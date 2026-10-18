@@ -9,17 +9,28 @@ from gideon.host.index import build, sample
 
 
 def _gold_sources(loaded: evalset.LoadedSet) -> Iterator[tuple[str, str | None]]:
-    """Walk judged ids and hashes, then every sign-off's unversioned must-cite ids."""
+    """Walk judged and case-gold ids and hashes, then every sign-off's unversioned must-cite ids."""
 
     for judgment in loaded.judgments:
         yield judgment.source_id, judgment.sha256
+    for case_id in loaded.active_ids:
+        gold = loaded.cases_by_id[case_id].get("gold", [])
+        assert isinstance(gold, list)
+        for entry in gold:
+            assert isinstance(entry, dict)
+            identifier, digest = entry["source_id"], entry["sha256"]
+            assert isinstance(identifier, str) and isinstance(digest, str)
+            yield identifier, digest
     for signoff in loaded.signoffs:
         for identifier in signoff.must_cite:
             yield identifier, None
 
 
 def gold_documents(loaded: evalset.LoadedSet) -> tuple[sample.GoldDocument, ...]:
-    """Collect sorted gold ids, retaining judged hashes over must-cite-only ids."""
+    """Collect sorted gold from judgments, sign-offs, and active cases.
+
+    Judged and case-gold hashes take precedence over must-cite-only ids.
+    """
 
     documents: dict[str, sample.GoldDocument] = {}
     for identifier, sha256 in _gold_sources(loaded):
@@ -31,7 +42,7 @@ def gold_documents(loaded: evalset.LoadedSet) -> tuple[sample.GoldDocument, ...]
 
 
 def gold_hashes(loaded: evalset.LoadedSet) -> Mapping[str, frozenset[str]]:
-    """Collect sorted gold ids and every judged hash, empty for must-cite-only ids."""
+    """Collect sorted gold ids and every judged or case-gold hash, empty for must-cite-only ids."""
 
     hashes: dict[str, set[str]] = {}
     for identifier, sha256 in _gold_sources(loaded):

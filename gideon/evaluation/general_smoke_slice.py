@@ -23,6 +23,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Final, cast
 
+from gideon.evaluation import bound
 from gideon.evaluation.evalset import Case as EvalCase
 from gideon.evaluation.evalset import LoadedSet, select_cases
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
@@ -261,13 +262,16 @@ def _slice_result(
         case_id for case_id in case_ids if not all(row.passed for row in by_case[case_id])
     )
     passed = bool(outcomes) and all(row.passed for row in outcomes)
+    gated_cases = len(case_ids)
     lines.append(
         f"general-smoke: {'pass' if passed else 'fail'}; {len(case_ids)} cases at "
         f"{repeats} repeats, {turns_made} turns, {resent} re-sent; classes {class_detail}; "
-        f"failed: {_ids(failed_ids)}"
+        f"failed: {_ids(failed_ids)}; {bound.bound_text(gated_cases, passed)}"
     )
     report = "\n".join(lines) + "\n"
-    return SliceResult(passed, report, tuple(_result(row) for row in outcomes))
+    return SliceResult(
+        passed, report, tuple(_result(row) for row in outcomes), gated_cases=gated_cases
+    )
 
 
 def run_general_smoke(eval_set: LoadedSet, slice_name: str, context: RunContext) -> SliceResult:

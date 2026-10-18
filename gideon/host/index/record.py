@@ -360,6 +360,31 @@ def write_footprint(
     return value
 
 
+def _parse_manifest_row(line: str, *, with_doc_id: bool) -> dict[str, str] | None:
+    """Validate a manifest projection's source id and content-addressed hashes."""
+
+    try:
+        value = json.loads(line)
+    except ValueError:
+        return None
+    keys = {"source_id", "canonical_text_sha256"}
+    if with_doc_id:
+        keys.add("doc_id")
+    if (
+        not isinstance(value, dict) or set(value) != keys
+        or not isinstance(value["source_id"], str)
+        or not 1 <= len(value["source_id"]) <= SOURCE_ID_MAX_LENGTH
+        or re.fullmatch(SOURCE_ID_PATTERN, value["source_id"]) is None
+        or any(
+            not isinstance(value[key], str)
+            or staging.DIGEST_PATTERN.fullmatch(value[key]) is None
+            for key in keys - {"source_id"}
+        )
+    ):
+        return None
+    return value
+
+
 def read_manifest(
     host: Host, rendered_dir: PathLike, name: str, source_ids: Sequence[str], command_path: str,
 ) -> Mapping[str, str] | Problem:
@@ -383,19 +408,39 @@ def read_manifest(
     requested = frozenset(source_ids)
     hashes: dict[str, str] = {}
     for line in result.stdout.splitlines():
-        try:
-            value = json.loads(line)
-        except ValueError:
-            value = None
+        value = _parse_manifest_row(line, with_doc_id=False)
         if (
-            not isinstance(value, dict) or set(value) != {"source_id", "canonical_text_sha256"}
-            or not isinstance(value["source_id"], str)
-            or not 1 <= len(value["source_id"]) <= SOURCE_ID_MAX_LENGTH
-            or re.fullmatch(SOURCE_ID_PATTERN, value["source_id"]) is None
+            value is None
             or value["source_id"] not in requested or value["source_id"] in hashes
-            or not isinstance(value["canonical_text_sha256"], str)
-            or staging.DIGEST_PATTERN.fullmatch(value["canonical_text_sha256"]) is None
         ):
             return Problem("generation manifest row is invalid", fix)
         hashes[value["source_id"]] = value["canonical_text_sha256"]
     return hashes
+
+
+def read_manifest_rows(
+    host: Host, rendered_dir: PathLike, name: str, command_path: str,
+) -> tuple[tuple[str, str, str], ...] | Problem:
+    """Read every source id, canonical text hash, and document id in source order."""
+
+    sql = (
+        worker.bind("v_name", name)
+        + "\nSELECT row_to_json(manifest) FROM ("
+        "SELECT source_id, canonical_text_sha256, doc_id FROM public.generation_documents "
+        "WHERE gen_id = :'v_name' ORDER BY source_id) AS manifest;\n"
+    )
+    result = _run(host, rendered_dir, sql, command_path)
+    if isinstance(result, Problem):
+        return result
+    fix = database_fix(rendered_dir, command_path)
+    if result.returncode != 0:
+        return Problem(f"generation manifest read failed (exit {result.returncode})", fix)
+    rows: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for line in result.stdout.splitlines():
+        value = _parse_manifest_row(line, with_doc_id=True)
+        if value is None or value["source_id"] in seen:
+            return Problem("generation manifest row is invalid", fix)
+        seen.add(value["source_id"])
+        rows.append((value["source_id"], value["canonical_text_sha256"], value["doc_id"]))
+    return tuple(rows)

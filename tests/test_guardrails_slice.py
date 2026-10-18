@@ -685,11 +685,25 @@ class FamilyGate(unittest.TestCase):
             guardrails_slice._Outcome("b/positive", "b", "positive", "replaced", "clean"),
             guardrails_slice._Outcome("c/positive", "c", "positive", "answered", "clean"),
         )
-        passed, report = guardrails_slice._report(outcomes, ())
+        passed, report, gated_cases = guardrails_slice._report(outcomes, ())
         self.assertFalse(passed)
+        self.assertEqual(gated_cases, len(outcomes))
         self.assertIn("a: pass", report)
         self.assertIn("b: pass", report)
         self.assertIn("c: fail", report)
+        self.assertIn(
+            "a: pass\n  positives 1 of 1 blocked; unblocked: none\n"
+            "  1 case, true failure rate ≤ 100.0 % (3/n at 95 %)\n",
+            report,
+        )
+        self.assertIn(
+            "c: fail\n  positives 0 of 1 blocked; unblocked: c/positive\n"
+            "  1 case, failed: no bound (3/n at 95 % is a clean run's)\n",
+            report,
+        )
+        self.assertTrue(report.rstrip().endswith(
+            "3 cases, failed: no bound (3/n at 95 % is a clean run's)"
+        ))
 
     def test_failed_non_sample_control_fails_even_when_positive_passes(self) -> None:
         counts = guardrails_slice.FamilyCounts(
@@ -700,13 +714,24 @@ class FamilyGate(unittest.TestCase):
         self.assertFalse(guardrails_slice.family_verdict(counts).passed)
 
     def test_narrow_report_without_tier_two_rows_has_no_tier_two_block_or_counts(self) -> None:
-        outcomes = (
+        outcomes = tuple(
             guardrails_slice._Outcome(
-                "fictional/positive-01", "fictional", "positive", "replaced", "clean"
+                f"fictional/positive-{index}", "fictional", "positive", "replaced", "clean"
+            )
+            for index in range(6)
+        ) + (
+            guardrails_slice._Outcome(
+                "fictional/control", "fictional", "control", "answered", "clean"
             ),
         )
-        passed, report = guardrails_slice._report(outcomes, ())
+        passed, report, gated_cases = guardrails_slice._report(outcomes, ())
         self.assertTrue(passed)
+        self.assertEqual(gated_cases, len(outcomes))
+        self.assertIn(
+            "  positives 6 of 6 blocked; unblocked: none\n"
+            "  6 cases, true failure rate ≤ 50.0 % (3/n at 95 %)\n",
+            report,
+        )
         self.assertNotIn(f"{TIER_2_CATEGORY}: reported, not gated", report)
         self.assertNotIn("tier-2 green door", report)
 
@@ -909,6 +934,11 @@ class GuardrailsRunner(unittest.TestCase):
             )
 
             self.assertTrue(green.verdict, green.report)
+            gated_cases = sum(
+                loaded.cases_by_id[case_id]["category"] != TIER_2_CATEGORY
+                for case_id in select_cases(loaded, "guardrails").counted
+            )
+            self.assertEqual(green.gated_cases, gated_cases)
             tier_rows = {
                 row.case_id: row for row in green.results if row.metrics["family"] == TIER_2_CATEGORY
             }
@@ -957,7 +987,10 @@ class GuardrailsRunner(unittest.TestCase):
             self.assertIn("differing: none", green.report)
             self.assertIn("leaks: none", green.report)
             self.assertIn("errors: none", green.report)
-            self.assertTrue(green.report.rstrip().endswith("tier-2 green door 2, frontend 2"))
+            self.assertTrue(green.report.rstrip().endswith(
+                "tier-2 green door 2, frontend 2; "
+                "9 cases, true failure rate ≤ 33.3 % (3/n at 95 %)"
+            ))
 
             allowed_metrics = {
                 "family", "role", "class", "stream", "pattern", "checks", "reading",
@@ -993,6 +1026,7 @@ class GuardrailsRunner(unittest.TestCase):
                 row.case_id: row for row in red.results if row.metrics["family"] == TIER_2_CATEGORY
             }
             self.assertTrue(red.verdict, red.report)
+            self.assertEqual(red.gated_cases, gated_cases)
             self.assertEqual(_family_lines(red.report), _family_lines(green.report))
             self.assertTrue(red.report.rstrip().splitlines()[-1].startswith("guardrails: pass;"))
             for row in red_rows.values():
@@ -1005,7 +1039,10 @@ class GuardrailsRunner(unittest.TestCase):
             self.assertIn(f"{first_id} replaced", red.report)
             self.assertIn(f"{second_id} replaced", red.report)
             self.assertIn(f"{second_id} answered", red.report)
-            self.assertTrue(red.report.rstrip().endswith("tier-2 green door 0, frontend 0"))
+            self.assertTrue(red.report.rstrip().endswith(
+                "tier-2 green door 0, frontend 0; "
+                "9 cases, true failure rate ≤ 33.3 % (3/n at 95 %)"
+            ))
 
     def test_differing_readings_are_reported_without_failing_the_row(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1311,7 +1348,8 @@ class GuardrailsRunner(unittest.TestCase):
         self.assertTrue(
             result.report.rstrip().endswith(
                 f"false refusal 1, judge withheld 2, differing 1; "
-                f"tier-2 green door {door_green}, frontend {frontend_green}"
+                f"tier-2 green door {door_green}, frontend {frontend_green}; "
+                "9 cases, true failure rate ≤ 33.3 % (3/n at 95 %)"
             )
         )
 
@@ -1540,6 +1578,13 @@ class GuardrailsRunner(unittest.TestCase):
 
         self.assertTrue(result.verdict, result.report)
         self.assertEqual(len(result.results), len(loaded.active_ids))
+        self.assertEqual(result.gated_cases, sum(
+            loaded.cases_by_id[case_id]["category"] != TIER_2_CATEGORY
+            for case_id in select_cases(loaded, "guardrails").counted
+        ))
+        self.assertTrue(result.report.rstrip().splitlines()[-1].endswith(
+            "9 cases, true failure rate ≤ 33.3 % (3/n at 95 %)"
+        ))
         self.assertEqual(len(progress), len(result.results))
         self.assertEqual(
             tuple(line.split(":", 1)[0] for line in progress),
@@ -1741,6 +1786,13 @@ class GuardrailsRunner(unittest.TestCase):
             result = _run_fixture(loaded, "guardrails", context)
         self.assertEqual(len(result.results), len(loaded.active_ids))
         self.assertTrue(all(row.metrics["problem"] == "door-unavailable" for row in result.results))
+        self.assertEqual(result.gated_cases, sum(
+            loaded.cases_by_id[case_id]["category"] != TIER_2_CATEGORY
+            for case_id in select_cases(loaded, "guardrails").counted
+        ))
+        self.assertTrue(result.report.rstrip().endswith(
+            "9 cases, failed: no bound (3/n at 95 % is a clean run's)"
+        ))
         self.assertEqual(len(host.requests), 1)
 
     def test_door_signin_failure_keeps_adjacent_problem_and_fix_lines(self) -> None:
@@ -2203,7 +2255,15 @@ class GuardrailsCommand(unittest.TestCase):
             "\\set partial 'false'",
         ):
             self.assertIn(binding, write_sql)
-        self.assertIn("decision, engine_in_flight_max, engine_preemptions) VALUES", write_sql)
+        self.assertIn("decision, engine_in_flight_max, engine_preemptions, gated_cases) VALUES", write_sql)
+        gated_cases = sum(
+            loaded.cases_by_id[case_id]["category"] != TIER_2_CATEGORY
+            for case_id in select_cases(loaded, "guardrails").counted
+        )
+        self.assertIn(f"\\set gated_cases '{gated_cases}'", write_sql)
+        bound_lines = [line for line in stdout.splitlines() if line.startswith("bound:")]
+        self.assertEqual(len(bound_lines), 1)
+        self.assertTrue(bound_lines[0].startswith(f"bound: {gated_cases} cases, "))
         decision_line = next(
             line for line in write_sql.splitlines() if line.startswith("\\set decision ")
         )
@@ -2321,6 +2381,7 @@ class GuardrailsCommand(unittest.TestCase):
                 self.assertIn("repeat 1 of 5: pass", stdout)
                 self.assertIn("repeat 2 of 5: pass", stdout)
                 self.assertNotIn("repeat 3 of 5: pass", stdout)
+                self.assertFalse(any(line.startswith("bound:") for line in stdout.splitlines()))
                 _assert_comparison_lines(self, stdout, word="FAIL")
                 self.assertIn(
                     f"run: ok — {2 * case_count} results over {case_count} active cases, "
@@ -2346,6 +2407,9 @@ class GuardrailsCommand(unittest.TestCase):
                     and "INSERT INTO eval_runs" in input_text
                 )
                 self.assertIn("\\set partial 'true'", write_sql)
+                self.assertNotIn("\\set gated_cases ", write_sql)
+                run_insert = next(line for line in write_sql.splitlines() if line.startswith("INSERT INTO eval_runs"))
+                self.assertTrue(run_insert.endswith(", NULL);"))
                 decision_line = next(
                     line
                     for line in write_sql.splitlines()
@@ -2390,6 +2454,7 @@ class GuardrailsCommand(unittest.TestCase):
         self.assertEqual(code, 1, stdout + stderr)
         self.assertTrue(crossed)
         self.assertIn("gate: refuse — partial: aborted at the window's end, nothing kept", stdout)
+        self.assertFalse(any(line.startswith("bound:") for line in stdout.splitlines()))
         _assert_comparison_lines(self, stdout, word="FAIL")
         self.assertIn("Start the run at the window's opening, then retry.", stdout)
         self.assertIn(
@@ -2407,6 +2472,9 @@ class GuardrailsCommand(unittest.TestCase):
         )
         self.assertIn("\\set kind 'manual'", write_sql)
         self.assertIn("\\set partial 'true'", write_sql)
+        self.assertNotIn("\\set gated_cases ", write_sql)
+        run_insert = next(line for line in write_sql.splitlines() if line.startswith("INSERT INTO eval_runs"))
+        self.assertTrue(run_insert.endswith(", NULL);"))
         self.assertNotIn("INSERT INTO eval_results", write_sql)
 
     def test_one_positive_answer_on_the_first_repeat_fails_bounds_even_when_it_wins(self) -> None:

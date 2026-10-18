@@ -8,12 +8,14 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 from test_evaluation_set import (
     _judgment,
     _judgment_case,
     _research_qa_case,
+    _synthetic_case,
     _write,
     _write_research_cases,
     _write_signoffs,
@@ -102,6 +104,48 @@ class GoldIntake(unittest.TestCase):
         ))
         self.assertEqual((output.getvalue(), errors.getvalue()), ("", ""))
         self.assertNotIn(PRIVATE, repr(build.call_args))
+
+    def test_active_case_gold_keeps_hashes_over_must_cites_and_excludes_retired_cases(self) -> None:
+        retired = _synthetic_case()
+        retired_gold = cast(list[dict[str, object]], retired["gold"])
+        retired_gold[0].update(source_id="fictitious:opinion:2", sha256="e" * 64)
+        retired["cluster_id"] = retired_gold[0]["source_id"]
+        retired["expected"] = {"answer": PRIVATE, "must_cite": [retired_gold[0]["source_id"]]}
+
+        active = _synthetic_case("research-qa-lookup-002")
+        gold = cast(list[dict[str, object]], active["gold"])
+        gold[0].update(source_id="fictitious:opinion:5", sha256="c" * 64)
+        gold.extend((
+            {**gold[0], "source_id": "fictitious:opinion:3", "sha256": "d" * 64},
+            {**gold[0], "source_id": self.judged[0].source_id, "sha256": self.judged[0].sha256},
+            dict(gold[0]),
+        ))
+        active["expected"] = {"answer": PRIVATE, "must_cite": sorted({str(entry["source_id"]) for entry in gold})}
+        active["cluster_id"] = gold[0]["source_id"]
+        active["supersedes"] = retired["id"]
+        _write_research_cases(self.root, (_research_qa_case(question=PRIVATE), retired, active))
+
+        loaded = self.load()
+        self.assertNotIn(retired["id"], loaded.active_ids)
+        self.assertEqual(sample.gold_documents(loaded), (
+            GoldDocument(self.judged[1].source_id, self.judged[1].sha256),
+            GoldDocument(str(gold[1]["source_id"]), str(gold[1]["sha256"])),
+            GoldDocument(str(gold[0]["source_id"]), str(gold[0]["sha256"])),
+            GoldDocument(self.judged[0].source_id, self.judged[0].sha256),
+        ))
+        self.assertEqual(sample.gold_documents(replace(loaded, judgments=(), signoffs=())), (
+            GoldDocument(str(gold[1]["source_id"]), str(gold[1]["sha256"])),
+            GoldDocument(str(gold[0]["source_id"]), str(gold[0]["sha256"])),
+            GoldDocument(str(gold[2]["source_id"]), str(gold[2]["sha256"])),
+        ))
+        # The gold-drop gate reads the same gold: a case's hash joins a
+        # judged id's, and a retired case's gold reaches neither reader.
+        hashes = sample.gold_hashes(loaded)
+        self.assertEqual(tuple(hashes), tuple(document.source_id for document in sample.gold_documents(loaded)))
+        self.assertEqual(hashes[str(gold[0]["source_id"])], frozenset({str(gold[0]["sha256"])}))
+        self.assertEqual(hashes[str(gold[1]["source_id"])], frozenset({str(gold[1]["sha256"])}))
+        self.assertIn(self.judged[0].sha256, hashes[self.judged[0].source_id])
+        self.assertNotIn(str(retired_gold[0]["source_id"]), hashes)
 
     def test_loader_findings_refuse_before_build_and_hide_case_values(self) -> None:
         case = _judgment_case(question=PRIVATE)

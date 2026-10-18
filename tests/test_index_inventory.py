@@ -12,6 +12,7 @@ from dataclasses import asdict, replace
 
 import test_index_record
 import test_index_report
+import test_index_treatment
 
 from gideon.host import caselaw, report, worker
 from gideon.host.corpus.record import CutRow, SourceBinding, database_fix
@@ -304,7 +305,7 @@ class InventoryBlock(unittest.TestCase):
         self.assertGreater(row.bytes, 0)
         self.assertGreater(counts["dense_copied"], 0)
         self.assertGreater(counts["dense_embedded"], 0)
-        self.assertEqual(block[:7], [
+        self.assertEqual(block[:8], [
             f"inventory {row.gen_id}",
             f"{row.gen_id}: {row.state}; {row.collection}; lockfile {row.corpus_lockfile}, "
             f"served {', '.join(row.lockfiles)}; pipeline {row.pipeline}; embedding space {row.embedding_space}",
@@ -320,6 +321,7 @@ class InventoryBlock(unittest.TestCase):
             f"report: written {saved.written_at}; state {saved.state}; failed stage none; reason none; "
             f"seconds {saved.seconds}; whole build yes; lifecycle seconds {saved.wall_clock.lifecycle_seconds}",
             "gate cluster: none",
+            "treatment: none",
         ])
         entries = tuple(saved.courts.values())
         coverage = [value for entry in entries for value in entry.anchors.by_text_source.values()]
@@ -328,7 +330,7 @@ class InventoryBlock(unittest.TestCase):
         with_anchors = sum(value.with_anchors for value in coverage)
         documents = sum(value.documents for value in coverage)
         self.assertNotEqual(anchored, with_anchors)
-        self.assertEqual(block[7],
+        self.assertEqual(block[8],
             f"courts {len(entries)}: opinions {sum(entry.counts.opinions for entry in entries)}; "
             f"ready {sum(entry.counts.by_status.get('ready', 0) for entry in entries)}; "
             f"failed {sum(entry.counts.by_status.get('failed', 0) for entry in entries)}; "
@@ -340,7 +342,7 @@ class InventoryBlock(unittest.TestCase):
             ("precedential", "by_precedential", PRECEDENTIAL_VALUES),
             ("failure reason", "by_failure_reason", ()),
         ]
-        for offset, (label, attribute, order) in enumerate(distributions, start=8):
+        for offset, (label, attribute, order) in enumerate(distributions, start=9):
             total: Counter[str] = Counter()
             for entry in entries:
                 total.update(getattr(entry.counts, attribute))
@@ -348,7 +350,7 @@ class InventoryBlock(unittest.TestCase):
             expected = ", ".join(f"{key} {total[key]}" for key in keys)
             self.assertEqual(block[offset], f"by {label}: {expected}")
         for offset, (court, entry) in enumerate(sorted(saved.courts.items())):
-            court_block = block[12 + offset * 7:19 + offset * 7]
+            court_block = block[13 + offset * 7:20 + offset * 7]
             expected_counts = []
             for label, attribute, order in distributions:
                 values = getattr(entry.counts, attribute)
@@ -388,7 +390,7 @@ class InventoryBlock(unittest.TestCase):
                 f"{court}: accounted staged {accounted.staged}, recorded {accounted.recorded}, "
                 f"ready {accounted.ready}, failed {accounted.failed}, {'pass' if accounted.passed else 'fail'}")
         self.assertEqual(block[-1], "metadata changes: none")
-        self.assertEqual(len(block), 13 + 7 * len(saved.courts))
+        self.assertEqual(len(block), 14 + 7 * len(saved.courts))
         self.assertEqual(len(self.host.calls), 3)
         argv, sql = self.host.calls[-1]
         self.assertNotIn(row.gen_id, " ".join(argv))
@@ -540,7 +542,8 @@ class InventoryBlock(unittest.TestCase):
 
     def test_every_stdout_line_is_plain_and_contains_no_path_caption_or_citation(self) -> None:
         private_text = "Fictitious caption: Example v. Example, 999 F.4th 123\n/private/example/opinion.txt"
-        self.host.reports[self.row.gen_id] = replace(self.build_report, metadata_changes={"caption": private_text})
+        self.host.reports[self.row.gen_id] = replace(self.build_report, metadata_changes={"caption": private_text},
+                                                   treatment=test_index_treatment.treatment_for())
         code, out, err = run_report(self.host)
         self.assertEqual((code, err), (0, ""))
         self.assertNotIn(private_text, out)
@@ -551,7 +554,7 @@ class InventoryBlock(unittest.TestCase):
                 self.assertNotIn("Example v. Example", line)
                 self.assertNotIn("999 F.4th 123", line)
                 self.assertNotIn("\r", line)
-        self.assertEqual(len(out.splitlines()), 18 + 7 * len(self.build_report.courts))
+        self.assertEqual(len(out.splitlines()), 19 + 7 * len(self.build_report.courts))
 
     def test_clustering_figures_come_from_the_generation_and_follow_the_dense_line(self) -> None:
         counts = {
@@ -628,6 +631,24 @@ class InventoryBlock(unittest.TestCase):
                     f"reused {'yes' if gate.reused else 'no'}; {'pass' if gate.passed else 'fail'}"
                 )
                 self.assertEqual(lines[report_line + 1], expected)
-                self.assertTrue(lines[report_line + 2].startswith("courts "))
+                self.assertTrue(lines[report_line + 2].startswith("treatment: "))
                 if gate is not None and not gate.passed:
                     self.assertIn("failed stage cluster; reason cluster-budget;", lines[report_line])
+
+    def test_treatment_prints_each_risk_state_with_its_share_after_the_cluster_gate(self) -> None:
+        saved = test_index_treatment.treatment_for()
+        reversed_states = replace(saved, by_state=dict(reversed(tuple(saved.by_state.items()))))
+        empty = replace(saved, clusters=0, by_state=dict.fromkeys(saved.by_state, 0))
+        for distribution, states in (
+            (reversed_states, "clusters 7; negative 2 (29%), caution 1 (14%), unchecked 4 (57%)"),
+            (empty, "clusters 0; negative 0 (0%), caution 0 (0%), unchecked 0 (0%)"),
+        ):
+            with self.subTest(clusters=distribution.clusters):
+                self.host.reports[self.row.gen_id] = replace(self.build_report, treatment=distribution)
+                code, out, err = run_report(self.host)
+                self.assertEqual((code, err), (0, ""))
+                lines = out.splitlines()
+                gate = lines.index("gate cluster: none")
+                self.assertEqual(lines[gate + 1], f"treatment: {states}; materialized {saved.materialized_at}")
+                self.assertTrue(lines[gate + 2].startswith("courts "))
+                self.assertNotIn(saved.pattern_set, out)

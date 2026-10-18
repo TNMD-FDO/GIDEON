@@ -213,6 +213,10 @@ class GeneralSmokeRunner(unittest.TestCase):
         )
         self.assertTrue(result.verdict, result.report)
         self.assertEqual(len(result.results), 22)
+        self.assertEqual(result.gated_cases, len(active_ids))
+        self.assertTrue(result.report.rstrip().endswith(
+            "; 11 cases, true failure rate ≤ 27.3 % (3/n at 95 %)"
+        ))
         self.assertEqual(
             tuple((row.case_id, row.repeat) for row in result.results), expected_order
         )
@@ -259,6 +263,10 @@ class GeneralSmokeRunner(unittest.TestCase):
         turns = len(select_cases(loaded, "general-smoke").counted) * context.repeats
         self.assertTrue(result.verdict, result.report)
         self.assertEqual(len(result.results), turns)
+        self.assertEqual(result.gated_cases, len(select_cases(loaded, "general-smoke").counted))
+        self.assertTrue(result.report.rstrip().endswith(
+            "; 11 cases, true failure rate ≤ 27.3 % (3/n at 95 %)"
+        ))
         rows = {(row.case_id, row.repeat): row for row in result.results}
         row = rows[("doctrine-03", 1)]
         self.assertEqual(row.verdict, "pass")
@@ -312,6 +320,10 @@ class GeneralSmokeRunner(unittest.TestCase):
 
         self.assertFalse(result.verdict)
         rows = [row for row in result.results if row.case_id == "plain-01"]
+        self.assertEqual(result.gated_cases, len(select_cases(loaded, "general-smoke").counted))
+        self.assertTrue(result.report.rstrip().endswith(
+            "; 11 cases, failed: no bound (3/n at 95 % is a clean run's)"
+        ))
         self.assertEqual(len(rows), context.repeats)
         self.assertEqual(rows[0].verdict, "fail")
         self.assertEqual(rows[0].metrics["class"], "declined")
@@ -656,6 +668,7 @@ class GeneralSmokeRunner(unittest.TestCase):
 
         result = general_smoke_slice.run_general_smoke(loaded, "general-smoke", context)
         self.assertEqual(len(result.results), 22)
+        self.assertEqual(result.gated_cases, len(select_cases(loaded, "general-smoke").counted))
         self.assertTrue(all(row.metrics["problem"] == "frontend-signin" for row in result.results))
         for row in result.results:
             self.assertEqual(row.metrics["attempts"], 1)
@@ -684,6 +697,7 @@ class GeneralSmokeRunner(unittest.TestCase):
         second = general_smoke_slice.run_general_smoke(loaded, "general-smoke", unavailable)
         self.assertEqual(first, second)
         self.assertEqual(len(first.results), 22)
+        self.assertEqual(first.gated_cases, len(select_cases(loaded, "general-smoke").counted))
         self.assertTrue(all(row.metrics["problem"] == "turns-unavailable" for row in first.results))
         for row in first.results:
             self.assertEqual(row.metrics["attempts"], 1)

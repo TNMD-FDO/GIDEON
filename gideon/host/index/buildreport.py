@@ -359,9 +359,10 @@ def gather(
     row: record.GenerationRow, seconds: int, failed_stage: str | None,
     whole_build: bool, *, treatment: Treatment | None = None,
     work_root: PathLike = WORK_ROOT,
+    corpus_dir: PathLike | None = None,
     command_path: str = "index build",
 ) -> BuildReport | Problem:
-    """Gather record counts and optional work files without writing the database."""
+    """Gather the corpus's counts, the record's row, and optional work files."""
 
     problem = staging.snapshot_problem(inputs.snapshot, command_path, subject="build report")
     if problem is not None:
@@ -374,17 +375,18 @@ def gather(
         return stage
     # A stage of another snapshot, or without a court, has no count to compare.
     staged_counts = stage.counts if stage is not None and stage.snapshot == inputs.snapshot else {}
+    corpus_dir = rendered_dir if corpus_dir is None else corpus_dir
     courts: dict[str, CourtEntry] = {}
     accounted: dict[str, Accounted] = {}
     for court in sorted(inputs.courts):
         counts = caselaw.read_counts(
-            host, rendered_dir, source=source, snapshot_date=inputs.snapshot[-10:],
+            host, corpus_dir, source=source, snapshot_date=inputs.snapshot[-10:],
             court=court, command_path=command_path,
         )
         if isinstance(counts, Problem):
             return counts
         anchors = caselaw.read_anchor_counts(
-            host, rendered_dir, source=source, snapshot_date=inputs.snapshot[-10:],
+            host, corpus_dir, source=source, snapshot_date=inputs.snapshot[-10:],
             court=court, command_path=command_path,
         )
         if isinstance(anchors, Problem):

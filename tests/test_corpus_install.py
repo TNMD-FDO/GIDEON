@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 from urllib.parse import urlsplit
+from uuid import UUID
 
 import test_index_treatment
 import yaml  # type: ignore[import-untyped]
@@ -46,8 +47,16 @@ from gideon.host.corpus.lockfile import (
 )
 from gideon.host.corpus.sources import SourceDefinition, SourceResolution, data_file
 from gideon.host.egress import load_egress_allowlist
-from gideon.host.index import buildreport, generations, guards, reserve, treatment
+from gideon.host.index import (
+    buildreport,
+    generations,
+    guards,
+    reserve,
+    smoke,
+    treatment,
+)
 from gideon.host.index.record import GenerationRow, PromotedRow
+from gideon.host.index.sample import sample_name
 from gideon.host.render import worker as worker_identity
 from gideon.host.render.ci import CI_ROOT
 from gideon.host.render.engine import EMBED
@@ -182,8 +191,10 @@ class FakeHost(RealHost):
         self.fail_phase: str | None = None
         self.interrupt_phase: str | None = None
         self.statements: list[str] = []
+        self.statement_directories: list[tuple[str, str]] = []
         self.reports: list[dict[str, Any]] = []
         self.report_write_code = 0
+        self.treatment_reads: list[dict[str, Any]] = []
         self.treatment_payloads: list[dict[str, Any]] = []
         self.treatment_results: list[treatment.Treatment] = []
         self.treatment_distribution = test_index_treatment.treatment_for()
@@ -198,6 +209,11 @@ class FakeHost(RealHost):
         self.identity_checked = False
         self.sibling_lockfiles: dict[str, dict[str, Any]] = {}
         self.manifest_hashes: dict[str, str] = {}
+        self.manifest_rows: tuple[tuple[str, str, str], ...] = ()
+        self.smoke_row: dict[str, object] | None = {
+            "run_id": str(UUID(int=1)), "stack": "ci", "kind": "smoke",
+            "finished_at": NOW.isoformat(),
+        }
 
     def seed_finished_report(self, row: GenerationRow) -> dict[str, Any]:
         """Record a completed fictitious build without running its stages."""
@@ -521,6 +537,16 @@ class FakeHost(RealHost):
         command = list(argv)
         self.calls.append(command)
         self.executions.append((command, input, self.engine_holder))
+        if command == smoke.reader_argv(RENDERED):
+            assert input is not None and "FROM public.eval_runs" in input
+            self.statements.append(input)
+            self.statement_directories.append((RENDERED, input))
+            if self.interrupt_phase == "smoke":
+                raise KeyboardInterrupt
+            return subprocess.CompletedProcess(
+                command, 3 if self.fail_phase == "smoke" else 0,
+                json.dumps(self.smoke_row) if self.smoke_row is not None else "", "private diagnostic",
+            )
         if command == list(reserve.DATA_DF_ARGV) or command[:2] == ["du", "-sb"]:
             phase = "df" if command[0] == "df" else "du"
             if self.interrupt_phase == phase:
@@ -545,13 +571,16 @@ class FakeHost(RealHost):
             return subprocess.CompletedProcess(command, self.store_state_code if self.ps_reads == self.state_read else 0, text, "private diagnostic")
         if command in (worker.psql_argv(RENDERED), worker.psql_argv(CI_ROOT)):
             assert input is not None
+            statement_dir = RENDERED if command == worker.psql_argv(RENDERED) else str(CI_ROOT)
+            self.statement_directories.append((statement_dir, input))
             if (
                 "WITH RECURSIVE chain AS" in input
                 or command == worker.psql_argv(CI_ROOT) and "DO $cut$" in input
                 or "public.generation_documents" in input
             ):
                 self.statements.append(input)
-                phase = "copy-read" if "WITH RECURSIVE chain AS" in input else "lockfile" if "DO $cut$" in input else "gold"
+                phase = ("copy-read" if "WITH RECURSIVE chain AS" in input else "lockfile" if "DO $cut$" in input
+                         else "treatment-manifest" if "canonical_text_sha256, doc_id" in input else "gold")
                 if self.interrupt_phase == phase:
                     raise KeyboardInterrupt
                 if self.fail_phase == phase:
@@ -570,12 +599,26 @@ class FakeHost(RealHost):
                     copied = json.loads(self._bound(input, "v_payload"))
                     self.sibling_lockfiles.setdefault(copied["label"], copied)
                     return subprocess.CompletedProcess(command, 0, "", "")
+                if phase == "treatment-manifest":
+                    return subprocess.CompletedProcess(command, 0, "\n".join(
+                        json.dumps({"source_id": source_id, "canonical_text_sha256": digest, "doc_id": doc_id})
+                        for source_id, digest, doc_id in sorted(self.manifest_rows)
+                    ), "")
                 identifiers = json.loads(self._bound(input, "v_source_ids"))
                 return subprocess.CompletedProcess(command, 0, "\n".join(
                     json.dumps({"source_id": identifier, "canonical_text_sha256": digest})
                     for identifier, digest in self.manifest_hashes.items() if identifier in identifiers
                 ), "")
-            if treatment.MATERIALIZE_SQL in input:
+            if treatment.READ_SQL in input:
+                self.statements.append(input)
+                self.treatment_reads.append(json.loads(self._bound(input, "v_payload")))
+                if self.interrupt_phase == "treatment-read":
+                    raise KeyboardInterrupt
+                if self.fail_phase == "treatment-read":
+                    return subprocess.CompletedProcess(command, 3, "", "private diagnostic")
+                observed = test_index_treatment.read_for(self.treatment_distribution)
+                return subprocess.CompletedProcess(command, 0, json.dumps(observed.to_payload()), "")
+            if treatment.WRITE_SQL in input:
                 self.statements.append(input)
                 treatment_payload = json.loads(self._bound(input, "v_payload"))
                 self.treatment_payloads.append(treatment_payload)
@@ -592,6 +635,14 @@ class FakeHost(RealHost):
                     materialized_at=(NOW + timedelta(microseconds=len(self.treatment_results) + 1)).isoformat(),
                     pattern_set=treatment_payload["pattern_set"], signal_pattern=treatment_payload["signal_pattern"],
                     signal_list=treatment_payload["signal_list"], treatment_snapshot=treatment_snapshot,
+                    clusters=treatment_payload["clusters"],
+                    by_state={
+                        **{state: sum(row["state"] == state for row in treatment_payload["rows"])
+                           for state in ("negative", "caution")},
+                        "unchecked": treatment_payload["clusters"] - len(treatment_payload["rows"]),
+                    },
+                    by_source=treatment_payload["by_source"], by_signal=treatment_payload["by_signal"],
+                    outside=treatment_payload["outside"], by_no_state_reason=treatment_payload["by_no_state_reason"],
                 )
                 self.treatment_results.append(materialized)
                 return subprocess.CompletedProcess(command, 0, json.dumps(materialized.to_json()), "")
@@ -1230,9 +1281,13 @@ class Install(unittest.TestCase):
         )
         lines = out.splitlines()
         tail = lines[next(index for index, line in enumerate(lines) if line.startswith("collections:")):]
+        evidence = self.host.smoke_row
+        assert evidence is not None
         self.assertEqual(tail, [
             f"collections: ok — {collection}: needs build; generation {name}, inputs hash {inputs_hash}",
             "collections: ok — 1 of 1 need a build",
+            f"smoke: ok — lockfile {lockfile.label}, pipeline {lockfile.pipeline}, embedding space {space}: "
+            f"run {evidence['run_id']} ({evidence['stack']}, {evidence['kind']}, finished {NOW:%Y-%m-%dT%H:%M}Z)",
             f"generation: ok — {name}: building, created",
             f"guard: ok — {name}: ready {ready_documents}, chunked {chunked_documents}, chunks {chunks}, "
             f"projected chunks {-(-chunks * ready_documents // chunked_documents)}; "
@@ -1272,6 +1327,87 @@ class Install(unittest.TestCase):
             f"retain: ok — 1 kept ({lockfile.label}), 0 removed, 1 unpinned",
             f"Next: run {report.command(f'index promote {name}')} to serve it.",
         ])
+
+    def test_smoke_refusal_leaves_the_label_installing_without_a_generation(self) -> None:
+        """The install refuses a collection build without its sample's smoke."""
+
+        self.host.smoke_row = None
+        lockfile = self._lockfile()
+        loaded = models.load_models_lock(self.checkout / "models.lock")
+        assert loaded.lock is not None
+        profile = models.select_profile(loaded.lock, loaded.lock.reference)
+        assert isinstance(profile, models.HardwareProfile) and profile.embedding_space is not None
+        name = generations.generation_name(generations.COLLECTIONS[0].name, lockfile.label, profile.embedding_space.id)
+        sample = sample_name(name)
+        code, out, err = self.run_install()
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn(
+            f"smoke: refuse — no passing smoke run for lockfile {lockfile.label}, pipeline {lockfile.pipeline}, "
+            f"embedding space {profile.embedding_space.id}: none names generation {sample}", out,
+        )
+        self.assertIn(report.command(f"index build caselaw --sample --lockfile {lockfile.label}"), out)
+        self.assertIn(report.command(
+            f"eval run --slice smoke --stack ci --kind smoke --generation {sample}",
+        ), out)
+        self.assertIn(f"then retry {report.command('corpus install')}", out)
+        stages = [line.split(":", 1)[0] for line in out.splitlines()]
+        self.assertEqual(stages[-1], "smoke")
+        self.assertNotIn("generation", stages)
+        self.assertNotIn("installed", stages)
+        self.assertEqual(self.host.record_rows[lockfile.label]["state"], "installing")
+        self.assertEqual((self.host.generations, self.host.deferred, self.host.reports), ({}, [], []))
+        self.assertFalse(any("DO $generation$" in sql for sql in self.host.statements))
+        self.assertIsNone(self.host.lock_holder)
+        self.assertEqual(self.host.lock_releases, 1)
+
+        directory = self.checkout / "eval/reference/smoke"
+        directory.mkdir(parents=True)
+        reference = directory / "v1000.0.0.json"
+        reference.write_text(json.dumps({
+            "format": 2, "slice": "smoke", "corpus_lockfile": lockfile.label,
+            "generation_id": sample, "verdict": "pass", "tag": reference.stem,
+        }))
+        read_count = self.host.calls.count(smoke.reader_argv(RENDERED))
+        code, out, err = self.run_install()
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn(
+            f"smoke: ok — lockfile {lockfile.label}, pipeline {lockfile.pipeline}, "
+            f"embedding space {profile.embedding_space.id}: reference {reference.stem} ({reference.name})", out,
+        )
+        self.assertLess(out.index("smoke: ok"), out.index("generation: ok"))
+        self.assertEqual(self.host.calls.count(smoke.reader_argv(RENDERED)), read_count)
+        self.assertEqual(self.host.record_rows[lockfile.label]["state"], "installed")
+        self.assertIsNone(self.host.lock_holder)
+        self.assertEqual(self.host.lock_releases, 2)
+
+    def test_unchanged_and_unfinished_collections_need_no_new_smoke_evidence(self) -> None:
+        """A completed build's treatment and report can finish without a new gate."""
+
+        code, out, err = self.run_install()
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual([line.split(":", 1)[0] for line in out.splitlines()].count("smoke"), 1)
+        statements = self.host.statements
+        read = next(index for index, sql in enumerate(statements) if "FROM public.eval_runs" in sql)
+        write = next(index for index, sql in enumerate(statements) if "DO $generation$" in sql)
+        self.assertLess(read, write)
+        self.host.smoke_row = None
+        deferred = copy.deepcopy(self.host.deferred)
+        for unfinished in (False, True):
+            with self.subTest(unfinished=unfinished):
+                if unfinished:
+                    self.host.reports.clear()
+                    self.seed_report_work(self.labels[0])
+                call_count = len(self.host.calls)
+                code, out, err = self.run_install()
+                self.assertEqual((code, err), (0, ""), out)
+                self.assertIn("collections: ok — 0 of 1 need a build", out)
+                stages = [line.split(":", 1)[0] for line in out.splitlines()]
+                self.assertNotIn("smoke", stages)
+                self.assertNotIn(smoke.reader_argv(RENDERED), self.host.calls[call_count:])
+                self.assertEqual("treatment" in stages, unfinished)
+                self.assertEqual("report" in stages, unfinished)
+                self.assertEqual(self.host.deferred, deferred)
+                self.assertIsNone(self.host.lock_holder)
 
     def test_captured_copy_seeded_verified_recorded_and_retained(self) -> None:
         self._enable_stage()

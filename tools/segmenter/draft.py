@@ -7,7 +7,6 @@ import re
 import subprocess
 import sys
 import time
-import urllib.parse
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -21,13 +20,12 @@ from gideon.host.render.worker import SECTION_TYPES
 from gideon.host.report import Problem
 from gideon.host.sysio import BytesHost, LockingHost, PathLike, RealHost
 from tools.segmenter import manifest
+from tools.synthetic.manifest import original_link
 
 DEFAULT_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 RENDERED_DIR: Final[Path] = Path("/etc/gideon/rendered")
 SITE_PATH: Final[Path] = Path("/etc/gideon/site.yaml")
 _SHA256: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
-_REPORTER_CITE: Final[re.Pattern[str]] = re.compile(r"([0-9]+) (.+) ([0-9]+)")
-ORIGINAL_BASE: Final[str] = "https://www.courtlistener.com/c/"
 DOCUMENTS_SQL: Final[str] = """SELECT COALESCE(jsonb_agg(jsonb_build_object(
     'opinion_id', o.opinion_id,
     'doc_id', d.doc_id,
@@ -92,7 +90,9 @@ def _selected(set_root: Path, requested: Sequence[str]) -> tuple[evalset.LoadedS
     return loaded, ids
 
 
-def _check_output(path: Path, checkout: Path) -> None:
+def check_output(path: Path, checkout: Path) -> None:
+    """Refuse an output outside an empty directory or inside the checkout."""
+
     try:
         resolved = path.resolve()
         root = checkout.resolve()
@@ -167,17 +167,6 @@ def _paragraphs(text: str, starts: Sequence[int]) -> tuple[str, ...]:
     )
 
 
-def _original(cites: Sequence[str]) -> str:
-    """The public copy of the opinion, found by its first printed reporter cite."""
-
-    for cite in cites:
-        found = _REPORTER_CITE.fullmatch(cite)
-        if found is not None and "LEXIS" not in found.group(2):
-            volume, reporter, page = found.groups()
-            return f"{ORIGINAL_BASE}{urllib.parse.quote(reporter)}/{volume}/{page}/"
-    return "no printed reporter cite recorded; search the opinion id"
-
-
 def _sheet(case_id: str, opinion_id: int, court: str, sha256: str, cites: Sequence[str], text: str,
            paragraphs: Sequence[str], result: segmenter_draft.Draft) -> bytes:
     status = "drafted" if result.failure is None else "failed"
@@ -195,7 +184,7 @@ def _sheet(case_id: str, opinion_id: int, court: str, sha256: str, cites: Sequen
         "Each footnote starts its own section. A record holding one separate opinion alone",
         "(a dissent filed as its own opinion) carries that type from 0000.",
         "Cited as: " + ("; ".join(cites) if cites else "no cite recorded"),
-        "Original: " + _original(cites),
+        "Original: " + original_link(cites),
         "The original keeps the footnote numbers this text lost; check closing paragraphs there.",
         manifest.SHEET_PARAGRAPHS_HEADER,
     ]
@@ -221,7 +210,7 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path,
         slice_pins = manifest.pin_slice(set_root)
     except OSError as error:
         raise DraftError("set", "segmenter slice's files cannot be read", _SET_FIX) from error
-    _check_output(out, checkout)
+    check_output(out, checkout)
     claim = backuplock.claim(
         io, command="tools.segmenter.draft", now=now(), lock=backuplock.ENGINE_LOCK,
     )

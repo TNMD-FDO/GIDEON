@@ -20,6 +20,7 @@ from gideon.host.images import (
     inputs_digest_text,
     is_plain_registry,
     load_image_lock,
+    manifest_inspect_argv,
     parse_registry,
     proxy_environment,
     reference,
@@ -403,6 +404,19 @@ class Refusals(unittest.TestCase):
 
 
 class Registry(unittest.TestCase):
+    def test_manifest_inspect_argv_for_plain_and_tls_targets(self) -> None:
+        pin = MirroredImagePin("caddy", CADDY_DIGEST, "docker.io/library/example:1.0")
+        for target, flags in (
+            (RegistryTarget("http", "127.0.0.1:5000", ""), ["--insecure"]),
+            (RegistryTarget("https", "registry.example", "example/"), []),
+        ):
+            with self.subTest(scheme=target.scheme):
+                image_reference = reference(target, pin)
+                self.assertEqual(
+                    manifest_inspect_argv(target, image_reference),
+                    ["docker", "manifest", "inspect", *flags, image_reference],
+                )
+
     def test_plain_registry_predicate_covers_loopback_and_libvirt_bridge(self) -> None:
         for authority in ("127.0.0.1:5000", "localhost:5000", "[::1]:5000", "192.168.122.1:5000"):
             with self.subTest(authority=authority):

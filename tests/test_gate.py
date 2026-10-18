@@ -23,10 +23,10 @@ class RecordingRunner:
 
     def __init__(self, codes: Sequence[int]) -> None:
         self.codes = list(codes)
-        self.commands: list[tuple[str, ...]] = []
+        self.commands: list[gate.Command] = []
 
-    def __call__(self, command: Sequence[str]) -> int:
-        self.commands.append(tuple(command))
+    def __call__(self, command: Sequence[str], stdin: str | None) -> int:
+        self.commands.append(gate.Command(tuple(command), stdin))
         return self.codes[len(self.commands) - 1]
 
 
@@ -56,9 +56,9 @@ class RecordingMask:
         self.probe_observations.append(observation)
         return self.probes[len(self.probe_commands) - 1]
 
-    def wrap(self, command: Sequence[str], paths: Sequence[str]) -> Sequence[str]:
+    def wrap(self, command: Sequence[str], paths: Sequence[str]) -> mask.Wrapped:
         self.wrap_calls.append((tuple(command), tuple(paths)))
-        return ("wrapped", *command)
+        return mask.Wrapped(("fictitious-wrapper",), "".join(word + "\n" for word in command))
 
 
 def observation(state: mask.ProbeState, present: Sequence[str] = ()) -> mask.Observation:
@@ -127,15 +127,16 @@ class Gate(unittest.TestCase):
         runner = RecordingRunner([0, 0, 0, 0])
         code, output = run_gate([], runner)
         self.assertEqual(code, 0)
-        self.assertIn(Path(runner.commands[0][0]).name, {"python", "python3"})
-        self.assertEqual(runner.commands[0][1], "-P")
-        self.assertTrue(runner.commands[0][2].endswith("tools/environment.py"))
+        self.assertIn(Path(runner.commands[0].argv[0]).name, {"python", "python3"})
+        self.assertEqual(runner.commands[0].argv[1], "-P")
+        self.assertTrue(runner.commands[0].argv[2].endswith("tools/environment.py"))
         self.assertEqual(
-            [Path(command[0]).name for command in runner.commands[1:]], list(gate.TOOLS)
+            [Path(command.argv[0]).name for command in runner.commands[1:]], list(gate.TOOLS)
         )
-        self.assertEqual(runner.commands[1][1:], ("check", "."))
-        self.assertEqual(runner.commands[2][1:], ("gideon", "tests", "tools"))
-        self.assertEqual(runner.commands[3][1:], ("-x", "-n", "4", "-m", "not slow"))
+        self.assertEqual(runner.commands[1].argv[1:], ("check", "."))
+        self.assertEqual(runner.commands[2].argv[1:], ("gideon", "tests", "tools"))
+        self.assertEqual(runner.commands[3].argv[1:], ("-x", "-n", "4", "-m", "not slow"))
+        self.assertTrue(all(command.stdin is None for command in runner.commands))
         lines = output.splitlines()
         self.assertEqual(len(lines), 1)
         self.assertRegex(
@@ -147,10 +148,10 @@ class Gate(unittest.TestCase):
         runner = RecordingRunner([0, 0, 0, 0])
         code, _output = run_gate(["tests/test_gate.py", "tests/test_tracker.py"], runner)
         self.assertEqual(code, 0)
-        self.assertEqual(runner.commands[1][1:], ("check", "."))
-        self.assertEqual(runner.commands[2][1:], ("gideon", "tests", "tools"))
+        self.assertEqual(runner.commands[1].argv[1:], ("check", "."))
+        self.assertEqual(runner.commands[2].argv[1:], ("gideon", "tests", "tools"))
         self.assertEqual(
-            runner.commands[3][1:],
+            runner.commands[3].argv[1:],
             ("-x", "-n", "4", "-m", "not slow", "tests/test_gate.py", "tests/test_tracker.py"),
         )
 
@@ -158,7 +159,7 @@ class Gate(unittest.TestCase):
         runner = RecordingRunner([0, 0, 0, 0])
         code, output = run_gate(["--all", "tests/test_gate.py"], runner)
         self.assertEqual(code, 0)
-        self.assertEqual(runner.commands[3][1:], ("-x", "-n", "4", "tests/test_gate.py"))
+        self.assertEqual(runner.commands[3].argv[1:], ("-x", "-n", "4", "tests/test_gate.py"))
         self.assertRegex(
             output.splitlines()[0],
             r"^gate: green in \d+\.\d+s \(environment, ruff, mypy, pytest; all cases; unmasked; 4 workers\)$",
@@ -170,7 +171,7 @@ class Gate(unittest.TestCase):
             [], runner, cpu_reader=lambda: gate.WORKER_CAP + 8
         )
         self.assertEqual(code, 0)
-        self.assertEqual(runner.commands[3][1:4], ("-x", "-n", str(gate.WORKER_CAP)))
+        self.assertEqual(runner.commands[3].argv[1:4], ("-x", "-n", str(gate.WORKER_CAP)))
         self.assertIn(f"; {gate.WORKER_CAP} workers)", output)
 
     def test_worker_count_uses_the_smaller_cpu_figure_with_one_path(self) -> None:
@@ -180,7 +181,7 @@ class Gate(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertEqual(
-            runner.commands[3][1:],
+            runner.commands[3].argv[1:],
             ("-x", "-n", "3", "-m", "not slow", "tests/test_gate.py"),
         )
         self.assertIn("; 3 workers)", output)
@@ -189,7 +190,7 @@ class Gate(unittest.TestCase):
         runner = RecordingRunner([0, 0, 0, 0])
         code, output = run_gate([], runner, cpu_reader=lambda: 1)
         self.assertEqual(code, 0)
-        self.assertEqual(runner.commands[3][1:4], ("-x", "-n", "1"))
+        self.assertEqual(runner.commands[3].argv[1:4], ("-x", "-n", "1"))
         self.assertIn("; 1 worker)", output)
         self.assertEqual(gate.worker_count(0), 1)
 
@@ -209,7 +210,7 @@ class Gate(unittest.TestCase):
             code, output = run_gate([], runner, cpu_reader=cpu_reader)
         self.assertEqual(code, 0)
         self.assertEqual(events, ["cpu", "comparison"])
-        self.assertEqual(runner.commands[3][1:4], ("-x", "-n", "6"))
+        self.assertEqual(runner.commands[3].argv[1:4], ("-x", "-n", "6"))
         self.assertIn("; 6 workers)", output)
 
     def test_red_tool_stops_the_gate_with_its_exit_code(self) -> None:
@@ -230,9 +231,9 @@ class Gate(unittest.TestCase):
         self.assertEqual(fake.observe_calls, 1)
         self.assertEqual(fake.probe_commands, [])
         self.assertEqual(fake.wrap_calls, [])
-        self.assertEqual(runner.commands[1][1:], ("check", "."))
-        self.assertEqual(runner.commands[2][1:], ("gideon", "tests", "tools"))
-        self.assertEqual(runner.commands[3][1:], ("-x", "-n", "4", "-m", "not slow"))
+        self.assertEqual(runner.commands[1].argv[1:], ("check", "."))
+        self.assertEqual(runner.commands[2].argv[1:], ("gideon", "tests", "tools"))
+        self.assertEqual(runner.commands[3].argv[1:], ("-x", "-n", "4", "-m", "not slow"))
         self.assertIn("; unmasked; 4 workers)", output)
 
     def test_masked_wraps_pytest_alone_and_trials_before_each_phase(self) -> None:
@@ -247,15 +248,20 @@ class Gate(unittest.TestCase):
         code, output = run_gate(["--masked", "tests/test_gate.py"], runner, fake)
         self.assertEqual(code, 0)
         self.assertIn("; masked; 4 workers)", output)
+        self.assertTrue(all(command.stdin is None for command in runner.commands[:3]))
+        self.assertEqual(
+            runner.commands[3].stdin,
+            "".join(word + "\n" for word in fake.probe_commands[1]),
+        )
         self.assertEqual(len(fake.probe_commands), 2)
         self.assertEqual(fake.probe_commands[0], fake.probe_commands[1])
         self.assertEqual(fake.probe_commands[0][1:4], ("-x", "-n", "4"))
         self.assertEqual(fake.wrap_calls, [(fake.probe_commands[1], present)])
-        self.assertEqual(runner.commands[1][1:], ("check", "."))
-        self.assertEqual(runner.commands[2][1:], ("gideon", "tests", "tools"))
+        self.assertEqual(runner.commands[1].argv[1:], ("check", "."))
+        self.assertEqual(runner.commands[2].argv[1:], ("gideon", "tests", "tools"))
         self.assertEqual(
-            runner.commands[3],
-            ("wrapped", *fake.probe_commands[1]),
+            runner.commands[3].argv,
+            ("fictitious-wrapper",),
         )
 
     def test_refusing_probe_runs_no_tool_and_reports_mask(self) -> None:
@@ -351,7 +357,7 @@ class Gate(unittest.TestCase):
         code, output, error = run_gate_with_stderr(["--masked"], runner, fake)
         self.assertEqual(code, 23)
         self.assertEqual(len(runner.commands), 1)
-        self.assertIn(Path(runner.commands[0][0]).name, {"python", "python3"})
+        self.assertIn(Path(runner.commands[0].argv[0]).name, {"python", "python3"})
         self.assertEqual(fake.probe_commands, [])
         self.assertEqual(fake.wrap_calls, [])
         self.assertEqual(error, "")

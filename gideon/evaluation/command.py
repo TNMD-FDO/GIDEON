@@ -23,6 +23,7 @@ from gideon.evaluation import (
     window,
 )
 from gideon.evaluation import decision as decision_stats
+from gideon.evaluation.bound import bound_text
 from gideon.evaluation.conditions import (
     ConditionsReader,
     describe,
@@ -353,6 +354,7 @@ def _run_repeats(
                 verdict=bool(completed) and all(repeat.verdict for repeat in completed),
                 report="".join(report_lines),
                 results=tuple(kept_results),
+                gated_cases=completed[0].gated_cases if completed and overrun is None else None,
             ),
             requested,
             len(completed),
@@ -364,7 +366,7 @@ def _run_repeats(
 
 
 def _gate(slice_result: SliceResult, slice_spec: SliceSpec, *, partial: bool) -> bool:
-    """Print the gate from only the slice verdict and the spec's gate texts.
+    """Print the gate from the slice verdict, counted cases, and gate texts.
 
     The gate of a slice that keeps no reference; ``_reference_gate`` is the
     other. The tripwire in ``tests/test_judge_never_gates.py`` reads this
@@ -376,11 +378,12 @@ def _gate(slice_result: SliceResult, slice_spec: SliceSpec, *, partial: bool) ->
     if partial:
         print_stage(StageResult("gate", False, _PARTIAL_DETAIL, _WINDOW_START_FIX))
         return False
-    if slice_result.verdict:
-        print_stage(StageResult("gate", True, slice_spec.gate_pass, ""))
-        return True
-    print_stage(StageResult("gate", False, slice_spec.gate_fail, slice_spec.gate_fix))
-    return False
+    bounds_ok = slice_result.verdict
+    detail = slice_spec.gate_pass if bounds_ok else slice_spec.gate_fail
+    if slice_result.gated_cases is not None:
+        detail += f"; {bound_text(slice_result.gated_cases, bounds_ok)}"
+    print_stage(StageResult("gate", bounds_ok, detail, "" if bounds_ok else slice_spec.gate_fix))
+    return bounds_ok
 
 
 def _verdict_word(slice_result: SliceResult, *, partial: bool) -> str:
@@ -533,6 +536,8 @@ def _reference_gate(
     gate_verdict = bounds_ok and not comparison.regressed and not comparison_refused
 
     bounds_detail = slice_spec.gate_pass if bounds_ok else slice_spec.gate_fail
+    if slice_result.gated_cases is not None:
+        bounds_detail += f"; {bound_text(slice_result.gated_cases, bounds_ok)}"
     reference_detail = _reference_detail(
         comparison,
         slice_name=slice_name,
@@ -598,6 +603,8 @@ def _decision_gate(
     gate_verdict = bounds_ok and reference_ok and not loses and not run_result.partial
 
     bounds_detail = slice_spec.gate_pass if bounds_ok else slice_spec.gate_fail
+    if slice_result.gated_cases is not None and not run_result.partial:
+        bounds_detail += f"; {bound_text(slice_result.gated_cases, bounds_ok)}"
     reference_detail = _reference_detail(
         comparison,
         slice_name=slice_name,
@@ -885,6 +892,14 @@ def _prepare_generation(
         if name is None
         else request.command_flags.removesuffix(f" --generation {name}")
     )
+    if request.paths.name == CI_STACK and name is None:
+        selected = generation.sibling_default(
+            seams.host, seams.checkout, seams.site_path,
+            command_path=request.retry_command(flags=flags),
+        )
+        if isinstance(selected, Problem):
+            return StageResult("preconditions", False, selected.problem, selected.fix)
+        name = selected
     resolved = generation.resolve_generation(
         seams.host, request.paths.turns_dir, name,
         stack_name=request.paths.name,
@@ -1444,6 +1459,7 @@ def _record(
         decision=decision_json,
         engine_in_flight_max=None if engine_conditions is None else engine_conditions.in_flight_max,
         engine_preemptions=None if engine_conditions is None else engine_conditions.preemptions,
+        gated_cases=slice_result.gated_cases,
     )
     results = tuple(
         record.ResultRow(
@@ -1683,6 +1699,8 @@ def _run_body(
     print(slice_result.report, end="")
     if slice_result.report and not slice_result.report.endswith("\n"):
         print()
+    if slice_result.gated_cases is not None:
+        print(f"bound: {bound_text(slice_result.gated_cases, slice_result.verdict)}")
     print(f"verdict {_verdict_word(slice_result, partial=run_result.partial)}")
 
     comparison: reference.Comparison | None = None

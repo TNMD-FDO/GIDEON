@@ -217,6 +217,7 @@ class Runner(CountGatesFixture):
         checkpoints: list[int] = []
         checkpoint = Mock(side_effect=lambda: checkpoints.append(len(self.host.calls)))
         result = self.run_slice(replace(self.context, checkpoint=checkpoint))
+        self.assertIsNone(result.gated_cases)
         self.assertTrue(result.verdict, result.report)
         self.assertEqual(tuple(row.case_id for row in result.results), select_cases(self.loaded, "count-gates").counted)
         self.assertTrue(all(row.verdict == "pass" and row.metrics == {"failing": [], "courts": 2} for row in result.results))

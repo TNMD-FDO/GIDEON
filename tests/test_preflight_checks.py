@@ -53,6 +53,7 @@ from gideon.host.checks.network import (
     DOCKER_NETWORK_TIMEOUT_SECONDS,
     GETENT_TIMEOUT_SECONDS,
     NETWORK_LS_ARGV,
+    PROBE_RETRY_WAIT_SECONDS,
     PROBE_TIMEOUT_SECONDS,
     DockerNetworksCheck,
     EgressCheck,
@@ -369,10 +370,55 @@ class Registry(unittest.TestCase):
         )
 
 
+class SequenceHost(FakeHost):
+    """A FakeHost whose listed argvs answer their outcomes in turn, the last repeating."""
+
+    def __init__(
+        self,
+        *,
+        sequences: Mapping[tuple[str, ...], list[subprocess.CompletedProcess[str]]],
+        commands: Mapping[tuple[str, ...], subprocess.CompletedProcess[str]] | None = None,
+    ) -> None:
+        super().__init__(commands=commands)
+        self.sequences = {argv: list(outcomes) for argv, outcomes in sequences.items()}
+
+    def run(
+        self,
+        argv: Command,
+        *,
+        check: bool = False,
+        input: str | None = None,
+        cwd: PathLike | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        passthrough: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        outcomes = self.sequences.get(tuple(argv))
+        if outcomes:
+            self.calls.append(("run", tuple(argv)))
+            return outcomes.pop(0) if len(outcomes) > 1 else outcomes[0]
+        return super().run(
+            argv,
+            check=check,
+            input=input,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            passthrough=passthrough,
+        )
+
+
 class Egress(unittest.TestCase):
     """The check probes both pre-install egress groups and the site's registry host."""
 
     REGISTRY_PROBE = probe_argv("https://ghcr.io/v2/")
+
+    def setUp(self) -> None:
+        self.sleeps: list[float] = []
+        self.check = EgressCheck(sleep=self.sleeps.append)
+
+    def probes(self, host: FakeHost, argv: tuple[str, ...]) -> int:
+        return host.calls.count(("run", argv))
 
     def outcomes(self, **returncodes: int) -> dict[tuple[str, ...], subprocess.CompletedProcess[str]]:
         codes = {"a": 0, "b": 0, "registry": 0}
@@ -385,8 +431,98 @@ class Egress(unittest.TestCase):
 
     def test_all_reachable_passes(self) -> None:
         host = FakeHost(commands=self.outcomes())
-        report = EgressCheck().run(context(host))
+        report = self.check.run(context(host))
         self.assertEqual(report.severity, Severity.PASS)
+
+    def test_no_first_miss_waits_for_nothing_and_reads_as_before(self) -> None:
+        host = FakeHost(commands=self.outcomes())
+        report = self.check.run(context(host))
+        self.assertEqual(report.detail, "all 3 required egress hosts responded")
+        self.assertEqual(self.sleeps, [])
+        for argv in self.outcomes():
+            self.assertEqual(self.probes(host, argv), 1)
+
+    def test_unanswered_host_answering_its_second_probe_passes_naming_it(self) -> None:
+        probe = probe_argv("https://a.example/")
+        commands = self.outcomes()
+        del commands[probe]
+        host = SequenceHost(
+            sequences={probe: [completed((), returncode=4), completed(())]},
+            commands=commands,
+        )
+        report = self.check.run(context(host))
+        self.assertEqual(report.severity, Severity.PASS, report.detail)
+        self.assertEqual(
+            report.detail,
+            "all 3 required egress hosts responded; "
+            "on a second probe: a.example (first no response)",
+        )
+        self.assertEqual(self.sleeps, [PROBE_RETRY_WAIT_SECONDS])
+        self.assertEqual(self.probes(host, probe), 2)
+        self.assertEqual(self.probes(host, probe_argv("https://b.example/")), 1)
+        self.assertEqual(self.probes(host, self.REGISTRY_PROBE), 1)
+        runs = [call[1] for call in host.calls if call[0] == "run"]
+        self.assertEqual(runs[-1], probe)
+
+    def test_twice_missed_host_refuses_naming_both_verdicts(self) -> None:
+        probe = probe_argv("https://a.example/")
+        commands = self.outcomes()
+        del commands[probe]
+        host = SequenceHost(
+            sequences={
+                probe: [
+                    completed((), returncode=4),
+                    completed((), returncode=8, stderr="  HTTP/1.1 403 Forbidden\n"),
+                ]
+            },
+            commands=commands,
+        )
+        report = self.check.run(context(host))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertEqual(
+            report.detail, "unreachable hosts: a.example (no response, then HTTP 403)"
+        )
+        self.assertEqual(self.probes(host, probe), 2)
+
+    def test_refuse_row_names_a_second_probe_answer_after_the_misses(self) -> None:
+        probe = probe_argv("https://a.example/")
+        commands = self.outcomes(b=4)
+        del commands[probe]
+        host = SequenceHost(
+            sequences={probe: [completed((), returncode=4), completed(())]},
+            commands=commands,
+        )
+        report = self.check.run(context(host))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertEqual(
+            report.detail,
+            "unreachable hosts: b.example (no response, then no response); "
+            "on a second probe: a.example (first no response)",
+        )
+        self.assertEqual(self.sleeps, [PROBE_RETRY_WAIT_SECONDS])
+
+    def test_no_host_is_probed_more_than_twice(self) -> None:
+        host = FakeHost(commands=self.outcomes(a=4, registry=5))
+        report = self.check.run(context(host))
+        self.assertEqual(
+            report.detail,
+            "unreachable hosts: a.example (no response, then no response), "
+            "ghcr.io (no response, then no response)",
+        )
+        self.assertEqual(self.sleeps, [PROBE_RETRY_WAIT_SECONDS])
+        self.assertEqual(self.probes(host, probe_argv("https://a.example/")), 2)
+        self.assertEqual(self.probes(host, self.REGISTRY_PROBE), 2)
+        self.assertEqual(self.probes(host, probe_argv("https://b.example/")), 1)
+
+    def test_host_answering_with_a_status_is_not_probed_again(self) -> None:
+        probe = probe_argv("https://a.example/")
+        commands = self.outcomes()
+        commands[probe] = completed((), returncode=8, stderr="  HTTP/1.1 403 Forbidden\n")
+        host = FakeHost(commands=commands)
+        report = self.check.run(context(host))
+        self.assertEqual(report.detail, "unreachable hosts: a.example (HTTP 403)")
+        self.assertEqual(self.sleeps, [])
+        self.assertEqual(self.probes(host, probe), 1)
 
     def test_auth_gated_registry_response_still_counts_as_reachable(self) -> None:
         """A 401 on the registry /v2/ endpoint proves the origin answered."""
@@ -396,7 +532,7 @@ class Egress(unittest.TestCase):
             (), returncode=8, stderr="  HTTP/1.1 401 Unauthorized\n"
         )
         host = FakeHost(commands=commands)
-        report = EgressCheck().run(context(host))
+        report = self.check.run(context(host))
         self.assertEqual(report.severity, Severity.PASS, report.detail)
 
     def test_wget_auth_failure_exit_counts_as_reachable(self) -> None:
@@ -405,7 +541,7 @@ class Egress(unittest.TestCase):
         commands = self.outcomes()
         commands[self.REGISTRY_PROBE] = completed((), returncode=6)
         host = FakeHost(commands=commands)
-        report = EgressCheck().run(context(host))
+        report = self.check.run(context(host))
         self.assertEqual(report.severity, Severity.PASS, report.detail)
 
     def test_declared_expected_status_counts_as_reachable_for_that_host_only(self) -> None:
@@ -435,7 +571,7 @@ class Egress(unittest.TestCase):
             courts=COURTS,
             no_gpu=False,
         )
-        report = EgressCheck().run(preflight_context)
+        report = self.check.run(preflight_context)
         self.assertEqual(report.severity, Severity.PASS, report.detail)
 
     def test_proxy_block_page_is_a_miss_naming_the_status(self) -> None:
@@ -446,14 +582,14 @@ class Egress(unittest.TestCase):
             (), returncode=8, stderr="  HTTP/1.1 403 Forbidden\n"
         )
         host = FakeHost(commands=commands)
-        report = EgressCheck().run(context(host))
+        report = self.check.run(context(host))
         self.assertEqual(report.severity, Severity.REFUSE)
         self.assertIn("a.example", report.detail)
         self.assertIn("403", report.detail)
 
     def test_every_missed_host_is_named(self) -> None:
         host = FakeHost(commands=self.outcomes(a=4, b=5))
-        report = EgressCheck().run(context(host))
+        report = self.check.run(context(host))
         self.assertEqual(report.severity, Severity.REFUSE)
         self.assertIn("a.example", report.detail)
         self.assertIn("b.example", report.detail)
@@ -462,7 +598,7 @@ class Egress(unittest.TestCase):
 
     def test_corpus_group_is_not_probed_pre_install(self) -> None:
         host = FakeHost(commands=self.outcomes())
-        EgressCheck().run(context(host))
+        self.check.run(context(host))
         probed = [call for call in host.calls if call[0] == "run"]
         self.assertNotIn(("run", probe_argv("https://c.example/")), probed)
 
@@ -476,7 +612,7 @@ class Egress(unittest.TestCase):
                 probe: completed(()),
             }
         )
-        report = EgressCheck().run(context(host, site=site))
+        report = self.check.run(context(host, site=site))
         self.assertEqual(report.severity, Severity.PASS, report.detail)
         self.assertIn(("run", probe), host.calls)
 
@@ -490,14 +626,14 @@ class Egress(unittest.TestCase):
                 probe: completed(()),
             }
         )
-        report = EgressCheck().run(context(host, site=site))
+        report = self.check.run(context(host, site=site))
         self.assertEqual(report.severity, Severity.PASS, report.detail)
         self.assertIn(("run", probe), host.calls)
 
     def test_proxy_auth_travels_by_wgetrc_never_argv(self) -> None:
         site = make_site(extra="egress_proxy: http://proxy.test:3128\n")
         host = FakeHost(files={"/etc/gideon/secrets/proxy_auth": "alice:s3cret\n"})
-        report = EgressCheck().run(context(host, site=site))
+        report = self.check.run(context(host, site=site))
         self.assertEqual(report.severity, Severity.REFUSE)  # probes unmapped -> misses
 
         writes = [call for call in host.calls if call[0] == "write_text"]
@@ -517,9 +653,15 @@ class Egress(unittest.TestCase):
                 if argv and argv[0] == "env":
                     self.assertTrue(argv[1].startswith("WGETRC=/run/"))
 
+        # Every probe gave no response, so each was sent twice with one argv.
+        wgets = [call[1] for call in host.calls if call[0] == "run"]
+        self.assertEqual(len(wgets), 6)
+        self.assertTrue(all(wgets.count(argv) == 2 for argv in wgets), wgets)
+        self.assertEqual(self.sleeps, [PROBE_RETRY_WAIT_SECONDS])
+
     def test_malformed_proxy_auth_refuses(self) -> None:
         host = FakeHost(files={"/etc/gideon/secrets/proxy_auth": "no-colon\n"})
-        report = EgressCheck().run(context(host))
+        report = self.check.run(context(host))
         self.assertEqual(report.severity, Severity.REFUSE)
         self.assertIn("proxy_auth", report.detail + report.fix)
 

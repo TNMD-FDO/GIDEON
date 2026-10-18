@@ -1,9 +1,13 @@
-"""Materialize a generation's cluster risk states and validate their distribution."""
+"""Read risk states from the corpus record and write them to a generation's record.
+
+The read script computes the rows and corpus figures; the write script replaces
+one generation's rows atomically and returns their persisted distribution.
+"""
 
 import json
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Self
 
@@ -43,14 +47,7 @@ BY_NO_STATE_REASON_KEYS: Final = frozenset(NO_STATE_REASONS)
 # A persisted report keeps the set it was derived under, so any set's id parses.
 PATTERN_SET_PATTERN: Final = r"treatment/patterns@[1-9][0-9]*"
 
-MATERIALIZE_SQL = """\\set QUIET on
-BEGIN;
-WITH payload AS (
-    SELECT :'v_payload'::jsonb AS value
-)
-DELETE FROM public.cluster_treatment
-WHERE gen_id = (SELECT value->>'gen_id' FROM payload);
-
+READ_SQL = """\\set QUIET on
 WITH payload AS (
     SELECT :'v_payload'::jsonb AS value
 ), ready_documents AS (
@@ -62,6 +59,10 @@ WITH payload AS (
       AND d.source_snapshot = (p.value->>'snapshot_date')::date
       AND d.status = 'ready'
       AND o.court IN (SELECT jsonb_array_elements_text(p.value->'courts'))
+      AND (p.value->'doc_ids' = 'null'::jsonb
+           OR d.doc_id IN (
+               SELECT jsonb_array_elements_text(NULLIF(p.value->'doc_ids', 'null'::jsonb))
+           ))
 ), held AS (
     SELECT DISTINCT cluster_id FROM ready_documents
 ), selected_signals AS (
@@ -112,30 +113,18 @@ WITH payload AS (
     SELECT * FROM pattern UNION ALL SELECT * FROM list
 ), kept AS (
     SELECT c.* FROM candidates AS c JOIN held AS h USING (cluster_id)
-), written AS (
-    INSERT INTO public.cluster_treatment (
-        gen_id, cluster_id, state, signals, materialized_at
-    )
-    SELECT p.value->>'gen_id', k.cluster_id,
-           CASE WHEN bool_or(k.state = 'negative') THEN 'negative' ELSE 'caution' END,
-           jsonb_agg(k.element ORDER BY k.arm, k.element_id), now()
-    FROM kept AS k CROSS JOIN payload AS p
-    GROUP BY p.value->>'gen_id', k.cluster_id
-    RETURNING state
+), grouped AS (
+    SELECT k.cluster_id,
+           CASE WHEN bool_or(k.state = 'negative') THEN 'negative' ELSE 'caution' END AS state,
+           jsonb_agg(k.element ORDER BY k.arm, k.element_id) AS signals
+    FROM kept AS k
+    GROUP BY k.cluster_id
 )
 SELECT jsonb_build_object(
-    'materialized_at', now(), 'pattern_set', p.value->>'pattern_set',
-    'signal_pattern', (p.value->>'signal_pattern')::boolean,
-    'signal_list', (p.value->>'signal_list')::boolean,
-    'treatment_snapshot', CASE WHEN p.value->>'treatment_source' IS NOT NULL
-        THEN (p.value->>'treatment_source') || '-' || (p.value->>'treatment_snapshot_date')
-        ELSE NULL END,
+    'rows', COALESCE((
+        SELECT jsonb_agg(to_jsonb(g) ORDER BY g.cluster_id) FROM grouped AS g
+    ), '[]'::jsonb),
     'clusters', (SELECT count(*) FROM held),
-    'by_state', jsonb_build_object(
-        'negative', (SELECT count(*) FROM written WHERE state = 'negative'),
-        'caution', (SELECT count(*) FROM written WHERE state = 'caution'),
-        'unchecked', (SELECT count(*) FROM held) - (SELECT count(*) FROM written)
-    ),
     'by_source', COALESCE((
         SELECT jsonb_object_agg(source, n) FROM (
             SELECT element->>'source' AS source, count(*) AS n
@@ -158,8 +147,114 @@ SELECT jsonb_build_object(
     ), '{}'::jsonb)
 )
 FROM payload AS p;
+"""
+
+WRITE_SQL = """\\set QUIET on
+BEGIN;
+WITH payload AS (
+    SELECT :'v_payload'::jsonb AS value
+)
+DELETE FROM public.cluster_treatment
+WHERE gen_id = (SELECT value->>'gen_id' FROM payload);
+
+WITH payload AS (
+    SELECT :'v_payload'::jsonb AS value
+), written AS (
+    INSERT INTO public.cluster_treatment (
+        gen_id, cluster_id, state, signals, materialized_at
+    )
+    SELECT p.value->>'gen_id', r.cluster_id, r.state, r.signals, now()
+    FROM payload AS p
+    CROSS JOIN jsonb_to_recordset(p.value->'rows') AS r (
+        cluster_id bigint, state text, signals jsonb
+    )
+    RETURNING state
+)
+SELECT jsonb_build_object(
+    'materialized_at', now(), 'pattern_set', p.value->>'pattern_set',
+    'signal_pattern', (p.value->>'signal_pattern')::boolean,
+    'signal_list', (p.value->>'signal_list')::boolean,
+    'treatment_snapshot', CASE WHEN p.value->>'treatment_source' IS NOT NULL
+        THEN (p.value->>'treatment_source') || '-' || (p.value->>'treatment_snapshot_date')
+        ELSE NULL END,
+    'clusters', p.value->'clusters',
+    'by_state', jsonb_build_object(
+        'negative', (SELECT count(*) FROM written WHERE state = 'negative'),
+        'caution', (SELECT count(*) FROM written WHERE state = 'caution'),
+        'unchecked', (p.value->>'clusters')::bigint - (SELECT count(*) FROM written)
+    ),
+    'by_source', p.value->'by_source', 'by_signal', p.value->'by_signal',
+    'outside', p.value->'outside', 'by_no_state_reason', p.value->'by_no_state_reason'
+)
+FROM payload AS p;
 COMMIT;
 """
+
+
+@dataclass(frozen=True, slots=True)
+class TreatmentRow:
+    """One cluster's derived state and its ordered signal elements."""
+
+    cluster_id: int
+    state: str
+    signals: tuple[Mapping[str, object], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TreatmentRead:
+    """Corpus-derived rows and figures to bind to the generation's write."""
+
+    rows: tuple[TreatmentRow, ...]
+    clusters: int
+    by_source: Mapping[str, int]
+    by_signal: Mapping[str, int]
+    outside: int
+    by_no_state_reason: Mapping[str, int]
+
+    def to_payload(self) -> dict[str, object]:
+        """Return the validated corpus values for the write's stdin payload."""
+
+        return {
+            "rows": [{"cluster_id": row.cluster_id, "state": row.state,
+                      "signals": [dict(signal) for signal in row.signals]} for row in self.rows],
+            "clusters": self.clusters, "by_source": dict(self.by_source),
+            "by_signal": dict(self.by_signal), "outside": self.outside,
+            "by_no_state_reason": dict(self.by_no_state_reason),
+        }
+
+    @classmethod
+    def from_json(cls, value: object) -> Self | None:
+        """Refuse malformed rows, duplicate clusters, and invalid corpus figures."""
+
+        if not isinstance(value, dict) or set(value) != {
+            "rows", "clusters", "by_source", "by_signal", "outside", "by_no_state_reason",
+        }:
+            return None
+        if not isinstance(value["rows"], list) or any(
+            type(value[key]) is not int or value[key] < 0 for key in ("clusters", "outside")
+        ):
+            return None
+        rows = []
+        seen = set()
+        for row in value["rows"]:
+            if not isinstance(row, dict) or set(row) != {"cluster_id", "state", "signals"}:
+                return None
+            cluster_id = row["cluster_id"]
+            if (
+                type(cluster_id) is not int or cluster_id < 0 or cluster_id in seen
+                or row["state"] not in ("negative", "caution")
+                or not isinstance(row["signals"], list) or not row["signals"]
+                or any(not isinstance(signal, dict) for signal in row["signals"])
+            ):
+                return None
+            seen.add(cluster_id)
+            rows.append(TreatmentRow(cluster_id, row["state"], tuple(row["signals"])))
+        by_source = caselaw.counts_map(value["by_source"], BY_SOURCE_KEYS)
+        by_signal = caselaw.counts_map(value["by_signal"], BY_SIGNAL_KEYS)
+        reasons = caselaw.counts_map(value["by_no_state_reason"], BY_NO_STATE_REASON_KEYS)
+        if by_source is None or by_signal is None or reasons is None or len(rows) > value["clusters"]:
+            return None
+        return cls(tuple(rows), value["clusters"], by_source, by_signal, value["outside"], reasons)
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,9 +336,10 @@ def _run(
 
 def materialize(
     host: Host, rendered_dir: PathLike, inputs: GenerationInputs,
-    treatment_snapshot: str | None, *, command_path: str = "index build",
+    treatment_snapshot: str | None, *, corpus_dir: PathLike | None = None,
+    documents: Sequence[str] | None = None, command_path: str = "index build",
 ) -> Treatment | Problem:
-    """Replace a generation's derived rows atomically and read their distribution."""
+    """Read optionally bounded corpus states, then replace the generation's rows."""
 
     problem = staging.snapshot_problem(inputs.snapshot, command_path, subject="treatment case-law")
     if problem is not None:
@@ -258,9 +354,7 @@ def materialize(
                 f"Use a {OVERRULED_SOURCE}-YYYY-MM-DD snapshot, then run "
                 f"{report.command(command_path)} again.",
             )
-    payload = {
-        "gen_id": inputs.name, "source": inputs.snapshot[:-staging.DATE_SUFFIX_LENGTH],
-        "snapshot_date": inputs.snapshot[-10:], "courts": list(inputs.courts),
+    release: dict[str, object] = {
         "pattern_set": PATTERN_SET_ID, "signal_pattern": SIGNAL_PATTERN,
         "signal_list": SIGNAL_LIST,
         "treatment_source": (
@@ -268,7 +362,27 @@ def materialize(
         ),
         "treatment_snapshot_date": treatment_snapshot[-10:] if treatment_snapshot is not None else None,
     }
-    sql = worker.bind("v_payload", json.dumps(payload, separators=(",", ":"))) + "\n" + MATERIALIZE_SQL
+    payload: dict[str, object] = {
+        "source": inputs.snapshot[:-staging.DATE_SUFFIX_LENGTH],
+        "snapshot_date": inputs.snapshot[-10:], "courts": list(inputs.courts),
+        "doc_ids": None if documents is None else list(documents), **release,
+    }
+    corpus_dir = rendered_dir if corpus_dir is None else corpus_dir
+    sql = worker.bind("v_payload", json.dumps(payload, separators=(",", ":"))) + "\n" + READ_SQL
+    result = _run(host, corpus_dir, sql, command_path)
+    if isinstance(result, Problem):
+        return result
+    fix = record.database_fix(corpus_dir, command_path)
+    if result.returncode != 0:
+        return Problem(f"treatment read failed (exit {result.returncode})", fix)
+    try:
+        observed = TreatmentRead.from_json(json.loads(result.stdout))
+    except ValueError:
+        observed = None
+    if observed is None:
+        return Problem("treatment read returned an invalid row", fix)
+    payload = {"gen_id": inputs.name, **observed.to_payload(), **release}
+    sql = worker.bind("v_payload", json.dumps(payload, separators=(",", ":"))) + "\n" + WRITE_SQL
     result = _run(host, rendered_dir, sql, command_path)
     if isinstance(result, Problem):
         return result
@@ -281,7 +395,7 @@ def materialize(
         treatment = None
     if treatment is None:
         return Problem("treatment materialization returned an invalid row", fix)
-    if treatment.pattern_set != payload["pattern_set"]:
+    if treatment.pattern_set != PATTERN_SET_ID:
         return Problem("treatment materialization returned a different pattern set", fix)
     return treatment
 

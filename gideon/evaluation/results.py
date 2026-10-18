@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING
 
 from gideon.evaluation.rankmetrics import Coordinates
@@ -14,6 +15,26 @@ if TYPE_CHECKING:
     from gideon.evaluation.turns.access import TurnAccess
 
 type JSONValue = None | bool | int | float | str | list[JSONValue] | Mapping[str, JSONValue]
+
+
+class CallSurface(Enum):
+    """A surface an evaluation slice reaches, and whether it is on the box.
+
+    The record surface asks ``preconditions`` for root and the site file but
+    probes no reader; a runner reports the database refusal if its read fails.
+    The stores surface resolves one index generation before the run and probes
+    no store.
+    """
+
+    ENGINE = ("engine", True)
+    IMAGE = ("image", True)
+    RECORD = ("record", True)
+    STORES = ("stores", True)
+    TURNS = ("turns", True)
+    RANKED_FILE = ("ranked-file", False)
+
+    def __init__(self, _name: str, on_box: bool) -> None:
+        self.on_box = on_box
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,11 +71,17 @@ class CaseResult:
 
 @dataclass(frozen=True, slots=True)
 class SliceResult:
-    """The code-computed gate verdict, report, and per-case results."""
+    """The code-computed gate verdict, report, and per-case results.
+
+    ``gated_cases`` counts the cases the zero-tolerance verdict read, each one
+    a case whose single failure fails the gate. It is ``None`` for a slice
+    whose gate is not zero-tolerance.
+    """
 
     verdict: bool
     report: str
     results: tuple[CaseResult, ...]
+    gated_cases: int | None = field(default=None, kw_only=True)
 
 
 def no_checkpoint() -> None:

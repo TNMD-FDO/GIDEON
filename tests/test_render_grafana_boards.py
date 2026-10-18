@@ -11,9 +11,11 @@ import yaml  # type: ignore[import-untyped]
 from test_render_grafana import EXAMPLE, ROOT, SECOND, _datasource_uids, inputs
 from test_render_grafana_runbook import render_tile_facts
 
+from gideon.evaluation import bound
 from gideon.evaluation.evalset import SHAPE_REGISTRY, TIER_2_CATEGORY
 from gideon.evaluation.guardrails_slice import OVER_TRIP_DIVISOR
 from gideon.evaluation.window import QUIET_WINDOW_END_HOUR
+from gideon.host.index.generations import COLLECTIONS
 from gideon.host.render import ARTIFACTS, VerbatimArtifact, render_all
 from gideon.host.render.engine import ENGINE_JOB_NAME
 from gideon.host.render.grafana import (
@@ -31,6 +33,7 @@ from gideon.host.render.grafana import (
 from gideon.host.render.systemd import NIGHTLY_CALENDAR
 from gideon.host.site import FIELD_REGISTRY
 from gideon.improvement import tally
+from gideon.worker.metrics import KNOWN_QUEUES
 from tools.boards.page import GRID_CELL_HEIGHT, GRID_CELL_MARGIN, VIEWPORT_WIDTH
 
 # The pinned Grafana's table panel and dashboard grid, read from its source;
@@ -45,6 +48,21 @@ KIOSK_SIDE_PADDING = 32  # the kiosk page's 16 px padding on each side
 GRID_COLUMNS = 24  # the dashboard grid's columns
 HEADER_CHAR_WIDTH_BOUND = 9  # an upper bound per header character, not a glyph metric
 GPU_AGGREGATED_FIELD = re.compile(r"max by \(gpu\) \((DCGM_FI_[A-Z0-9_]+)\)")
+
+# The time series legend note's bottom cap applies below 992 px, even when
+# placement is right. The 2026-10-17 copies measured at most 22 px per table
+# row including the header, against the note's source-derived 23.857 px bound.
+LEGEND_BOTTOM_CAP_FRACTION = 0.35
+LEGEND_TABLE_ROW_PITCH = 22
+# A bottom list: 4 px wrapper padding and the note's likely 23.5 px line, the
+# worker's six queue names packing three a line at a phone width, a bound on
+# the four the 2026-10-18 capture packed. A right list forced to the bottom
+# keeps one entry per line, so the worker charts place theirs at the bottom.
+LEGEND_LIST_PADDING = 4
+LEGEND_LIST_LINE_PITCH = 23.5
+LEGEND_LIST_PHONE_PER_LINE = 3
+GENERATION_ID_REGEX = r"^([^_]+__)?([^_]+)(__.*)?$"
+QUEUE_HUES = ("green", "yellow", "blue", "orange", "red", "purple")
 
 # The pinned Grafana's stat panel, read from its source: no panel padding, so
 # the tiles fill the card inside its border and title bar.
@@ -122,10 +140,17 @@ def table_whole_rows(panel: dict[str, Any]) -> int:
     return (card_height - PANEL_VERTICAL_CHROME - TABLE_HEADER_HEIGHT) // TABLE_ROW_HEIGHT[cell_height]
 
 
-def table_inner_width(panel: dict[str, Any]) -> int:
-    """Resolve the table's available pixels in the board check's kiosk viewport."""
+def chart_inner_height(panel: dict[str, Any]) -> int:
+    """Resolve a chart's inner height: 38h minus 66, with the 40 px title bar."""
 
-    grid_width = VIEWPORT_WIDTH - KIOSK_SIDE_PADDING
+    card_height = (GRID_CELL_HEIGHT + GRID_CELL_MARGIN) * panel["gridPos"]["h"] - GRID_CELL_MARGIN
+    return card_height - PANEL_VERTICAL_CHROME
+
+
+def table_inner_width(panel: dict[str, Any], *, viewport: int = VIEWPORT_WIDTH) -> int:
+    """Resolve the table's available pixels at the requested kiosk viewport."""
+
+    grid_width = viewport - KIOSK_SIDE_PADDING
     column_width = (grid_width - GRID_CELL_MARGIN * (GRID_COLUMNS - 1)) / GRID_COLUMNS
     width = panel["gridPos"]["w"]
     return round(column_width * width + GRID_CELL_MARGIN * (width - 1)) - PANEL_INNER_WIDTH_LOSS
@@ -141,7 +166,15 @@ def column_overrides(panel: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
-def table_column_widths(panel: dict[str, Any], columns: list[str]) -> dict[str, float]:
+def header_label(panel: dict[str, Any], column: str) -> str:
+    """Read the drawn header from its by-name override or SQL column name."""
+
+    return column_overrides(panel).get(column, {}).get("displayName", column)
+
+
+def table_column_widths(
+    panel: dict[str, Any], columns: list[str], *, viewport: int = VIEWPORT_WIDTH,
+) -> dict[str, float]:
     """Apply Grafana's explicit widths and shared width floor to query columns."""
 
     defaults = panel["fieldConfig"]["defaults"].get("custom", {})
@@ -152,7 +185,7 @@ def table_column_widths(panel: dict[str, Any], columns: list[str]) -> dict[str, 
     }
     fixed = sum(value for value in explicit.values() if value)
     auto_count = sum(not value for value in explicit.values())
-    shared = (table_inner_width(panel) - fixed) / auto_count if auto_count else 0
+    shared = (table_inner_width(panel, viewport=viewport) - fixed) / auto_count if auto_count else 0
     return {
         name: float(value) if value else max(
             properties.get(name, {}).get("custom.minWidth", defaults.get("minWidth", TABLE_MIN_COLUMN_WIDTH)),
@@ -253,6 +286,31 @@ def _leaf_panels(dashboard: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 class Dashboards(unittest.TestCase):
+    def test_backup_and_eval_columns_have_readable_display_names(self) -> None:
+        for artifact in (GrafanaBackupArtifact, GrafanaEvalArtifact):
+            board = json.loads(artifact.emit(inputs()))
+            for panel in board["panels"]:
+                if panel["type"] != "table" and not (
+                    artifact is GrafanaBackupArtifact and panel["type"] == "timeseries"
+                ):
+                    continue
+                with self.subTest(board=board["uid"], panel=panel["title"]):
+                    overrides = column_overrides(panel)
+                    self.assertEqual(len(overrides), len(panel["fieldConfig"]["overrides"]))
+                    columns = outer_select_columns(panel["targets"][0]["rawSql"])
+                    for column in columns:
+                        if panel["type"] == "timeseries" and column == "time":
+                            continue
+                        with self.subTest(column=column):
+                            name = overrides[column]["displayName"]
+                            self.assertIsInstance(name, str)
+                            self.assertRegex(name, r"^[A-Z]")
+                            self.assertNotIn("_", name)
+                    if artifact is GrafanaEvalArtifact and panel["title"] in (
+                        "Last run per suite and kind", "Failed cases of newest nightly runs",
+                    ):
+                        self.assertEqual(overrides["slice"]["displayName"], "Suite")
+
     def test_overview_tiles_hold_every_scraped_name(self) -> None:
         for label, site_path, no_gpu in (
             ("example", EXAMPLE, False),
@@ -403,12 +461,22 @@ class TableLayout(unittest.TestCase):
         }
         self.assertEqual(table_whole_rows(panel), 4)
         self.assertEqual(table_inner_width(panel), 1550)
+        self.assertEqual(table_inner_width(panel, viewport=1280), 1230)
         panel["gridPos"]["h"] = 10
         self.assertEqual(table_whole_rows(panel), 7)
         self.assertEqual(sum(table_column_widths(panel, [f"field_{i}" for i in range(12)]).values()), 1800)
         panel["gridPos"]["w"] = 12
         self.assertEqual(table_inner_width(panel), 762)
         self.assertEqual(sum(table_column_widths(panel, [f"field_{i}" for i in range(10)]).values()), 1500)
+
+        for grid_w, inner_width in ((24, 1230), (12, 602), (8, 393)):
+            with self.subTest(grid_w=grid_w, viewport=1280):
+                panel["gridPos"]["w"] = grid_w
+                self.assertEqual(table_inner_width(panel, viewport=1280), inner_width)
+                self.assertEqual(
+                    table_column_widths(panel, ["fictitious"], viewport=1280),
+                    {"fictitious": inner_width},
+                )
 
         for grid_w, grid_h, cols, rows, last, width, height, last_width, room in (
             (12, 8, 8, 3, 7, 94.625, 82.667, 108.571, 78.625),
@@ -495,10 +563,94 @@ class BackupBoard(unittest.TestCase):
         self.assertIn("(kind <> 'backup_run' OR detail->>'phase' = 'applied')", runs_sql)
         overrides = column_overrides(runs)
         self.assertEqual(overrides["hard_link_ratio"]["unit"], chart["fieldConfig"]["defaults"]["unit"])
-        self.assertEqual(overrides["transferred_bytes"]["custom.width"], 170)
+        self.assertEqual(overrides["hard_link_ratio"]["decimals"], chart["fieldConfig"]["defaults"]["decimals"])
+        widths = {
+            "at": 165, "duration_s": 185, "result": 100, "set_bytes": 95,
+            "hard_link_ratio": 85, "transferred_bytes": 115, "total_bytes": 95,
+            "verified": 95, "pruned": 85,
+        }
+        self.assertEqual(
+            {name: properties["custom.width"] for name, properties in overrides.items() if "custom.width" in properties},
+            widths,
+        )
+        self.assertNotIn("custom.width", overrides["kind"])
+        minimum = runs["fieldConfig"]["defaults"]["custom"]["minWidth"]
+        self.assertEqual(minimum, 100)
+        self.assertLess(sum(widths.values()) + minimum, table_inner_width(runs, viewport=1280))
+        columns = outer_select_columns(runs_sql)
+        self.assertLessEqual(
+            sum(table_column_widths(runs, columns, viewport=1280).values()),
+            table_inner_width(runs, viewport=1280),
+        )
+
+    def test_table_figures_are_numeric_and_use_human_units(self) -> None:
+        board = json.loads(GrafanaBackupArtifact.emit(inputs()))
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        runs = panels["Last ten backup and restore runs"]
+        sql = runs["targets"][0]["rawSql"]
+        overrides = column_overrides(runs)
+        for column, cast in (
+            ("duration_s", r"double\s+precision"),
+            ("set_bytes", "bigint"),
+            ("transferred_bytes", "bigint"),
+            ("total_bytes", "bigint"),
+            ("verified", "integer"),
+            ("pruned", "integer"),
+        ):
+            with self.subTest(column=column):
+                self.assertRegex(
+                    sql,
+                    rf"(?i)\(\s*detail\s*->>\s*'{column}'\s*\)\s*::\s*{cast}\s+AS\s+{column}\b",
+                )
+        self.assertEqual(overrides["duration_s"]["unit"], "dtdurations")
+        self.assertEqual(overrides["duration_s"]["decimals"], 1)
+        for column in ("set_bytes", "transferred_bytes", "total_bytes"):
+            with self.subTest(column=column):
+                self.assertEqual(overrides[column]["unit"], "bytes")
+        self.assertEqual(overrides["hard_link_ratio"]["unit"], "percentunit")
+        self.assertEqual(overrides["hard_link_ratio"]["decimals"], 1)
+        self.assertNotIn("unit", runs["fieldConfig"]["defaults"])
+        for column in ("verified", "pruned"):
+            with self.subTest(column=column):
+                self.assertNotIn("unit", overrides[column])
+        drill_sql = panels["Restore drill result"]["targets"][0]["rawSql"]
+        self.assertRegex(drill_sql, r"(?i)^SELECT\s+at\s*,")
+        self.assertEqual(outer_select_columns(drill_sql), ["at", "result"])
+
+    def test_duration_charts_read_whole_minutes(self) -> None:
+        board = json.loads(GrafanaBackupArtifact.emit(inputs()))
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        for title in ("Backup run duration", "Restore drill duration"):
+            with self.subTest(panel=title):
+                panel = panels[title]
+                sql = panel["targets"][0]["rawSql"]
+                self.assertRegex(
+                    sql,
+                    r"(?i)\(\s*detail\s*->>\s*'duration_s'\s*\)\s*::\s*double\s+precision\s*/\s*60\.0\s+AS\s+duration_min\b",
+                )
+                self.assertEqual(outer_select_columns(sql), ["time", "duration_min"])
+                self.assertEqual(panel["fieldConfig"]["defaults"]["unit"], "m")
+                self.assertEqual(panel["fieldConfig"]["defaults"]["decimals"], 0)
+                self.assertEqual(column_overrides(panel)["duration_min"]["displayName"], "Duration")
 
 
 class EvalBoard(unittest.TestCase):
+    def test_table_and_trip_share_the_backup_duration_form(self) -> None:
+        board = json.loads(GrafanaEvalArtifact.emit(inputs()))
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        duration = column_overrides(panels["Last run per suite and kind"])["duration_seconds"]
+        trip = panels["Last eval trip"]["fieldConfig"]["defaults"]
+        backup = json.loads(GrafanaBackupArtifact.emit(inputs()))
+        runs = next(panel for panel in backup["panels"] if panel["title"] == "Last ten backup and restore runs")
+        backup_duration = column_overrides(runs)["duration_s"]
+        self.assertEqual(backup_duration["unit"], "dtdurations")
+        self.assertEqual(backup_duration["decimals"], 1)
+        for name, properties in (("duration_seconds", duration), ("age_seconds", trip)):
+            with self.subTest(column=name):
+                self.assertEqual(properties["unit"], backup_duration["unit"])
+                self.assertEqual(properties["decimals"], backup_duration["decimals"])
+        self.assertEqual(duration["custom.width"], 185)
+
     def test_board_is_verbatim_and_only_applies_on_gpu_hosts(self) -> None:
         self.assertEqual(GrafanaEvalArtifact.emit(inputs()), inputs().templates[EVAL_TEMPLATE])
         self.assertEqual(GrafanaEvalArtifact.owners, ("grafana",))
@@ -564,7 +716,7 @@ class EvalBoard(unittest.TestCase):
                 self.assertNotIn("AT TIME ZONE", sql.upper())
 
         last = panels["Last run per suite and kind"]["targets"][0]["rawSql"]
-        for column in ("stack", "slice", "kind", "verdict", "partial", "forced", "started_at", "finished_at", "product_version", "eval_set_version", "run_id"):
+        for column in ("stack", "slice", "kind", "verdict", "gated_cases", "bound_pct", "partial", "forced", "started_at", "finished_at", "product_version", "eval_set_version", "run_id"):
             self.assertIn(column, last)
         self.assertIn("DISTINCT ON (stack, slice, kind)", last)
         self.assertIn("duration_seconds", last)
@@ -601,6 +753,51 @@ class EvalBoard(unittest.TestCase):
             "SELECT EXTRACT(EPOCH FROM (now() - max(at))) AS age_seconds "
             "FROM guardrail_trips WHERE source = 'eval'",
         )
+
+    def test_last_run_bound_requires_a_passing_run_and_positive_count(self) -> None:
+        board = json.loads(GrafanaEvalArtifact.emit(inputs()))
+        panel = next(panel for panel in board["panels"] if panel["title"] == "Last run per suite and kind")
+        sql = panel["targets"][0]["rawSql"]
+        self.assertEqual(outer_select_columns(sql), [
+            "stack", "slice", "kind", "verdict", "cases", "bound_pct", "partial", "forced",
+            "started_at", "finished_at", "duration_seconds", "product_version", "eval_set_version", "run_id",
+        ])
+        self.assertRegex(
+            " ".join(sql.split()),
+            r"CASE WHEN verdict = 'pass' AND gated_cases > 0 "
+            r"THEN ROUND\(LEAST\(100, \d+(?:\.\d+)? / gated_cases\), 1\) "
+            r"ELSE NULL END AS bound_pct",
+        )
+
+    def test_bound_queries_and_descriptions_follow_the_report_rule(self) -> None:
+        board = json.loads(GrafanaEvalArtifact.emit(inputs()))
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        for title, count in (
+            ("Last run per suite and kind", "gated_cases"),
+            ("Guardrails: gate counts per family", "positives"),
+        ):
+            with self.subTest(panel=title):
+                panel = panels[title]
+                sql = " ".join(panel["targets"][0]["rawSql"].split())
+                numerator = re.search(
+                    rf"ROUND\(LEAST\(100, (\d+(?:\.\d+)?) / {count}\), 1\)", sql
+                )
+                self.assertIsNotNone(numerator)
+                assert numerator is not None
+                self.assertEqual(float(numerator.group(1)), bound.RULE_NUMERATOR * 100)
+                description = panel["description"]
+                rule = re.search(r"\((\d+)/n at (\d+) % one-sided\)", description)
+                self.assertIsNotNone(rule)
+                assert rule is not None
+                self.assertEqual(int(rule.group(1)), bound.RULE_NUMERATOR)
+                self.assertEqual(int(rule.group(2)), bound.ONE_SIDED_LEVEL_PERCENT)
+                self.assertIn("true failure rate", description)
+                self.assertIn("blank", description)
+                bound_override = next(
+                    override for override in panel["fieldConfig"]["overrides"]
+                    if override["matcher"]["options"] == "bound_pct"
+                )
+                self.assertIn({"id": "decimals", "value": 1}, bound_override["properties"])
 
     def test_proposals_panel_reads_the_newest_tally_and_keeps_empty_lists_visible(self) -> None:
         board = json.loads(GrafanaEvalArtifact.emit(inputs()))
@@ -651,6 +848,20 @@ class EvalBoard(unittest.TestCase):
         ) + ")"
         self.assertIn(family_filter, sql)
         self.assertIn("verdict AS run_verdict", sql)
+        self.assertIn("COUNT(*) FILTER (WHERE role = 'positive') AS positives", sql)
+        self.assertEqual(outer_select_columns(sql), [
+            "started_at", "family", "run_id", "run_verdict", "positives", "bound_pct",
+            "positives_not_blocked", "leaks", "errors", "replaced_controls",
+            "frontend_disagreements", "ceiling",
+        ])
+        self.assertRegex(
+            " ".join(sql.split()),
+            r"CASE WHEN positives > 0 AND positives_not_blocked = 0 "
+            r"AND leaks = 0 AND errors = 0 AND frontend_disagreements = 0 "
+            r"AND replaced_controls <= ceiling "
+            r"THEN ROUND\(LEAST\(100, \d+(?:\.\d+)? / positives\), 1\) "
+            r"ELSE NULL END AS bound_pct",
+        )
         self.assertIn("door_class IS NOT NULL", sql)
         self.assertIn("door_class IN ('replaced', 'declined', 'disclaimed')", sql)
         self.assertIn("checks->>'must_not' = 'true'", sql)
@@ -741,12 +952,280 @@ class EvalBoard(unittest.TestCase):
                     for name in columns:
                         with self.subTest(column=name):
                             self.assertLessEqual(
-                                len(name) * HEADER_CHAR_WIDTH_BOUND,
+                                len(header_label(panel, name)) * HEADER_CHAR_WIDTH_BOUND,
                                 widths[name] - HEADER_TEXT_INSET,
                             )
 
 
 class CorpusBoard(unittest.TestCase):
+    def test_every_table_column_has_a_width_and_fits_at_1280(self) -> None:
+        board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
+        for panel in board["panels"]:
+            if panel["type"] != "table":
+                continue
+            with self.subTest(panel=panel["title"]):
+                columns = outer_select_columns(panel["targets"][0]["rawSql"])
+                properties = column_overrides(panel)
+                for name in columns:
+                    with self.subTest(column=name):
+                        self.assertIn("custom.width", properties.get(name, {}))
+                        self.assertGreater(properties[name]["custom.width"], 0)
+                widths = table_column_widths(panel, columns, viewport=1280)
+                self.assertLessEqual(sum(widths.values()), table_inner_width(panel, viewport=1280))
+
+    def test_distribution_rows_hold_two_generations_in_paired_cards(self) -> None:
+        board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        # 2026-10-16 record readings: a two-court generation has eight text-source
+        # rows and five precedential rows; reserve room for two such generations.
+        for left_title, right_title, whole_rows in (
+            ("Documents by status", "Documents by text source", 16),
+            ("Documents by precedential status", "Failures by reason", 10),
+        ):
+            with self.subTest(left=left_title, right=right_title):
+                left = panels[left_title]
+                right = panels[right_title]
+                for panel in (left, right):
+                    with self.subTest(panel=panel["title"]):
+                        self.assertEqual(table_whole_rows(panel), whole_rows)
+                a = left["gridPos"]
+                b = right["gridPos"]
+                self.assertEqual((a["y"], a["h"]), (b["y"], b["h"]))
+                self.assertEqual(b["x"], a["x"] + a["w"])
+                self.assertEqual(a["w"] + b["w"], GRID_COLUMNS)
+
+    def test_generation_tables_name_lockfile_and_space_without_collection(self) -> None:
+        board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
+        titles = ("Generations", "Build wall clock", "Embedding progress")
+        self.assertEqual(
+            len(COLLECTIONS), 1,
+            f"{board['uid']}: add a collection column to {', '.join(titles)} "
+            "before registering a second collection",
+        )
+        for panel in board["panels"]:
+            if panel["type"] != "table":
+                continue
+            with self.subTest(panel=panel["title"]):
+                sql = panel["targets"][0]["rawSql"]
+                columns = outer_select_columns(sql)
+                self.assertNotIn("gen_id", columns)
+                if panel["title"] in titles:
+                    self.assertEqual(columns[:2], ["lockfile", "space"])
+                    self.assertIn("split_part(gen_id, '__', 2) AS lockfile", sql)
+                    self.assertIn("split_part(gen_id, '__', 3) AS space", sql)
+
+    def test_timestamps_read_to_the_minute_and_token_rate_scales(self) -> None:
+        board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        for title, columns in (
+            ("Generations", ("created_at", "lexical_built_at", "dense_built_at", "built_at", "promoted_at")),
+            ("Build wall clock", ("report_at",)),
+        ):
+            properties = column_overrides(panels[title])
+            for name in columns:
+                with self.subTest(panel=title, column=name):
+                    self.assertEqual(properties[name]["unit"], "time:YYYY-MM-DD HH:mm")
+        progress = panels["Embedding progress"]
+        rate = column_overrides(progress)["tokens_per_second"]
+        self.assertEqual(rate["displayName"], "tokens/s")
+        self.assertEqual(rate["unit"], "short")
+        self.assertNotIn("decimals", rate)
+        self.assertNotIn("decimals", progress["fieldConfig"]["defaults"])
+        for title, unit in (
+            ("Tokens embedded per second", "short"),
+            ("Documents indexed per second", "suffix: docs/s"),
+        ):
+            with self.subTest(panel=title):
+                defaults = panels[title]["fieldConfig"]["defaults"]
+                self.assertEqual(defaults["unit"], unit)
+                self.assertEqual(defaults["decimals"], 0)
+        self.assertEqual(panels["Collections"]["fieldConfig"]["defaults"]["unit"], "locale")
+        work = panels["Store work in flight"]["fieldConfig"]["defaults"]
+        self.assertEqual(work["unit"], "short")
+        self.assertEqual(work["decimals"], 0)
+        self.assertEqual(work["min"], 0)
+        self.assertEqual(work["custom"]["axisSoftMax"], 1)
+
+    def test_counts_read_one_way_across_the_tables(self) -> None:
+        """The Corpus tables display exact document and anchor counts."""
+
+        board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        for title, columns in (
+            ("Documents by status", ("documents",)),
+            ("Documents by text source", ("documents",)),
+            ("Documents by precedential status", ("documents",)),
+            ("Failures by reason", ("documents",)),
+            ("Anchors, agreement, and the accounted gate", (
+                "staged", "recorded", "ready", "failed", "anchored", "agreed", "gideon_pairs", "map_pairs",
+            )),
+        ):
+            properties = column_overrides(panels[title])
+            for name in columns:
+                with self.subTest(panel=title, column=name):
+                    self.assertEqual(properties[name]["unit"], "locale")
+
+    def test_generation_series_are_named_by_lockfile(self) -> None:
+        """Generation charts name their series by the lockfile alone."""
+
+        site_inputs = inputs()
+        board = json.loads(GrafanaCorpusArtifact.emit(site_inputs))
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        for title, ref_id, selector, label, legend in (
+            ("Collections", "A", 'collection_points{job="qdrant"}', "id", "{{lockfile}} points"),
+            ("Collections", "B", 'collection_vectors{job="qdrant"}', "collection", "{{lockfile}} vectors"),
+            ("Store work in flight", "C", 'collection_update_queue_length{job="qdrant"}', "id", "{{lockfile}} queue"),
+            ("Store work in flight", "D", 'collection_running_optimizations{job="qdrant"}', "id", "{{lockfile}} optimizing"),
+            ("Documents indexed per second", "A", (
+                'sum by (index) (rate(opensearch_index_indexing_index_count{job="opensearch-metrics", '
+                'context="primaries", index!~"[.].*"}[5m]))'
+            ), "index", "{{lockfile}}"),
+        ):
+            with self.subTest(panel=title, target=ref_id):
+                target = next(target for target in panels[title]["targets"] if target["refId"] == ref_id)
+                self.assertEqual(
+                    target["expr"],
+                    f'label_replace({selector}, "lockfile", "$2", "{label}", "{GENERATION_ID_REGEX}")',
+                )
+                self.assertEqual(target["legendFormat"], legend)
+        lexical = next(target for target in panels["Store work in flight"]["targets"] if target["refId"] == "A")
+        self.assertEqual(lexical["expr"], 'max(opensearch_indices_indexing_index_current_number{job="opensearch-metrics"})')
+        self.assertEqual(lexical["legendFormat"], "lexical indexing")
+
+        space = site_inputs.profile.embedding_space
+        assert space is not None
+        lockfile = "corpus-2099-01-03"
+        generation = f"{COLLECTIONS[0].name}__{lockfile}__{space.id}"
+        # Python fullmatch stands in for RE2's anchored match; this pattern
+        # uses no construct whose meaning differs between the engines.
+        for name, expected in ((generation, lockfile), ("example-collection", "example-collection")):
+            with self.subTest(name=name):
+                match = re.fullmatch(GENERATION_ID_REGEX, name)
+                self.assertIsNotNone(match)
+                assert match is not None
+                self.assertEqual(match.group(2), expected)
+
+    def test_chart_legends_show_every_entry_at_the_phone_cap(self) -> None:
+        """The phone's bottom legends show the reserved series whole."""
+
+        board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        # 2026-10-17 readings: four collection series, five store-work series,
+        # and two indexing series. At h: 12 the table holds five data rows;
+        # a sixth needs h: 14. Each worker's six names pack three per line.
+        for title, entries in (
+            ("Collections", 4),
+            ("Store work in flight", 5),
+            ("Documents indexed per second", 2),
+        ):
+            with self.subTest(panel=title):
+                panel = panels[title]
+                self.assertEqual(panel["options"]["legend"], {
+                    "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"],
+                })
+                self.assertEqual(panel["gridPos"]["w"], GRID_COLUMNS // 2)
+                cap = LEGEND_BOTTOM_CAP_FRACTION * chart_inner_height(panel)
+                self.assertLessEqual((entries + 1) * LEGEND_TABLE_ROW_PITCH, cap)
+        for title in ("Worker jobs waiting", "Worker jobs running"):
+            with self.subTest(panel=title):
+                panel = panels[title]
+                self.assertEqual(panel["options"]["legend"], {"displayMode": "list", "placement": "bottom"})
+                cap = LEGEND_BOTTOM_CAP_FRACTION * chart_inner_height(panel)
+                lines = math.ceil(len(KNOWN_QUEUES) / LEGEND_LIST_PHONE_PER_LINE)
+                self.assertLessEqual(LEGEND_LIST_PADDING + lines * LEGEND_LIST_LINE_PITCH, cap)
+
+    def test_worker_charts_take_six_hues_at_two_steps(self) -> None:
+        """Every queue has one hue at two distinct strengths."""
+
+        board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        colours = []
+        for title, status, step in (
+            ("Worker jobs waiting", "todo", "light"),
+            ("Worker jobs running", "doing", "semi-dark"),
+        ):
+            with self.subTest(panel=title):
+                panel = panels[title]
+                self.assertEqual(len(panel["targets"]), 1)
+                target = panel["targets"][0]
+                self.assertEqual(target["expr"], f'gideon_worker_queue_jobs{{job="worker", status="{status}"}}')
+                self.assertEqual(target["legendFormat"], "{{queue}}")
+                self.assertEqual(
+                    [override["matcher"] for override in panel["fieldConfig"]["overrides"]],
+                    [{"id": "byName", "options": queue} for queue in KNOWN_QUEUES],
+                )
+                properties = column_overrides(panel)
+                for queue, hue in zip(KNOWN_QUEUES, QUEUE_HUES, strict=True):
+                    with self.subTest(queue=queue):
+                        color = properties[queue]["color"]
+                        self.assertEqual(color, {"mode": "fixed", "fixedColor": f"{step}-{hue}"})
+                        colours.append(color["fixedColor"])
+        self.assertEqual(len(set(colours)), 2 * len(KNOWN_QUEUES))
+
+    def test_throttle_flag_has_its_own_state_timeline(self) -> None:
+        """Lexical throttling reads as a named state beside its rate."""
+
+        board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        panel = panels["Lexical indexing throttled"]
+        self.assertEqual(panel["type"], "state-timeline")
+        self.assertEqual(panel["datasource"], {"type": "prometheus", "uid": "prometheus"})
+        self.assertEqual(len(panel["targets"]), 1)
+        target = panel["targets"][0]
+        self.assertEqual(target["datasource"], panel["datasource"])
+        self.assertEqual(target["expr"], 'max(opensearch_indices_indexing_is_throttled_bool{job="opensearch-metrics"})')
+        self.assertEqual(target["legendFormat"], "lexical throttled")
+        defaults = panel["fieldConfig"]["defaults"]
+        self.assertEqual(defaults["mappings"], [{
+            "type": "value", "options": {
+                "0": {"text": "not throttled", "color": "green"},
+                "1": {"text": "throttled", "color": "red"},
+            },
+        }])
+        self.assertEqual(defaults["color"], {"mode": "fixed"})
+        self.assertEqual(panel["options"], {
+            "showValue": "auto", "mergeValues": True, "rowHeight": 0.9,
+            # The two mapped states as a key, and the text the board check reads.
+            "legend": {"showLegend": True, "displayMode": "list", "placement": "bottom"},
+        })
+        rate = panels["Documents indexed per second"]["gridPos"]
+        band = panel["gridPos"]
+        self.assertEqual((rate["x"], rate["y"], rate["w"], rate["h"]), (0, 87, 12, 7))
+        self.assertEqual((band["y"], band["w"], band["h"]), (rate["y"], rate["w"], rate["h"]))
+        self.assertEqual(band["x"], rate["x"] + rate["w"])
+        self.assertEqual(rate["w"] + band["w"], GRID_COLUMNS)
+
+    def test_grid_tiles_in_screen_order_without_gaps_or_overlap(self) -> None:
+        board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
+        panels = board["panels"]
+        self.assertEqual(
+            [panel["title"] for panel in panels],
+            [panel["title"] for panel in sorted(panels, key=lambda panel: (panel["gridPos"]["y"], panel["gridPos"]["x"]))],
+        )
+        row_widths: dict[int, int] = {}
+        row_heights: dict[int, int] = {}
+        for panel in panels:
+            pos = panel["gridPos"]
+            self.assertGreaterEqual(pos["x"], 0)
+            self.assertLessEqual(pos["x"] + pos["w"], GRID_COLUMNS)
+            row_widths[pos["y"]] = row_widths.get(pos["y"], 0) + pos["w"]
+            row_heights[pos["y"]] = max(row_heights.get(pos["y"], 0), pos["h"])
+        self.assertTrue(all(width <= GRID_COLUMNS for width in row_widths.values()))
+        bands = sorted(row_heights.items())
+        self.assertEqual(bands[0][0], 0)
+        for (y, height), (next_y, _) in pairwise(bands):
+            self.assertEqual(next_y, y + height)
+        for left, right in combinations(panels, 2):
+            a = left["gridPos"]
+            b = right["gridPos"]
+            overlap = (
+                a["x"] < b["x"] + b["w"]
+                and b["x"] < a["x"] + a["w"]
+                and a["y"] < b["y"] + b["h"]
+                and b["y"] < a["y"] + a["h"]
+            )
+            self.assertFalse(overlap, (left["title"], right["title"]))
+
     def test_board_is_verbatim_and_renders_on_every_host(self) -> None:
         self.assertIsInstance(GrafanaCorpusArtifact, VerbatimArtifact)
         self.assertEqual(GrafanaCorpusArtifact.name, "grafana-corpus")
@@ -773,7 +1252,7 @@ class CorpusBoard(unittest.TestCase):
                 )
                 self.assertIn(GrafanaCorpusArtifact.relative_path, render_all(site_inputs).by_path)
 
-    def test_nineteen_panels_cover_the_record_embed_stores_and_worker(self) -> None:
+    def test_twenty_one_panels_cover_the_record_embed_stores_and_worker(self) -> None:
         board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
         eval_board = json.loads(GrafanaEvalArtifact.emit(inputs()))
         self.assertEqual(board["uid"], "gideon-corpus")
@@ -800,14 +1279,16 @@ class CorpusBoard(unittest.TestCase):
                 "Embedding requests per second",
                 "Embedding request latency",
                 "Store memory",
-                "Documents indexed per second",
                 "Collections",
                 "Store work in flight",
-                "Worker queue depth",
+                "Documents indexed per second",
+                "Lexical indexing throttled",
+                "Worker jobs waiting",
+                "Worker jobs running",
                 "Worker heartbeat and slots",
             ],
         )
-        self.assertEqual([panel["id"] for panel in board["panels"]], list(range(1, 20)))
+        self.assertEqual([panel["id"] for panel in board["panels"]], list(range(1, 22)))
 
     def test_rows_panels_read_only_recorded_counts_and_ids(self) -> None:
         board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
@@ -856,7 +1337,7 @@ class CorpusBoard(unittest.TestCase):
         sql = panel["targets"][0]["rawSql"]
         self.assertEqual(
             outer_select_columns(sql),
-            ["gen_id", "scope", "written", "present", "copied", "embedded", "tokens", "requests", "seconds", "indexed", "tokens_per_second"],
+            ["lockfile", "space", "scope", "written", "present", "copied", "embedded", "tokens", "requests", "seconds", "indexed", "tokens_per_second"],
         )
         for key in ("scope", "present", "copied", "embedded", "tokens", "requests", "seconds", "indexed"):
             self.assertIn(f"(counts->>'dense_{key}')::bigint AS {key}", sql)
@@ -874,7 +1355,7 @@ class CorpusBoard(unittest.TestCase):
         board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
         panels = {panel["title"]: panel for panel in board["panels"]}
         node_series = []
-        for title in ("Store memory", "Store work in flight"):
+        for title in ("Store memory", "Store work in flight", "Lexical indexing throttled"):
             for target in panels[title]["targets"]:
                 if "opensearch_" in target["expr"]:
                     node_series.append(target)
@@ -882,6 +1363,10 @@ class CorpusBoard(unittest.TestCase):
                         self.assertRegex(target["expr"], r'^max\(opensearch_[a-z_]+\{[^}]*\}\)$')
                         self.assertNotIn("{{node}}", target["legendFormat"])
         self.assertEqual(len(node_series), 4)
+        self.assertEqual(
+            sum("opensearch_" in target["expr"] for target in panels["Store work in flight"]["targets"]),
+            1,
+        )
         memory = panels["Store memory"]
         limit = next(target for target in memory["targets"] if "heap_max_bytes" in target["expr"])
         self.assertTrue(limit["legendFormat"].endswith(" limit"))

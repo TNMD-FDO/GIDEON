@@ -8,7 +8,9 @@ is the only interface. It observes before it acts: inside a mask, or on a host
 carrying none of the listed paths, the command runs as it stands. ``tools/gate.py``
 imports the verbs for its ``--masked`` flag; the export tree's check runs this
 file by path, so the tree under test needs to know nothing of it. Standard
-library only.
+library only. The root stages belong to the provision-owned wrapper outside
+all checkouts; command words travel on stdin and are read only after the
+privilege drop. A masked command receives no stdin of its own.
 """
 
 from __future__ import annotations
@@ -16,7 +18,6 @@ from __future__ import annotations
 import argparse
 import enum
 import os
-import pwd
 import shutil
 import subprocess
 import sys
@@ -34,121 +35,7 @@ MASK_PATHS: Final[tuple[str, ...]] = (
     "/run/docker.sock",
     "/var/run/docker.sock",
 )
-ENVIRONMENT_ALLOWLIST: Final[tuple[str, ...]] = (
-    "HOME",
-    "PATH",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TERM",
-    "TMPDIR",
-    "USER",
-    "LOGNAME",
-)
-ROOT_STAGE: Final[str] = r"""set -u
-
-fail() {
-    printf '%s\n' "mask: setup failed at $1" >&2
-    exit 71
-}
-
-setup() {
-    step=$1
-    shift
-    if "$@" >/dev/null 2>&1; then
-        return 0
-    fi
-    fail "$step"
-}
-
-uid=$1
-gid=$2
-groups=$3
-environment_count=$4
-path_count=$5
-shift 5
-
-home_set=0
-path_set=0
-lang_set=0
-lc_all_set=0
-lc_ctype_set=0
-term_set=0
-tmpdir_set=0
-user_set=0
-logname_set=0
-home=
-path=
-lang=
-lc_all=
-lc_ctype=
-term=
-tmpdir=
-user=
-logname=
-
-i=0
-while [ "$i" -lt "$environment_count" ]; do
-    case "$1" in
-        HOME=*) home=${1#HOME=}; home_set=1 ;;
-        PATH=*) path=${1#PATH=}; path_set=1 ;;
-        LANG=*) lang=${1#LANG=}; lang_set=1 ;;
-        LC_ALL=*) lc_all=${1#LC_ALL=}; lc_all_set=1 ;;
-        LC_CTYPE=*) lc_ctype=${1#LC_CTYPE=}; lc_ctype_set=1 ;;
-        TERM=*) term=${1#TERM=}; term_set=1 ;;
-        TMPDIR=*) tmpdir=${1#TMPDIR=}; tmpdir_set=1 ;;
-        USER=*) user=${1#USER=}; user_set=1 ;;
-        LOGNAME=*) logname=${1#LOGNAME=}; logname_set=1 ;;
-    esac
-    shift
-    i=$((i + 1))
-done
-
-setup / mount --make-rprivate /
-i=0
-while [ "$i" -lt "$path_count" ]; do
-    if [ -d "$1" ]; then
-        setup "$1" mount -t tmpfs -o ro tmpfs "$1"
-    else
-        setup "$1" mount --bind /dev/null "$1"
-    fi
-    shift
-    i=$((i + 1))
-done
-setup loopback ip link set lo up
-
-trial_drop() {
-    set --
-    if [ "$logname_set" -eq 1 ]; then set -- "LOGNAME=$logname" "$@"; fi
-    if [ "$user_set" -eq 1 ]; then set -- "USER=$user" "$@"; fi
-    if [ "$tmpdir_set" -eq 1 ]; then set -- "TMPDIR=$tmpdir" "$@"; fi
-    if [ "$term_set" -eq 1 ]; then set -- "TERM=$term" "$@"; fi
-    if [ "$lc_ctype_set" -eq 1 ]; then set -- "LC_CTYPE=$lc_ctype" "$@"; fi
-    if [ "$lc_all_set" -eq 1 ]; then set -- "LC_ALL=$lc_all" "$@"; fi
-    if [ "$lang_set" -eq 1 ]; then set -- "LANG=$lang" "$@"; fi
-    if [ "$path_set" -eq 1 ]; then set -- "PATH=$path" "$@"; fi
-    if [ "$home_set" -eq 1 ]; then set -- "HOME=$home" "$@"; fi
-    set -- "$@" true
-    setpriv --reuid "$uid" --regid "$gid" --groups "$groups" \
-        --no-new-privs env -i "$@" >/dev/null 2>&1
-}
-
-if ! trial_drop; then
-    fail drop
-fi
-
-if [ "$logname_set" -eq 1 ]; then set -- "LOGNAME=$logname" "$@"; fi
-if [ "$user_set" -eq 1 ]; then set -- "USER=$user" "$@"; fi
-if [ "$tmpdir_set" -eq 1 ]; then set -- "TMPDIR=$tmpdir" "$@"; fi
-if [ "$term_set" -eq 1 ]; then set -- "TERM=$term" "$@"; fi
-if [ "$lc_ctype_set" -eq 1 ]; then set -- "LC_CTYPE=$lc_ctype" "$@"; fi
-if [ "$lc_all_set" -eq 1 ]; then set -- "LC_ALL=$lc_all" "$@"; fi
-if [ "$lang_set" -eq 1 ]; then set -- "LANG=$lang" "$@"; fi
-if [ "$path_set" -eq 1 ]; then set -- "PATH=$path" "$@"; fi
-if [ "$home_set" -eq 1 ]; then set -- "HOME=$home" "$@"; fi
-exec setpriv --reuid "$uid" --regid "$gid" --groups "$groups" \
-    --no-new-privs env -i "$@"
-"""
+WRAPPER_PATH: Final[str] = "/usr/local/sbin/gideon-mask"
 
 SETUP_FAILURE_CODE: Final = 71
 MASK_CODES: Final[frozenset[int]] = frozenset((SETUP_FAILURE_CODE, 125, 126, 127))
@@ -169,6 +56,14 @@ class ProbeState(enum.Enum):
     ABSENT = "absent"
     READY = "ready"
     REFUSED = "refused"
+
+
+@dataclass(frozen=True, slots=True)
+class Wrapped:
+    """The fixed wrapper command and the command words it receives on stdin."""
+
+    argv: tuple[str, ...]
+    stdin: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,9 +101,9 @@ def _environment() -> Mapping[str, str]:
     return os.environ
 
 
-def _run(command: Sequence[str]) -> int:
+def _run(command: Sequence[str], stdin: str | None) -> int:
     try:
-        return subprocess.run(list(command), check=False).returncode
+        return subprocess.run(list(command), input=stdin, text=True, check=False).returncode
     except OSError:
         return 127
 
@@ -224,13 +119,10 @@ class Facts:
     device: Callable[[str], int] = _device
     realpath: Callable[[str], str] = os.path.realpath
     effective_uid: Callable[[], int] = os.geteuid
-    effective_gid: Callable[[], int] = os.getegid
-    supplementary_groups: Callable[[], Sequence[int]] = os.getgroups
-    password_entry: Callable[[int], pwd.struct_passwd] = pwd.getpwuid
     environment: Callable[[], Mapping[str, str]] = _environment
     which: Callable[[str], str | None] = shutil.which
     working_directory: Callable[[], str] = os.getcwd
-    run: Callable[[Sequence[str]], int] = _run
+    run: Callable[[Sequence[str], str | None], int] = _run
 
 
 FACTS: Final = Facts()
@@ -279,21 +171,6 @@ def _under_mask(path: str, facts: Facts) -> bool:
         except ValueError:
             continue
     return False
-
-
-def _environment_values(facts: Facts) -> tuple[str, ...]:
-    calling = facts.environment()
-    entry = facts.password_entry(facts.effective_uid())
-    fallback = {
-        "HOME": entry.pw_dir,
-        "USER": entry.pw_name,
-        "LOGNAME": entry.pw_name,
-    }
-    return tuple(
-        f"{name}={calling[name] if name in calling else fallback[name]}"
-        for name in ENVIRONMENT_ALLOWLIST
-        if name in calling or name in fallback
-    )
 
 
 def _unsafe_refusal(command: Sequence[str], facts: Facts) -> Refusal | None:
@@ -348,12 +225,24 @@ def probe(
     missing = _missing_tool(facts)
     if missing is not None:
         return ProbeResult(ProbeState.REFUSED, observed, missing)
+    if not facts.exists(WRAPPER_PATH):
+        refusal = Refusal(
+            f"the mask wrapper {WRAPPER_PATH} is absent",
+            "Run sudo python3 -m gideon host provision --only gh-runner from a checkout at main, then re-run.",
+        )
+        return ProbeResult(ProbeState.REFUSED, observed, refusal)
+    if any("\n" in word for word in command):
+        refusal = Refusal(
+            "a command word contains a newline",
+            "Run a command whose words contain no newline, then re-run.",
+        )
+        return ProbeResult(ProbeState.REFUSED, observed, refusal)
     unsafe = _unsafe_refusal(command, facts)
     if unsafe is not None:
         return ProbeResult(ProbeState.REFUSED, observed, unsafe)
 
     trial = wrap(("true",), paths=observed.present, facts=facts)
-    code = facts.run(trial)
+    code = facts.run(trial.argv, trial.stdin)
     if code != 0:
         refusal = Refusal(
             "the mask setup trial failed",
@@ -367,35 +256,15 @@ def wrap(
     command: Sequence[str],
     paths: Sequence[str] | None = None,
     facts: Facts = FACTS,
-) -> tuple[str, ...]:
-    """Build the one argv that runs *command* inside the private mask."""
+) -> Wrapped:
+    """Build the fixed wrapper argv and one-word-per-line command stdin.
 
-    if paths is None:
-        paths = observe(facts).present
-    uid = facts.effective_uid()
-    gid = facts.effective_gid()
-    groups = ",".join(str(group) for group in facts.supplementary_groups())
-    environment = _environment_values(facts)
-    return (
-        "sudo",
-        "-n",
-        "unshare",
-        "--mount",
-        "--net",
-        "--",
-        "sh",
-        "-c",
-        ROOT_STAGE,
-        "mask",
-        str(uid),
-        str(gid),
-        groups,
-        str(len(environment)),
-        str(len(paths)),
-        *environment,
-        *paths,
-        *command,
-    )
+    Paths and facts retain the caller seam's shape; the provision-owned wrapper
+    carries its own paths and reads the invoking identity itself.
+    """
+
+    del paths, facts
+    return Wrapped(("sudo", "-n", WRAPPER_PATH), "".join(word + "\n" for word in command))
 
 
 def _state_line(observation: Observation) -> str:
@@ -431,14 +300,15 @@ def main(argv: Sequence[str] | None = None, facts: Facts = FACTS) -> int:
     observed = observe(facts=facts)
     if observed.state in (ProbeState.INSIDE, ProbeState.ABSENT):
         print(_state_line(observed), flush=True)
-        return facts.run(command)
+        return facts.run(command, None)
 
     result = probe(command, facts=facts, observation=observed)
     if result.refusal is not None:
         _print_refusal(result.refusal)
         return 1
     print(_state_line(observed), flush=True)
-    return facts.run(wrap(command, paths=observed.present, facts=facts))
+    wrapped = wrap(command, paths=observed.present, facts=facts)
+    return facts.run(wrapped.argv, wrapped.stdin)
 
 
 if __name__ == "__main__":

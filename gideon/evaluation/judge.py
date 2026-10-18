@@ -294,6 +294,7 @@ def _request_body(
     prompt: JudgePrompt,
     *,
     slots: Mapping[str, str],
+    max_tokens: int,
 ) -> Mapping[str, object]:
     user_message = prompt.user_template.format(**slots)
     return {
@@ -302,7 +303,7 @@ def _request_body(
             {"role": "system", "content": prompt.system},
             {"role": "user", "content": user_message},
         ],
-        "max_tokens": JUDGE_MAX_TOKENS,
+        "max_tokens": max_tokens,
         "temperature": 0,
         "stream": False,
         "response_format": {
@@ -323,6 +324,8 @@ def grade(
     served_model_name: str,
     prompt: JudgePrompt,
     slots: Mapping[str, str],
+    max_tokens: int = JUDGE_MAX_TOKENS,
+    max_time: int = JUDGE_TIMEOUT_SECONDS,
 ) -> Grading:
     """Grade one document through the in-container engine seam."""
 
@@ -340,8 +343,9 @@ def grade(
             served_model_name,
             prompt,
             slots=slots,
+            max_tokens=max_tokens,
         ),
-        max_time=JUDGE_TIMEOUT_SECONDS,
+        max_time=max_time,
     )
     if reply.problem is not None:
         # A transport failure has no elapsed time; a reply whose body would not
@@ -370,7 +374,7 @@ def grade(
             prompt,
             "finish-reason",
             f"answer did not finish (finish reason {finish_reason!r}); "
-            f"read the {JUDGE_MAX_TOKENS} token reserve",
+            f"read the {max_tokens} token reserve",
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             elapsed_seconds=elapsed_seconds,

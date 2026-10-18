@@ -1,6 +1,7 @@
 """The reference-guided judge over a stub engine."""
 
 import ast
+import inspect
 import json
 import string
 import subprocess
@@ -140,6 +141,38 @@ class Request(unittest.TestCase):
         with patch.object(engine, "call_model_server", wraps=engine.call_model_server) as call:
             run_grade(host)
         self.assertIs(call.call_args.args[2], GENERATOR)
+
+    def test_reserve_overrides_are_keyword_only_and_default_to_judge_bounds(self) -> None:
+        parameters = inspect.signature(judge.grade).parameters
+        for name, default in (
+            ("max_tokens", judge.JUDGE_MAX_TOKENS),
+            ("max_time", judge.JUDGE_TIMEOUT_SECONDS),
+        ):
+            with self.subTest(parameter=name):
+                self.assertEqual(parameters[name].kind, inspect.Parameter.KEYWORD_ONLY)
+                self.assertEqual(parameters[name].default, default)
+
+    def test_reserve_overrides_reach_the_body_and_engine_independently(self) -> None:
+        for overrides in (
+            {},
+            {"max_tokens": judge.JUDGE_MAX_TOKENS + 1},
+            {"max_time": judge.JUDGE_TIMEOUT_SECONDS + 1},
+            {"max_tokens": judge.JUDGE_MAX_TOKENS + 1, "max_time": judge.JUDGE_TIMEOUT_SECONDS + 1},
+        ):
+            with self.subTest(overrides=overrides):
+                host = StubHost(engine_output(valid_content()))
+                with patch.object(engine, "call_model_server", wraps=engine.call_model_server) as call:
+                    grading = judge.grade(
+                        cast(Any, host), RENDERED, served_model_name="fixture-model",
+                        prompt=PROMPT, slots=SLOTS, **overrides,
+                    )
+                self.assertIsNotNone(grading.verdict)
+                call.assert_called_once()
+                self.assertEqual(call.call_args.kwargs["max_time"],
+                                 overrides.get("max_time", judge.JUDGE_TIMEOUT_SECONDS))
+                assert host.input is not None
+                self.assertEqual(json.loads(host.input)["max_tokens"],
+                                 overrides.get("max_tokens", judge.JUDGE_MAX_TOKENS))
 
     def test_challenger_prompt_uses_shared_document_and_its_own_rubric(self) -> None:
         loaded = challenger.load_challenger(Path(__file__).resolve().parents[1] / challenger.CHALLENGER_PATH)
@@ -454,6 +487,19 @@ class Normalisation(unittest.TestCase):
         self.assertEqual(grading.failure.code, "finish-reason")
         self.assertIn(str(judge.JUDGE_MAX_TOKENS), grading.failure.detail)
         self.assertIn("token reserve", grading.failure.detail)
+
+    def test_unfinished_reply_names_the_overridden_token_reserve(self) -> None:
+        reserve = judge.JUDGE_MAX_TOKENS + 1
+        grading = judge.grade(
+            cast(Any, StubHost(engine_output(None, finish_reason="length"))),
+            RENDERED, served_model_name="fixture-model", prompt=PROMPT, slots=SLOTS,
+            max_tokens=reserve,
+        )
+        self.assertIsNone(grading.verdict)
+        assert grading.failure is not None
+        self.assertEqual(grading.failure.code, "finish-reason")
+        self.assertIn(f"{reserve} token reserve", grading.failure.detail)
+        self.assertNotIn(f"{judge.JUDGE_MAX_TOKENS} token reserve", grading.failure.detail)
 
     def test_result_reprs_redact_the_reason(self) -> None:
         """A judge mapping reaches two dataclasses whose generated reprs would

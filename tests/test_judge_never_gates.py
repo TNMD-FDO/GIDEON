@@ -8,14 +8,22 @@ from pathlib import Path
 from types import ModuleType
 from typing import cast
 
+import test_golddrop_slice
 from test_guardrails_slice import _DECLINE, SAMPLE_IDS, JudgingDoorHost, _fixture_turns
 from test_judge import false_refusal_content, valid_content
 
 from gideon import guardrail
 from gideon.evaluation import command, judge
-from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_cases
+from gideon.evaluation.evalset import (
+    SET_ROOT,
+    SHAPE_REGISTRY,
+    TIER_2_CATEGORY,
+    LoadedSet,
+    load_set,
+    select_cases,
+)
 from gideon.evaluation.results import RunContext, SliceResult
-from gideon.evaluation.slices import SLICE_RUNNERS, CallSurface
+from gideon.evaluation.slices import SLICE_RUNNERS, SMOKE_PARTS, CallSurface
 from gideon.evaluation.turns import classify
 from gideon.host import courts
 from gideon.host.sysio import Host, PathLike
@@ -23,7 +31,7 @@ from tools.exportboundary import absent_from_export
 
 ROOT = Path(__file__).resolve().parents[1]
 GATE_ATTRIBUTES: frozenset[str] = frozenset(
-    {"verdict", "gate_pass", "gate_fail", "gate_fix"}
+    {"verdict", "gated_cases", "gate_pass", "gate_fail", "gate_fix"}
 )
 REFERENCE_GATE_ATTRIBUTES: frozenset[str] = GATE_ATTRIBUTES | frozenset(
     {
@@ -186,6 +194,14 @@ def _run_registered(
             turns=turns,
             checkout=checkout,
         )
+        if slice_name == "gold-drop":
+            gold_host = test_golddrop_slice.GoldDropHost()
+            gold_host.manifest = test_golddrop_slice._manifest(loaded)
+            context = replace(
+                context,
+                host=cast(Host, gold_host),
+                generation=test_golddrop_slice._context(gold_host).generation,
+            )
         result = spec.runner(loaded, slice_name, context)
         if CallSurface.TURNS in spec.surfaces and spec.judge_prompt is not None:
             assert all(
@@ -242,6 +258,34 @@ class Invariance(unittest.TestCase):
                 # Every runner takes the loader's selection, so an unsigned
                 # case (an unlabelled segmenter case among them) has no row.
                 expected_ids = select_cases(first_loaded, slice_name).counted
+                self.assertEqual(first_result.gated_cases, second_result.gated_cases)
+                expected_count: int | None
+                if slice_name in {"extraction", "judgments", "count-gates"}:
+                    expected_count = None
+                elif slice_name == "guardrails":
+                    expected_count = sum(
+                        first_loaded.cases_by_id[case_id]["category"] != TIER_2_CATEGORY
+                        for case_id in expected_ids
+                    )
+                elif slice_name == "smoke":
+                    expected_count = sum(
+                        (first_loaded.cases_by_id[case_id]["suite"],
+                         first_loaded.cases_by_id[case_id]["category"])
+                        in SMOKE_PARTS["guardrails"].categories
+                        for case_id in expected_ids
+                    )
+                elif slice_name == "gold-drop":
+                    expected_count = sum(
+                        SHAPE_REGISTRY[cast(
+                            tuple[str, str],
+                            (first_loaded.cases_by_id[case_id]["suite"],
+                             first_loaded.cases_by_id[case_id]["category"]),
+                        )].zero_tolerance
+                        for case_id in expected_ids
+                    )
+                else:
+                    expected_count = len(expected_ids)
+                self.assertEqual(first_result.gated_cases, expected_count)
                 self.assertEqual(
                     {result.case_id for result in first_result.results},
                     set(expected_ids),

@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from collections.abc import Mapping
+from dataclasses import replace
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import NamedTuple, cast
@@ -21,7 +22,7 @@ from test_evaluation_run import (
     _run_kwargs,
 )
 
-from gideon.evaluation.evalset import SEGMENTER_TEXT_SOURCES, LoadedSet
+from gideon.evaluation.evalset import SEGMENTER_TEXT_SOURCES, LoadedSet, select_cases
 from gideon.evaluation.results import ImageAccess, RunContext
 from gideon.evaluation.segmenter_labels import LabelSpan, SegmenterLabel
 from gideon.evaluation.segmenter_slice import (
@@ -345,6 +346,12 @@ class Runner(unittest.TestCase):
         host = SegmenterHost()
         result = run_segmenter(_loaded(), "segmenter-300", _context(host))
         self.assertTrue(result.verdict, result.report)
+        self.assertEqual(result.gated_cases, len(select_cases(_loaded(), "segmenter-300").counted))
+        self.assertIn(
+            "counted 1, unsigned 0, measured 1, failed-by-code none; "
+            "1 case, true failure rate ≤ 100.0 % (3/n at 95 %)\n",
+            result.report,
+        )
         self.assertEqual(result.results[0].verdict, "pass")
         self.assertEqual(result.results[0].metrics["mislabel"], 0)
         self.assertTrue(result.results[0].metrics["record_agrees"])
@@ -492,6 +499,11 @@ class Runner(unittest.TestCase):
                 result = run_segmenter(loaded, "segmenter-300", _context(host))
                 self.assertFalse(result.verdict)
                 self.assertEqual(result.results[0].metrics["problem"], code)
+                self.assertEqual(result.gated_cases, len(select_cases(loaded, "segmenter-300").counted))
+                self.assertIn(
+                    "; 1 case, failed: no bound (3/n at 95 % is a clean run's)\n",
+                    result.report,
+                )
                 self.assertIn(code, result.report)
                 self.assertIn("Fix:", result.report)
                 self.assertNotIn(TEXT, result.report)
@@ -516,6 +528,11 @@ class Runner(unittest.TestCase):
                 expected = "record-unreachable" if failure.startswith("read") else "image-leg-failed"
                 self.assertFalse(result.verdict)
                 self.assertEqual(tuple(item.metrics["problem"] for item in result.results), (expected, expected))
+                self.assertEqual(result.gated_cases, len(select_cases(_loaded(second=True), "segmenter-300").counted))
+                self.assertIn(
+                    "; 2 cases, failed: no bound (3/n at 95 % is a clean run's)\n",
+                    result.report,
+                )
                 self.assertIn("Fix:", result.report)
                 if failure == "leg-exit":
                     self.assertIn("segmenter image leg failed: container exited 2\n", result.report)
@@ -526,7 +543,37 @@ class Runner(unittest.TestCase):
         host = SegmenterHost()
         result = run_segmenter(_loaded(), "segmenter-300", _context(host, image=False))
         self.assertEqual(result.results[0].metrics["problem"], "image-leg-failed")
+        self.assertEqual(result.gated_cases, len(select_cases(_loaded(), "segmenter-300").counted))
+        self.assertIn(
+            "; 1 case, failed: no bound (3/n at 95 % is a clean run's)\n",
+            result.report,
+        )
         self.assertEqual(host.calls, [])
+
+    def test_empty_selection_has_zero_gated_cases_without_host_calls(self) -> None:
+        host = SegmenterHost()
+        loaded = _loaded()
+        loaded = replace(loaded, unsigned_ids=frozenset(loaded.active_ids))
+        result = run_segmenter(loaded, "segmenter-300", _context(host))
+        self.assertFalse(result.verdict)
+        self.assertEqual(result.gated_cases, 0)
+        self.assertEqual(result.results, ())
+        self.assertIn(
+            "counted 0, unsigned 1, measured 0, failed-by-code none; 0 cases, no bound\n",
+            result.report,
+        )
+        self.assertEqual(host.calls, [])
+
+    def test_unsigned_case_does_not_increase_the_gated_count(self) -> None:
+        loaded = _loaded(second=True, unsigned=True)
+        result = run_segmenter(loaded, "segmenter-300", _context(SegmenterHost()))
+        self.assertTrue(result.verdict, result.report)
+        self.assertEqual(result.gated_cases, len(select_cases(loaded, "segmenter-300").counted))
+        self.assertIn(
+            "counted 1, unsigned 1, measured 1, failed-by-code none; "
+            "1 case, true failure rate ≤ 100.0 % (3/n at 95 %)\n",
+            result.report,
+        )
 
     def test_flag_from_record_and_planted_mislabel_by_id(self) -> None:
         host = SegmenterHost()

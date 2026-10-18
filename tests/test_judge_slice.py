@@ -20,7 +20,7 @@ from test_evaluation_record import read_psql_set
 from test_judge import engine_output, valid_content
 
 from gideon.evaluation import command, stacks, window
-from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set
+from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_cases
 from gideon.evaluation.results import CaseResult, RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS
 from gideon.host import courts, site
@@ -277,6 +277,7 @@ class Runner(unittest.TestCase):
         )
         self.assertEqual(tuple(line.split(":", 1)[0] for line in progress), expected)
         self.assertEqual(len(result.results), len(ids) * SLICE_RUNNERS["judge-triples"].repeats)
+        self.assertEqual(result.gated_cases, len(ids))
 
     def test_report_has_derived_band_rows_and_summary(self) -> None:
         loaded, result, _progress = _run_runner(engine_output(valid_content()))
@@ -320,6 +321,10 @@ class Runner(unittest.TestCase):
             self.assertEqual(columns[-1], "True")
         summary = f"in band {in_band} of {len(ids)}, equal {equal} of {len(ids)}, failed gradings {failed}"
         self.assertIn(summary, result.report)
+        self.assertEqual(result.gated_cases, len(ids))
+        self.assertTrue(result.report.rstrip().endswith(
+            "; 8 cases, true failure rate ≤ 37.5 % (3/n at 95 %)"
+        ))
 
     def test_out_of_band_score_keeps_gate_green(self) -> None:
         with _supplied_set() as directory:
@@ -329,7 +334,7 @@ class Runner(unittest.TestCase):
         self.assertIn("gate: ok — all judge gradings returned on-schema verdicts", stdout)
 
     def test_a_slice_that_keeps_no_reference_prints_no_comparison(self) -> None:
-        """The ruling at the rebase onto v0.2.17: the gate row is the spec's text alone."""
+        """A slice without a reference reports its own gate and bound."""
 
         host = JudgeHost(engine_output(valid_content()))
         code, stdout, _stderr = _invoke_command(host)
@@ -342,10 +347,17 @@ class Runner(unittest.TestCase):
             ["verdict pass"],
         )
         self.assertIn(
-            "gate: ok — all judge gradings returned on-schema verdicts\n", stdout
+            "gate: ok — all judge gradings returned on-schema verdicts; "
+            "8 cases, true failure rate ≤ 37.5 % (3/n at 95 %)\n", stdout
         )
 
     def test_failed_grading_is_scoreless_and_gate_red(self) -> None:
+        loaded, result, _progress = _run_runner(engine_output("not JSON"))
+        self.assertFalse(result.verdict)
+        self.assertEqual(result.gated_cases, len(select_cases(loaded, "judge-triples").counted))
+        self.assertTrue(result.report.rstrip().endswith(
+            "; 8 cases, failed: no bound (3/n at 95 % is a clean run's)"
+        ))
         host = JudgeHost(engine_output("not JSON"))
         code, stdout, _stderr = _invoke_command(host)
         self.assertEqual(code, 1)

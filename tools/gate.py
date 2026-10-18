@@ -42,7 +42,7 @@ SKIP_SLOW: tuple[str, ...] = ("-m", f"not {SLOW_MARK}")
 # time after the three long cases set the floor. Measured on the box on
 # 2026-10-06 and 2026-10-10; correct the cap by measurement.
 WORKER_CAP = 16
-Runner = Callable[[Sequence[str]], int]
+Runner = Callable[[Sequence[str], str | None], int]
 CPUReader = Callable[[], int]
 
 
@@ -59,12 +59,20 @@ def worker_count(cpu_count: int) -> int:
 
 
 @dataclass(frozen=True, slots=True)
+class Command:
+    """A gate child's argv and optional stdin."""
+
+    argv: tuple[str, ...]
+    stdin: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Mask:
     """The three mask verbs the gate uses, as the gate calls them."""
 
     observe: Callable[[], tools.mask.Observation]
     probe: Callable[[Sequence[str], tools.mask.Observation], tools.mask.ProbeResult]
-    wrap: Callable[[Sequence[str], Sequence[str]], Sequence[str]]
+    wrap: Callable[[Sequence[str], Sequence[str]], tools.mask.Wrapped]
 
 
 def _probe(
@@ -73,7 +81,7 @@ def _probe(
     return tools.mask.probe(command, observation=observation)
 
 
-def _wrap(command: Sequence[str], paths: Sequence[str]) -> Sequence[str]:
+def _wrap(command: Sequence[str], paths: Sequence[str]) -> tools.mask.Wrapped:
     return tools.mask.wrap(command, paths)
 
 
@@ -137,10 +145,10 @@ def commands(
     root: Path = ROOT,
     mask: Mask | None = None,
     paths: Sequence[str] = (),
-) -> tuple[tuple[str, ...], ...]:
+) -> tuple[Command, ...]:
     """Return the three commands, optionally wrapping only pytest."""
 
-    result: list[tuple[str, ...]] = []
+    result: list[Command] = []
     for tool in TOOLS:
         arguments = ARGUMENTS[tool]
         if tool == "pytest":
@@ -148,13 +156,15 @@ def commands(
             arguments = (*arguments, "-n", str(workers), *marker, *test_paths)
         command = (resolve(tool, root), *arguments)
         if tool == "pytest" and mask is not None:
-            command = tuple(mask.wrap(command, paths))
-        result.append(command)
+            wrapped = mask.wrap(command, paths)
+            result.append(Command(wrapped.argv, wrapped.stdin))
+        else:
+            result.append(Command(command))
     return tuple(result)
 
 
-def _run(command: Sequence[str]) -> int:
-    return subprocess.run(list(command), cwd=ROOT, check=False).returncode
+def _run(command: Sequence[str], stdin: str | None) -> int:
+    return subprocess.run(list(command), input=stdin, text=True, cwd=ROOT, check=False).returncode
 
 
 def _state(masked: bool, observation: tools.mask.Observation) -> str:
@@ -245,7 +255,7 @@ def main(
         comparison = environment_command()
     except EnvironmentRefusal as refusal:
         return _environment_refuse(refusal, started, state, workers)
-    code = runner(comparison)
+    code = runner(comparison, None)
     if code != 0:
         elapsed = time.monotonic() - started
         print(
@@ -258,12 +268,12 @@ def main(
     should_wrap = options.masked and observation.state is tools.mask.ProbeState.READY
 
     if should_wrap:
-        trial = mask.probe(plan[2], observation)
+        trial = mask.probe(plan[2].argv, observation)
         if trial.state is tools.mask.ProbeState.REFUSED:
             return _refuse(trial, started, workers)
 
     for tool, command in zip(TOOLS[:2], plan[:2], strict=True):
-        code = runner(command)
+        code = runner(command.argv, command.stdin)
         if code != 0:
             elapsed = time.monotonic() - started
             print(
@@ -273,7 +283,7 @@ def main(
             return code
 
     if should_wrap:
-        trial = mask.probe(plan[2], observation)
+        trial = mask.probe(plan[2].argv, observation)
         if trial.state is tools.mask.ProbeState.REFUSED:
             return _refuse(trial, started, workers)
         plan = commands(
@@ -284,7 +294,7 @@ def main(
             paths=observation.present,
         )
 
-    code = runner(plan[2])
+    code = runner(plan[2].argv, plan[2].stdin)
     if code != 0:
         elapsed = time.monotonic() - started
         tool = "mask" if should_wrap and code in tools.mask.MASK_CODES else "pytest"

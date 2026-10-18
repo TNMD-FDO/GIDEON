@@ -813,6 +813,16 @@ def reference(target: RegistryTarget, pin: ImagePin) -> str:
     return f"{target.authority}/{target.prefix}{pin.name}@{pin.digest}"
 
 
+def manifest_inspect_argv(target: RegistryTarget, image_reference: str) -> list[str]:
+    """The probe argv shared by apply's registry stage, the mirror, and restore's seed."""
+
+    argv = ["docker", "manifest", "inspect"]
+    if target.scheme == "http":
+        argv.append("--insecure")
+    argv.append(image_reference)
+    return argv
+
+
 @dataclass(frozen=True, slots=True)
 class ProxyEnvironment:
     """Child-process proxy variables, or a fix-bearing problem for the caller to report."""

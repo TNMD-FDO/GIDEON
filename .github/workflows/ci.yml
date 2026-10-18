@@ -109,8 +109,9 @@ jobs:
     # a frontend sample disagreeing, or a case regressed against its committed
     # reference. It takes the engine lock first, so a busy engine is a skip
     # (exit 0, the sibling untouched), never a red push or a disrupted run.
-    # -B keeps root's bytecode out of the runner's checkout, which its next
-    # clean could not remove; the transcript sits in the runner's temporary
+    # The provision-owned wrapper is pinned to this instance's checkout and
+    # carries -B, keeping root's bytecode out of it, which its next clean
+    # could not remove; the transcript sits in the runner's temporary
     # directory, so the checkout reads clean, and it holds ids, classes, and
     # verdicts alone.
     if: github.event_name == 'push' && github.event.repository.private
@@ -121,7 +122,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Smoke on the sibling
         shell: bash
-        run: sudo python3 -B -m tools.cistack smoke 2>&1 | tee "$RUNNER_TEMP/smoke.txt"
+        run: sudo /usr/local/sbin/gideon-ci-smoke 2>&1 | tee "$RUNNER_TEMP/smoke.txt"
       - name: Job summary
         if: always()
         shell: bash

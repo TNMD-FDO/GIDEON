@@ -1,4 +1,8 @@
-"""Build a collection's near-duplicate clusters, indexes, and risk states, and append its report."""
+"""Build a collection's near-duplicate clusters, indexes, and risk states, and append its report.
+
+Production builds check smoke evidence after preconditions and before generation.
+Samples run guard, reserve, both indexes, gold, treatment, and report across the corpus and sibling records.
+"""
 
 import argparse
 import subprocess
@@ -32,6 +36,7 @@ from gideon.host.index import (
     guards,
     lexical,
     reserve,
+    smoke,
     treatment,
 )
 from gideon.host.index import record as indexrecord
@@ -310,12 +315,12 @@ def _preconditions(
 
 def _guard(
     host: IndexHost, rendered_dir: PathLike, inputs: generations.GenerationInputs,
-    chunk_guards: models.ChunkGuards, command_path: str,
+    chunk_guards: models.ChunkGuards, command_path: str, *, corpus_dir: PathLike | None = None,
 ) -> int:
     # _collection_scope names the snapshot <source>-YYYY-MM-DD; the projection binds both halves.
     source, snapshot_date = inputs.snapshot[:-11], inputs.snapshot[-10:]
     projection = guards.read_chunk_projection(
-        host, rendered_dir, source=source, snapshot_date=snapshot_date,
+        host, rendered_dir if corpus_dir is None else corpus_dir, source=source, snapshot_date=snapshot_date,
         courts=inputs.courts, pipeline=inputs.pipeline, command_path=command_path,
     )
     if isinstance(projection, Problem):
@@ -658,10 +663,17 @@ def _built(
 
 def _treatment(
     host: IndexHost, rendered_dir: PathLike, inputs: generations.GenerationInputs,
-    treatment_snapshot: str | None, command_path: str,
+    treatment_snapshot: str | None, command_path: str, *, corpus_dir: PathLike | None = None,
 ) -> treatment.Treatment | int:
+    documents = None
+    if inputs.sample is not None:
+        rows = indexrecord.read_manifest_rows(host, rendered_dir, inputs.name, command_path)
+        if isinstance(rows, Problem):
+            return _refuse("treatment", rows)
+        documents = tuple(doc_id for _, _, doc_id in rows)
     materialized = treatment.materialize(
         host, rendered_dir, inputs, treatment_snapshot, command_path=command_path,
+        corpus_dir=corpus_dir, documents=documents,
     )
     if isinstance(materialized, Problem):
         return _refuse("treatment", materialized)
@@ -673,7 +685,7 @@ def _report(
     host: IndexHost, rendered_dir: PathLike, inputs: generations.GenerationInputs,
     seconds: int, failed_stage: str | None, whole_build: bool,
     materialized: treatment.Treatment | None,
-    work_root: PathLike, command_path: str,
+    work_root: PathLike, command_path: str, *, corpus_dir: PathLike | None = None,
 ) -> int:
     row = indexrecord.read_generation(host, rendered_dir, inputs.name, command_path=command_path)
     if isinstance(row, Problem):
@@ -687,7 +699,7 @@ def _report(
     gathered = buildreport.gather(
         host, rendered_dir, inputs, row, seconds, failed_stage,
         whole_build and row.dense_built_at is not None,
-        treatment=materialized, work_root=work_root, command_path=command_path,
+        treatment=materialized, work_root=work_root, command_path=command_path, corpus_dir=corpus_dir,
     )
     if isinstance(gathered, Problem):
         return _refuse("report", gathered)
@@ -702,11 +714,12 @@ def _finish(
     host: IndexHost, rendered_dir: PathLike, inputs: dense.DenseInputs, command_path: str,
     result: int, whole_build: bool, *, started_at: float, monotonic: Callable[[], float],
     active_stage: list[str], treatment_snapshot: str | None, work_root: PathLike,
+    corpus_dir: PathLike | None = None,
 ) -> int:
     materialized: treatment.Treatment | None = None
     if not result:
         active_stage[0] = "treatment"
-        treated = _treatment(host, rendered_dir, inputs, treatment_snapshot, command_path)
+        treated = _treatment(host, rendered_dir, inputs, treatment_snapshot, command_path, corpus_dir=corpus_dir)
         if isinstance(treated, int):
             result = treated
         else:
@@ -715,7 +728,7 @@ def _finish(
     active_stage[0] = "report"
     report_result = _report(
         host, rendered_dir, inputs, int(monotonic() - started_at), failed_stage,
-        whole_build and not result, materialized, work_root, command_path,
+        whole_build and not result, materialized, work_root, command_path, corpus_dir=corpus_dir,
     )
     return result if result else report_result
 
@@ -799,29 +812,51 @@ def _gold(host: IndexHost, rendered_dir: PathLike, inputs: dense.DenseInputs, co
 
 def _build_sample(
     host: IndexHost, rendered_dir: PathLike, inputs: dense.DenseInputs, command_path: str,
-    *, sleep: Callable[[float], None], monotonic: Callable[[], float],
+    *, corpus_dir: PathLike, chunk_guards: models.ChunkGuards, treatment_snapshot: str | None,
+    created: bool, started_at: float, work_root: PathLike,
+    sleep: Callable[[float], None], monotonic: Callable[[], float],
     clock: Callable[[], datetime], active_stage: list[str], dense_limit: int | None = None,
 ) -> int:
-    """Build a sample's two halves, report its gold, and close it, under the engine lock."""
+    """Run a sample's guard, reserve, build, counts, dense, gold, built, treatment, and report.
 
-    # A sample takes no guard, reserve, clustering, risk states, or report: those
-    # stages read the corpus or the promoted generations from the record they are
-    # given, and a sample's record is the sibling's while its corpus is production's.
+    Corpus reads use corpus_dir; generation reads and writes use rendered_dir.
+    Guard, reserve, and gold refusals return without a report; build, counts,
+    dense, and built refusals run the finish stages under the engine lock.
+    """
+
+    active_stage[0] = "guard"
+    result = _guard(host, rendered_dir, inputs, chunk_guards, command_path, corpus_dir=corpus_dir)
+    if result:
+        return result
+    active_stage[0] = "reserve"
+    result = _reserve(host, rendered_dir, inputs, command_path)
+    if result:
+        return result
     active_stage[0] = "build"
-    result = _build(host, rendered_dir, inputs, command_path, sleep, monotonic).exit_code
+    lexical_result = _build(host, rendered_dir, inputs, command_path, sleep, monotonic)
+    result = lexical_result.exit_code
+    dense_deferred = False
     if not result:
         active_stage[0] = "counts"
         result = _counts(host, rendered_dir, inputs.name, command_path)
     if not result:
         active_stage[0] = "dense"
-        result = _dense(host, rendered_dir, inputs, command_path, sleep, monotonic, clock, dense_limit).exit_code
+        dense_result = _dense(host, rendered_dir, inputs, command_path, sleep, monotonic, clock, dense_limit)
+        result = dense_result.exit_code
+        dense_deferred = dense_result.deferred
     if not result:
         active_stage[0] = "gold"
         result = _gold(host, rendered_dir, inputs, command_path)
-    if not result:
+        if result:
+            return result
         active_stage[0] = "built"
         result = _built(host, rendered_dir, inputs.name, command_path, qdrant_root=CI_QDRANT_DATA_ROOT)
-    return result
+    return _finish(
+        host, rendered_dir, inputs, command_path, result,
+        created and lexical_result.deferred and dense_deferred, started_at=started_at,
+        monotonic=monotonic, active_stage=active_stage, treatment_snapshot=treatment_snapshot,
+        work_root=work_root, corpus_dir=corpus_dir,
+    )
 
 
 def run_index_build(
@@ -887,6 +922,12 @@ def run_index_build(
         if sample is not None:
             detail += f"; eval set {sample.set_version}; fill per million {sample.fill_per_million}"
         report.print_stage(StageResult("preconditions", True, detail + lock_detail, ""))
+        if sample is None:
+            active_stage[0] = "smoke"
+            evidence = smoke.smoke_evidence(io, rendered_dir, root, inputs, command_path)
+            if isinstance(evidence, Problem):
+                return _refuse("smoke", evidence)
+            report.print_stage(StageResult("smoke", True, smoke.stage_detail(evidence), ""))
         conflict_fix = f"Run sudo python3 -m tools.cistack down --wipe, then run {report.command(command_path)} again."
         if sample is not None:
             active_stage[0] = "lockfile"
@@ -922,6 +963,9 @@ def run_index_build(
             return _build_sample(
                 io, rendered_dir, inputs, command_path, sleep=sleep, monotonic=monotonic,
                 clock=clock, active_stage=active_stage, dense_limit=dense_limit,
+                corpus_dir=production_dir, chunk_guards=prepared.chunk_guards,
+                treatment_snapshot=prepared.treatment_snapshot, created=outcome.outcome == "created",
+                started_at=started_at, work_root=work_root,
             )
         return build_generation(
             io, rendered_dir, inputs, command_path, created=outcome.outcome == "created",

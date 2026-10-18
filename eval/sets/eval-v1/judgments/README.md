@@ -34,7 +34,7 @@ Two records yield no query: `HARV-014`, a prompt-writing request, and `HARV-017`
 
 ## Where grades come from
 
-Grades come through the **grading kit**: a **pool** of candidate passages goes in, one **packet** per query per grader comes out, the graders return small **grades files**, and the intake appends the **judgments file** beside this page. The pools come from slice 3's sample index; until it exists the kit is exercised over an invented fixture. Packets, their manifest, and returned grades files are built **outside any checkout** and are never committed — the one committed product is the judgments file.
+Grades come through the **grading kit**: a **pool** of candidate passages goes in, one **packet** per query per grader comes out, the graders return small **grades files**, and the intake appends the **judgments file** beside this page. The pools come from the sample generation through the pool builder below; the kit's own tests run over an invented fixture. Packets, their manifest, and returned grades files are built **outside any checkout** and are never committed — the one committed product is the judgments file.
 
 A passage is identified by its **gold-evidence coordinates** — source id,
 canonical-text SHA-256, and a code-point offset range — and never by a chunk id,
@@ -42,7 +42,15 @@ because the corpus is later re-chunked and a grade must survive that change.
 
 ### The pool file
 
-The contract slice 3's pool builder writes to: UTF-8 JSONL kept outside the checkout, one line per query, keys `query_id` and `passages` and no others. Each passage carries `source_id`, `sha256`, `start`, `end`, `caption`, `text`, and an optional `provenance` object. `provenance` is where a pool may keep a passage's legs, ranks, and scores; the builder checks only that it is an object and never reads into it, which is the mechanism behind "no packet shows a score, a rank, or which leg found a passage".
+The contract the pool builder writes to: UTF-8 JSONL kept outside the checkout, one line per query, keys `query_id` and `passages` and no others. Each passage carries `source_id`, `sha256`, `start`, `end`, `caption`, `text`, and an optional `provenance` object. `provenance` is where a pool may keep a passage's legs, ranks, and scores; the packet builder checks only that it is an object and never reads into it, which is the mechanism behind "no packet shows a score, a rank, or which leg found a passage".
+
+The pool builder runs on the box, as root, from a checkout the CI sibling's worker mounts:
+
+```
+sudo python3 -B -m tools.judgments.pool <generation> --out <dir>
+```
+
+It reads the named sample generation on the sibling and queries it three ways for every active query: a dense query with the release's retrieval instruction, a lexical query, and the controlling leg, the dense query filtered to the site's home courts and the Supreme Court. A query's stated jurisdiction narrows every leg to its courts, a state's high court widened to that state's appellate courts, and the Supreme Court always kept. The pool is the top ten dense, the top ten lexical, and the top five controlling passages, deduplicated by coordinates, each passage's `provenance` naming every leg that found it with that leg's rank and score. Into the empty output directory it writes `pool.jsonl`, the three ranked lists below, and a content-free `summary.json`; a query no leg answers is left out of the pool and written to the ranked lists with an empty list.
 
 The file is checked whole, every finding reported at once, each located by
 line, query id, and passage ordinal alone: the query id is a known active id
@@ -128,7 +136,9 @@ A successful run appends lines ordered by query id, grader, then coordinates, an
 
 ### The ranked list
 
-The contract slice 3's retrieval driver writes to, and the door this suite is
+The contract the pool builder writes to, one file per leg — `ranked-dense.jsonl`,
+`ranked-lexical.jsonl`, and `ranked-controlling.jsonl`, each the leg's top fifty —
+and the door this suite is
 scored through until `/turn` with `stop_after: retrieve` arrives (slice 4). It
 mirrors the pool file less everything a packet needed: UTF-8 JSONL kept outside
 the checkout and never committed, one line per query, keys `query_id` and
@@ -145,7 +155,7 @@ query. A list may be empty. Length is never bounded — the metrics read the fir
 fifty — and the run reports the file's SHA-256, which the run row keeps beside
 the definition id.
 
-Run it with `gideon eval run --slice judgments --ranked <file>`.
+Run it with `gideon eval run --slice judgments --ranked <file>`, once per leg's file.
 
 ### The metrics, `judgments@1`
 
@@ -196,7 +206,7 @@ defined and prints that count, so the three populations differ at those edges.
 **Below twenty-five judged queries** the set detects regressions and ranks
 nothing, which the run's summary says whenever it applies.
 
-**Two known limits, stated and not solved.** A chunk that swallows two graded
+**Three known limits, stated and not solved.** A chunk that swallows two graded
 passages earns the higher grade alone, so a large-chunk arm cannot reach 1.0 on
 such a query; the gold-span crossing rate is the companion figure to read beside
 it. And a judged passage whose canonical text the index under test does not hold
@@ -204,7 +214,11 @@ reads as not retrieved, since a ranked list states nothing about what that index
 holds: it deflates recall@50 and nDCG@10 without a word. That bites at a corpus
 bump or a canonicalizer change, not at Phase A, whose pools are drawn from the
 very index its arms are scored on. The drop rule arrives with the input that
-can prove absence, as this definition's next `@N`.
+can prove absence, as this definition's next `@N`. And a chunk wholly inside a
+graded passage meets it at the passage's grade even when the chunk omits the
+sentence that earned it, so a small-target arm can be paid for geometry rather
+than evidence; a sample of such hits is read by hand before the target is
+decided (the grilling session of 2026-10-16).
 
 The figures are reported and compared paired, and **never gated**. The slice's
 own verdict is coverage alone: it passes when every judged query was scored,

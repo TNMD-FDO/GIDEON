@@ -7,16 +7,16 @@
     {
       "description": "This charts how long each completed backup run took, from its recorded run. A steady duration is normal; a sharp increase can mean the nightly backup is slowing. Read docs/runbooks/backup-restore.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
-      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "m", "decimals": 0}, "overrides": [{"matcher": {"id": "byName", "options": "duration_min"}, "properties": [{"id": "displayName", "value": "Duration"}]}]},
       "gridPos": {"h": 7, "w": 8, "x": 0, "y": 0},
-      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, (detail->>'duration_s')::double precision AS duration_s FROM audit_log WHERE kind = 'backup_run' AND detail->>'phase' = 'applied' ORDER BY at", "refId": "A"}],
+      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, (detail->>'duration_s')::double precision / 60.0 AS duration_min FROM audit_log WHERE kind = 'backup_run' AND detail->>'phase' = 'applied' ORDER BY at", "refId": "A"}],
       "title": "Backup run duration",
       "type": "timeseries"
     },
     {
       "description": "This charts the size of files in each completed backup set, excluding the database backup repository, from the set inventory. A stable size is expected; sudden growth can consume the space kept for backups. Read docs/runbooks/backup-restore.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
-      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": [{"matcher": {"id": "byName", "options": "set_bytes"}, "properties": [{"id": "displayName", "value": "Set size"}]}]},
       "gridPos": {"h": 7, "w": 8, "x": 8, "y": 0},
       "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, (detail->>'set_bytes')::double precision AS set_bytes FROM audit_log WHERE kind = 'backup_run' AND detail->>'phase' = 'applied' ORDER BY at", "refId": "A"}],
       "title": "Backup set bytes",
@@ -25,7 +25,7 @@
     {
       "description": "This shows the share of sampled files reused from the previous local backup set rather than copied again, from the backup's link check. Some reuse is expected after the first set; zero reused files with a previous sample makes the run fail. Read docs/runbooks/backup-restore.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
-      "fieldConfig": {"defaults": {"unit": "percentunit"}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 1}, "overrides": [{"matcher": {"id": "byName", "options": "hard_link_ratio"}, "properties": [{"id": "displayName", "value": "Reused"}]}]},
       "gridPos": {"h": 7, "w": 8, "x": 16, "y": 0},
       "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, CASE WHEN jsonb_typeof(detail->'hard_links') = 'object' THEN (detail->'hard_links'->>'linked')::double precision / NULLIF((detail->'hard_links'->>'sampled')::double precision, 0) ELSE (detail->>'hard_links')::double precision END AS hard_link_ratio FROM audit_log WHERE kind = 'backup_run' AND detail->>'phase' = 'applied' ORDER BY at", "refId": "A"}],
       "title": "Hard-link ratio",
@@ -34,7 +34,7 @@
     {
       "description": "This compares bytes sent off the box with the total snapshot size for each recorded push. A first push may send everything; later pushes should send under 90 percent, or the push fails. Read docs/runbooks/backup-restore.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
-      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": [{"matcher": {"id": "byName", "options": "transferred_bytes"}, "properties": [{"id": "displayName", "value": "Transferred"}]}, {"matcher": {"id": "byName", "options": "total_bytes"}, "properties": [{"id": "displayName", "value": "Total"}]}]},
       "gridPos": {"h": 7, "w": 12, "x": 0, "y": 7},
       "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, (detail->>'transferred_bytes')::double precision AS transferred_bytes, (detail->>'total_bytes')::double precision AS total_bytes FROM audit_log WHERE kind = 'backup_push' ORDER BY at", "refId": "A"}],
       "title": "Push transferred versus total bytes",
@@ -43,7 +43,7 @@
     {
       "description": "This charts paths checked on the backup target and old target snapshots removed during each recorded push. Checked paths show the copy was verified, while zero removed snapshots is normal when none has expired; a failed check prevents a successful push row. Read docs/runbooks/backup-restore.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
-      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": [{"matcher": {"id": "byName", "options": "verified"}, "properties": [{"id": "displayName", "value": "Verified"}]}, {"matcher": {"id": "byName", "options": "pruned"}, "properties": [{"id": "displayName", "value": "Pruned"}]}]},
       "gridPos": {"h": 7, "w": 12, "x": 12, "y": 7},
       "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, (detail->>'verified')::double precision AS verified, (detail->>'pruned')::double precision AS pruned FROM audit_log WHERE kind = 'backup_push' ORDER BY at", "refId": "A"}],
       "title": "Verified and pruned counts",
@@ -52,29 +52,29 @@
     {
       "description": "This charts how long each backup restore drill took, from its recorded run. A steady duration is expected; a sharp increase can make the next scheduled drill harder to finish. Read docs/runbooks/backup-restore.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
-      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "m", "decimals": 0}, "overrides": [{"matcher": {"id": "byName", "options": "duration_min"}, "properties": [{"id": "displayName", "value": "Duration"}]}]},
       "gridPos": {"h": 8, "w": 8, "x": 0, "y": 14},
-      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, (detail->>'duration_s')::double precision AS duration_s FROM audit_log WHERE kind = 'backup_drill' ORDER BY at", "refId": "A"}],
+      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, (detail->>'duration_s')::double precision / 60.0 AS duration_min FROM audit_log WHERE kind = 'backup_drill' ORDER BY at", "refId": "A"}],
       "title": "Restore drill duration",
       "type": "timeseries"
     },
     {
       "description": "This table lists the five newest recorded backup drill results. Pass means the restore checks succeeded; failed means they did not and causes a page. Follow docs/runbooks/observability.md §4.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
-      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": [{"matcher": {"id": "byName", "options": "at"}, "properties": [{"id": "displayName", "value": "Recorded"}]}, {"matcher": {"id": "byName", "options": "result"}, "properties": [{"id": "displayName", "value": "Result"}]}]},
       "gridPos": {"h": 8, "w": 8, "x": 8, "y": 14},
       "options": {"cellHeight": "sm", "showHeader": true},
-      "targets": [{"format": "table", "rawSql": "SELECT at AS time, detail->>'result' AS result FROM audit_log WHERE kind = 'backup_drill' ORDER BY at DESC LIMIT 5", "refId": "A"}],
+      "targets": [{"format": "table", "rawSql": "SELECT at, detail->>'result' AS result FROM audit_log WHERE kind = 'backup_drill' ORDER BY at DESC LIMIT 5", "refId": "A"}],
       "title": "Restore drill result",
       "type": "table"
     },
     {
       "description": "This table lists the ten newest recorded backup runs, pushes, drills, and restores with each result, sizes, and the share of sampled files reused. A run, push, or restore reads completed when healthy; a healthy drill reads pass. A failed drill or a missing expected run needs investigation. Read docs/runbooks/backup-restore.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
-      "fieldConfig": {"defaults": {}, "overrides": [{"matcher": {"id": "byName", "options": "hard_link_ratio"}, "properties": [{"id": "unit", "value": "percentunit"}]}, {"matcher": {"id": "byName", "options": "transferred_bytes"}, "properties": [{"id": "custom.width", "value": 170}]}]},
+      "fieldConfig": {"defaults": {"custom": {"minWidth": 100}}, "overrides": [{"matcher": {"id": "byName", "options": "at"}, "properties": [{"id": "displayName", "value": "Recorded"}, {"id": "custom.width", "value": 165}]}, {"matcher": {"id": "byName", "options": "kind"}, "properties": [{"id": "displayName", "value": "Kind"}]}, {"matcher": {"id": "byName", "options": "duration_s"}, "properties": [{"id": "displayName", "value": "Duration"}, {"id": "unit", "value": "dtdurations"}, {"id": "decimals", "value": 1}, {"id": "custom.width", "value": 185}]}, {"matcher": {"id": "byName", "options": "result"}, "properties": [{"id": "displayName", "value": "Result"}, {"id": "custom.width", "value": 100}]}, {"matcher": {"id": "byName", "options": "set_bytes"}, "properties": [{"id": "displayName", "value": "Set size"}, {"id": "unit", "value": "bytes"}, {"id": "custom.width", "value": 95}]}, {"matcher": {"id": "byName", "options": "hard_link_ratio"}, "properties": [{"id": "displayName", "value": "Reused"}, {"id": "unit", "value": "percentunit"}, {"id": "decimals", "value": 1}, {"id": "custom.width", "value": 85}]}, {"matcher": {"id": "byName", "options": "transferred_bytes"}, "properties": [{"id": "displayName", "value": "Transferred"}, {"id": "unit", "value": "bytes"}, {"id": "custom.width", "value": 115}]}, {"matcher": {"id": "byName", "options": "total_bytes"}, "properties": [{"id": "displayName", "value": "Total"}, {"id": "unit", "value": "bytes"}, {"id": "custom.width", "value": 95}]}, {"matcher": {"id": "byName", "options": "verified"}, "properties": [{"id": "displayName", "value": "Verified"}, {"id": "custom.width", "value": 95}]}, {"matcher": {"id": "byName", "options": "pruned"}, "properties": [{"id": "displayName", "value": "Pruned"}, {"id": "custom.width", "value": 85}]}]},
       "gridPos": {"h": 13, "w": 24, "x": 0, "y": 22},
       "options": {"cellHeight": "sm", "footer": {"show": false}, "showHeader": true},
-      "targets": [{"format": "table", "rawSql": "SELECT at, kind, detail->>'duration_s' AS duration_s, COALESCE(detail->>'result', 'completed') AS result, detail->>'set_bytes' AS set_bytes, CASE WHEN jsonb_typeof(detail->'hard_links') = 'object' THEN (detail->'hard_links'->>'linked')::double precision / NULLIF((detail->'hard_links'->>'sampled')::double precision, 0) ELSE (detail->>'hard_links')::double precision END AS hard_link_ratio, detail->>'transferred_bytes' AS transferred_bytes, detail->>'total_bytes' AS total_bytes, detail->>'verified' AS verified, detail->>'pruned' AS pruned FROM audit_log WHERE kind IN ('backup_run', 'backup_push', 'backup_drill', 'restore') AND (kind <> 'backup_run' OR detail->>'phase' = 'applied') ORDER BY at DESC LIMIT 10", "refId": "A"}],
+      "targets": [{"format": "table", "rawSql": "SELECT at, kind, (detail->>'duration_s')::double precision AS duration_s, COALESCE(detail->>'result', 'completed') AS result, (detail->>'set_bytes')::bigint AS set_bytes, CASE WHEN jsonb_typeof(detail->'hard_links') = 'object' THEN (detail->'hard_links'->>'linked')::double precision / NULLIF((detail->'hard_links'->>'sampled')::double precision, 0) ELSE (detail->>'hard_links')::double precision END AS hard_link_ratio, (detail->>'transferred_bytes')::bigint AS transferred_bytes, (detail->>'total_bytes')::bigint AS total_bytes, (detail->>'verified')::integer AS verified, (detail->>'pruned')::integer AS pruned FROM audit_log WHERE kind IN ('backup_run', 'backup_push', 'backup_drill', 'restore') AND (kind <> 'backup_run' OR detail->>'phase' = 'applied') ORDER BY at DESC LIMIT 10", "refId": "A"}],
       "title": "Last ten backup and restore runs",
       "type": "table"
     }

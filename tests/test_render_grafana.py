@@ -15,6 +15,7 @@ import re
 import tomllib
 import unittest
 from dataclasses import replace
+from itertools import combinations, groupby
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,9 @@ EXAMPLE = ROOT / "config/site.example.yaml"
 SECOND = ROOT / "tests/fixtures/site/second-office.yaml"
 FULL_DN = ROOT / "tests/fixtures/site/dn-groups.yaml"
 ESCAPED_DN = ROOT / "tests/fixtures/site/dn-groups-escaping.yaml"
+OVERVIEW_TOP_ROW_HEIGHT = 10
+CONTAINER_MEMORY_HEIGHT = 26
+OVERVIEW_HOST_KINDS = ((EXAMPLE, False, True), (SECOND, False, False), (EXAMPLE, True, False))
 
 
 def data_volume_percent(rule: dict[str, Any]) -> int:
@@ -250,6 +254,100 @@ def _datasource_uids(value: Any) -> set[str]:
 
 
 class Overview(unittest.TestCase):
+    def test_top_row_cards_share_height_on_every_host_kind(self) -> None:
+        for site_path, no_gpu, build_box in OVERVIEW_HOST_KINDS:
+            with self.subTest(site=site_path.name, no_gpu=no_gpu, build_box=build_box):
+                dashboard = json.loads(GrafanaOverviewArtifact().emit(
+                    inputs(site_path, no_gpu=no_gpu, build_box=build_box)
+                ))
+                panels = {panel["title"]: panel for panel in dashboard["panels"]}
+                for title, x, width in (("Needs attention", 0, 16), (START_HERE_TITLE, 16, 8)):
+                    with self.subTest(panel=title):
+                        self.assertEqual(
+                            panels[title]["gridPos"],
+                            {"x": x, "y": 0, "w": width, "h": OVERVIEW_TOP_ROW_HEIGHT},
+                        )
+
+    def test_grid_bands_tile_the_overview_without_gaps_or_overlap(self) -> None:
+        for site_path, no_gpu, build_box in OVERVIEW_HOST_KINDS:
+            with self.subTest(site=site_path.name, no_gpu=no_gpu, build_box=build_box):
+                dashboard = json.loads(GrafanaOverviewArtifact().emit(
+                    inputs(site_path, no_gpu=no_gpu, build_box=build_box)
+                ))
+                panels = sorted(
+                    dashboard["panels"],
+                    key=lambda panel: (panel["gridPos"]["y"], panel["gridPos"]["x"]),
+                )
+                bottom = 0
+                for y, band in groupby(panels, key=lambda panel: panel["gridPos"]["y"]):
+                    self.assertEqual(y, bottom)
+                    right = 0
+                    bottoms = set()
+                    for panel in band:
+                        pos = panel["gridPos"]
+                        self.assertEqual(pos["x"], right, panel["title"])
+                        self.assertGreater(pos["w"], 0)
+                        self.assertGreater(pos["h"], 0)
+                        right += pos["w"]
+                        bottoms.add(y + pos["h"])
+                    self.assertEqual(right, 24)
+                    self.assertEqual(len(bottoms), 1)
+                    bottom = bottoms.pop()
+                for left, right_panel in combinations(panels, 2):
+                    a = left["gridPos"]
+                    b = right_panel["gridPos"]
+                    overlap = (
+                        a["x"] < b["x"] + b["w"]
+                        and b["x"] < a["x"] + a["w"]
+                        and a["y"] < b["y"] + b["h"]
+                        and b["y"] < a["y"] + a["h"]
+                    )
+                    self.assertFalse(overlap, (left["title"], right_panel["title"]))
+                row = next(panel for panel in panels if panel["type"] == "row")
+                for panel in row["panels"]:
+                    self.assertEqual(panel["gridPos"]["y"], row["gridPos"]["y"] + 1)
+
+    def test_no_gpu_start_here_lines_are_a_subsequence_at_the_same_height(self) -> None:
+        for site_path in (EXAMPLE, SECOND):
+            with self.subTest(site=site_path.name):
+                cards = []
+                for no_gpu in (False, True):
+                    dashboard = json.loads(GrafanaOverviewArtifact().emit(inputs(site_path, no_gpu=no_gpu)))
+                    cards.append(next(panel for panel in dashboard["panels"] if panel["title"] == START_HERE_TITLE))
+                gpu, no_gpu_card = cards
+                self.assertEqual(gpu["gridPos"]["h"], no_gpu_card["gridPos"]["h"])
+                gpu_lines = iter(gpu["options"]["content"].splitlines())
+                for line in no_gpu_card["options"]["content"].splitlines():
+                    self.assertTrue(any(candidate == line for candidate in gpu_lines), line)
+
+    def test_container_memory_legend_shows_last_values_and_hides_foreign_names_only(self) -> None:
+        dashboard = json.loads(GrafanaOverviewArtifact().emit(inputs()))
+        row = next(panel for panel in dashboard["panels"] if panel["title"] == "Host detail")
+        panel = next(panel for panel in row["panels"] if panel["title"] == "Container memory")
+        self.assertEqual(
+            panel["options"]["legend"],
+            {"placement": "right", "displayMode": "table", "calcs": ["lastNotNull"]},
+        )
+        override = panel["fieldConfig"]["overrides"][1]
+        self.assertEqual(
+            override["matcher"],
+            {"id": "byRegexp", "options": "/^(gideon-ci-|transcribe-|buildx_)/"},
+        )
+        self.assertEqual(
+            override["properties"],
+            [{"id": "custom.hideFrom", "value": {"legend": True, "tooltip": False, "viz": False}}],
+        )
+
+    def test_guardrail_trips_use_whole_counts_from_zero_with_filled_bars(self) -> None:
+        dashboard = json.loads(GrafanaOverviewArtifact().emit(inputs()))
+        panel = next(panel for panel in dashboard["panels"] if panel["title"] == "Guardrail trips")
+        defaults = panel["fieldConfig"]["defaults"]
+        self.assertEqual(defaults["unit"], "short")
+        self.assertEqual(defaults["decimals"], 0)
+        self.assertEqual(defaults["min"], 0)
+        self.assertEqual(defaults["custom"]["drawStyle"], "bars")
+        self.assertGreater(defaults["custom"]["fillOpacity"], 0)
+
     def test_rendered_overview_has_declared_datasources_and_literal_dollars(self) -> None:
         for no_gpu in (False, True):
             with self.subTest(no_gpu=no_gpu):
@@ -361,7 +459,7 @@ class Overview(unittest.TestCase):
         panel = json.loads(GrafanaOverviewArtifact().emit(inputs()))["panels"][0]
         self.assertEqual(panel["type"], "alertlist")
         self.assertEqual(panel["title"], "Needs attention")
-        self.assertEqual(panel["gridPos"], {"x": 0, "y": 0, "w": 16, "h": 8})
+        self.assertEqual(panel["gridPos"], {"x": 0, "y": 0, "w": 16, "h": OVERVIEW_TOP_ROW_HEIGHT})
         self.assertNotIn("datasource", panel)
         options = panel["options"]
         self.assertEqual(
@@ -416,7 +514,7 @@ class Overview(unittest.TestCase):
                 panel = json.loads(GrafanaOverviewArtifact().emit(site_inputs))["panels"][1]
                 self.assertEqual(panel["type"], "text")
                 self.assertEqual(panel["title"], "Start here")
-                self.assertEqual(panel["gridPos"], {"x": 16, "y": 0, "w": 8, "h": 8})
+                self.assertEqual(panel["gridPos"], {"x": 16, "y": 0, "w": 8, "h": OVERVIEW_TOP_ROW_HEIGHT})
                 self.assertNotIn("datasource", panel)
                 self.assertEqual(panel["options"]["mode"], "markdown")
                 content = panel["options"]["content"]
@@ -554,7 +652,7 @@ class Overview(unittest.TestCase):
                     ("Last drill result", 18),
                 ):
                     with self.subTest(panel=title):
-                        self.assertEqual(panels[title]["gridPos"], {"h": 7, "w": 6, "x": column, "y": 23})
+                        self.assertEqual(panels[title]["gridPos"], {"h": 7, "w": 6, "x": column, "y": OVERVIEW_TOP_ROW_HEIGHT + 15})
 
                 drill = panels["Last drill result"]
                 self.assertEqual(drill["targets"][0]["format"], "table")
@@ -705,7 +803,7 @@ class Overview(unittest.TestCase):
                 self.assertEqual(row["title"], "Host detail")
                 self.assertNotIn("$", row["title"])
                 self.assertTrue(row["collapsed"])
-                self.assertEqual(row["gridPos"], {"h": 1, "w": 24, "x": 0, "y": 37})
+                self.assertEqual(row["gridPos"], {"h": 1, "w": 24, "x": 0, "y": OVERVIEW_TOP_ROW_HEIGHT + 29})
                 self.assertEqual(
                     [panel["title"] for panel in row["panels"]],
                     ["Host load", "Host memory", "Container memory"],
@@ -713,9 +811,9 @@ class Overview(unittest.TestCase):
                 self.assertEqual(
                     [panel["gridPos"] for panel in row["panels"]],
                     [
-                        {"h": 8, "w": 6, "x": 0, "y": 38},
-                        {"h": 8, "w": 6, "x": 6, "y": 38},
-                        {"h": 8, "w": 12, "x": 12, "y": 38},
+                        {"h": 8, "w": 6, "x": 0, "y": OVERVIEW_TOP_ROW_HEIGHT + 30},
+                        {"h": 8, "w": 6, "x": 6, "y": OVERVIEW_TOP_ROW_HEIGHT + 30},
+                        {"h": CONTAINER_MEMORY_HEIGHT, "w": 12, "x": 12, "y": OVERVIEW_TOP_ROW_HEIGHT + 30},
                     ],
                 )
                 for panel in row["panels"]:
@@ -747,7 +845,7 @@ class Overview(unittest.TestCase):
         self.assertIn("> 0", targets["B"]["expr"])
         self.assertTrue(targets["B"]["legendFormat"].endswith(" limit"))
         overrides = panel["fieldConfig"]["overrides"]
-        self.assertEqual(len(overrides), 1)
+        self.assertEqual(len(overrides), 2)
         self.assertEqual(overrides[0]["matcher"], {"id": "byRegexp", "options": "/ limit$/"})
         self.assertEqual(
             overrides[0]["properties"],

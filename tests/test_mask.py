@@ -5,7 +5,10 @@ from __future__ import annotations
 import ast
 import contextlib
 import io
+import os
 import pwd
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -13,9 +16,9 @@ import tempfile
 import unittest
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from types import SimpleNamespace
 from typing import cast
 
+from gideon.host.steps.services import MASK_SETUP_FAILURE_CODE, mask_wrapper_text
 from tools import mask
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,10 +29,10 @@ class RecordingRunner:
 
     def __init__(self, codes: Sequence[int] = ()) -> None:
         self.codes = list(codes)
-        self.commands: list[tuple[str, ...]] = []
+        self.commands: list[tuple[tuple[str, ...], str | None]] = []
 
-    def __call__(self, command: Sequence[str]) -> int:
-        self.commands.append(tuple(command))
+    def __call__(self, command: Sequence[str], stdin: str | None) -> int:
+        self.commands.append((tuple(command), stdin))
         return self.codes[len(self.commands) - 1] if self.codes else 0
 
 
@@ -41,12 +44,9 @@ def facts(
     entries: Mapping[str, Sequence[str]] | None = None,
     null_device: int = 90,
     devices: Mapping[str, int] | None = None,
+    wrapper_present: bool = True,
     uid: int = 1000,
-    gid: int = 1000,
-    groups: Sequence[int] = (1000, 1001),
     environment: Mapping[str, str] | None = None,
-    password_name: str = "fictitious-user",
-    password_home: str = "/home/fictitious-user",
     missing_tools: Sequence[str] = (),
     executable_paths: Mapping[str, str] | None = None,
     working_directory: str = "/workspace/checkout",
@@ -71,10 +71,6 @@ def facts(
     missing = set(missing_tools)
     executable_map = dict(executable_paths or {})
     command_runner = runner or RecordingRunner()
-    password = cast(
-        pwd.struct_passwd,
-        SimpleNamespace(pw_name=password_name, pw_dir=password_home),
-    )
 
     def device(path: str) -> int:
         return device_map.get(realpath(path), null_device if path == "/dev/null" else 10)
@@ -86,16 +82,13 @@ def facts(
 
     return (
         mask.Facts(
-            exists=lambda path: realpath(path) in canonical_present,
+            exists=lambda path: (path == mask.WRAPPER_PATH and wrapper_present) or realpath(path) in canonical_present,
             is_directory=lambda path: realpath(path) in canonical_directories,
             is_mount=lambda path: realpath(path) in canonical_mounts,
             list_directory=lambda path: canonical_entries.get(realpath(path), ()),
             device=device,
             realpath=realpath,
             effective_uid=lambda: uid,
-            effective_gid=lambda: gid,
-            supplementary_groups=lambda: tuple(groups),
-            password_entry=lambda _uid: password,
             environment=lambda: dict(caller_environment),
             which=which,
             working_directory=lambda: working_directory,
@@ -127,23 +120,8 @@ def all_present_facts(
     )
 
 
-def wrapped_parts(
-    command: Sequence[str], paths: Sequence[str], test_facts: mask.Facts
-) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-    """Split a wrapped argv into its environment, paths, and command tails."""
-
-    wrapped = mask.wrap(command, paths=paths, facts=test_facts)
-    stage = wrapped.index(mask.ROOT_STAGE)
-    environment_count = int(wrapped[stage + 5])
-    path_count = int(wrapped[stage + 6])
-    first = stage + 7
-    environment = wrapped[first : first + environment_count]
-    listed_paths = wrapped[first + environment_count : first + environment_count + path_count]
-    return environment, listed_paths, wrapped[first + environment_count + path_count :]
-
-
 class Refusals(unittest.TestCase):
-    """The four probe refusals are ordered and carry separate fixes."""
+    """Probe refusals are ordered and carry separate fixes."""
 
     def assert_refused(self, result: mask.ProbeResult) -> mask.Refusal:
         self.assertIs(result.state, mask.ProbeState.REFUSED)
@@ -158,6 +136,7 @@ class Refusals(unittest.TestCase):
     def ready_facts(
         self,
         *,
+        wrapper_present: bool = True,
         uid: int = 1000,
         missing_tools: Sequence[str] = (),
         environment: Mapping[str, str] | None = None,
@@ -171,6 +150,7 @@ class Refusals(unittest.TestCase):
             directories=(path,),
             mounts=(path,),
             entries={path: ("visible",)},
+            wrapper_present=wrapper_present,
             uid=uid,
             missing_tools=missing_tools,
             environment=environment,
@@ -180,7 +160,7 @@ class Refusals(unittest.TestCase):
         )
 
     def test_root_refusal_precedes_tool_checks(self) -> None:
-        test_facts, runner = self.ready_facts(uid=0, missing_tools=mask.REQUIRED_TOOLS)
+        test_facts, runner = self.ready_facts(uid=0, missing_tools=mask.REQUIRED_TOOLS, wrapper_present=False)
         refusal = self.assert_refused(mask.probe(("pytest",), test_facts))
         self.assertIn("root", refusal.problem)
         self.assertEqual(runner.commands, [])
@@ -188,11 +168,33 @@ class Refusals(unittest.TestCase):
     def test_missing_tool_refusal_precedes_path_and_trial_checks(self) -> None:
         test_facts, runner = self.ready_facts(
             missing_tools=(mask.REQUIRED_TOOLS[0],),
+            wrapper_present=False,
             working_directory=mask.MASK_PATHS[0],
         )
         refusal = self.assert_refused(mask.probe(("pytest",), test_facts))
         self.assertIn(mask.REQUIRED_TOOLS[0], refusal.problem)
         self.assertEqual(runner.commands, [])
+
+    def test_absent_wrapper_refusal_precedes_newline_path_and_trial_checks(self) -> None:
+        test_facts, runner = self.ready_facts(
+            wrapper_present=False, working_directory=mask.MASK_PATHS[0],
+        )
+        refusal = self.assert_refused(mask.probe(("pytest", "fictitious\nword"), test_facts))
+        self.assertEqual(refusal.problem, f"the mask wrapper {mask.WRAPPER_PATH} is absent")
+        self.assertEqual(
+            refusal.fix,
+            "Run sudo python3 -m gideon host provision --only gh-runner from a checkout at main, then re-run.",
+        )
+        self.assertEqual(runner.commands, [])
+
+    def test_newline_word_refusal_precedes_path_and_trial_checks(self) -> None:
+        for command in (("fictitious\ncommand",), ("pytest", "fictitious\nword")):
+            with self.subTest(command=command):
+                test_facts, runner = self.ready_facts(working_directory=mask.MASK_PATHS[0])
+                refusal = self.assert_refused(mask.probe(command, test_facts))
+                self.assertIn("newline", refusal.problem)
+                self.assertIn("newline", refusal.fix)
+                self.assertEqual(runner.commands, [])
 
     def test_path_refusals_precede_the_trial(self) -> None:
         path_cases = (
@@ -286,64 +288,21 @@ class Observation(unittest.TestCase):
 
 
 class Wrapping(unittest.TestCase):
-    """The wrapper keeps argv, identity, environment, and the drop contract."""
+    """Only the fixed wrapper is in argv; command words travel on stdin."""
 
-    def test_wrap_has_namespaces_stage_identity_and_command_positionals(self) -> None:
-        caller = {
-            name: f"ALLOW_{name}_SENTINEL" for name in mask.ENVIRONMENT_ALLOWLIST
-        }
-        caller["NOT_ALLOWED_NAME"] = "NOT_ALLOWED_SENTINEL"
-        test_facts, _runner = facts(
-            environment=caller,
-            uid=1201,
-            gid=1302,
-            groups=(1302, 1403),
-        )
-        paths = (mask.MASK_PATHS[0],)
-        command = ("pytest", "-x", "tests/test_mask.py")
-        wrapped = mask.wrap(command, paths=paths, facts=test_facts)
-        stage = wrapped.index(mask.ROOT_STAGE)
-        self.assertEqual(wrapped[:2], ("sudo", "-n"))
-        self.assertIn("--mount", wrapped[:stage])
-        self.assertIn("--net", wrapped[:stage])
-        self.assertEqual(wrapped[stage - 1], "-c")
-        self.assertEqual(
-            wrapped[stage + 1 : stage + 5], ("mask", "1201", "1302", "1302,1403")
-        )
-        self.assertIn("--reuid", mask.ROOT_STAGE)
-        self.assertIn("--regid", mask.ROOT_STAGE)
-        self.assertIn("--groups", mask.ROOT_STAGE)
-        self.assertIn("--no-new-privs", mask.ROOT_STAGE)
-        environment, listed_paths, tail = wrapped_parts(command, paths, test_facts)
-        self.assertEqual(
-            environment,
-            tuple(f"{name}={caller[name]}" for name in mask.ENVIRONMENT_ALLOWLIST),
-        )
-        self.assertEqual(listed_paths, paths)
-        self.assertEqual(tail, command)
-        joined = " ".join(wrapped)
-        self.assertNotIn("NOT_ALLOWED_SENTINEL", joined)
-        self.assertNotIn("NOT_ALLOWED_NAME", joined)
+    def test_wrap_has_the_fixed_argv_and_one_word_per_line(self) -> None:
+        test_facts, _runner = facts(environment={"HOME": "/fictitious/caller"})
+        command = ("pytest", "-x", "a word with spaces", "", "$(fictitious-command)")
+        wrapped = mask.wrap(command, paths=(mask.MASK_PATHS[0],), facts=test_facts)
+        self.assertEqual(wrapped.argv, ("sudo", "-n", mask.WRAPPER_PATH))
+        self.assertEqual(wrapped.stdin, "pytest\n-x\na word with spaces\n\n$(fictitious-command)\n")
 
-    def test_missing_environment_names_stay_absent_and_identity_names_fallback(self) -> None:
-        caller = {"PATH": "PATH_SENTINEL"}
-        test_facts, _runner = facts(
-            environment=caller,
-            password_name="fallback-user",
-            password_home="/home/fallback-user",
-        )
-        environment, _paths, _tail = wrapped_parts(("true",), (), test_facts)
-        values = dict(item.split("=", 1) for item in environment)
-        self.assertEqual(values["PATH"], "PATH_SENTINEL")
-        self.assertEqual(values["HOME"], "/home/fallback-user")
-        self.assertEqual(values["USER"], "fallback-user")
-        self.assertEqual(values["LOGNAME"], "fallback-user")
-        self.assertNotIn("LANG", values)
-        self.assertNotEqual(values["HOME"], "/root")
-        self.assertNotEqual(values["USER"], "root")
-        self.assertNotEqual(values["LOGNAME"], "root")
+    def test_paths_are_owned_by_the_wrapper_and_empty_command_has_empty_stdin(self) -> None:
+        wrapped = mask.wrap((), paths=("/fictitious/path",))
+        self.assertEqual(wrapped.argv, ("sudo", "-n", mask.WRAPPER_PATH))
+        self.assertEqual(wrapped.stdin, "")
 
-    def test_probe_trial_uses_the_wrap_argv_and_true_as_command(self) -> None:
+    def test_probe_trial_sends_true_to_the_fixed_wrapper(self) -> None:
         test_facts, runner = facts(
             present=(mask.MASK_PATHS[0],),
             directories=(mask.MASK_PATHS[0],),
@@ -353,21 +312,20 @@ class Wrapping(unittest.TestCase):
         )
         result = mask.probe(("pytest", "-x"), test_facts)
         self.assertIs(result.state, mask.ProbeState.READY)
-        self.assertEqual(len(runner.commands), 1)
-        trial = runner.commands[0]
-        expected = mask.wrap(("true",), paths=(mask.MASK_PATHS[0],), facts=test_facts)
-        self.assertEqual(trial, expected)
-        self.assertEqual(trial[-1], "true")
-        self.assertIn("--mount", trial)
-        self.assertIn("--net", trial)
+        self.assertEqual(runner.commands, [(("sudo", "-n", mask.WRAPPER_PATH), "true\n")])
 
 
 class RootStage(unittest.TestCase):
-    """The fixed shell text fails setup safely and preserves command codes."""
+    """The provision-owned shell text fails setup safely and preserves command codes."""
 
     def run_stage(
-        self, *, failing: str | None, command: Sequence[str]
-    ) -> subprocess.CompletedProcess[str]:
+        self,
+        *,
+        failing: str | None = None,
+        command: Sequence[str] = ("true",),
+        arguments: Sequence[str] = (),
+        include_sudo_uid: bool = True,
+    ) -> tuple[subprocess.CompletedProcess[str], list[tuple[str, ...]], tuple[str, ...]]:
         shell = shutil.which("sh")
         if shell is None:
             self.skipTest("sh is not installed")
@@ -375,82 +333,139 @@ class RootStage(unittest.TestCase):
             root = Path(directory)
             tools = root / "bin"
             tools.mkdir()
-            masked = root / "masked"
+            masked = root / "masked directory's path"
             masked.mkdir()
+            masked_file = root / "masked file"
+            masked_file.touch()
+            paths = (str(masked), str(masked_file), str(root / "missing"))
+            log = root / "operations"
+            log.touch()
 
             def write_tool(name: str, text: str) -> None:
                 path = tools / name
-                path.write_text(text, encoding="utf-8")
+                path.write_text("#!/bin/sh\n" + text, encoding="utf-8")
                 path.chmod(0o755)
 
-            mount_script = "#!/bin/sh\n"
+            write_tool(
+                "unshare",
+                f'printf "unshare\\t%s\\t%s\\n" "$1" "$2" >> {shlex.quote(str(log))}\n'
+                '[ "$1" = --mount ] && [ "$2" = --net ] && [ "$3" = -- ] || exit 1\n'
+                + ("exit 1\n" if failing == "namespace" else 'shift 3\nexec "$@"\n'),
+            )
+            mount_script = (
+                '{ printf "mount"; printf "\\t%s" "$@"; printf "\\n"; } >> '
+                f"{shlex.quote(str(log))}\n"
+            )
             if failing == "rprivate":
-                mount_script += 'if [ "$1" = "--make-rprivate" ]; then exit 1; fi\nexit 0\n'
+                mount_script += '[ "$1" != --make-rprivate ]\n'
             elif failing == "mount":
-                mount_script += 'if [ "$1" = "--make-rprivate" ]; then exit 0; fi\nexit 1\n'
+                mount_script += '[ "$1" = --make-rprivate ]\n'
             else:
                 mount_script += "exit 0\n"
             write_tool("mount", mount_script)
-            write_tool("ip", "#!/bin/sh\n" + ("exit 1\n" if failing == "ip" else "exit 0\n"))
-            if failing == "setpriv":
-                setpriv_script = "#!/bin/sh\nexit 1\n"
-            else:
-                setpriv_script = """#!/bin/sh
-while [ "$1" != env ]; do shift; done
-shift
-if [ "$1" = "-i" ]; then shift; fi
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        *=*) export "$1"; shift ;;
-        *) exec "$@" ;;
-    esac
-done
-exit 0
-"""
-            write_tool("setpriv", setpriv_script)
-
-            test_facts, _runner = facts(
-                environment={"PATH": "/usr/bin"},
-                runner=RecordingRunner(),
+            write_tool("ip", "exit 1\n" if failing == "loopback" else "exit 0\n")
+            write_tool(
+                "setpriv",
+                "exit 1\n" if failing == "drop" else
+                'while [ "$1" != env ]; do shift; done\nexec "$@"\n',
             )
-            wrapped = mask.wrap(command, paths=(str(masked),), facts=test_facts)
-            stage = wrapped.index(mask.ROOT_STAGE)
-            stage_argv = (shell, "-c", mask.ROOT_STAGE, *wrapped[stage + 1 :])
-            return subprocess.run(
-                stage_argv,
+            wrapper = root / "wrapper"
+            wrapper.write_text(mask_wrapper_text(paths=paths), encoding="utf-8")
+            environment = {
+                "PATH": f"{tools}:/usr/bin:/bin",
+                "SUDO_GID": str(os.getgid()),
+                "HOME": "/fictitious/inherited/home",
+                "USER": "fictitious-inherited-user",
+                "LOGNAME": "fictitious-inherited-logname",
+                "LANG": "fictitious-inherited-lang",
+                "NOT_ALLOWED": "fictitious-inherited-value",
+            }
+            if include_sudo_uid:
+                environment["SUDO_UID"] = str(os.getuid())
+            result = subprocess.run(
+                (shell, str(wrapper), *arguments),
+                input=mask.wrap(command).stdin,
                 cwd=directory,
-                env={"PATH": str(tools)},
+                env=environment,
                 capture_output=True,
                 text=True,
                 check=False,
             )
+            operations = [tuple(line.split("\t")) for line in log.read_text().splitlines()]
+            return result, operations, paths
 
-    def test_each_setup_failure_is_code_71_and_cannot_fall_through(self) -> None:
-        expected_steps = {"rprivate": "/", "mount": None, "ip": "loopback"}
-        for failing, step in expected_steps.items():
+    def assert_setup_failure(self, result: subprocess.CompletedProcess[str], step: str) -> None:
+        self.assertEqual(result.returncode, MASK_SETUP_FAILURE_CODE)
+        self.assertEqual(result.stdout, "")
+        self.assertRegex(
+            result.stderr,
+            rf"^mask: setup failed at {re.escape(step)}\. Fix: [^\n]+\n$",
+        )
+
+    def test_each_setup_failure_has_its_one_line_and_cannot_fall_through(self) -> None:
+        for failing in ("namespace", "rprivate", "mount", "loopback", "drop"):
             with self.subTest(failing=failing):
-                result = self.run_stage(
-                    failing=failing,
-                    command=("sh", "-c", "exit 1"),
-                )
-                self.assertEqual(result.returncode, mask.SETUP_FAILURE_CODE)
-                self.assertEqual(result.stdout, "")
-                if step is None:
-                    self.assertTrue(result.stderr.startswith("mask: setup failed at "))
-                    self.assertTrue(result.stderr.endswith("/masked\n"))
-                else:
-                    self.assertEqual(result.stderr, f"mask: setup failed at {step}\n")
+                result, operations, paths = self.run_stage(failing=failing, command=("false",))
+                self.assert_setup_failure(result, paths[0] if failing == "mount" else failing)
+                if failing == "namespace":
+                    self.assertFalse(any(operation[0] == "mount" for operation in operations))
 
-    def test_setpriv_trial_turns_exit_one_into_setup_failure(self) -> None:
-        result = self.run_stage(failing="setpriv", command=("sh", "-c", "exit 1"))
-        self.assertEqual(result.returncode, mask.SETUP_FAILURE_CODE)
-        self.assertEqual(result.stderr, "mask: setup failed at drop\n")
+    def test_namespaces_precede_mounts_and_only_present_paths_are_masked(self) -> None:
+        result, operations, paths = self.run_stage()
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(operations[:2], [("unshare", "--mount", "--net")] * 2)
+        self.assertEqual(
+            operations[2:],
+            [
+                ("mount", "--make-rprivate", "/"),
+                ("mount", "-t", "tmpfs", "-o", "ro", "tmpfs", paths[0]),
+                ("mount", "--bind", "/dev/null", paths[1]),
+            ],
+        )
+
+    def test_arguments_missing_uid_and_empty_stdin_are_refused(self) -> None:
+        result, operations, _paths = self.run_stage(arguments=("extra",))
+        self.assert_setup_failure(result, "arguments")
+        self.assertIn("no argument", result.stderr)
+        self.assertEqual(operations, [])
+        result, operations, _paths = self.run_stage(include_sudo_uid=False)
+        self.assert_setup_failure(result, "identity")
+        self.assertIn("through sudo", result.stderr)
+        self.assertEqual(operations, [])
+        result, _operations, _paths = self.run_stage(command=())
+        self.assert_setup_failure(result, "command")
+        self.assertIn("on stdin", result.stderr)
 
     def test_successful_trial_preserves_the_command_exit_one(self) -> None:
-        result = self.run_stage(failing=None, command=("sh", "-c", "exit 1"))
+        result, _operations, _paths = self.run_stage(command=("false",))
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stderr, "")
 
+    def test_command_sees_only_the_fixed_environment_with_account_values(self) -> None:
+        result, _operations, _paths = self.run_stage(command=("/usr/bin/env",))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        environment = dict(line.split("=", 1) for line in result.stdout.splitlines())
+        self.assertEqual(set(environment), {"HOME", "PATH", "USER", "LOGNAME", "LANG"})
+        account = pwd.getpwuid(os.getuid())
+        self.assertEqual(environment["HOME"], account.pw_dir)
+        self.assertEqual(environment["USER"], account.pw_name)
+        self.assertEqual(environment["LOGNAME"], account.pw_name)
+        self.assertEqual(environment["LANG"], "C.UTF-8")
+        self.assertIn("/usr/bin", environment["PATH"].split(":"))
+
+    def test_command_words_are_literal_and_command_stdin_is_empty(self) -> None:
+        words = ("", "a word with spaces", "$(printf expanded)", "`printf expanded`", '"quoted"')
+        result, _operations, _paths = self.run_stage(command=("printf", "<%s>\\n", *words))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "".join(f"<{word}>\n" for word in words))
+        self.assertEqual(result.stderr, "")
+        result, _operations, _paths = self.run_stage(
+            command=("sh", "-c", "if read -r word; then exit 1; fi"),
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
 
 class Main(unittest.TestCase):
     """The standalone command reports each observed state and returns its code."""
@@ -471,7 +486,7 @@ class Main(unittest.TestCase):
                 code, output = self.run_main(test_facts, ("echo", "absent"))
                 self.assertEqual(code, expected)
                 self.assertEqual(output, "mask: no listed path is on this host\n")
-                self.assertEqual(runner.commands, [("echo", "absent")])
+                self.assertEqual(runner.commands, [(("echo", "absent"), None)])
 
     def test_inside_host_runs_as_stands(self) -> None:
         runner = RecordingRunner([17])
@@ -479,7 +494,7 @@ class Main(unittest.TestCase):
         code, output = self.run_main(test_facts, ("echo", "inside"))
         self.assertEqual(code, 17)
         self.assertEqual(output, "mask: already inside a mask\n")
-        self.assertEqual(runner.commands, [("echo", "inside")])
+        self.assertEqual(runner.commands, [(("echo", "inside"), None)])
 
     def test_ready_host_trials_then_runs_the_wrapped_command(self) -> None:
         runner = RecordingRunner([0, 23])
@@ -497,8 +512,8 @@ class Main(unittest.TestCase):
             "mask: 1 listed paths hidden; network namespace isolated with loopback up\n",
         )
         self.assertEqual(len(runner.commands), 2)
-        self.assertEqual(runner.commands[0][-1], "true")
-        self.assertEqual(runner.commands[1][-2:], ("echo", "ready"))
+        self.assertEqual(runner.commands[0], (("sudo", "-n", mask.WRAPPER_PATH), "true\n"))
+        self.assertEqual(runner.commands[1], (("sudo", "-n", mask.WRAPPER_PATH), "echo\nready\n"))
 
 
 class Imports(unittest.TestCase):

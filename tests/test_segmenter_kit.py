@@ -916,6 +916,7 @@ class Imports(unittest.TestCase):
                         self.assertTrue(
                             (node.module or "").split(".")[0] in sys.stdlib_module_names
                             or (node.module or "").startswith(("gideon.", "tools.segmenter"))
+                            or node.module == "tools.synthetic.manifest"
                         )
                         self.assertFalse((node.module or "").startswith("gideon.worker"))
 

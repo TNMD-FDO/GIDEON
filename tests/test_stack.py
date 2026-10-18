@@ -1,14 +1,19 @@
-"""Command shapes for one-off service-image execution."""
+"""Compose command shapes and rendered service image references."""
 
 import unittest
 from pathlib import Path
 
+from test_images_lock import FakeHost
+
+from gideon.host import report
 from gideon.host.render.api import API_MOUNT_TARGET, API_WORKING_DIRECTORY
+from gideon.host.report import Problem
 from gideon.host.stack import (
     compose_project_argv,
     container_remove_argv,
     image_present_argv,
     image_run_argv,
+    service_image,
 )
 
 
@@ -44,3 +49,40 @@ class ImageCommands(unittest.TestCase):
             container_remove_argv("gideon-casecite-1"),
             ["docker", "rm", "-f", "gideon-casecite-1"],
         )
+
+
+class ServiceImage(unittest.TestCase):
+    def test_present_image(self) -> None:
+        image = "registry.example/postgres@sha256:" + "c" * 64
+        host = FakeHost(files={
+            "/rendered/compose.yaml": f"services:\n  postgres:\n    image: {image}\n",
+        })
+        self.assertEqual(service_image(host, "/rendered", "postgres"), image)
+
+    def test_missing_service(self) -> None:
+        host = FakeHost(files={"/rendered/compose.yaml": "services: {}\n"})
+        result = service_image(host, "/rendered", "postgres")
+        self.assertIsInstance(result, Problem)
+        assert isinstance(result, Problem)
+        self.assertEqual(result.problem, "rendered Compose file names no postgres service.")
+        self.assertEqual(result.fix, f"Run {report.command('apply')}, then retry.")
+
+    def test_missing_image(self) -> None:
+        for definition in ("{}", "{image: 42}"):
+            with self.subTest(definition=definition):
+                host = FakeHost(files={
+                    "/rendered/compose.yaml": f"services:\n  postgres: {definition}\n",
+                })
+                result = service_image(host, "/rendered", "postgres")
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertEqual(result.problem, "rendered Compose file names no image for postgres.")
+                self.assertEqual(result.fix, f"Run {report.command('apply')}, then retry.")
+
+    def test_unreadable_file(self) -> None:
+        host = FakeHost(denied=frozenset(("/rendered/compose.yaml",)))
+        result = service_image(host, "/rendered", "postgres")
+        self.assertIsInstance(result, Problem)
+        assert isinstance(result, Problem)
+        self.assertIn("rendered Compose file is unavailable:", result.problem)
+        self.assertEqual(result.fix, f"Run {report.command('apply')}, then retry.")

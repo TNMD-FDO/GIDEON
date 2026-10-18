@@ -207,6 +207,7 @@ class FakePage:
         rows: Mapping[str, list[tuple[str, str, str]]] | None = None,
         open_rows: set[str] | None = None,
         unopenable_rows: set[str] | None = None,
+        grid_widths: Mapping[str, tuple[int, int]] | None = None,
     ) -> None:
         self.host = host
         self.password = password
@@ -218,6 +219,7 @@ class FakePage:
         self.rows = rows or {}
         self.open_rows = open_rows or set()
         self.unopenable_rows = unopenable_rows or set()
+        self.grid_widths = grid_widths or {}
         self.default_panels = panels
         self.current_url = ""
         self.tooltip = ""
@@ -333,6 +335,9 @@ class FakePage:
         if selector == page.TOOLTIP_SELECTOR and self.hovered:
             return self.tooltip
         return self.values.get(selector)
+
+    def scroll_widths(self, selector: str) -> tuple[int, int] | None:
+        return self.grid_widths.get(selector)
 
     def url(self) -> str:
         return self.current_url
@@ -458,10 +463,11 @@ class BoardRows(unittest.TestCase):
         visible: list[tuple[str, str, str]],
         *,
         refuse_fill: bool = False,
+        grid_widths: Mapping[str, tuple[int, int]] | None = None,
     ) -> tuple[int, str, str, FakeHost, FakePage]:
         document = board_document("example-board", expected)
         host = FakeHost(document)
-        browser_page = FakePage(host, visible, refuse_fill=refuse_fill)
+        browser_page = FakePage(host, visible, refuse_fill=refuse_fill, grid_widths=grid_widths)
         code, stdout, stderr = self.invoke(host, browser_page)
         return code, stdout, stderr, host, browser_page
 
@@ -504,6 +510,61 @@ class BoardRows(unittest.TestCase):
         self.assertTrue(
             all(PASSWORD not in " ".join(command) for command in host.commands)
         )
+
+    def test_drawn_table_row_carries_its_scroll_and_client_widths(self) -> None:
+        selector = f'section[data-testid="{page.PANEL_SECTION_PREFIX}Rows"] {page.TABLE_GRID_SELECTOR}'
+        for widths in ((500, 600), (750, 600)):
+            with self.subTest(widths=widths):
+                code, stdout, stderr, _, _ = self.run_board(
+                    [("Rows", "table")], [("Rows", "drawn", "fictitious rows")],
+                    grid_widths={selector: widths},
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(stderr, "")
+                self.assertIn(
+                    f"panel: ok — example-board: Rows: drawn; scroll {widths[0]}/{widths[1]}",
+                    stdout.splitlines(),
+                )
+
+    def test_drawn_chart_row_has_no_scroll_figure(self) -> None:
+        selector = f'section[data-testid="{page.PANEL_SECTION_PREFIX}Figure"] {page.TABLE_GRID_SELECTOR}'
+        code, stdout, stderr, _, _ = self.run_board(
+            [("Figure", "timeseries")], [("Figure", "drawn", "fictitious points")],
+            grid_widths={selector: (750, 600)},
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertIn("panel: ok — example-board: Figure: drawn", stdout.splitlines())
+        self.assertNotIn("scroll", stdout)
+
+    def test_drawn_table_without_a_grid_has_no_scroll_figure(self) -> None:
+        code, stdout, stderr, _, _ = self.run_board(
+            [("Rows", "table")], [("Rows", "drawn", "fictitious rows")],
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertIn("panel: ok — example-board: Rows: drawn", stdout.splitlines())
+        self.assertNotIn("scroll", stdout)
+
+    def test_scroll_read_leaves_request_log_and_record_unchanged(self) -> None:
+        selector = f'section[data-testid="{page.PANEL_SECTION_PREFIX}Rows"] {page.TABLE_GRID_SELECTOR}'
+        records = []
+        for grid_widths in ({}, {selector: (750, 600)}):
+            code, stdout, stderr, host, _ = self.run_board(
+                [("Rows", "table")], [("Rows", "drawn", "fictitious rows")],
+                grid_widths=grid_widths,
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            self.assertNotIn("scroll", host.files[str(OUTPUT / "requests.log")])
+            for value in (stdout, stderr, host.files[str(OUTPUT / "requests.log")]):
+                self.assertNotIn(PASSWORD, value)
+            records.append((
+                host.files,
+                host.chowns,
+                [line for line in stdout.splitlines() if line.startswith(("requests:", "record:"))],
+            ))
+        self.assertEqual(records[0], records[1])
 
     def test_errored_panel_fails_and_carries_the_tooltip(self) -> None:
         expected = [("Faulty figure", "timeseries")]

@@ -2,7 +2,6 @@
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from enum import Enum
 from types import MappingProxyType
 from typing import Final
 
@@ -19,27 +18,7 @@ from gideon.evaluation import (
 )
 from gideon.evaluation.decision import DecisionMetric
 from gideon.evaluation.evalset import TIER_2_CATEGORY, LoadedSet
-from gideon.evaluation.results import RunContext, SliceResult
-
-
-class CallSurface(Enum):
-    """A surface an evaluation slice reaches, and whether it is on the box.
-
-    The record surface asks ``preconditions`` for root and the site file but
-    probes no reader; a runner reports the database refusal if its read fails.
-    The stores surface resolves one index generation before the run and probes
-    no store.
-    """
-
-    ENGINE = ("engine", True)
-    IMAGE = ("image", True)
-    RECORD = ("record", True)
-    STORES = ("stores", True)
-    TURNS = ("turns", True)
-    RANKED_FILE = ("ranked-file", False)
-
-    def __init__(self, _name: str, on_box: bool) -> None:
-        self.on_box = on_box
+from gideon.evaluation.results import CallSurface, RunContext, SliceResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +47,8 @@ class SliceSpec:
     a composite names none because it runs no case itself. ``turn_calls``
     counts the turns this runner drives over a slice's counted cases when a
     composite routes to it, excluding the judge's readings.
+    A part naming the stores surface runs in every composite run, even when
+    no counted case routes to it.
     ``engine_calls`` estimates the engine requests one counted run makes; None
     leaves its size bound to the quiet window. ``smoke``'s is the sum of its
     parts' ``turn_calls``; ``guardrails`` run alone keeps None, since the
@@ -237,7 +218,7 @@ _GENERAL_SMOKE: Final[SliceSpec] = SliceSpec(
 )
 
 SMOKE_PARTS: Final[Mapping[str, SliceSpec]] = MappingProxyType(
-    {"guardrails": _GUARDRAILS, "extraction": _EXTRACTION}
+    {"guardrails": _GUARDRAILS, "extraction": _EXTRACTION, "gold-drop": _GOLD_DROP}
 )
 _SMOKE: Final[smoke_slice.Composite] = smoke_slice.Composite(SMOKE_PARTS)
 
@@ -258,12 +239,14 @@ SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
         compares_reference=True,
         engine_calls=_SMOKE.engine_calls,
         gate_pass=(
-            "every positive blocked, no leak, the frontend sample agreeing; "
-            "the controls' replacement and the extraction bounds reported"
+            "every positive blocked, no leak, the frontend sample agreeing, "
+            "no zero-tolerance gold case dropped, gold dropped within the ceiling; "
+            "the controls' replacement, the extraction bounds, and the drop figures reported"
         ),
         gate_fail="a zero-tolerance case failed",
         gate_fix=(
-            "Review the smoke report's unblocked, leak, error, and disagreeing ids, then retry."
+            "Review the smoke report's unblocked, leak, error, and disagreeing ids "
+            "and the gold-drop report's dropped source ids, then retry."
         ),
         categories=frozenset(),
         turn_calls=None,

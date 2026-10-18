@@ -46,6 +46,7 @@ tools/judgments/ export-ignore
 tools/signoffs/ export-ignore
 tests/test_judgments_intake.py export-ignore
 tests/test_judgments_kit.py export-ignore
+tests/test_judgments_pool.py export-ignore
 tests/test_signoffs_kit.py export-ignore
 eval/sets/eval-v1/build-gates/extraction.jsonl export-ignore
 eval/sets/eval-v1/build-gates/extraction-variants.jsonl export-ignore

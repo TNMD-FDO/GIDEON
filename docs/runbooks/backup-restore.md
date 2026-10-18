@@ -289,16 +289,20 @@ rotated since the set was made (the install runbook's rotation step, `v0.1.40`).
    --project-directory /etc/gideon/rendered -f
    /etc/gideon/rendered/compose.yaml down`. Its `stores:` row puts the
    derived stores' indexes back from the set's snapshots, so they return with
-   the restore rather than by a rebuild. On the build box, first put the
-   set's registry root back by hand: from the snapshot the restore will select
-   (§4 above), the set it will select there — the push record's
-   `newest_set`, or under `--at` the newest complete set finished by that
-   time — fetch `sets/<set>/files/data-registry/` with the backup key into
-   `/data/registry` and restart `gideon-registry`, because the restore's
-   `fetch` reads the Postgres repository's owner through the built image
-   only that root holds; the restore's `stop` then stops the registry, its
-   file roots return `/data/registry` whole, and it starts the registry with
-   the store tier, so step 6's apply passes `registry`.
+   the restore rather than by a rebuild. On the build box, `fetch` probes the
+   host registry for the Postgres image the rendered Compose file names and,
+   when absent, seeds `/data/registry` from the selected set's `data-registry`
+   copy — verified against the set's inventory first, nothing deleted —
+   restarts `gideon-registry`, and probes again, its row naming the seed. A row
+   failing after the seed names the release the set records; follow step 3's
+   checkout at that tag, run `gideon apply`, then retry the restore. The
+   `stop`, `files`, and `stores` stages then stop the registry, return its root
+   whole, and start it, so step 6's apply passes `registry`.
+   A set recording a release whose `restore` has no seed fails at `fetch` with
+   the snapshot already in `/data/backup-staging.fetch-<label>` — copy that
+   directory's `sets/<set>/files/data-registry/` into `/data/registry` by hand,
+   restart `gideon-registry`, run the restore again, and remove the side
+   directory after recovery.
 5. Decrypt the set's tarball over the fresh secrets with the **old** identity
    from the password manager (the restored databases carry the old role
    passwords, so the old secrets must be back before anything connects).

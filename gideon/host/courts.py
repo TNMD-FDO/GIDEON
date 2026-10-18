@@ -169,6 +169,33 @@ class CourtMap:
             )
         )
 
+    def controlling_courts(
+        self, circuit: str, districts: Iterable[str], states: Iterable[str]
+    ) -> tuple[str, ...]:
+        """Return the courts whose authority controls at the site: the Supreme Court, the home
+        circuit and districts, and each home state's appellate courts."""
+
+        identifiers = set(self.ids_at_level("scotus"))
+        for identifier in (circuit, *districts):
+            identifiers.add(self.courts[identifier].id)
+        for identifier in states:
+            state = self.courts[identifier].state
+            if state is not None:
+                identifiers.update(self.appellate_courts(state))
+        return tuple(sorted(identifiers))
+
+    def scope_courts(self, identifiers: Iterable[str]) -> tuple[str, ...]:
+        """Return a stated jurisdiction's courts, a state's high court widened to its appellate
+        courts, and the Supreme Court always kept, since its authority controls everywhere."""
+
+        scoped = set(self.ids_at_level("scotus"))
+        for identifier in identifiers:
+            court = self.courts[identifier]
+            scoped.add(identifier)
+            if court.level == "state_supreme" and court.state is not None:
+                scoped.update(self.appellate_courts(court.state))
+        return tuple(sorted(scoped))
+
 
 @dataclass(frozen=True, slots=True)
 class CourtsError:

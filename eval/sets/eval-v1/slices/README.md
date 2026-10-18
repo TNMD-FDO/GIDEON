@@ -51,8 +51,10 @@ door and through the frontend. Its two extraction lists mirror `extraction`'s
 and change with them. Every list changes only by append; a successor to a
 superseded sample case is appended to the lists and named in the runner's
 `FRONTEND_SAMPLE` constant in `gideon/evaluation/guardrails_slice.py` in the
-same release. Each later slice adds its categories as they land. `harvest.ids`
-leaves at the export boundary with its cases.
+same release. The `gold-drop` part has no list: it runs in every smoke over
+the sibling's sample generation, and its verdict is smoke's. The research-qa
+lists join at sign-off intake. `harvest.ids` leaves at the export boundary
+with its cases.
 
 The `segmenter-300` slice has one list, `segmenter-300/sample.ids`, with every
 drawn case id, a superseding case's appended after it. A case without a checked

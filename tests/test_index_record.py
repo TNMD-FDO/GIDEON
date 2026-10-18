@@ -17,10 +17,12 @@ from gideon.host.index.record import (
     read_generation_by_inputs,
     read_generations,
     read_manifest,
+    read_manifest_rows,
     read_promoted,
     write_building,
     write_footprint,
 )
+from gideon.host.index.sample import SOURCE_ID_MAX_LENGTH
 from gideon.host.render.worker import GENERATION_FAILURE_REASONS, PIPELINE_VERSION
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike, RealHost
@@ -530,4 +532,76 @@ class ManifestReader(unittest.TestCase):
                     self.assertIn("Restore Docker Compose and psql", result.fix)
                 self.assertNotIn(host.stderr, result.problem + result.fix)
                 self.assertIn(report.command("index build caselaw --sample"), result.fix)
+                self.assertEqual(len(host.calls), 1)
+
+
+class ManifestRowsReader(unittest.TestCase):
+    """The whole manifest is a validated, ordered projection."""
+
+    def test_reads_every_identity_with_generation_bound_on_stdin(self) -> None:
+        rows = (
+            {"source_id": "example:opinion:17", "canonical_text_sha256": "b" * 64, "doc_id": "e" * 64},
+            {"source_id": "example:opinion:29", "canonical_text_sha256": "c" * 64, "doc_id": "f" * 64},
+        )
+        host = FakeHost(stdout="\n".join(json.dumps(row) for row in rows))
+        self.assertEqual(read_manifest_rows(host, RENDERED, NAME, "tools.synthetic.draft"), tuple(
+            (row["source_id"], row["canonical_text_sha256"], row["doc_id"]) for row in rows
+        ))
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, worker.psql_argv(RENDERED))
+        assert sql is not None
+        self.assertIn(worker.bind("v_name", NAME), sql)
+        self.assertIn("SELECT source_id, canonical_text_sha256, doc_id FROM public.generation_documents", sql)
+        self.assertIn("WHERE gen_id = :'v_name' ORDER BY source_id", sql)
+        self.assertNotIn("v_source_ids", sql)
+        self.assertNotIn(NAME, " ".join(argv))
+
+    def test_empty_manifest_returns_no_rows(self) -> None:
+        host = FakeHost()
+        self.assertEqual(read_manifest_rows(host, RENDERED, NAME, "tools.synthetic.draft"), ())
+        self.assertEqual(len(host.calls), 1)
+
+    def test_malformed_rows_refuse_the_whole_read_without_partial_results(self) -> None:
+        row = {"source_id": "example:opinion:29", "canonical_text_sha256": "c" * 64, "doc_id": "f" * 64}
+        first = {**row, "source_id": "example:opinion:17"}
+        invalid: tuple[object, ...] = (
+            None, [], {},
+            {**row, "source_id": ""}, {**row, "source_id": None},
+            {**row, "source_id": "Invalid identifier"},
+            {**row, "source_id": "x" * (SOURCE_ID_MAX_LENGTH + 1)},
+            {**row, "canonical_text_sha256": "C" * 64},
+            {**row, "canonical_text_sha256": "c" * 63},
+            {**row, "canonical_text_sha256": None},
+            {**row, "doc_id": "F" * 64}, {**row, "doc_id": "f" * 63},
+            {**row, "doc_id": None}, {**row, "doc_id": 1},
+            {**row, "unexpected": "Fictitious private diagnostic"},
+            *({key: value for key, value in row.items() if key != missing} for missing in row),
+        )
+        for line in ("Invalid JSON", json.dumps(first), *(json.dumps(value) for value in invalid)):
+            for prefix in ("", json.dumps(first) + "\n"):
+                # A single valid row is the control; repeating its source id
+                # is a malformed manifest just as it is for a filtered read.
+                if not prefix and line == json.dumps(first):
+                    continue
+                with self.subTest(line=line, after_valid=bool(prefix)):
+                    host = FakeHost(stdout=prefix + line)
+                    result = read_manifest_rows(host, RENDERED, NAME, "tools.synthetic.draft")
+                    self.assertEqual(result, Problem("generation manifest row is invalid", database_fix(RENDERED, "tools.synthetic.draft")))
+                    self.assertEqual(len(host.calls), 1)
+
+    def test_failed_read_and_unavailable_tools_refuse_even_with_valid_stdout(self) -> None:
+        row = {"source_id": "example:opinion:17", "canonical_text_sha256": "b" * 64, "doc_id": "e" * 64}
+        for code, error in ((3, None), (127, None), (0, FileNotFoundError()), (0, subprocess.SubprocessError())):
+            with self.subTest(code=code, error=error):
+                host = FakeHost(code=code, stdout=json.dumps(row), error=error, stderr="Fictitious private database diagnostic")
+                result = read_manifest_rows(host, RENDERED, NAME, "tools.synthetic.draft")
+                assert isinstance(result, Problem)
+                if code == 3:
+                    self.assertEqual(result.problem, "generation manifest read failed (exit 3)")
+                    self.assertEqual(result.fix, database_fix(RENDERED, "tools.synthetic.draft"))
+                else:
+                    self.assertIn("Restore Docker Compose and psql", result.fix)
+                self.assertIn(report.command("tools.synthetic.draft"), result.fix)
+                self.assertNotIn(host.stderr, result.problem + result.fix)
                 self.assertEqual(len(host.calls), 1)

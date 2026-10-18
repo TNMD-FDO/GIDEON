@@ -147,8 +147,8 @@ def running_services(host: Host, rendered_dir: PathLike) -> tuple[str, ...] | No
     )
 
 
-def declared_services(host: Host, rendered_dir: PathLike) -> tuple[str, ...] | Problem:
-    """Read service names in order from the rendered Compose file."""
+def _read_services(host: Host, rendered_dir: PathLike) -> Mapping[str, object] | Problem:
+    """Load and validate the rendered Compose services map through the host seam."""
 
     compose_path = Path(rendered_dir) / "compose.yaml"
     try:
@@ -162,4 +162,28 @@ def declared_services(host: Host, rendered_dir: PathLike) -> tuple[str, ...] | P
     services = document["services"]
     if not all(isinstance(name, str) for name in services):
         return Problem("rendered Compose file has an invalid services map.", _apply_fix())
+    return services
+
+
+def declared_services(host: Host, rendered_dir: PathLike) -> tuple[str, ...] | Problem:
+    """Read service names in order from the rendered Compose file."""
+
+    services = _read_services(host, rendered_dir)
+    if isinstance(services, Problem):
+        return services
     return tuple(services)
+
+
+def service_image(host: Host, rendered_dir: PathLike, service: str) -> str | Problem:
+    """Read one service's image reference from the rendered Compose file."""
+
+    services = _read_services(host, rendered_dir)
+    if isinstance(services, Problem):
+        return services
+    if service not in services:
+        return Problem(f"rendered Compose file names no {service} service.", _apply_fix())
+    definition = services[service]
+    image = definition.get("image") if isinstance(definition, Mapping) else None
+    if not isinstance(image, str):
+        return Problem(f"rendered Compose file names no image for {service}.", _apply_fix())
+    return image

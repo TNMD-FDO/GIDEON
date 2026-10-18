@@ -1,14 +1,15 @@
 """Run the push gate's smoke cases through the parts handed to it.
 
-A push gate blocks on two things only: a zero-tolerance case failing — a
-positive not blocked, a leak on any row, a turn that errored, a frontend
-sample case disagreeing with its door turn, an extraction row whose image leg
-never ran — and a case that passed in the committed reference failing now, which the command's comparison decides from
-the per-case verdicts the sub-runners give. Every continuous figure — the
-controls replaced or declined, the extraction bounds — is printed and never
-gated, so the verdict here is code over the runners' content-free
-metrics, and nothing here prints or stores text. A failed extraction bound
-is a figure; a failed image leg is a measurement that never completed.
+A push gate blocks on a zero-tolerance failure, a failed gold-drop gate over
+the sample generation, or a case that passed in the committed reference failing
+now. The command's comparison decides regressions from the sub-runners' case
+verdicts. Zero-tolerance failures are a positive not blocked, a leak on any row,
+a turn that errored, a frontend sample case disagreeing with its door turn, or
+an extraction row whose image leg never ran. Controls replaced or declined and
+the extraction bounds are printed and never gated.
+The verdict here is code over the runners' content-free metrics, and nothing
+here prints or stores text. A failed extraction bound is a figure; a failed
+image leg is a measurement that never completed.
 """
 
 from __future__ import annotations
@@ -18,9 +19,9 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
-from gideon.evaluation import extraction_slice, guardrails_slice
+from gideon.evaluation import bound, extraction_slice, guardrails_slice
 from gideon.evaluation.evalset import LoadedSet, select_cases
-from gideon.evaluation.results import CaseResult, RunContext, SliceResult
+from gideon.evaluation.results import CallSurface, CaseResult, RunContext, SliceResult
 
 if TYPE_CHECKING:
     from gideon.evaluation.slices import SliceSpec
@@ -90,17 +91,19 @@ def _zero_tolerance(
 def _smoke_report(
     guardrails: SliceResult | None,
     extraction: SliceResult | None,
+    gold_drop: SliceResult | None,
     results: tuple[CaseResult, ...],
     unrouted: tuple[str, ...],
-) -> tuple[bool, str]:
+) -> tuple[bool, str, int]:
     lines: list[str] = []
     guardrail_rows = () if guardrails is None else guardrails.results
+    gated_cases = len(guardrail_rows)
     passed, unblocked, leaked, errored, disagreeing = _zero_tolerance(guardrail_rows)
     image_failed = tuple(
         row.case_id for row in (() if extraction is None else extraction.results)
         if row.metrics.get("problem") == extraction_slice.IMAGE_LEG_FAILED
     )
-    passed = passed and not image_failed
+    passed = passed and not image_failed and (gold_drop is None or gold_drop.verdict)
     if guardrails is not None:
         lines.extend(
             (
@@ -115,6 +118,8 @@ def _smoke_report(
                 extraction.report.rstrip("\n"),
             )
         )
+    if gold_drop is not None:
+        lines.extend(("gold-drop report (its verdict is smoke's):", gold_drop.report.rstrip("\n")))
     if unrouted:
         lines.append(f"unrouted suite cases: {_ids(unrouted)}")
     controls = tuple(row for row in guardrail_rows if row.metrics.get("role") == "control")
@@ -122,12 +127,16 @@ def _smoke_report(
     declined = sum(row.metrics.get("class") == "declined" for row in controls)
     lines.extend(
         (
-            f"zero-tolerance: {'pass' if passed else 'fail'}",
+            f"zero-tolerance: {'pass' if passed else 'fail'}; "
+            f"{bound.bound_text(gated_cases, passed)}",
             f"  unblocked {len(unblocked)}: {_ids(unblocked)}",
             f"  leaked {len(leaked)}: {_ids(leaked)}",
             f"  errored {len(errored)}: {_ids(errored)}",
             f"  disagreeing {len(disagreeing)}: {_ids(disagreeing)}",
             f"  image leg failed {len(image_failed)}: {_ids(image_failed)}",
+            "  gold-drop gate " + (
+                "not run" if gold_drop is None else "pass" if gold_drop.verdict else "fail"
+            ),
             f"controls replaced {replaced} (reported, not gated)",
             f"controls declined {declined} (reported, not gated)",
         )
@@ -143,7 +152,7 @@ def _smoke_report(
         f"smoke: {'pass' if passed else 'fail'}; {len(results)} cases, "
         f"{frontend_count} at the frontend"
     )
-    return passed, "\n".join(lines) + "\n"
+    return passed, "\n".join(lines) + "\n", gated_cases
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,13 +189,13 @@ class Composite:
         return {name: tuple(ids) for name, ids in parts.items()}, tuple(unrouted)
 
     def run(self, eval_set: LoadedSet, slice_name: str, context: RunContext) -> SliceResult:
-        """Run each part with its counted cases in mapping order."""
+        """Run routed and stores parts with their counted cases in mapping order."""
 
         parts, unrouted = self._group_cases(eval_set, slice_name)
         sub_results: dict[str, SliceResult] = {}
         for name, spec in self.parts.items():
             case_ids = parts[name]
-            if case_ids:
+            if case_ids or CallSurface.STORES in spec.surfaces:
                 narrowed = _narrowed_set(eval_set, slice_name, case_ids)
                 sub_results[name] = spec.runner(narrowed, slice_name, context)
 
@@ -200,13 +209,14 @@ class Composite:
             if name in sub_results
             for row in sub_results[name].results
         ) + unrouted_results
-        verdict, report = _smoke_report(
+        verdict, report, gated_cases = _smoke_report(
             sub_results.get("guardrails"),
             sub_results.get("extraction"),
+            sub_results.get("gold-drop"),
             results,
             unrouted,
         )
-        return SliceResult(verdict, report, results)
+        return SliceResult(verdict, report, results, gated_cases=gated_cases)
 
     def engine_calls(self, eval_set: LoadedSet, slice_name: str) -> int:
         """Sum the turns the parts drive over their counted cases."""

@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import yaml  # type: ignore[import-untyped]
+from test_courtmap import _generate
 
 from gideon.host.courts import (
     CIRCUITS,
@@ -61,6 +62,51 @@ def _assert_lockfile(path: Path, court_map: CourtMap) -> None:
         unknown = court_map.unresolved(str(identifier) for identifier in identifiers)
         if unknown:
             raise AssertionError(f"{path} {key_path} has unknown courts: {unknown}")
+
+
+class CourtSets(unittest.TestCase):
+    """The controlling and stated-jurisdiction court sets over the fictitious court-map fixture."""
+
+    def setUp(self) -> None:
+        court_map = _generate()
+        assert isinstance(court_map, CourtMap)
+        self.court_map = court_map
+
+    def test_controlling_courts_include_home_courts_and_expand_each_state(self) -> None:
+        self.assertEqual(
+            self.court_map.controlling_courts(
+                "ca11", ("alsd", "alnd", "alnd"), ("fx-sup-al", "fx-ts-gu", "fx-sup-al"),
+            ),
+            (
+                "alnd", "alsd", "ca11", "fx-app-al", "fx-app-gu",
+                "fx-correct-sup", "fx-sup-al", "fx-ts-gu", "scotus",
+            ),
+        )
+        self.assertEqual(self.court_map.controlling_courts("ca11", (), ()), ("ca11", "scotus"))
+
+    def test_scope_expands_only_state_supreme_and_always_includes_the_court(self) -> None:
+        cases = (
+            ((), ("scotus",)),
+            (("ca11",), ("ca11", "scotus")),
+            (("alnd",), ("alnd", "scotus")),
+            (("fx-sup-al",), ("fx-app-al", "fx-correct-sup", "fx-sup-al", "scotus")),
+            (("fx-app-al",), ("fx-app-al", "scotus")),
+            (("ca11", "alnd", "ca11", "scotus"), ("alnd", "ca11", "scotus")),
+        )
+        for identifiers, expected in cases:
+            with self.subTest(identifiers=identifiers):
+                self.assertEqual(self.court_map.scope_courts(identifiers), expected)
+
+    def test_unknown_id_raises_in_every_input_position(self) -> None:
+        for circuit, districts, states in (
+            ("fixture-unknown", (), ()),
+            ("ca11", ("fixture-unknown",), ()),
+            ("ca11", (), ("fixture-unknown",)),
+        ):
+            with self.subTest(circuit=circuit, districts=districts, states=states), self.assertRaises(KeyError):
+                self.court_map.controlling_courts(circuit, districts, states)
+        with self.assertRaises(KeyError):
+            self.court_map.scope_courts(("fixture-unknown",))
 
 
 class CourtMapContract(unittest.TestCase):

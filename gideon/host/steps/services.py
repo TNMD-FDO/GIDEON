@@ -3,7 +3,9 @@
 import json
 import os
 import re
+import shlex
 import stat
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -67,6 +69,20 @@ RUNNER_INSTANCES = (
 )
 _RUNNER_TOKEN = Path("/etc/gideon/secrets/gh_runner_token")
 RUNNER_SUDOERS = Path("/etc/sudoers.d/gideon-acceptance")
+MASK_WRAPPER_PATH = Path("/usr/local/sbin/gideon-mask")
+SMOKE_WRAPPER_PATH = Path("/usr/local/sbin/gideon-ci-smoke")
+WRAPPER_MODE = 0o755
+MASK_WRAPPER_PATHS = (
+    "/etc/gideon",
+    "/opt/gideon",
+    "/run/gideon",
+    "/data",
+    "/var/log/journal",
+    "/run/log/journal",
+    "/run/docker.sock",
+    "/var/run/docker.sock",
+)
+MASK_SETUP_FAILURE_CODE = 71
 _RUNNER_SUDOERS_CANDIDATE = Path("/etc/sudoers.d/gideon-acceptance.candidate")
 _RUNNER_PACKAGE = "python3-venv"
 # The runner matches the ACTIONS_RUNNER_INPUT_ prefix case-insensitively and
@@ -74,6 +90,8 @@ _RUNNER_PACKAGE = "python3-venv"
 # is therefore the exact form.
 _RUNNER_TOKEN_VARIABLE = "ACTIONS_RUNNER_INPUT_token"
 _RUNNER_URL = "https://github.com/TNMD-FDO"  # The product's GitHub organization.
+_RUNNER_REPOSITORY = "GIDEON-dev"
+SMOKE_CHECKOUT = RUNNER_INSTANCES[0].directory / "_work" / _RUNNER_REPOSITORY / _RUNNER_REPOSITORY
 _KVM_FIX = "Install and repair the libvirt KVM prerequisites, then re-run provision."
 _IMAGE_FIX = "Download the lock-pinned acceptance VM image, then re-run provision."
 _REGISTRY_FIX = "Repair the provision-owned registry service, then re-run provision."
@@ -98,6 +116,8 @@ _RUNNER_SERVICE_FIX = "Install and start the GitHub runner service, then re-run 
 _RUNNER_SUDOERS_FIX = (
     "Repair /etc/sudoers.d/gideon-acceptance, then re-run provision."
 )
+_MASK_WRAPPER_FIX = "Repair /usr/local/sbin/gideon-mask, then re-run provision."
+_SMOKE_WRAPPER_FIX = "Repair /usr/local/sbin/gideon-ci-smoke, then re-run provision."
 _RUNNER_CREATE_FIX = "Create the gh-runner system user, then re-run provision."
 _RUNNER_USER_FIX = (
     "Repair gh-runner as a system user with a home directory, then re-run provision."
@@ -114,6 +134,169 @@ _RUNNER_REREGISTERED_ANNOUNCEMENT = (
     "it, bring the checkout to the merged commit, and re-run host provision within "
     "30 days of the release."
 )
+
+
+_MASK_SETUP = rf"""fail() {{
+    case "$1" in
+        arguments) fix="run it with no argument, the command one word per line on stdin" ;;
+        identity) fix="run it through sudo from the calling account, never as root" ;;
+        command) fix="send the command one word per line on stdin" ;;
+        *) fix="repair the mask prerequisites, then re-run" ;;
+    esac
+    printf "%s\n" "mask: setup failed at $1. Fix: $fix." >&2
+    exit {MASK_SETUP_FAILURE_CODE}
+}}
+
+setup() {{
+    step=$1
+    shift
+    if "$@" >/dev/null 2>&1; then
+        return 0
+    fi
+    fail "$step"
+}}
+
+"""
+
+_MASK_READ_STAGE = "set -u\n\n" + _MASK_SETUP + r"""set --
+# sh may export its own PWD even when started under env -i.
+unset PWD
+while IFS= read -r word || [ -n "$word" ]; do
+    set -- "$@" "$word"
+done
+[ "$#" -gt 0 ] || fail command
+exec "$@" </dev/null
+"""
+
+_MASK_INNER_STAGE = "set -u\n\n" + _MASK_SETUP + r"""uid=$1
+gid=$2
+groups=$3
+home=$4
+name=$5
+read_stage=$6
+shift 6
+
+setup rprivate mount --make-rprivate /
+for path do
+    if [ -d "$path" ]; then
+        setup "$path" mount -t tmpfs -o ro tmpfs "$path"
+    elif [ -e "$path" ]; then
+        setup "$path" mount --bind /dev/null "$path"
+    fi
+done
+setup loopback ip link set lo up
+
+set -- setpriv --reuid "$uid" --regid "$gid" --groups "$groups" \
+    --no-new-privs env -i "HOME=$home" \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    "USER=$name" "LOGNAME=$name" LANG=C.UTF-8
+setup drop "$@" true
+exec "$@" sh -c "$read_stage" mask
+"""
+
+
+def mask_wrapper_text(paths: Sequence[str] = MASK_WRAPPER_PATHS) -> str:
+    """The fixed root stages and the dropped-user reader for a masked command."""
+
+    return (
+        "#!/bin/sh\n"
+        "# Owned by gideon host provision, which rewrites it at every run: an edit does not survive.\n"
+        "set -u\n\n"
+        f"inner={shlex.quote(_MASK_INNER_STAGE)}\n"
+        f"read_stage={shlex.quote(_MASK_READ_STAGE)}\n\n"
+        + _MASK_SETUP
+        + r"""[ "$#" -eq 0 ] || fail arguments
+uid=${SUDO_UID-}
+gid=${SUDO_GID-}
+case "$uid" in ""|*[!0-9]*) fail identity ;; esac
+case "$gid" in ""|*[!0-9]*) fail identity ;; esac
+[ "$uid" -ne 0 ] 2>/dev/null || fail identity
+group_ids=$(id -G "$uid" 2>/dev/null) || fail identity
+groups=
+for group in $group_ids; do
+    case "$group" in ""|*[!0-9]*) fail identity ;; esac
+    groups=$groups${groups:+,}$group
+done
+[ -n "$groups" ] || fail identity
+account=$(getent passwd "$uid" 2>/dev/null) || fail identity
+IFS=: read -r name password account_uid account_gid gecos home login <<EOF
+$account
+EOF
+[ "$?" -eq 0 ] || fail identity
+[ "$account_uid" = "$uid" ] && [ -n "$name" ] && [ -n "$home" ] || fail identity
+setup namespace unshare --mount --net -- true
+exec unshare --mount --net -- sh -c "$inner" mask \
+"""
+        + '    "$uid" "$gid" "$groups" "$home" "$name" "$read_stage"'
+        + "".join(f" {shlex.quote(path)}" for path in paths)
+        + "\n"
+    )
+
+
+def smoke_wrapper_text(checkout: Path = SMOKE_CHECKOUT) -> str:
+    """The fixed smoke command run from the box runner's checkout."""
+
+    argument_refusal = (
+        "gideon-ci-smoke: takes no argument. Fix: run "
+        f"{SMOKE_WRAPPER_PATH} without arguments."
+    )
+    checkout_refusal = (
+        f"gideon-ci-smoke: {checkout} holds no CI smoke checkout. "
+        "Fix: a push to main checks it out there; by hand run "
+        "sudo python3 -B -m tools.cistack smoke from any checkout."
+    )
+    enter_refusal = (
+        f"gideon-ci-smoke: cannot enter {checkout}. "
+        f"Fix: repair access to {checkout}, then re-run."
+    )
+    return (
+        "#!/bin/sh\n"
+        "# Owned by gideon host provision, which rewrites it at every run: an edit does not survive.\n"
+        '[ "$#" -eq 0 ] || '
+        f"{{ echo {shlex.quote(argument_refusal)} >&2; exit 2; }}\n"
+        f"[ -f {shlex.quote(str(checkout / 'tools/cistack/__main__.py'))} ] || "
+        f"{{ echo {shlex.quote(checkout_refusal)} >&2; exit 2; }}\n"
+        f"cd {shlex.quote(str(checkout))} 2>/dev/null || "
+        f"{{ echo {shlex.quote(enter_refusal)} >&2; exit 2; }}\n"
+        "exec python3 -B -m tools.cistack smoke\n"
+    )
+
+
+_RUNNER_WRAPPERS = (
+    (MASK_WRAPPER_PATH, mask_wrapper_text(), _MASK_WRAPPER_FIX),
+    (SMOKE_WRAPPER_PATH, smoke_wrapper_text(), _SMOKE_WRAPPER_FIX),
+)
+
+
+def _wrapper_check(
+    context: ProvisionContext, path: Path, expected: str, fix: str
+) -> CheckResult | None:
+    """Read a provision-owned wrapper's text, mode, and root ownership."""
+
+    if not context.host.exists(path):
+        return CheckResult(Disposition.DRIFT, f"{path} is missing", fix)
+    try:
+        current = context.host.read_text(path)
+    except (OSError, UnicodeError) as exc:
+        return CheckResult(Disposition.UNFIXABLE, f"cannot read {path}: {exc}", fix)
+    if current != expected:
+        return CheckResult(Disposition.DRIFT, f"{path} differs from the release's wrapper", fix)
+    try:
+        details = context.host.stat(path)
+    except OSError as exc:
+        return CheckResult(Disposition.UNFIXABLE, f"cannot stat {path}: {exc}", fix)
+    mode = stat.S_IMODE(details.st_mode)
+    if mode != WRAPPER_MODE:
+        return CheckResult(
+            Disposition.DRIFT, f"{path} has mode {mode:04o}, expected {WRAPPER_MODE:04o}", fix
+        )
+    if details.st_uid != 0 or details.st_gid != 0:
+        return CheckResult(
+            Disposition.DRIFT,
+            f"{path} is owned by {details.st_uid}:{details.st_gid}, expected root:root",
+            fix,
+        )
+    return None
 
 
 def _runner_settings_fix(instance: RunnerInstance) -> str:
@@ -541,7 +724,7 @@ class GhRunnerStep(Step):
 
     A job on one instance never holds the other's release or registration.
     Both share the gh-runner account and its sudoers rules for the acceptance
-    harness, push smoke, and masked root stage.
+    harness and the provision-owned gideon-ci-smoke and gideon-mask wrappers.
     """
 
     name = "gh-runner"
@@ -555,9 +738,9 @@ class GhRunnerStep(Step):
             f"{_RUNNER_USER} ALL=(root) NOPASSWD: "
             "/usr/bin/python3 -m tools.acceptance *\n"
             f"{_RUNNER_USER} ALL=(root) NOPASSWD: "
-            "/usr/bin/python3 -B -m tools.cistack smoke\n"
+            f"{SMOKE_WRAPPER_PATH}\n"
             f"{_RUNNER_USER} ALL=(root) NOPASSWD: "
-            "/usr/bin/unshare --mount --net -- sh -c *\n"
+            f"{MASK_WRAPPER_PATH}\n"
         )
 
     def _sudoers_check(self, context: ProvisionContext) -> CheckResult | None:
@@ -705,6 +888,10 @@ class GhRunnerStep(Step):
             (instance.name, self._check_instance(context, instance, uid, gid, token))
             for instance in RUNNER_INSTANCES
         ]
+        for path, expected, fix in _RUNNER_WRAPPERS:
+            wrapper = _wrapper_check(context, path, expected, fix)
+            if wrapper is not None:
+                findings.append((path.name, wrapper))
         sudoers = self._sudoers_check(context)
         if sudoers is not None:
             findings.append(("sudoers", sudoers))
@@ -742,6 +929,7 @@ class GhRunnerStep(Step):
             context.host.run(["usermod", "-aG", "docker", _RUNNER_USER], check=True)
         if not package_installed(context, _RUNNER_PACKAGE):
             apt_install(context, [_RUNNER_PACKAGE])
+        self._ensure_wrappers(context)
         self._ensure_sudoers(context)
         token = _runner_token(context)
         failures: list[tuple[str, StepFailure]] = []
@@ -839,6 +1027,17 @@ class GhRunnerStep(Step):
         context.host.run(["systemctl", "enable", unit], check=True)
         context.host.run(["./svc.sh", "start"], cwd=instance.directory, check=True)
         return replaced, registered_now
+
+    def _ensure_wrappers(self, context: ProvisionContext) -> None:
+        """Write the fixed wrappers before promoting the rules that admit them."""
+
+        for path, expected, fix in _RUNNER_WRAPPERS:
+            if _wrapper_check(context, path, expected, fix) is None:
+                continue
+            context.host.mkdir(path.parent, mode=0o755, parents=True, exist_ok=True)
+            context.host.write_text(path, expected, mode=WRAPPER_MODE)
+            context.host.chmod(path, WRAPPER_MODE)
+            context.host.chown(path, 0, 0)
 
     def _ensure_sudoers(self, context: ProvisionContext) -> None:
         """Validate the acceptance runner's sudoers rule as a candidate, then promote it."""

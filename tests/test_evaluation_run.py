@@ -64,6 +64,7 @@ from gideon.evaluation import (
     evalset,
     judge,
     reference,
+    results,
     signoffs,
     stacks,
     window,
@@ -75,7 +76,11 @@ from gideon.evaluation.results import CaseResult, RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS, SMOKE_PARTS, CallSurface
 from gideon.extraction import KEYED_TYPES, SECTION_TYPES, ExactObject, extract
 from gideon.extraction.scoring import MIN_RECALL
-from gideon.host import backuplock, nogpu, report, stack
+from gideon.host import backuplock, models, nogpu, report, site, stack
+from gideon.host.corpus.lockfile import read_lockfile_directory
+from gideon.host.corpus.sources import SOURCES
+from gideon.host.index.generations import generation_name
+from gideon.host.index.sample import sample_name
 from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK
 from gideon.host.render.owui import GENERAL_MODEL_ID
 from gideon.host.render.services.prometheus import PROMETHEUS_LOOPBACK_ADDRESS
@@ -134,6 +139,35 @@ def _generation_row(*, state: str = "live") -> dict[str, str]:
         "gen_id": f"{command.generation.COLLECTION}__{label}__fictitious-embedding",
         "corpus_lockfile": label,
         "state": state,
+    }
+
+
+def _copy_sibling_artifacts(checkout: Path) -> None:
+    """Give an owned checkout the committed inputs used to name the sibling sample."""
+
+    shutil.copytree(ROOT / "corpus/lockfiles", checkout / "corpus/lockfiles")
+    shutil.copy2(ROOT / "models.lock", checkout / "models.lock")
+
+
+def _sibling_row(checkout: Path, site_path: Path = ROOT / "config/site.example.yaml") -> dict[str, str]:
+    """Derive the fake's sample row from the checkout's loaded artifacts."""
+
+    directory = read_lockfile_directory(
+        checkout / "corpus/lockfiles", known_sources={source.name: source for source in SOURCES},
+    )
+    assert not directory.errors and directory.newest is not None
+    loaded_site = site.load_site(site_path)
+    assert loaded_site.config is not None
+    loaded_models = models.load_models_lock(checkout / "models.lock")
+    assert loaded_models.lock is not None
+    profile = models.select_profile(loaded_models.lock, loaded_site.config.hardware_profile)
+    assert isinstance(profile, models.HardwareProfile) and profile.embedding_space is not None
+    return {
+        "gen_id": sample_name(generation_name(
+            command.generation.COLLECTION, directory.newest.label, profile.embedding_space.id,
+        )),
+        "corpus_lockfile": directory.newest.label,
+        "state": "built",
     }
 
 
@@ -214,6 +248,9 @@ class EvalHost:
         if Path(path).name == "images.lock":
             return self.image_lock_text
         return Path(path).read_text(encoding=encoding)
+
+    def read_bytes(self, path: PathLike) -> bytes:
+        return Path(path).read_bytes()
 
     def write_text(self, path: str | os.PathLike[str], text: str, *, encoding: str = "utf-8", mode: int = 0o644) -> None:
         raise NotImplementedError
@@ -313,7 +350,7 @@ def _reference_files(
     version = loaded.version if eval_set_version is None else eval_set_version
     for list_name, ids in loaded.slice_lists["extraction"].items():
         value = reference.ReferenceFile(
-            format=reference.FORMAT_VERSION,
+            format=1,
             product_version=gideon.__version__,
             corpus_lockfile=None,
             eval_set_version=version,
@@ -475,6 +512,116 @@ class Runner(unittest.TestCase):
         self.assertGreaterEqual(cast(float, by_id["case-a"].latency_ms), 0.0)
 
 
+class GateBounds(unittest.TestCase):
+    """The reported bound leaves every gate's verdict and fixes intact."""
+
+    def test_all_three_gates_report_the_slice_bound_before_reference_and_decision(self) -> None:
+        spec = SLICE_RUNNERS["guardrails"]
+        assert spec.decision is not None
+        paired = decision.paired_decision(
+            {}, {}, {}, spec.decision, against=RUN_ID,
+            requested_repeats=decision.DECISION_REPEATS,
+            completed_repeats=decision.DECISION_REPEATS, digest_equal=True,
+        )
+        comparison = reference.Comparison("absent", None, (), (), (), (), False)
+        for gate_name in ("_gate", "_reference_gate", "_decision_gate"):
+            for verdict in (True, False):
+                for count in (None, 0, 39):
+                    with self.subTest(gate=gate_name, verdict=verdict, count=count):
+                        result = SliceResult(verdict, "visibly fictitious report\n", (), gated_cases=count)
+                        with patch.object(command, "print_stage") as printer:
+                            if gate_name == "_gate":
+                                actual = command._gate(result, spec, partial=False)
+                            elif gate_name == "_reference_gate":
+                                actual = command._reference_gate(
+                                    result, spec, comparison, slice_name="guardrails",
+                                    set_version="eval-v-fictitious", reference_version="",
+                                    run_id=RUN_ID, written=True, record_root_fix="", partial=False,
+                                )
+                            else:
+                                actual = command._decision_gate(
+                                    result, spec, comparison, paired,
+                                    command._RunRepeats(result, decision.DECISION_REPEATS, decision.DECISION_REPEATS, None),
+                                    slice_name="guardrails", set_version="eval-v-fictitious",
+                                    reference_version="", run_id=RUN_ID, written=True, record_root_fix="",
+                                )
+                        self.assertEqual(actual, verdict)
+                        printer.assert_called_once()
+                        row = cast(report.StageResult, printer.call_args.args[0])
+                        expected = spec.gate_pass if verdict else spec.gate_fail
+                        if count == 0:
+                            expected += "; 0 cases, no bound"
+                        elif count is not None:
+                            expected += (
+                                "; 39 cases, true failure rate ≤ 7.7 % (3/n at 95 %)"
+                                if verdict else "; 39 cases, failed: no bound (3/n at 95 % is a clean run's)"
+                            )
+                        if gate_name != "_gate":
+                            expected += "; no reference for guardrails"
+                        if gate_name == "_decision_gate":
+                            expected += f"; decision {paired.verdict}"
+                        self.assertEqual(row.detail, expected)
+                        self.assertEqual(row.ok, verdict)
+                        self.assertEqual(row.fix, "" if verdict else spec.gate_fix)
+
+
+class RepeatCounts(unittest.TestCase):
+    """The fold keeps one selection's count only when the run finishes."""
+
+    def test_ordinary_and_decision_folds_take_the_first_completed_count(self) -> None:
+        loaded = load_set(ROOT / SET_ROOT).loaded
+        assert loaded is not None
+        for pairs in (False, True):
+            for count in (None, 0, 39):
+                with self.subTest(pairs=pairs, count=count):
+                    calls = 0
+
+                    def runner(
+                        _loaded: LoadedSet, _name: str, _context: RunContext,
+                        count: int | None = count,
+                    ) -> SliceResult:
+                        nonlocal calls
+                        calls += 1
+                        return SliceResult(
+                            True, "visibly fictitious report\n", (),
+                            gated_cases=count if calls == 1 else 999,
+                        )
+
+                    spec = replace(SLICE_RUNNERS["guardrails"], runner=runner)
+                    folded = command._run_repeats(
+                        spec, loaded, "guardrails", _run_context(),
+                        mode=command._Mode(command._DECISION_KIND if pairs else command._MANUAL_KIND, False),
+                    )
+                    self.assertEqual(folded.result.gated_cases, count)
+                    self.assertFalse(folded.partial)
+                    self.assertEqual(calls, decision.DECISION_REPEATS if pairs else 1)
+
+    def test_overrun_clears_the_count_with_or_without_completed_repeats(self) -> None:
+        loaded = load_set(ROOT / SET_ROOT).loaded
+        assert loaded is not None
+        for completed in (0, 2):
+            with self.subTest(completed=completed):
+                calls = 0
+
+                def runner(
+                    _loaded: LoadedSet, _name: str, _context: RunContext,
+                    completed: int = completed,
+                ) -> SliceResult:
+                    nonlocal calls
+                    calls += 1
+                    if calls > completed:
+                        raise window.WindowOverrun(NOW)
+                    return SliceResult(True, "visibly fictitious report\n", (), gated_cases=39)
+
+                folded = command._run_repeats(
+                    replace(SLICE_RUNNERS["guardrails"], runner=runner),
+                    loaded, "guardrails", _run_context(), mode=command._Mode(command._DECISION_KIND, False),
+                )
+                self.assertTrue(folded.partial)
+                self.assertEqual(folded.completed_repeats, completed)
+                self.assertIsNone(folded.result.gated_cases)
+
+
 class Command(unittest.TestCase):
     """The in-process CLI exposes the ordered run and its refusals."""
 
@@ -510,6 +657,7 @@ class Command(unittest.TestCase):
             True,
             "visibly fictitious passing run\n",
             tuple(CaseResult(case_id, repeat, "pass", {}) for repeat in range(1, 6)),
+            gated_cases=39,
         )
         prepared = command._Prepared(
             served_model_name=None,
@@ -556,10 +704,16 @@ class Command(unittest.TestCase):
         self.assertTrue(rows["decision"].detail.endswith("refused"))
         self.assertTrue(rows["gate"].ok)
         self.assertTrue(rows["gate"].detail.endswith("decision refused"))
+        self.assertIn(
+            "; 39 cases, true failure rate ≤ 7.7 % (3/n at 95 %); no reference for guardrails; decision refused",
+            rows["gate"].detail,
+        )
+        self.assertIn("bound: 39 cases, true failure rate ≤ 7.7 % (3/n at 95 %)\nverdict pass\n", stdout)
         self.assertEqual(rows["gate"].fix, "")
         writer.assert_called_once()
         recorded = writer.call_args.args[2]
         self.assertEqual(recorded.verdict, "pass")
+        self.assertEqual(recorded.gated_cases, slice_result.gated_cases)
         self.assertEqual(recorded.decision, decision.to_json(paired))
 
     def test_parser_kinds_and_decision_resolve_to_modes(self) -> None:
@@ -1244,6 +1398,7 @@ def _invoke_engine_command(
     conditions: ConditionsReader | None = None,
     sleep: Callable[[float], None] | None = None,
     on_run: Callable[[RunContext], SliceResult] | None = None,
+    generation_reply: str | None = None,
 ) -> tuple[int, str, str, dict[str, list[Any]]]:
     observed: dict[str, list[Any]] = {
         "contexts": [],
@@ -1290,6 +1445,13 @@ def _invoke_engine_command(
         run_kwargs["sleep"] = sleep
     replacement = dict(command.SLICE_RUNNERS)
     replacement[slice_name] = replace(replacement[slice_name], runner=run_slice)
+    if stack_name == CI_STACK and CallSurface.STORES in replacement[slice_name].surfaces:
+        host.generation_output = (
+            json.dumps(_sibling_row(run_kwargs["checkout_root"])) + "\n"
+            if generation_reply is None else generation_reply
+        )
+    elif CallSurface.STORES in replacement[slice_name].surfaces:
+        host.generation_output = json.dumps(_generation_row()) + "\n"
     with (
         patch.object(
             command.engine,
@@ -1530,6 +1692,28 @@ class EngineConditionsRecord(unittest.TestCase):
 
 
 class EngineStackAndLock(unittest.TestCase):
+    def test_missing_sibling_sample_names_its_build_and_releases_the_engine(self) -> None:
+        """An unnamed smoke resolves the current cut's sample or refuses."""
+
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        row = _sibling_row(ROOT)
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                environment = {report.GIDEON_INSTALLED_COMMAND: "/fictitious/gideon"} if installed else {}
+                host = EvalHost()
+                with patch.dict(os.environ, environment, clear=True):
+                    code, stdout, stderr, observed = _invoke_engine_command(host, generation_reply="")
+                    build = report.command(f"index build caselaw --sample --lockfile {row['corpus_lockfile']}")
+                    retry = report.command("eval run --slice smoke --stack ci --kind smoke")
+                self.assertEqual((code, stderr), (1, ""), stdout)
+                self.assertIn(f"generation {row['gen_id']} is not recorded on the {CI_STACK} stack", stdout)
+                self.assertIn(f"Build it with {build}, or name a built generation with {retry} --generation <name>", stdout)
+                self.assertEqual(observed["contexts"], [])
+                self.assertEqual(host.locks, {})
+                self.assertNotIn("run: ok", stdout)
+                self.assertNotIn("record:", stdout)
+                self.assertFalse(any("INSERT INTO eval_runs" in (sql or "") for _argv, sql in host.calls))
+
     def test_live_sibling_job_refuses_after_lock_before_any_turn_and_releases(self) -> None:
         """A live sibling build keeps a hand-run CI eval off the engine."""
 
@@ -1592,21 +1776,51 @@ class EngineStackAndLock(unittest.TestCase):
     def test_turn_driving_slices_print_their_own_verdict(self) -> None:
         for slice_name in ("smoke", "general-smoke", "guardrails"):
             for verdict, word in ((True, "pass"), (False, "FAIL")):
-                with self.subTest(slice_name=slice_name, verdict=verdict):
-                    def run_result(_context: RunContext, verdict: bool = verdict) -> SliceResult:
-                        return SliceResult(
-                            verdict, "visibly fictitious report without final newline", ()
-                        )
+                for count in (None, 0, 39):
+                    with self.subTest(slice_name=slice_name, verdict=verdict, count=count):
+                        def run_result(
+                            _context: RunContext, verdict: bool = verdict,
+                            count: int | None = count,
+                        ) -> SliceResult:
+                            return SliceResult(
+                                verdict, "visibly fictitious report without final newline", (),
+                                gated_cases=count,
+                            )
 
-                    code, stdout, stderr, _observed = _invoke_engine_command(
-                        EvalHost(),
-                        slice_name=slice_name,
-                        on_run=run_result,
-                    )
-                    self.assertEqual(stderr, "")
-                    self.assertEqual(code, 0 if verdict else 1)
-                    self.assertIn("visibly fictitious report without final newline\nverdict ", stdout)
-                    _assert_comparison_lines(self, stdout, word=word)
+                        host = EvalHost()
+                        code, stdout, stderr, _observed = _invoke_engine_command(
+                            host,
+                            slice_name=slice_name,
+                            on_run=run_result,
+                        )
+                        self.assertEqual(stderr, "")
+                        self.assertEqual(code, 0 if verdict else 1)
+                        bound_lines = [line for line in stdout.splitlines() if line.startswith("bound:")]
+                        if count is None:
+                            self.assertEqual(bound_lines, [])
+                            self.assertIn("visibly fictitious report without final newline\nverdict ", stdout)
+                        else:
+                            text = (
+                                "0 cases, no bound" if count == 0 else
+                                "39 cases, true failure rate ≤ 7.7 % (3/n at 95 %)" if verdict else
+                                "39 cases, failed: no bound (3/n at 95 % is a clean run's)"
+                            )
+                            self.assertEqual(bound_lines, [f"bound: {text}"])
+                            self.assertIn(f"bound: {text}\nverdict {word}\n", stdout)
+                            gate_line = next(line for line in stdout.splitlines() if line.startswith("gate:"))
+                            self.assertIn(f"; {text}", gate_line)
+                        _assert_comparison_lines(self, stdout, word=word)
+                        write_sql = next(
+                            cast(str, sql) for argv, sql in host.calls
+                            if sql is not None and "INSERT INTO eval_runs" in sql
+                        )
+                        if count is None:
+                            self.assertNotIn("\\set gated_cases ", write_sql)
+                            run_insert = next(line for line in write_sql.splitlines() if line.startswith("INSERT INTO eval_runs"))
+                            self.assertTrue(run_insert.endswith(", NULL);"))
+                        else:
+                            count_line = next(line for line in write_sql.splitlines() if line.startswith("\\set gated_cases "))
+                            self.assertEqual(int(read_psql_set(count_line, "gated_cases")), count)
 
     def test_ci_threads_turn_paths_records_identity_and_waives_the_window(self) -> None:
         host = EvalHost()
@@ -1844,7 +2058,7 @@ class NightlyCommand(unittest.TestCase):
 
         def finish_at_deadline(_context: RunContext) -> SliceResult:
             now[0] = end
-            return SliceResult(True, "visibly fictitious completed turn\n", ())
+            return SliceResult(True, "visibly fictitious completed turn\n", (), gated_cases=39)
 
         def unexpected_sleep(_seconds: float) -> None:
             self.fail("an available lock must not sleep")
@@ -1865,6 +2079,7 @@ class NightlyCommand(unittest.TestCase):
         self.assertIn("1 run row, 0 result rows", stdout)
         self.assertIn("gate: refuse", stdout)
         _assert_comparison_lines(self, stdout, word="FAIL")
+        self.assertFalse(any(line.startswith("bound:") for line in stdout.splitlines()))
         write_sql = next(
             cast(str, statement)
             for argv, statement in host.calls
@@ -1877,6 +2092,9 @@ class NightlyCommand(unittest.TestCase):
         self.assertIn(f"\\set finished_at '{end.isoformat()}'", write_sql)
         self.assertIn("\\set engine_in_flight_max '7'", write_sql)
         self.assertIn("\\set engine_preemptions '3'", write_sql)
+        self.assertNotIn("\\set gated_cases ", write_sql)
+        run_insert = next(line for line in write_sql.splitlines() if line.startswith("INSERT INTO eval_runs"))
+        self.assertTrue(run_insert.endswith(", NULL);"))
 
     def test_held_lock_waits_for_each_poll_and_records_the_effective_start(self) -> None:
         host = EvalHost()
@@ -2075,7 +2293,7 @@ class RunnerSelection(unittest.TestCase):
                     cases_by_id={case_id: {"id": case_id}},
                     active_ids=(case_id,),
                     slices={slice_name: (case_id,)},
-                    slice_lists={},
+                    slice_lists={slice_name: {"fictitious": (case_id,)}},
                     digest="fictional-digest",
                     unsigned_ids=frozenset({case_id}),
                 )
@@ -2126,7 +2344,8 @@ class SliceRegistry(unittest.TestCase):
         self.assertIsNone(spec.engine_calls)
         self.assertIsNone(spec.turn_calls)
         self.assertIsNone(spec.decision)
-        self.assertNotIn("gold-drop", SMOKE_PARTS)
+        self.assertIs(SMOKE_PARTS["gold-drop"], spec)
+        self.assertEqual(tuple(SMOKE_PARTS), ("guardrails", "extraction", "gold-drop"))
 
     def test_segmenter_entry_is_image_and_record_only(self) -> None:
         spec = SLICE_RUNNERS["segmenter-300"]
@@ -2195,6 +2414,9 @@ class SliceRegistry(unittest.TestCase):
                     self.assertIsNotNone(part.turn_calls)
 
     def test_smoke_surfaces_are_the_union_of_its_parts(self) -> None:
+        self.assertIs(CallSurface, results.CallSurface)
+        self.assertEqual(CallSurface.__module__, "gideon.evaluation.results")
+        self.assertIn(CallSurface.STORES, SLICE_RUNNERS["smoke"].surfaces)
         self.assertEqual(
             SLICE_RUNNERS["smoke"].surfaces,
             frozenset(surface for part in SMOKE_PARTS.values() for surface in part.surfaces),
@@ -2354,6 +2576,9 @@ class Imports(unittest.TestCase):
                         and top == "playwright"
                     ):
                         # test_turns_browser.py owns the function-or-TYPE_CHECKING boundary.
+                        continue
+                    if path == EVALUATION / "pool_leg.py" and top in {"httpx", "psycopg"}:
+                        # test_pool_leg.py holds the image's clients inside functions.
                         continue
                     self.assertTrue(
                         top in standard_library or top == "gideon"

@@ -1,4 +1,4 @@
-"""The committed reference-file format and its per-case comparison.
+"""The committed reference-file formats 1 and 2 and their per-case comparison.
 
 Reference files are the one stable, content-free record of an evaluation slice:
 ``eval/reference/<slice>/<list>.json`` contains the format number, the release
@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Final, Literal, cast
 
 from gideon.evaluation.evalset import SHAPE_REGISTRY, Finding
+from gideon.host.render.worker import GENERATION_PATTERN
 from gideon.host.sysio import Host, PathLike, RealHost
 
 type Verdict = Literal["pass", "fail"]
@@ -37,7 +38,7 @@ type ReferenceOutcome = Literal[
     "malformed",
 ]
 
-FORMAT_VERSION: Final[int] = 1
+FORMAT_VERSION: Final[int] = 2
 VERDICTS: Final[tuple[Verdict, ...]] = ("pass", "fail")
 OUTCOMES: Final[tuple[ReferenceOutcome, ...]] = (
     "current",
@@ -49,7 +50,7 @@ OUTCOMES: Final[tuple[ReferenceOutcome, ...]] = (
 )
 REFERENCE_ROOT: Final[Path] = Path("eval", "reference")
 
-_REFERENCE_KEYS: Final[frozenset[str]] = frozenset(
+_FORMAT_1_KEYS: Final[frozenset[str]] = frozenset(
     {
         "cases",
         "corpus_lockfile",
@@ -64,8 +65,9 @@ _REFERENCE_KEYS: Final[frozenset[str]] = frozenset(
         "tag",
     }
 )
+_FORMAT_2_KEYS: Final[frozenset[str]] = _FORMAT_1_KEYS | {"generation_id", "verdict"}
 _HEADER_FIELDS: Final[tuple[str, ...]] = tuple(
-    sorted(_REFERENCE_KEYS - {"cases", "list"})
+    sorted(_FORMAT_2_KEYS - {"cases", "list"})
 )
 _CASE_ID_PATTERNS: Final[tuple[re.Pattern[str], ...]] = tuple(
     spec.id_pattern for spec in SHAPE_REGISTRY.values()
@@ -97,6 +99,8 @@ class ReferenceFile:
     repeats: int
     set_digest: str
     cases: Mapping[str, Verdict]
+    generation_id: str | None = None
+    verdict: Verdict | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +153,9 @@ def serialize_reference(reference: ReferenceFile) -> str:
         "set_digest": reference.set_digest,
         "cases": dict(sorted(reference.cases.items())),
     }
+    if reference.format == 2:
+        document["generation_id"] = reference.generation_id
+        document["verdict"] = reference.verdict
     return json.dumps(document, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
 
 
@@ -226,15 +233,16 @@ def _parse_file(
         findings.append(Finding(relative, None, 1, "file is not one JSON object", _REFERENCE_FIX))
         return None
 
-    keys = set(document)
-    for key in sorted(keys - _REFERENCE_KEYS):
-        findings.append(Finding(relative, None, 0, f"unknown key {key!r}", _REFERENCE_FIX))
-    for key in sorted(_REFERENCE_KEYS - keys):
-        findings.append(Finding(relative, None, 0, f"missing key {key!r}", _REFERENCE_FIX))
-
     format_value = document.get("format")
-    if not isinstance(format_value, int) or isinstance(format_value, bool) or format_value != FORMAT_VERSION:
+    if not isinstance(format_value, int) or isinstance(format_value, bool) or format_value not in {1, 2}:
         findings.append(Finding(relative, None, 0, "format number", _REFERENCE_FIX))
+        return None
+    required_keys = _FORMAT_1_KEYS if format_value == 1 else _FORMAT_2_KEYS
+    keys = set(document)
+    for key in sorted(keys - required_keys):
+        findings.append(Finding(relative, None, 0, f"unknown key {key!r}", _REFERENCE_FIX))
+    for key in sorted(required_keys - keys):
+        findings.append(Finding(relative, None, 0, f"missing key {key!r}", _REFERENCE_FIX))
 
     product_version = _required_string(document, "product_version", relative, findings)
     corpus_lockfile = _nullable_string(document, "corpus_lockfile", relative, findings)
@@ -243,6 +251,17 @@ def _parse_file(
     tag = _required_string(document, "tag", relative, findings)
     header_slice = _required_string(document, "slice", relative, findings)
     header_list = _required_string(document, "list", relative, findings)
+    generation_id = None
+    run_verdict = None
+    if format_value == 2:
+        generation_id = _nullable_string(document, "generation_id", relative, findings)
+        if generation_id is not None and re.fullmatch(GENERATION_PATTERN, generation_id) is None:
+            findings.append(Finding(relative, None, 0, "generation_id must be a generation name or null", _REFERENCE_FIX))
+        verdict_value = document.get("verdict")
+        if isinstance(verdict_value, str) and verdict_value in VERDICTS:
+            run_verdict = cast(Verdict, verdict_value)
+        else:
+            findings.append(Finding(relative, None, 0, "verdict must be pass or fail", _REFERENCE_FIX))
 
     if header_slice and header_slice != slice_name:
         findings.append(Finding(relative, None, 0, "slice does not match path", _REFERENCE_FIX))
@@ -288,7 +307,7 @@ def _parse_file(
     # Every field above either holds a validated value or left a finding behind
     # it, so the finding count is the one guard the file has to pass.
     reference = ReferenceFile(
-        FORMAT_VERSION,
+        format_value,
         product_version,
         corpus_lockfile,
         eval_set_version,
@@ -299,6 +318,8 @@ def _parse_file(
         repeats,
         set_digest,
         cases,
+        generation_id=generation_id,
+        verdict=run_verdict,
     )
     if len(findings) > before:
         return None

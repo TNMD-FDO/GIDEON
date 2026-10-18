@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Final, Protocol, cast
 
-from gideon.evaluation import record, segmenter_leg
+from gideon.evaluation import bound, record, segmenter_leg
 from gideon.evaluation.evalset import SEGMENTER_TEXT_SOURCES, LoadedSet, select_cases
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
 from gideon.host import cas, report, stack
@@ -321,6 +321,8 @@ def _report(
     reasons: tuple[str, ...],
     fixes: Mapping[str, str],
     details: Sequence[str],
+    *,
+    verdict: bool,
 ) -> str:
     """Render ids, counts, and vocabulary words alone."""
 
@@ -373,7 +375,8 @@ def _report(
     ) or "none"
     lines.append(
         f"counted {selection_count}, unsigned {unsigned_count}, "
-        f"measured {sum('chars' in item.metrics for item in results)}, failed-by-code {failure_counts}"
+        f"measured {sum('chars' in item.metrics for item in results)}, failed-by-code {failure_counts}; "
+        f"{bound.bound_text(selection_count, verdict)}"
     )
     for item in details:
         lines.append(item)
@@ -404,13 +407,13 @@ def run_segmenter(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
 
     if not counted:
         gate = slice_gate(matrix, 0, 0, 0)
-        return SliceResult(False, _report(0, len(selection.unsigned), (), matrix, source_counts, page_figures, elapsed, gate.reasons, fixes, details), ())
+        return SliceResult(False, _report(0, len(selection.unsigned), (), matrix, source_counts, page_figures, elapsed, gate.reasons, fixes, details, verdict=False), (), gated_cases=0)
     if context.image is None:
         for case_id in counted:
             fail(case_id, "image-leg-failed", "Build the pinned gideon image with tools.imagebuild, then retry.")
         ordered = tuple(results[case_id] for case_id in counted)
         gate = slice_gate(matrix, len(counted), 0, 0)
-        return SliceResult(False, _report(len(counted), len(selection.unsigned), ordered, matrix, source_counts, page_figures, elapsed, gate.reasons, fixes, details), ordered)
+        return SliceResult(False, _report(len(counted), len(selection.unsigned), ordered, matrix, source_counts, page_figures, elapsed, gate.reasons, fixes, details, verdict=False), ordered, gated_cases=len(counted))
 
     opinion_ids = tuple(cast(int, eval_set.cases_by_id[case_id]["opinion_id"]) for case_id in counted)
     documents = _read_documents(opinion_ids, context)
@@ -419,7 +422,7 @@ def run_segmenter(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
             fail(case_id, "record-unreachable", documents.fix)
         ordered = tuple(results[case_id] for case_id in counted)
         gate = slice_gate(matrix, len(counted), 0, 0)
-        return SliceResult(False, _report(len(counted), len(selection.unsigned), ordered, matrix, source_counts, page_figures, elapsed, gate.reasons, fixes, details), ordered)
+        return SliceResult(False, _report(len(counted), len(selection.unsigned), ordered, matrix, source_counts, page_figures, elapsed, gate.reasons, fixes, details, verdict=False), ordered, gated_cases=len(counted))
 
     available: dict[str, RecordDocument] = {}
     originals: dict[str, str] = {}
@@ -520,6 +523,7 @@ def run_segmenter(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
     verdict = gate.ok and all(item.verdict == "pass" for item in ordered)
     return SliceResult(
         verdict,
-        _report(len(counted), len(selection.unsigned), ordered, matrix, source_counts, page_figures, elapsed, gate.reasons, fixes, details),
+        _report(len(counted), len(selection.unsigned), ordered, matrix, source_counts, page_figures, elapsed, gate.reasons, fixes, details, verdict=verdict),
         ordered,
+        gated_cases=len(counted),
     )

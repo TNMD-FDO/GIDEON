@@ -130,6 +130,7 @@ class ImageLeg(unittest.TestCase):
         loaded, ids = _cases(full=True)
         host = ImageHost(lambda input_text: _reply(input_text, loaded))
         result = run_extraction(loaded, "extraction", _context(host))
+        self.assertIsNone(result.gated_cases)
         self.assertEqual(len(host.calls), 1)
         argv, input_text, timeout = host.calls[0]
         self.assertEqual(timeout, IMAGE_TIMEOUT_SECONDS)

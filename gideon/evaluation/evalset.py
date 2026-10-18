@@ -3,9 +3,14 @@
 An extraction case is a harvest, an invented, or a variant case; a variant
 names its parent, carries the parent's cluster, and retires with it. A judge
 triple is an invented reference-and-candidate grading case. A research-qa case
-is one reviewed research question carrying no expected answer: its signed
-answer lives in the sign-offs file, and a case with no line there is unsigned —
-it loads, and a selection keeps it out of what a gate counts.
+is one reviewed research question. A harvest case's signed answer lives in the
+sign-offs file; a synthetic case carries its own expected answer and retraced
+gold evidence. A case is unsigned iff its shape takes a sign-off, it carries no
+expected of its own, and no sign-off or label names it — it loads, and a
+selection keeps it out of what a gate counts.
+The shape's zero_tolerance flag marks categories whose dropped gold fails the
+gate and whose synthetic cases require a full read. Other synthetic reviews
+record whether the case was read or admitted on the batch's sample.
 Guardrails family cases carry an expected turn class and, for positives, a
 pattern id with an optional ``must_not`` string or list of regular expressions.
 Tier-2 cases carry the instructed turn expectation without a family pattern.
@@ -109,6 +114,11 @@ _QUESTION_BASE_KEYS: Final[tuple[str, ...]] = (
     "notes",
     "review",
 )
+_SYNTHETIC_KEYS: Final[tuple[str, ...]] = (
+    "id", "suite", "category", "branch", "question", "jurisdiction", "expected",
+    "gold", "labels", "template", "cluster_id", "review", "notes",
+)
+GOLD_COORDINATE_KEYS: Final[tuple[str, ...]] = ("source_id", "sha256", "start", "end", "quote")
 ROLE_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?:CHU-attorney|CHU-investigator|CHU-paralegal|TRAD-attorney|"
     r"TRAD-investigator|TRAD-legal-assistant|support|CSA|unknown)-[1-9][0-9]*"
@@ -125,11 +135,11 @@ class ShapeSpec:
 
     ``question_origins`` is the origin vocabulary of a shape whose case is one
     reviewed research question, and empty for every other shape. Non-empty, it
-    carries that family's whole rule set — the one-line question, the origin,
-    wording, and query-type label form, the optional ``reference_date`` and
-    ``jurisdiction`` checked against the court map, and ``accepted_flags`` in
-    the review — so a shape registered later takes the rules by declaring its
-    vocabulary rather than by repeating four flags in lockstep.
+    carries that family's one-line question and court-map checks. Harvest and
+    written questions also carry wording labels and accepted review flags;
+    synthetic questions use their own keys and labels. ``zero_tolerance`` marks
+    shapes whose dropped gold fails the gate and whose synthetic cases require
+    a full read; other synthetic reviews also say whether the case was read.
     """
 
     suite: str
@@ -141,6 +151,10 @@ class ShapeSpec:
     review_keys: tuple[str, ...]
     question_origins: tuple[str, ...] = ()
     takes_signoff: bool = False
+    synthetic_keys: tuple[str, ...] = ()
+    zero_tolerance: bool = False
+    expected_keys: tuple[str, ...] = ()
+    gold_keys: tuple[str, ...] = ()
 
     @property
     def is_question_case(self) -> bool:
@@ -151,6 +165,10 @@ class ShapeSpec:
     def keys_for(self, record: Mapping[str, object], origin: str | None) -> tuple[str, ...]:
         """Return the exact key order allowed for *record*."""
 
+        from gideon.evaluation import synthetic
+
+        if origin == synthetic.SYNTHETIC_ORIGIN and self.synthetic_keys:
+            return self.synthetic_keys + (("supersedes",) if "supersedes" in record else ())
         keys = list(self.base_keys)
         if self.category == "extraction":
             if origin == "variant":
@@ -177,6 +195,27 @@ class ShapeSpec:
         elif "supersedes" in record:
             keys.append("supersedes")
         return tuple(keys)
+
+    def review_keys_for(self, origin: str | None) -> tuple[str, ...]:
+        """Synthetic reviews carry the reader, date, and sampled read status."""
+
+        from gideon.evaluation import synthetic
+
+        if origin == synthetic.SYNTHETIC_ORIGIN:
+            return ("by", "on") if self.zero_tolerance else ("by", "on", "read")
+        return self.review_keys
+
+    def expected_keys_for(self) -> tuple[str, ...]:
+        """Return the shape's answer keys or the default sign-off keys."""
+
+        from gideon.evaluation import signoffs
+
+        return self.expected_keys or signoffs.EXPECTED_KEYS
+
+    def gold_keys_for(self) -> tuple[str, ...]:
+        """Return the shape's evidence keys or the default coordinates."""
+
+        return self.gold_keys or GOLD_COORDINATE_KEYS
 
 
 SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
@@ -229,8 +268,9 @@ SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
         RESEARCH_QA_ID_PATTERN,
         _HARVEST_CLUSTER,
         ("by", "on", "accepted_flags"),
-        question_origins=("harvest",),
+        question_origins=("harvest", "synthetic"),
         takes_signoff=True,
+        synthetic_keys=_SYNTHETIC_KEYS,
     ),
     ("research-qa", "synthesis"): ShapeSpec(
         "research-qa",
@@ -240,8 +280,9 @@ SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
         RESEARCH_QA_ID_PATTERN,
         _HARVEST_CLUSTER,
         ("by", "on", "accepted_flags"),
-        question_origins=("harvest",),
+        question_origins=("harvest", "synthetic"),
         takes_signoff=True,
+        synthetic_keys=_SYNTHETIC_KEYS,
     ),
     ("research-qa", "lookup"): ShapeSpec(
         "research-qa",
@@ -251,8 +292,10 @@ SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
         RESEARCH_QA_ID_PATTERN,
         _HARVEST_CLUSTER,
         ("by", "on", "accepted_flags"),
-        question_origins=("harvest",),
+        question_origins=("harvest", "synthetic"),
         takes_signoff=True,
+        synthetic_keys=_SYNTHETIC_KEYS,
+        zero_tolerance=True,
     ),
     ("research-qa", "edition"): ShapeSpec(
         "research-qa",
@@ -264,6 +307,47 @@ SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
         ("by", "on", "accepted_flags"),
         question_origins=("harvest",),
         takes_signoff=True,
+        zero_tolerance=True,
+    ),
+    ("research-qa", "existence"): ShapeSpec(
+        "research-qa",
+        "existence",
+        _QUESTION_BASE_KEYS,
+        {"suite": "research-qa", "category": "existence", "branch": "legal"},
+        RESEARCH_QA_ID_PATTERN,
+        _HARVEST_CLUSTER,
+        ("by", "on", "accepted_flags"),
+        question_origins=("synthetic",),
+        synthetic_keys=_SYNTHETIC_KEYS,
+    ),
+    ("research-qa", "treatment"): ShapeSpec(
+        "research-qa",
+        "treatment",
+        _QUESTION_BASE_KEYS,
+        {"suite": "research-qa", "category": "treatment", "branch": "legal"},
+        RESEARCH_QA_ID_PATTERN,
+        _HARVEST_CLUSTER,
+        ("by", "on", "accepted_flags"),
+        question_origins=("synthetic",),
+        takes_signoff=False,
+        synthetic_keys=_SYNTHETIC_KEYS,
+        zero_tolerance=True,
+        expected_keys=("answer", "must_cite", "state"),
+        gold_keys=GOLD_COORDINATE_KEYS + ("citation_id", "signal_id", "pattern_set", "cluster"),
+    ),
+    ("research-qa", "section-attribution"): ShapeSpec(
+        "research-qa",
+        "section-attribution",
+        _QUESTION_BASE_KEYS,
+        {"suite": "research-qa", "category": "section-attribution", "branch": "legal"},
+        RESEARCH_QA_ID_PATTERN,
+        _HARVEST_CLUSTER,
+        ("by", "on", "accepted_flags"),
+        question_origins=("synthetic",),
+        takes_signoff=False,
+        synthetic_keys=_SYNTHETIC_KEYS,
+        zero_tolerance=True,
+        expected_keys=("answer", "must_cite", "section_type"),
     ),
     ("judge", "triples"): ShapeSpec(
         "judge",
@@ -504,16 +588,27 @@ def _validate_review(
     case_id: str | None,
     line: int,
     findings: list[Finding],
+    *,
+    origin: str | None = None,
 ) -> None:
-    if not isinstance(review, dict) or tuple(review) != spec.review_keys:
+    from gideon.evaluation import synthetic
+
+    keys = spec.review_keys_for(origin)
+    if not isinstance(review, dict) or tuple(review) != keys:
         findings.append(Finding(file, case_id, line, "review keys or order", _CASE_FIX))
         return
     reviewer = review.get("by")
-    if not isinstance(reviewer, str) or ROLE_PATTERN.fullmatch(reviewer) is None:
+    if (
+        not isinstance(reviewer, str)
+        or ROLE_PATTERN.fullmatch(reviewer) is None
+        or (origin == synthetic.SYNTHETIC_ORIGIN and not reviewer.startswith("CSA-"))
+    ):
         findings.append(Finding(file, case_id, line, "review.by role", _CASE_FIX))
     if not valid_iso_date(review.get("on")):
         findings.append(Finding(file, case_id, line, "review.on ISO date", _CASE_FIX))
-    if spec.is_question_case:
+    if "read" in keys and not isinstance(review.get("read"), bool):
+        findings.append(Finding(file, case_id, line, "review.read bool", _CASE_FIX))
+    if spec.is_question_case and origin != synthetic.SYNTHETIC_ORIGIN:
         flags = review.get("accepted_flags")
         if (
             not isinstance(flags, list)
@@ -639,6 +734,8 @@ def _validate_shape(
     court_ids: frozenset[str] | None,
     findings: list[Finding],
 ) -> None:
+    from gideon.evaluation import synthetic
+
     relative = _relative(root, path)
     case_id = _case_id(record)
     spec = _shape_for(record)
@@ -647,7 +744,12 @@ def _validate_shape(
         return
     if Path(relative).parts[0] != spec.suite:
         findings.append(Finding(relative, case_id, line, "suite does not match directory", _CASE_FIX))
-    if not isinstance(case_id, str) or spec.id_pattern.fullmatch(case_id) is None:
+    origin = _origin(record)
+    id_pattern = (
+        synthetic.synthetic_id_pattern(spec.category)
+        if origin == synthetic.SYNTHETIC_ORIGIN and spec.synthetic_keys else spec.id_pattern
+    )
+    if not isinstance(case_id, str) or id_pattern.fullmatch(case_id) is None:
         findings.append(Finding(relative, case_id, line, "id pattern", _CASE_FIX))
     if tuple(record) != spec.keys_for(record, _origin(record)):
         findings.append(Finding(relative, case_id, line, "case keys or order", _CASE_FIX))
@@ -665,7 +767,6 @@ def _validate_shape(
         findings.append(Finding(relative, case_id, line, "question shape", _CASE_FIX))
 
     labels = record.get("labels")
-    origin = _origin(record)
     if not isinstance(labels, list) or len(labels) < 1:
         findings.append(Finding(relative, case_id, line, "labels", _CASE_FIX))
         return
@@ -685,12 +786,17 @@ def _validate_shape(
         ):
             findings.append(Finding(relative, case_id, line, "variant labels", _CASE_FIX))
     elif spec.is_question_case:
-        if len(labels) < 2:
+        if origin not in spec.question_origins:
+            findings.append(Finding(relative, case_id, line, "labels.origin", _CASE_FIX))
+        if origin == synthetic.SYNTHETIC_ORIGIN:
+            if labels not in ([synthetic.SYNTHETIC_ORIGIN], [synthetic.SYNTHETIC_ORIGIN, synthetic.CLOSED_BOOK_LABEL]):
+                findings.append(Finding(relative, case_id, line, "synthetic labels", _CASE_FIX))
+            if spec.synthetic_keys:
+                _validate_synthetic_fields(spec, record, relative, case_id, line, findings)
+        elif len(labels) < 2:
             findings.append(Finding(relative, case_id, line, "labels", _CASE_FIX))
         else:
             wording = labels[1]
-            if origin not in spec.question_origins:
-                findings.append(Finding(relative, case_id, line, "labels.origin", _CASE_FIX))
             if wording not in {"verbatim", "rewritten"}:
                 findings.append(Finding(relative, case_id, line, "labels.wording", _CASE_FIX))
             if origin == "harvest" and (len(labels) != 3 or labels[2] not in _QUERY_TYPES):
@@ -755,20 +861,20 @@ def _validate_shape(
     elif origin == "harvest":
         if spec.cluster_pattern.fullmatch(cluster_id) is None:
             findings.append(Finding(relative, case_id, line, "cluster_id", _CASE_FIX))
-    elif origin != "variant" and cluster_id != case_id:
+    elif origin not in {"variant", synthetic.SYNTHETIC_ORIGIN} and cluster_id != case_id:
         findings.append(Finding(relative, case_id, line, "cluster_id", _CASE_FIX))
 
     if "notes" in spec.keys_for(record, origin) and not isinstance(record.get("notes"), str):
         findings.append(Finding(relative, case_id, line, "notes", _CASE_FIX))
     if "supersedes" in record and not isinstance(record["supersedes"], str):
         findings.append(Finding(relative, case_id, line, "supersedes string", _CASE_FIX))
-    _validate_review(spec, record.get("review"), relative, case_id, line, findings)
+    _validate_review(spec, record.get("review"), relative, case_id, line, findings, origin=origin)
 
     if spec.is_question_case:
         if "reference_date" in record and not valid_iso_date(record["reference_date"]):
             findings.append(Finding(relative, case_id, line, "reference_date", _CASE_FIX))
         jurisdiction = record.get("jurisdiction")
-        if "jurisdiction" in record and (
+        if ("jurisdiction" in record or origin == synthetic.SYNTHETIC_ORIGIN) and (
             not isinstance(jurisdiction, list)
             or not jurisdiction
             or any(
@@ -796,6 +902,102 @@ def _validate_shape(
             )
     elif spec.category == "triples":
         _validate_triple_fields(record, relative, case_id, line, findings)
+
+
+def case_findings(
+    record: Case, relative: str, line: int, court_ids: Iterable[str] | None = None,
+) -> tuple[Finding, ...]:
+    """Validate one case before intake, using the loader's shape checks."""
+
+    findings: list[Finding] = []
+    _validate_shape(
+        Path("."), Path(relative), line, record,
+        None if court_ids is None else frozenset(court_ids), findings,
+    )
+    return tuple(findings)
+
+
+def _validate_synthetic_fields(
+    spec: ShapeSpec, record: Case, file: str, case_id: str | None, line: int, findings: list[Finding],
+) -> None:
+    """Validate a generated answer and its code-retraced evidence coordinates."""
+
+    from gideon.evaluation import judgments, synthetic
+    from gideon.host.index.treatment import PATTERN_SET_PATTERN
+    from gideon.host.render.worker import SECTION_TYPES, TREATMENT_STATES
+
+    template = record.get("template")
+    if (
+        not isinstance(template, str)
+        or synthetic.TEMPLATE_PATTERN.fullmatch(template) is None
+        or not template.startswith(f"{record['category']}@")
+        or template not in synthetic.TEMPLATES
+    ):
+        findings.append(Finding(file, case_id, line, "template", _CASE_FIX))
+    expected = record.get("expected")
+    must_cite: list[object] = []
+    if not isinstance(expected, Mapping):
+        findings.append(Finding(file, case_id, line, "expected mapping", _CASE_FIX))
+    else:
+        if tuple(expected) != spec.expected_keys_for():
+            findings.append(Finding(file, case_id, line, "expected keys or order", _CASE_FIX))
+        answer = expected.get("answer")
+        if (
+            not isinstance(answer, str) or not answer.strip()
+            or "\n" in answer or "\r" in answer
+        ):
+            findings.append(Finding(file, case_id, line, "expected.answer", _CASE_FIX))
+        cites = expected.get("must_cite")
+        if isinstance(cites, list):
+            must_cite = cites
+        if (
+            not isinstance(cites, list) or not cites
+            or any(not isinstance(item, str) or judgments.SOURCE_ID_PATTERN.fullmatch(item) is None for item in cites)
+            or len(set(cites)) != len(cites)
+        ):
+            findings.append(Finding(file, case_id, line, "expected.must_cite", _CASE_FIX))
+        if "state" in spec.expected_keys_for() and expected.get("state") not in (*TREATMENT_STATES, synthetic.NO_STATE):
+            findings.append(Finding(file, case_id, line, "expected.state", _CASE_FIX))
+        if "section_type" in spec.expected_keys_for() and expected.get("section_type") not in SECTION_TYPES:
+            findings.append(Finding(file, case_id, line, "expected.section_type", _CASE_FIX))
+    gold = record.get("gold")
+    if not isinstance(gold, list) or not gold:
+        findings.append(Finding(file, case_id, line, "gold non-empty list", _CASE_FIX))
+        return
+    for index, entry in enumerate(gold, start=1):
+        rule = f"gold[{index}]"
+        if not isinstance(entry, Mapping):
+            findings.append(Finding(file, case_id, line, f"{rule} mapping", _CASE_FIX))
+            continue
+        if tuple(entry) != spec.gold_keys_for():
+            findings.append(Finding(file, case_id, line, f"{rule} keys or order", _CASE_FIX))
+        findings.extend(
+            Finding(file, case_id, line, f"{rule}.{finding.rule}", _CASE_FIX)
+            for finding in judgments.coordinate_findings(entry, file, line)
+        )
+        for key in ("citation_id", "signal_id"):
+            if key in spec.gold_keys_for():
+                value = entry.get(key)
+                if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                    findings.append(Finding(file, case_id, line, f"{rule}.{key}", _CASE_FIX))
+        if "pattern_set" in spec.gold_keys_for():
+            pattern_set = entry.get("pattern_set")
+            if not isinstance(pattern_set, str) or re.fullmatch(PATTERN_SET_PATTERN, pattern_set) is None:
+                findings.append(Finding(file, case_id, line, f"{rule}.pattern_set", _CASE_FIX))
+        if "cluster" in spec.gold_keys_for():
+            cluster = entry.get("cluster")
+            if not _int(cluster) or cast(int, cluster) <= 0:
+                findings.append(Finding(file, case_id, line, f"{rule}.cluster", _CASE_FIX))
+        quote, start, end = entry.get("quote"), entry.get("start"), entry.get("end")
+        if (
+            not isinstance(quote, str) or not quote
+            or (_int(start) and _int(end) and len(quote) != cast(int, end) - cast(int, start))
+        ):
+            findings.append(Finding(file, case_id, line, f"{rule}.quote length", _CASE_FIX))
+        if entry.get("source_id") not in must_cite:
+            findings.append(Finding(file, case_id, line, f"{rule}.source_id absent from expected.must_cite", _CASE_FIX))
+    if isinstance(gold[0], Mapping) and record.get("cluster_id") != gold[0].get("source_id"):
+        findings.append(Finding(file, case_id, line, "cluster_id must equal first gold source_id", _CASE_FIX))
 
 
 def _validate_guardrail_fields(
@@ -1129,7 +1331,7 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
 
     # The auxiliary file readers import Finding from this module; keep their
     # imports here so the loader does not create an import cycle.
-    from gideon.evaluation import judgments, segmenter_labels, signoffs
+    from gideon.evaluation import judgments, segmenter_labels, signoffs, synthetic
 
     set_root = Path(root)
     findings: list[Finding] = []
@@ -1303,13 +1505,17 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
         {located.record.case_id for located in located_signoffs}
         | {located.record.case_id for located in located_labels}
     )
-    # Every case validated against a registered shape above, so a case whose
-    # shape is unknown cannot reach here: the loader returned its finding.
+    # A case is unsigned iff its shape takes a sign-off, it carries no
+    # expected of its own, and no sign-off or label names it. Every shape
+    # validated above; an unknown shape cannot reach this point.
     unsigned_ids = frozenset(
         case_id
         for case_id in active_ids
         for spec in (_shape_for(cases_by_id[case_id]),)
-        if spec is not None and spec.takes_signoff and case_id not in signed_ids
+        if (
+            spec is not None and spec.takes_signoff and case_id not in signed_ids
+            and _origin(cases_by_id[case_id]) != synthetic.SYNTHETIC_ORIGIN
+        )
     )
     return EvalSetLoadResult(
         loaded=LoadedSet(

@@ -1343,6 +1343,14 @@ def supplies(
     )
 
 
+def registry_root(
+    roots: Sequence[backupset.InventoryRoot],
+) -> backupset.InventoryRoot | None:
+    """The bound root carrying the host registry, or None when none is bound."""
+
+    return next((root for root in roots if root.name == backupset.REGISTRY_ROOT), None)
+
+
 def held(
     io: Host,
     roots: Sequence[backupset.InventoryRoot],

@@ -39,6 +39,10 @@ TOOLTIP_SELECTOR: Final = '[data-testid="data-testid tooltip"]'
 DATA_ERROR_SELECTOR: Final = '[data-testid="data-testid Panel data error message"]'
 NO_DATA_TEXT: Final = "No data"
 TABLE_EMPTY_TEXT: Final = "No rows"
+# The table panel layout note's data grid: react-data-grid's .rdg root is the
+# table's one overflow:auto container, so a scrollWidth past its clientWidth
+# is a table that scrolls sideways.
+TABLE_GRID_SELECTOR: Final = ".rdg"
 STAT_EMPTY_TEXT: Final = "No data"
 ALERT_EMPTY_TEXT: Final = "No alerts matching filters"
 
@@ -79,6 +83,8 @@ class BoardPage(Protocol):
     def count(self, selector: str) -> int: ...
 
     def text(self, selector: str) -> str | None: ...
+
+    def scroll_widths(self, selector: str) -> tuple[int, int] | None: ...
 
     def url(self) -> str: ...
 
@@ -326,7 +332,12 @@ def classify(page: BoardPage, panel: ExpectedPanel, *, timeout: float) -> PanelR
     }.get(panel.type)
     if empty_text is not None and text == empty_text:
         return PanelReading(panel.title, "empty", empty_text)
-    return PanelReading(panel.title, "drawn")
+    detail = ""
+    if panel.type == "table":
+        widths = page.scroll_widths(_inside(section, TABLE_GRID_SELECTOR))
+        if widths is not None:
+            detail = f"scroll {widths[0]}/{widths[1]}"
+    return PanelReading(panel.title, "drawn", detail)
 
 
 def check_board(

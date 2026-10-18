@@ -7,12 +7,22 @@ import shutil
 import tempfile
 import unittest
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from test_evaluation_record import read_psql_set
-from test_evaluation_run import EVALUATION, ROOT, EvalHost, _invoke, _run_kwargs
+from test_evaluation_run import (
+    EVALUATION,
+    ROOT,
+    EvalHost,
+    _invoke,
+    _run_context,
+    _run_kwargs,
+)
 
+from gideon.evaluation.evalset import SET_ROOT, load_set
 from gideon.evaluation.judgments import Judgment, serialize
+from gideon.evaluation.judgments_slice import run_judgments
 from gideon.evaluation.rankmetrics import DEFINITION_ID
 
 SENTINEL = "[FICTIONAL TEST ONLY] this question must never enter a stream"
@@ -157,6 +167,12 @@ class Command(unittest.TestCase):
                 **_run_kwargs(host, checkout=checkout, court_path=checkout / "courts.yaml"),
             )
             sql = _write_sql(host)
+            loaded = load_set(checkout / SET_ROOT).loaded
+            assert loaded is not None
+            result = run_judgments(
+                loaded, "judgments", replace(_run_context(), ranked=dict.fromkeys(ids, ()))
+            )
+            self.assertIsNone(result.gated_cases)
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
         self.assertNotIn("INSERT", stdout)

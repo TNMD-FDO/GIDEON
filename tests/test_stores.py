@@ -44,6 +44,7 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0023_generation_documents.sql": (ROOT / "migrations/0023_generation_documents.sql").read_text(),
     f"{ROOT}/migrations/0024_eval_runs_engine_conditions.sql": (ROOT / "migrations/0024_eval_runs_engine_conditions.sql").read_text(),
     f"{ROOT}/migrations/0025_opinions_case_name.sql": (ROOT / "migrations/0025_opinions_case_name.sql").read_text(),
+    f"{ROOT}/migrations/0026_eval_runs_gated_cases.sql": (ROOT / "migrations/0026_eval_runs_gated_cases.sql").read_text(),
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -175,6 +176,7 @@ class Converge(unittest.TestCase):
                 "0023_generation_documents",
                 "0024_eval_runs_engine_conditions",
                 "0025_opinions_case_name",
+                "0026_eval_runs_gated_cases",
             ),
         )
 
@@ -346,6 +348,7 @@ class Converge(unittest.TestCase):
                 "0023_generation_documents",
                 "0024_eval_runs_engine_conditions",
                 "0025_opinions_case_name",
+                "0026_eval_runs_gated_cases",
             ),
         )
 

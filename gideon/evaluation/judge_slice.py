@@ -4,7 +4,7 @@ import hashlib
 from collections.abc import Mapping
 from typing import cast
 
-from gideon.evaluation import judge
+from gideon.evaluation import bound, judge
 from gideon.evaluation.evalset import Case, LoadedSet, select_cases
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
 
@@ -62,7 +62,7 @@ def _report(
     bands: Mapping[str, tuple[int, int]],
     results: tuple[CaseResult, ...],
     repeats: int,
-) -> str:
+) -> tuple[bool, str, int]:
     by_case: dict[str, list[CaseResult]] = {case_id: [] for case_id in case_ids}
     for result in results:
         by_case[result.case_id].append(result)
@@ -102,11 +102,13 @@ def _report(
             equal_cases += 1
         row.append(str(equal))
         lines.append(" | ".join(row))
+    passed = all(result.verdict == "pass" for result in results)
+    gated_cases = len(case_ids)
     lines.append(
         f"in band {in_band_cases} of {len(case_ids)}, equal {equal_cases} of "
-        f"{len(case_ids)}, failed gradings {failed}"
+        f"{len(case_ids)}, failed gradings {failed}; {bound.bound_text(gated_cases, passed)}"
     )
-    return "\n".join(lines) + "\n"
+    return passed, "\n".join(lines) + "\n", gated_cases
 
 
 def run_judge_triples(eval_set: LoadedSet, slice_name: str, context: RunContext) -> SliceResult:
@@ -165,9 +167,10 @@ def run_judge_triples(eval_set: LoadedSet, slice_name: str, context: RunContext)
             context.progress(_progress_line(case_id, repeat, grading))
 
     results = tuple(case_results)
-    failed = sum(result.verdict != "pass" for result in results)
+    passed, report, gated_cases = _report(case_ids, bands, results, context.repeats)
     return SliceResult(
-        failed == 0,
-        _report(case_ids, bands, results, context.repeats),
+        passed,
+        report,
         results,
+        gated_cases=gated_cases,
     )

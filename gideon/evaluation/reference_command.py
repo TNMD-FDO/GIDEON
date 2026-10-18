@@ -5,7 +5,7 @@ import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from stat import S_ISDIR
-from typing import Final
+from typing import Final, cast
 
 from gideon.evaluation import record, reference
 from gideon.evaluation.command import git_argv, load_set_with_courts
@@ -180,6 +180,8 @@ def _write(
                 repeats=run.repeats,
                 set_digest=run.set_digest,
                 cases=cases,
+                generation_id=run.generation_id,
+                verdict=cast(reference.Verdict, run.verdict),
             )
             text = reference.serialize_reference(file)
             path = directory / f"{list_name}.json"

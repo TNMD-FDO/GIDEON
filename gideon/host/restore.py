@@ -24,6 +24,7 @@ from gideon.host import (
     backuproots,
     backupset,
     derivedstores,
+    images,
     nogpu,
     pgbackrest,
     report,
@@ -61,6 +62,9 @@ _SELECT_FIX: Final = "Choose an earlier --at, or omit it for the latest state."
 _VERIFY_FIX: Final = "Repair the backup set, then retry restore."
 _REOWN_FIX: Final = "Repair ownership of the backup staging directory, then retry restore."
 _REGISTRY_FIX: Final = "Repair the host registry service, then retry restore."
+_REGISTRY_TARGET_FIX: Final = "Correct registry in /etc/gideon/site.yaml, then retry restore."
+_REGISTRY_SEED_PROBE_INTERVAL_SECONDS: Final = 2.0
+REGISTRY_SEED_WAIT_SECONDS: Final = 30.0
 _UNDECLARED_REGISTRY_PROBLEM: Final = (
     "the host registry is active, but this host is not declared the build box."
 )
@@ -94,6 +98,25 @@ def _push_fix() -> str:
 
 def _stage_fix() -> str:
     return f"Run {report.command('apply')}, then retry."
+
+
+def _docker_fix() -> str:
+    return f"Run {report.command('host provision --only docker-engine')}, then retry restore."
+
+
+def _build_fix() -> str:
+    return (
+        "Build and push the built images with python3 -m tools.imagebuild <name> "
+        "per docs/runbooks/built-images.md §2, then retry restore."
+    )
+
+
+def _seed_tag_fix(release: str) -> str:
+    return (
+        f"Check out tag v{release}, run {report.command('apply')} to render that tag's "
+        "Compose file (a registry refusal naming the built images is expected), "
+        "then retry restore; see docs/runbooks/backup-restore.md §5."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,11 +518,111 @@ def _later_sets(
     )
 
 
+def _seed_registry(
+    io: Host,
+    config: SiteConfig,
+    *,
+    rendered_dir: PathLike,
+    selected: backupset.SetRef,
+    roots: tuple[backupset.InventoryRoot, ...],
+    sleep: Callable[[float], None],
+) -> str | StageResult:
+    """Ensure the rendered Postgres image is served before the ownership lookup."""
+
+    image = stack.service_image(io, rendered_dir, "postgres")
+    if isinstance(image, Problem):
+        return StageResult("fetch", False, image.problem, image.fix)
+    target = images.parse_registry(config.registry)
+    if target is None:
+        return StageResult(
+            "fetch", False, f"registry is not usable: {config.registry}", _REGISTRY_TARGET_FIX
+        )
+    environment: Mapping[str, str] | None = None
+    if config.egress_proxy:
+        proxy = images.proxy_environment(config, io)
+        if not proxy.ok:
+            return StageResult("fetch", False, proxy.problem or "proxy is unusable", proxy.fix)
+        environment = proxy.variables
+    argv = images.manifest_inspect_argv(target, image)
+
+    def probe() -> bool | StageResult:
+        try:
+            result = io.run(argv, env=environment)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return StageResult(
+                "fetch", False, f"Docker manifest probe could not run: {exc}", _docker_fix()
+            )
+        if result.returncode == 127:
+            return StageResult("fetch", False, "Docker manifest probe is unavailable", _docker_fix())
+        return result.returncode == 0
+
+    present = probe()
+    if isinstance(present, StageResult):
+        return present
+    if present:
+        return "the host registry holds the Postgres image"
+
+    root = backuproots.registry_root(roots)
+    manifest = selected.manifest
+    if root is None or manifest is None or not any(
+        entry.kind == "f" for entry in manifest.inventory.get(root.name, ())
+    ):
+        return StageResult(
+            "fetch", False, f"set {selected.label} carries no registry copy", _build_fix()
+        )
+    held_root = backuproots.held(io, (root,), selected, ())[0]
+    problem = held_root.verify()
+    if problem is not None:
+        return StageResult("fetch", False, problem.problem, problem.fix or _VERIFY_FIX)
+    copied = run_stage(
+        io,
+        "fetch",
+        ["rsync", "-a", held_root.copy.rstrip("/") + "/", root.source.rstrip("/") + "/"],
+        f"seeded the host registry from set {selected.label}'s {root.name} copy",
+        _REGISTRY_FIX,
+    )
+    if not copied.ok:
+        return copied
+    restarted = run_stage(
+        io,
+        "fetch",
+        ["systemctl", "restart", "gideon-registry"],
+        "restarted the host registry",
+        _REGISTRY_FIX,
+    )
+    if not restarted.ok:
+        return restarted
+
+    waited = 0.0
+    while True:
+        present = probe()
+        if isinstance(present, StageResult):
+            return present
+        if present:
+            return (
+                f"seeded the host registry from set {selected.label}'s {root.name} copy "
+                "and restarted it"
+            )
+        if waited >= REGISTRY_SEED_WAIT_SECONDS:
+            return StageResult(
+                "fetch",
+                False,
+                "the host registry lacks the Postgres image after the seed from "
+                f"set {selected.label} (release {manifest.release})",
+                _seed_tag_fix(manifest.release),
+            )
+        interval = min(_REGISTRY_SEED_PROBE_INTERVAL_SECONDS, REGISTRY_SEED_WAIT_SECONDS - waited)
+        sleep(interval)
+        waited += interval
+
+
 def _fetch_stage(
     io: Host,
     config: SiteConfig,
     *,
     rendered_dir: PathLike,
+    build_box: bool,
+    sleep: Callable[[float], None],
     snapshot: backupset.RemoteSnapshot,
     at: datetime | None,
     operation_label: str,
@@ -530,11 +653,6 @@ def _fetch_stage(
     if not rsync.ok:
         return rsync, None
 
-    for landed_root in backuproots.landed(io, roots, side):
-        problem = landed_root.arrive(rendered_dir)
-        if problem is not None:
-            return StageResult("fetch", False, problem.problem, problem.fix or _REOWN_FIX), None
-
     try:
         sets = backupset.list_sets(io, staging=side)
     except OSError as exc:
@@ -542,6 +660,23 @@ def _fetch_stage(
     newest = next((ref for ref in sets if ref.complete and ref.manifest is not None), None)
     if newest is None:
         return StageResult("fetch", False, "fetched snapshot has no complete backup set", _set_fix()), None
+    selected = backupset.select_set(sets, at=at)
+    if isinstance(selected, Problem):
+        return StageResult("fetch", False, selected.problem, selected.fix), None
+    registry_clause = ""
+    if build_box:
+        seeded = _seed_registry(
+            io, config, rendered_dir=rendered_dir, selected=selected, roots=roots, sleep=sleep
+        )
+        if isinstance(seeded, StageResult):
+            return seeded, None
+        registry_clause = seeded + "; "
+
+    for landed_root in backuproots.landed(io, roots, side):
+        problem = landed_root.arrive(rendered_dir)
+        if problem is not None:
+            return StageResult("fetch", False, problem.problem, problem.fix or _REOWN_FIX), None
+
     claims = backuproots.Claims()
     for fetched_root in backuproots.fetched(io, roots, side, sets):
         outcome = fetched_root.reown(gideon_ids)
@@ -602,9 +737,6 @@ def _fetch_stage(
     if problem is not None:
         return StageResult("fetch", False, problem.problem, problem.fix or _REOWN_FIX), None
 
-    selected = backupset.select_set(sets, at=at)
-    if isinstance(selected, Problem):
-        return StageResult("fetch", False, selected.problem, selected.fix), None
     replaced = f"{backupset.STAGING}.replaced-{operation_label}"
     ownership = (
         f"{claims.gideon_owned} {REOWN_MAPPED_DETAIL} {gideon_ids.uid}:{gideon_ids.gid}"
@@ -619,6 +751,7 @@ def _fetch_stage(
             "fetch",
             True,
             f"fetched {snapshot.label}; selected set {selected.label}; "
+            f"{registry_clause}"
             f"re-owned {claims.entries_claimed} path(s), {ownership}",
             "",
         ),
@@ -1229,6 +1362,8 @@ def _restore_body(
             io,
             config,
             rendered_dir=rendered_dir,
+            build_box=build_box,
+            sleep=sleep,
             snapshot=selection.snapshot,
             at=at,
             operation_label=operation_label,

@@ -58,6 +58,7 @@ class RunRow:
     decision: Mapping[str, object] | None
     engine_in_flight_max: int | None = None
     engine_preemptions: int | None = None
+    gated_cases: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +100,7 @@ class RecordedRun:
     run_id: str
     product_version: str
     corpus_lockfile: str | None
+    generation_id: str | None
     eval_set_version: str
     hardware_profile: str
     slice: str | None
@@ -243,13 +245,16 @@ def _run_sql(row: RunRow, lines: list[str]) -> str:
         "NULL"
         if row.engine_preemptions is None
         else _number_variable("engine_preemptions", row.engine_preemptions, lines, "::integer"),
+        "NULL"
+        if row.gated_cases is None
+        else _number_variable("gated_cases", row.gated_cases, lines, "::integer"),
     ]
     return (
         "INSERT INTO eval_runs ("
         "run_id, started_at, finished_at, product_version, corpus_lockfile, "
         "eval_set_version, hardware_profile, stack, generation_id, kind, slice, "
         "overrides, repeats, git_sha, git_dirty, set_digest, verdict, forced, partial, decision, "
-        "engine_in_flight_max, engine_preemptions) VALUES ("
+        "engine_in_flight_max, engine_preemptions, gated_cases) VALUES ("
         + ", ".join(values)
         + ");"
     )
@@ -323,6 +328,7 @@ def _read_sql(run_id: str) -> str:
         started_at,
         product_version,
         corpus_lockfile,
+        generation_id,
         eval_set_version,
         hardware_profile,
         slice,
@@ -346,6 +352,7 @@ SELECT json_build_object(
             'run_id', run_id::text,
             'product_version', product_version,
             'corpus_lockfile', corpus_lockfile,
+            'generation_id', generation_id,
             'eval_set_version', eval_set_version,
             'hardware_profile', hardware_profile,
             'slice', slice,
@@ -491,6 +498,7 @@ def _decoded_run(stdout: str, run_id: str) -> RecordedRun:
         run_id=_text_field(run.get("run_id"), "run id", fix),
         product_version=_text_field(run.get("product_version"), "product version", fix),
         corpus_lockfile=_optional_text_field(run.get("corpus_lockfile"), "corpus lockfile", fix),
+        generation_id=_optional_text_field(run.get("generation_id"), "generation id", fix),
         eval_set_version=_text_field(run.get("eval_set_version"), "eval-set version", fix),
         hardware_profile=_text_field(run.get("hardware_profile"), "hardware profile", fix),
         slice=_optional_text_field(run.get("slice"), "slice", fix),

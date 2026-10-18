@@ -31,12 +31,28 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "gen_id"
+              "options": "lockfile"
             },
             "properties": [
               {
                 "id": "custom.width",
-                "value": 530
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "space"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 240
+              },
+              {
+                "id": "displayName",
+                "value": "embedding space"
               }
             ]
           },
@@ -48,7 +64,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 90
+                "value": 70
               }
             ]
           },
@@ -60,7 +76,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 90
+                "value": 70
               },
               {
                 "id": "unit",
@@ -76,7 +92,15 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 165
+                "value": 136
+              },
+              {
+                "id": "displayName",
+                "value": "created"
+              },
+              {
+                "id": "unit",
+                "value": "time:YYYY-MM-DD HH:mm"
               }
             ]
           },
@@ -88,7 +112,15 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 165
+                "value": 136
+              },
+              {
+                "id": "displayName",
+                "value": "lexical built"
+              },
+              {
+                "id": "unit",
+                "value": "time:YYYY-MM-DD HH:mm"
               }
             ]
           },
@@ -100,7 +132,15 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 165
+                "value": 136
+              },
+              {
+                "id": "displayName",
+                "value": "dense built"
+              },
+              {
+                "id": "unit",
+                "value": "time:YYYY-MM-DD HH:mm"
               }
             ]
           },
@@ -112,7 +152,15 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 165
+                "value": 136
+              },
+              {
+                "id": "displayName",
+                "value": "built"
+              },
+              {
+                "id": "unit",
+                "value": "time:YYYY-MM-DD HH:mm"
               }
             ]
           },
@@ -124,7 +172,15 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 165
+                "value": 136
+              },
+              {
+                "id": "displayName",
+                "value": "promoted"
+              },
+              {
+                "id": "unit",
+                "value": "time:YYYY-MM-DD HH:mm"
               }
             ]
           }
@@ -151,7 +207,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT gen_id, state, bytes, created_at, lexical_built_at, dense_built_at, built_at, promoted_at\nFROM index_generations\nORDER BY created_at DESC, gen_id",
+          "rawSql": "SELECT split_part(gen_id, '__', 2) AS lockfile, split_part(gen_id, '__', 3) AS space, state, bytes, created_at, lexical_built_at, dense_built_at, built_at, promoted_at\nFROM index_generations\nORDER BY created_at DESC, gen_id",
           "refId": "A"
         }
       ],
@@ -211,16 +267,20 @@
             },
             "properties": [
               {
+                "id": "custom.width",
+                "value": 95
+              },
+              {
                 "id": "unit",
-                "value": "short"
+                "value": "locale"
               }
             ]
           }
         ]
       },
       "gridPos": {
-        "h": 10,
-        "w": 8,
+        "h": 18,
+        "w": 12,
         "x": 0,
         "y": 8
       },
@@ -288,7 +348,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 112
+                "value": 125
               }
             ]
           },
@@ -299,17 +359,21 @@
             },
             "properties": [
               {
+                "id": "custom.width",
+                "value": 95
+              },
+              {
                 "id": "unit",
-                "value": "short"
+                "value": "locale"
               }
             ]
           }
         ]
       },
       "gridPos": {
-        "h": 10,
-        "w": 8,
-        "x": 8,
+        "h": 18,
+        "w": 12,
+        "x": 12,
         "y": 8
       },
       "options": {
@@ -376,7 +440,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 122
+                "value": 121
               }
             ]
           },
@@ -387,18 +451,22 @@
             },
             "properties": [
               {
+                "id": "custom.width",
+                "value": 95
+              },
+              {
                 "id": "unit",
-                "value": "short"
+                "value": "locale"
               }
             ]
           }
         ]
       },
       "gridPos": {
-        "h": 10,
-        "w": 8,
-        "x": 16,
-        "y": 8
+        "h": 13,
+        "w": 12,
+        "x": 0,
+        "y": 26
       },
       "options": {
         "cellHeight": "sm",
@@ -464,7 +532,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 90
+                "value": 112
               }
             ]
           },
@@ -475,18 +543,22 @@
             },
             "properties": [
               {
+                "id": "custom.width",
+                "value": 95
+              },
+              {
                 "id": "unit",
-                "value": "short"
+                "value": "locale"
               }
             ]
           }
         ]
       },
       "gridPos": {
-        "h": 9,
-        "w": 8,
-        "x": 0,
-        "y": 18
+        "h": 13,
+        "w": 12,
+        "x": 12,
+        "y": 26
       },
       "options": {
         "cellHeight": "sm",
@@ -553,6 +625,10 @@
               {
                 "id": "custom.width",
                 "value": 70
+              },
+              {
+                "id": "unit",
+                "value": "locale"
               }
             ]
           },
@@ -565,6 +641,10 @@
               {
                 "id": "custom.width",
                 "value": 90
+              },
+              {
+                "id": "unit",
+                "value": "locale"
               }
             ]
           },
@@ -576,7 +656,11 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 60
+                "value": 76
+              },
+              {
+                "id": "unit",
+                "value": "locale"
               }
             ]
           },
@@ -589,6 +673,10 @@
               {
                 "id": "custom.width",
                 "value": 70
+              },
+              {
+                "id": "unit",
+                "value": "locale"
               }
             ]
           },
@@ -613,6 +701,10 @@
               {
                 "id": "custom.width",
                 "value": 90
+              },
+              {
+                "id": "unit",
+                "value": "locale"
               }
             ]
           },
@@ -625,6 +717,10 @@
               {
                 "id": "custom.width",
                 "value": 70
+              },
+              {
+                "id": "unit",
+                "value": "locale"
               }
             ]
           },
@@ -637,6 +733,26 @@
               {
                 "id": "custom.width",
                 "value": 125
+              },
+              {
+                "id": "unit",
+                "value": "locale"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "map_pairs"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 94
+              },
+              {
+                "id": "unit",
+                "value": "locale"
               }
             ]
           }
@@ -644,9 +760,9 @@
       },
       "gridPos": {
         "h": 9,
-        "w": 16,
-        "x": 8,
-        "y": 18
+        "w": 24,
+        "x": 0,
+        "y": 39
       },
       "options": {
         "cellHeight": "sm",
@@ -672,7 +788,7 @@
     },
     {
       "id": 7,
-      "description": "This shows command and indexing times, failure details, and whether the newest report of each generation that is not retired covers a whole build. Large run or indexing times can mean slow work; a failed stage names where it stopped. lifecycle_seconds is the span from creation to built, including gaps between commands, and is never a build duration. Follow docs/runbooks/observability.md §3.",
+      "description": "This shows command and indexing times, failure details, and whether the newest report of each generation that is not retired covers a whole build. Large run or indexing times can mean slow work; a failed stage names where it stopped. lifecycle is the span from creation to built, including gaps between commands, and is never a build duration. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "postgres",
         "uid": "gideon-rows"
@@ -683,12 +799,28 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "gen_id"
+              "options": "lockfile"
             },
             "properties": [
               {
                 "id": "custom.width",
-                "value": 395
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "space"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 240
+              },
+              {
+                "id": "displayName",
+                "value": "embedding space"
               }
             ]
           },
@@ -700,7 +832,11 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 165
+                "value": 136
+              },
+              {
+                "id": "unit",
+                "value": "time:YYYY-MM-DD HH:mm"
               }
             ]
           },
@@ -712,7 +848,11 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 125
+                "value": 80
+              },
+              {
+                "id": "displayName",
+                "value": "stage"
               }
             ]
           },
@@ -724,7 +864,11 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 140
+                "value": 155
+              },
+              {
+                "id": "displayName",
+                "value": "reason"
               }
             ]
           },
@@ -736,7 +880,11 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 115
+                "value": 80
+              },
+              {
+                "id": "displayName",
+                "value": "run"
               },
               {
                 "id": "unit",
@@ -752,7 +900,11 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 150
+                "value": 80
+              },
+              {
+                "id": "displayName",
+                "value": "lexical"
               },
               {
                 "id": "unit",
@@ -768,7 +920,11 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 135
+                "value": 80
+              },
+              {
+                "id": "displayName",
+                "value": "dense"
               },
               {
                 "id": "unit",
@@ -784,11 +940,27 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 170
+                "value": 95
+              },
+              {
+                "id": "displayName",
+                "value": "lifecycle"
               },
               {
                 "id": "unit",
                 "value": "s"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "whole_build"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 112
               }
             ]
           }
@@ -798,7 +970,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 27
+        "y": 48
       },
       "options": {
         "cellHeight": "sm",
@@ -815,7 +987,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH newest AS (\n    SELECT DISTINCT ON (r.gen_id) r.gen_id, r.written_at, r.failed_stage, r.failure_reason, r.wall_clock\n    FROM build_reports r\n    JOIN index_generations g USING (gen_id)\n    WHERE g.state <> 'retired'\n    ORDER BY r.gen_id, r.written_at DESC\n)\nSELECT gen_id, written_at AS report_at, failed_stage, failure_reason,\n       (wall_clock->>'run_seconds')::bigint AS run_seconds,\n       (wall_clock->>'lexical_seconds')::bigint AS lexical_seconds,\n       (wall_clock->>'dense_seconds')::bigint AS dense_seconds,\n       (wall_clock->>'lifecycle_seconds')::bigint AS lifecycle_seconds,\n       (wall_clock->>'whole_build')::boolean AS whole_build\nFROM newest\nORDER BY split_part(gen_id, '__', 2) DESC, gen_id",
+          "rawSql": "WITH newest AS (\n    SELECT DISTINCT ON (r.gen_id) r.gen_id, r.written_at, r.failed_stage, r.failure_reason, r.wall_clock\n    FROM build_reports r\n    JOIN index_generations g USING (gen_id)\n    WHERE g.state <> 'retired'\n    ORDER BY r.gen_id, r.written_at DESC\n)\nSELECT split_part(gen_id, '__', 2) AS lockfile, split_part(gen_id, '__', 3) AS space, written_at AS report_at, failed_stage, failure_reason,\n       (wall_clock->>'run_seconds')::bigint AS run_seconds,\n       (wall_clock->>'lexical_seconds')::bigint AS lexical_seconds,\n       (wall_clock->>'dense_seconds')::bigint AS dense_seconds,\n       (wall_clock->>'lifecycle_seconds')::bigint AS lifecycle_seconds,\n       (wall_clock->>'whole_build')::boolean AS whole_build\nFROM newest\nORDER BY split_part(gen_id, '__', 2) DESC, gen_id",
           "refId": "A"
         }
       ],
@@ -824,7 +996,7 @@
     },
     {
       "id": 8,
-      "description": "This shows recorded dense indexing progress for each generation that is not retired. written is copied plus embedded, and tokens_per_second is tokens divided by recorded seconds; missing keys and a rate without positive seconds remain blank. A growing waiting queue with counts that stop advancing can mean a stalled build. Follow docs/runbooks/observability.md §3.",
+      "description": "This shows recorded dense indexing progress for each generation that is not retired. written is copied plus embedded, and tokens/s is tokens divided by recorded seconds; missing keys and a rate without positive seconds remain blank. A growing waiting queue with counts that stop advancing can mean a stalled build. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "postgres",
         "uid": "gideon-rows"
@@ -835,12 +1007,28 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "gen_id"
+              "options": "lockfile"
             },
             "properties": [
               {
                 "id": "custom.width",
-                "value": 530
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "space"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 240
+              },
+              {
+                "id": "displayName",
+                "value": "embedding space"
               }
             ]
           },
@@ -852,7 +1040,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 65
+                "value": 72
               }
             ]
           },
@@ -864,7 +1052,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 80
+                "value": 76
               }
             ]
           },
@@ -876,7 +1064,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 80
+                "value": 76
               }
             ]
           },
@@ -888,7 +1076,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 70
+                "value": 72
               }
             ]
           },
@@ -900,7 +1088,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 90
+                "value": 85
               }
             ]
           },
@@ -912,7 +1100,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 70
+                "value": 90
               }
             ]
           },
@@ -924,7 +1112,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 90
+                "value": 85
               }
             ]
           },
@@ -952,7 +1140,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 80
+                "value": 76
               }
             ]
           },
@@ -963,12 +1151,16 @@
             },
             "properties": [
               {
-                "id": "unit",
-                "value": "suffix: tokens/s"
+                "id": "custom.width",
+                "value": 85
               },
               {
-                "id": "decimals",
-                "value": 1
+                "id": "displayName",
+                "value": "tokens/s"
+              },
+              {
+                "id": "unit",
+                "value": "short"
               }
             ]
           }
@@ -978,7 +1170,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 34
+        "y": 55
       },
       "options": {
         "cellHeight": "sm",
@@ -995,7 +1187,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT gen_id,\n       (counts->>'dense_scope')::bigint AS scope,\n       (counts->>'dense_copied')::bigint + (counts->>'dense_embedded')::bigint AS written,\n       (counts->>'dense_present')::bigint AS present,\n       (counts->>'dense_copied')::bigint AS copied,\n       (counts->>'dense_embedded')::bigint AS embedded,\n       (counts->>'dense_tokens')::bigint AS tokens,\n       (counts->>'dense_requests')::bigint AS requests,\n       (counts->>'dense_seconds')::bigint AS seconds,\n       (counts->>'dense_indexed')::bigint AS indexed,\n       (counts->>'dense_tokens')::numeric / NULLIF((counts->>'dense_seconds')::numeric, 0) AS tokens_per_second\nFROM index_generations\nWHERE state <> 'retired'\nORDER BY created_at DESC, gen_id",
+          "rawSql": "SELECT split_part(gen_id, '__', 2) AS lockfile, split_part(gen_id, '__', 3) AS space,\n       (counts->>'dense_scope')::bigint AS scope,\n       (counts->>'dense_copied')::bigint + (counts->>'dense_embedded')::bigint AS written,\n       (counts->>'dense_present')::bigint AS present,\n       (counts->>'dense_copied')::bigint AS copied,\n       (counts->>'dense_embedded')::bigint AS embedded,\n       (counts->>'dense_tokens')::bigint AS tokens,\n       (counts->>'dense_requests')::bigint AS requests,\n       (counts->>'dense_seconds')::bigint AS seconds,\n       (counts->>'dense_indexed')::bigint AS indexed,\n       (counts->>'dense_tokens')::numeric / NULLIF((counts->>'dense_seconds')::numeric, 0) AS tokens_per_second\nFROM index_generations\nWHERE state <> 'retired'\nORDER BY created_at DESC, gen_id",
           "refId": "A"
         }
       ],
@@ -1021,7 +1213,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 40
+        "y": 61
       },
       "targets": [
         {
@@ -1065,7 +1257,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 40
+        "y": 61
       },
       "targets": [
         {
@@ -1090,8 +1282,8 @@
       },
       "fieldConfig": {
         "defaults": {
-          "decimals": 1,
-          "unit": "suffix: tokens/s"
+          "decimals": 0,
+          "unit": "short"
         },
         "overrides": []
       },
@@ -1099,7 +1291,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 40
+        "y": 61
       },
       "targets": [
         {
@@ -1132,7 +1324,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 47
+        "y": 68
       },
       "targets": [
         {
@@ -1165,7 +1357,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 47
+        "y": 68
       },
       "targets": [
         {
@@ -1226,7 +1418,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 47
+        "y": 68
       },
       "targets": [
         {
@@ -1271,39 +1463,6 @@
     },
     {
       "id": 15,
-      "description": "This shows the lexical store's indexing rate per index over five minutes, excluding dot-prefixed system indexes and counting primary shards. Each index is named for its generation; a low rate while build work waits can mean indexing is stalled. Follow docs/runbooks/observability.md §3.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 8,
-        "x": 0,
-        "y": 54
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (index) (rate(opensearch_index_indexing_index_count{job=\"opensearch-metrics\", context=\"primaries\", index!~\"[.].*\"}[5m]))",
-          "legendFormat": "{{index}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Documents indexed per second",
-      "type": "timeseries"
-    },
-    {
-      "id": 16,
       "description": "This shows points and vectors in each collection from the vector store's own measurements. Counts should advance during a dense build; unexpected missing collections or counts that stop growing while work waits need investigation. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "prometheus",
@@ -1311,15 +1470,24 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "locale"
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
-        "w": 8,
-        "x": 8,
-        "y": 54
+        "h": 12,
+        "w": 12,
+        "x": 0,
+        "y": 75
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
       },
       "targets": [
         {
@@ -1327,8 +1495,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "collection_points{job=\"qdrant\"}",
-          "legendFormat": "{{id}} points",
+          "expr": "label_replace(collection_points{job=\"qdrant\"}, \"lockfile\", \"$2\", \"id\", \"^([^_]+__)?([^_]+)(__.*)?$\")",
+          "legendFormat": "{{lockfile}} points",
           "refId": "A"
         },
         {
@@ -1336,8 +1504,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "collection_vectors{job=\"qdrant\"}",
-          "legendFormat": "{{collection}} vectors",
+          "expr": "label_replace(collection_vectors{job=\"qdrant\"}, \"lockfile\", \"$2\", \"collection\", \"^([^_]+__)?([^_]+)(__.*)?$\")",
+          "legendFormat": "{{lockfile}} vectors",
           "refId": "B"
         }
       ],
@@ -1345,23 +1513,37 @@
       "type": "timeseries"
     },
     {
-      "id": 17,
-      "description": "This shows lexical indexing work and whether it is throttled, beside each vector collection's update queue and running optimizations. Persistent throttling or a growing update queue with no progress can mean a store cannot keep up. Follow docs/runbooks/observability.md §3.",
+      "id": 16,
+      "description": "This shows lexical indexing work beside each vector collection's update queue and running optimizations. A growing update queue with no progress can mean a store cannot keep up. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "axisSoftMax": 1
+          }
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
-        "w": 8,
-        "x": 16,
-        "y": 54
+        "h": 12,
+        "w": 12,
+        "x": 12,
+        "y": 75
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
       },
       "targets": [
         {
@@ -1378,17 +1560,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(opensearch_indices_indexing_is_throttled_bool{job=\"opensearch-metrics\"})",
-          "legendFormat": "lexical throttled",
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "collection_update_queue_length{job=\"qdrant\"}",
-          "legendFormat": "{{id}} update queue",
+          "expr": "label_replace(collection_update_queue_length{job=\"qdrant\"}, \"lockfile\", \"$2\", \"id\", \"^([^_]+__)?([^_]+)(__.*)?$\")",
+          "legendFormat": "{{lockfile}} queue",
           "refId": "C"
         },
         {
@@ -1396,8 +1569,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "collection_running_optimizations{job=\"qdrant\"}",
-          "legendFormat": "{{id}} optimizing",
+          "expr": "label_replace(collection_running_optimizations{job=\"qdrant\"}, \"lockfile\", \"$2\", \"id\", \"^([^_]+__)?([^_]+)(__.*)?$\")",
+          "legendFormat": "{{lockfile}} optimizing",
           "refId": "D"
         }
       ],
@@ -1405,8 +1578,111 @@
       "type": "timeseries"
     },
     {
+      "id": 17,
+      "description": "This shows the lexical store's indexing rate per index over five minutes, excluding dot-prefixed system indexes and counting primary shards. Each index is named by its generation's lockfile; a low rate while build work waits can mean indexing is stalled. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "suffix: docs/s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 87
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "label_replace(sum by (index) (rate(opensearch_index_indexing_index_count{job=\"opensearch-metrics\", context=\"primaries\", index!~\"[.].*\"}[5m])), \"lockfile\", \"$2\", \"index\", \"^([^_]+__)?([^_]+)(__.*)?$\")",
+          "legendFormat": "{{lockfile}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Documents indexed per second",
+      "type": "timeseries"
+    },
+    {
       "id": 18,
-      "description": "This shows waiting and running jobs per worker queue from the worker's measurements. Known queues remain visible at zero; a queue that grows while running jobs make no progress needs investigation. Follow docs/runbooks/observability.md §3.",
+      "description": "This shows whether lexical indexing is throttled, measured by the lexical store. Persistent throttling can mean the store cannot keep up and can slow indexing. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "not throttled",
+                  "color": "green"
+                },
+                "1": {
+                  "text": "throttled",
+                  "color": "red"
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "fixed"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 87
+      },
+      "options": {
+        "showValue": "auto",
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(opensearch_indices_indexing_is_throttled_bool{job=\"opensearch-metrics\"})",
+          "legendFormat": "lexical throttled",
+          "refId": "A"
+        }
+      ],
+      "title": "Lexical indexing throttled",
+      "type": "state-timeline"
+    },
+    {
+      "id": 19,
+      "description": "This shows waiting jobs per worker queue from the worker's measurements. Known queues remain visible at zero; a queue that grows while running jobs make no progress needs investigation. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1417,13 +1693,110 @@
           "min": 0,
           "unit": "short"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "verify"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "light-green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "maintenance"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "light-yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fetch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "light-blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stage"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "light-orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "caselaw"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "light-red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "index"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "light-purple"
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 61
+        "y": 94
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
       },
       "targets": [
         {
@@ -1431,16 +1804,148 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "gideon_worker_queue_jobs{job=\"worker\"}",
-          "legendFormat": "{{queue}} {{status}}",
+          "expr": "gideon_worker_queue_jobs{job=\"worker\", status=\"todo\"}",
+          "legendFormat": "{{queue}}",
           "refId": "A"
         }
       ],
-      "title": "Worker queue depth",
+      "title": "Worker jobs waiting",
       "type": "timeseries"
     },
     {
-      "id": 19,
+      "id": 20,
+      "description": "This shows running jobs per worker queue from the worker's measurements. Known queues remain visible at zero; running jobs that make no progress while work waits need investigation. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "verify"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "semi-dark-green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "maintenance"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "semi-dark-yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fetch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "semi-dark-blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stage"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "semi-dark-orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "caselaw"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "semi-dark-red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "index"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "semi-dark-purple"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 94
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "gideon_worker_queue_jobs{job=\"worker\", status=\"doing\"}",
+          "legendFormat": "{{queue}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Worker jobs running",
+      "type": "timeseries"
+    },
+    {
+      "id": 21,
       "description": "This shows the worker's own heartbeat age and configured job slots. A stale heartbeat can mean the worker stopped; too few slots for sustained waiting work can limit progress. The worker's Overview tile carries its liveness page. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "prometheus",
@@ -1466,10 +1971,10 @@
         ]
       },
       "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 61
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 101
       },
       "targets": [
         {

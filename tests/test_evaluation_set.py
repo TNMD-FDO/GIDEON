@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-from gideon.evaluation import judgments, segmenter_labels, signoffs
+from gideon.evaluation import judgments, segmenter_labels, signoffs, synthetic
 from gideon.evaluation.evalset import (
+    GOLD_COORDINATE_KEYS,
     GUARDRAIL_ID_PATTERN,
     SEGMENTER_TEXT_SOURCES,
     SET_ROOT,
@@ -18,6 +19,7 @@ from gideon.evaluation.evalset import (
     Finding,
     LoadedSet,
     ShapeSpec,
+    case_findings,
     load_set,
     select_cases,
 )
@@ -25,6 +27,8 @@ from gideon.evaluation.judgments import Judgment, serialize
 from gideon.evaluation.signoffs import SignOff
 from gideon.extraction.scoring import active_cases
 from gideon.host.courts import load_court_map
+from gideon.host.index.treatment import PATTERN_SET_PATTERN
+from gideon.host.render.worker import SECTION_TYPES, TREATMENT_STATES
 from gideon.worker.opiniontext import TEXT_SOURCES
 from tools.exportboundary import absent_from_export
 
@@ -165,6 +169,41 @@ def _signoff(
     case_id: str = "research-qa-001", answer: str = "The fictional signed answer."
 ) -> SignOff:
     return SignOff(case_id, answer, ("fictional/source-1",), "CHU-attorney-1", "2026-09-21")
+
+
+def _synthetic_case(case_id: str | None = None, *, category: str = "lookup") -> dict[str, object]:
+    quote = "The fictitious court required notice.\n\nIt remanded the invented case. 😀"
+    expected: dict[str, object] = {"answer": SENTINEL, "must_cite": ["fictional/source-1"]}
+    gold: dict[str, object] = {
+        "source_id": "fictional/source-1", "sha256": "a" * 64,
+        "start": 5, "end": 5 + len(quote), "quote": quote,
+    }
+    if category == "treatment":
+        expected["state"] = TREATMENT_STATES[0]
+        gold.update({
+            "citation_id": "c" * 64, "signal_id": "d" * 64,
+            "pattern_set": "treatment/patterns@999", "cluster": 123,
+        })
+    elif category == "section-attribution":
+        expected["section_type"] = SECTION_TYPES[0]
+    review: dict[str, object] = {"by": "CSA-1", "on": "2001-01-02"}
+    if not SHAPE_REGISTRY[("research-qa", category)].zero_tolerance:
+        review["read"] = True
+    return {
+        "id": f"research-qa-{category}-001" if case_id is None else case_id,
+        "suite": "research-qa",
+        "category": category,
+        "branch": "legal",
+        "question": SENTINEL,
+        "jurisdiction": ["ca6"],
+        "expected": expected,
+        "gold": [gold],
+        "labels": [synthetic.SYNTHETIC_ORIGIN],
+        "template": f"{category}@1",
+        "cluster_id": "fictional/source-1",
+        "review": review,
+        "notes": "Fictitious case for the loader.",
+    }
 
 
 def _write_signoffs(root: Path, records: tuple[SignOff, ...]) -> None:
@@ -909,6 +948,443 @@ class CountGateCases(unittest.TestCase):
                 else:
                     self.assertIsNone(result.loaded)
                     self.assertIn("earlier", "\n".join(finding.rule for finding in result.findings))
+class SyntheticCases(unittest.TestCase):
+    """Synthetic research cases carry their expected answer and retraced gold."""
+
+    def assert_refused(self, record: dict[str, object], rule: str) -> None:
+        findings = case_findings(record, synthetic.case_path("lookup"), 7, ("ca6",))
+        self.assertIn(rule, tuple(finding.rule for finding in findings))
+        self.assertTrue(all(finding.file == synthetic.case_path("lookup") and finding.line == 7 for finding in findings))
+        self.assertTrue(all(finding.fix for finding in findings))
+        self.assertNotIn(SENTINEL, "\n".join(finding.text() for finding in findings))
+
+    def test_zero_tolerance_defaults_false_and_marks_four_research_categories(self) -> None:
+        self.assertIs(ShapeSpec.__dataclass_fields__["zero_tolerance"].default, False)
+        self.assertEqual(
+            {key for key, spec in SHAPE_REGISTRY.items() if spec.zero_tolerance},
+            {("research-qa", category) for category in
+             ("lookup", "edition", "treatment", "section-attribution")},
+        )
+
+    def test_key_declarations_and_origin_specific_review_keys(self) -> None:
+        for category in ("lookup", "retrieval", "synthesis", "existence"):
+            with self.subTest(category=category):
+                spec = SHAPE_REGISTRY[("research-qa", category)]
+                self.assertEqual(spec.synthetic_keys, synthetic.CASE_KEYS)
+                self.assertIs(spec.synthetic_keys, SHAPE_REGISTRY[("research-qa", "lookup")].synthetic_keys)
+                self.assertEqual(spec.question_origins, (synthetic.SYNTHETIC_ORIGIN,) if category == "existence"
+                                 else ("harvest", synthetic.SYNTHETIC_ORIGIN))
+                self.assertEqual(spec.review_keys, ("by", "on", "accepted_flags"))
+                self.assertEqual(spec.review_keys_for("harvest"), spec.review_keys)
+                self.assertEqual(spec.review_keys_for(synthetic.SYNTHETIC_ORIGIN),
+                                 ("by", "on") if category == "lookup" else ("by", "on", "read"))
+                record = _synthetic_case(f"research-qa-{category}-001", category=category)
+                self.assertEqual(spec.keys_for(record, synthetic.SYNTHETIC_ORIGIN), synthetic.CASE_KEYS)
+                record["supersedes"] = f"research-qa-{category}-000"
+                self.assertEqual(spec.keys_for(record, synthetic.SYNTHETIC_ORIGIN), (*synthetic.CASE_KEYS, "supersedes"))
+                if category != "existence":
+                    harvest = _research_qa_case(category=category)
+                    self.assertEqual(spec.keys_for(harvest, "harvest"), tuple(harvest))
+        edition = SHAPE_REGISTRY[("research-qa", "edition")]
+        self.assertEqual(edition.synthetic_keys, ())
+        self.assertEqual(edition.review_keys_for(synthetic.SYNTHETIC_ORIGIN), ("by", "on"))
+
+    def test_existence_shape_has_question_fields_and_takes_no_signoff(self) -> None:
+        spec = SHAPE_REGISTRY[("research-qa", "existence")]
+        sibling = SHAPE_REGISTRY[("research-qa", "retrieval")]
+        self.assertEqual((spec.suite, spec.category), ("research-qa", "existence"))
+        self.assertEqual(spec.base_keys, sibling.base_keys)
+        self.assertEqual(spec.fixed_fields, {"suite": "research-qa", "category": "existence", "branch": "legal"})
+        self.assertIs(spec.id_pattern, sibling.id_pattern)
+        self.assertIs(spec.cluster_pattern, sibling.cluster_pattern)
+        self.assertEqual(spec.review_keys, sibling.review_keys)
+        self.assertEqual(spec.question_origins, (synthetic.SYNTHETIC_ORIGIN,))
+        self.assertTrue(spec.is_question_case)
+        self.assertIs(spec.takes_signoff, False)
+
+    def test_sampled_categories_load_read_and_unread_cases_as_counted(self) -> None:
+        for category in ("retrieval", "synthesis", "existence"):
+            for read in (True, False):
+                with self.subTest(category=category, read=read), tempfile.TemporaryDirectory() as directory:
+                    record = _synthetic_case(f"research-qa-{category}-001", category=category)
+                    cast(dict[str, object], record["review"])["read"] = read
+                    relative = synthetic.case_path(category)
+                    self.assertEqual(case_findings(record, relative, 1, ("ca6",)), ())
+                    root = Path(directory) / "eval-v9"
+                    _write(root, relative, synthetic.case_line(record).rstrip("\n"))
+                    _write(root, "slices/demo/cases.ids", str(record["id"]))
+                    result = load_set(root, ("ca6",))
+                    self.assertTrue(result.ok, result.findings)
+                    assert result.loaded is not None
+                    self.assertEqual(result.loaded.cases_by_id[cast(str, record["id"])], record)
+                    self.assertEqual(result.loaded.unsigned_ids, frozenset())
+                    selection = select_cases(result.loaded, "demo")
+                    self.assertEqual(selection.counted, (record["id"],))
+                    self.assertEqual(selection.unsigned, ())
+
+    def test_sampled_reviews_require_ordered_boolean_read_and_a_csa(self) -> None:
+        value: object
+        for category in ("retrieval", "synthesis", "existence"):
+            with self.subTest(category=category):
+                record = _synthetic_case(f"research-qa-{category}-001", category=category)
+                review = cast(dict[str, object], record["review"])
+                del review["read"]
+                self.assert_refused(record, "review keys or order")
+                for value in (None, "true", "false", 0, 1, [], {}):
+                    with self.subTest(kind=type(value).__name__):
+                        review["read"] = value
+                        self.assert_refused(record, "review.read bool")
+                review["read"] = True
+                review["by"] = "CHU-attorney-1"
+                self.assert_refused(record, "review.by role")
+                review["by"] = "CSA-1"
+                record["review"] = {"read": True, "by": review["by"], "on": review["on"]}
+                self.assert_refused(record, "review keys or order")
+
+    def test_existence_refuses_harvest_origin(self) -> None:
+        self.assert_refused(_research_qa_case(category="existence"), "labels.origin")
+
+    def test_valid_labels_and_gold_count_code_points_and_keep_paragraph_breaks(self) -> None:
+        for labels in ([synthetic.SYNTHETIC_ORIGIN], [synthetic.SYNTHETIC_ORIGIN, synthetic.CLOSED_BOOK_LABEL]):
+            with self.subTest(labels=labels):
+                record = _synthetic_case()
+                record["labels"] = labels
+                self.assertEqual(case_findings(record, synthetic.case_path("lookup"), 1, ("ca6",)), ())
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory) / "eval-v9"
+                    _write(root, synthetic.case_path("lookup"), synthetic.case_line(record).rstrip("\n"))
+                    result = load_set(root, ("ca6",))
+                self.assertTrue(result.ok, result.findings)
+                assert result.loaded is not None
+                self.assertEqual(result.loaded.cases_by_id["research-qa-lookup-001"], record)
+                self.assertEqual(result.loaded.unsigned_ids, frozenset())
+
+    def test_every_top_level_key_is_required_and_ordered(self) -> None:
+        for key in synthetic.CASE_KEYS:
+            with self.subTest(key=key):
+                record = _synthetic_case()
+                del record[key]
+                expected = "unknown suite/category shape" if key in {"suite", "category"} else "case keys or order"
+                self.assert_refused(record, expected)
+        record = _synthetic_case()
+        self.assert_refused(dict(reversed(tuple(record.items()))), "case keys or order")
+        record["extra"] = SENTINEL
+        self.assert_refused(record, "case keys or order")
+        record = _synthetic_case()
+        record["supersedes"] = "research-qa-lookup-000"
+        self.assertEqual(case_findings(record, synthetic.case_path("lookup"), 1), ())
+        reordered = {"supersedes": record.pop("supersedes"), **record}
+        self.assert_refused(reordered, "case keys or order")
+
+    def test_ids_labels_templates_and_seed_refusals(self) -> None:
+        cases: tuple[tuple[str, str, object], ...] = (
+            ("id pattern", "id", "research-qa-001"),
+            ("id pattern", "id", "research-qa-lookup-01"),
+            ("id pattern", "id", "research-qa-retrieval-001"),
+            ("labels", "labels", []),
+            ("labels", "labels", "synthetic"),
+            ("synthetic labels", "labels", ["synthetic", "verbatim"]),
+            ("synthetic labels", "labels", ["synthetic", "closed-book-answerable", "other"]),
+            ("synthetic labels", "labels", ["synthetic", "synthetic"]),
+            ("labels.origin", "labels", ["closed-book-answerable", "synthetic"]),
+            ("labels.origin", "labels", ["invented"]),
+            ("template", "template", None),
+            ("template", "template", "lookup"),
+            ("template", "template", "lookup@0"),
+            ("template", "template", "lookup@01"),
+            ("template", "template", "retrieval@1"),
+            ("template", "template", "lookup@999"),
+            ("seed forbidden", "seed", "HARV-001"),
+            ("question shape", "question", "Fictitious\nquestion"),
+        )
+        for rule, key, value in cases:
+            with self.subTest(rule=rule, key=key, value=value):
+                record = _synthetic_case()
+                record[key] = value
+                self.assert_refused(record, rule)
+
+    def test_unregistered_synthetic_categories_are_refused_by_origin(self) -> None:
+        record = _synthetic_case()
+        record["category"] = "edition"
+        record["id"] = "research-qa-edition-001"
+        self.assert_refused(record, "labels.origin")
+
+    def test_jurisdiction_is_required_and_checked_against_handed_map(self) -> None:
+        for value in (None, [], "ca6", [1], [SENTINEL]):
+            with self.subTest(kind=type(value).__name__):
+                record = _synthetic_case()
+                record["jurisdiction"] = value
+                self.assert_refused(record, "jurisdiction")
+        record = _synthetic_case()
+        record["jurisdiction"] = ["fictionalcourt"]
+        self.assert_refused(record, "jurisdiction id 'fictionalcourt' is absent from courts.yaml")
+        self.assertEqual(case_findings(record, synthetic.case_path("lookup"), 1, ("fictionalcourt",)), ())
+
+    def test_expected_mapping_answer_and_unique_source_id_list(self) -> None:
+        value: object
+        for value in (None, []):
+            record = _synthetic_case()
+            record["expected"] = value
+            self.assert_refused(record, "expected mapping")
+        for key, values, rule in (
+            ("answer", ("", " ", None, "Fictitious\nanswer", "Fictitious\ranswer"), "expected.answer"),
+            ("must_cite", ([], None, "fictional/source-1", ["fictional/source-1", "fictional/source-1"], ["bad source"], [{}]), "expected.must_cite"),
+        ):
+            for value in values:
+                with self.subTest(key=key, kind=type(value).__name__):
+                    record = _synthetic_case()
+                    expected = cast(dict[str, object], record["expected"])
+                    expected[key] = value
+                    self.assert_refused(record, rule)
+        for value in ({}, {"must_cite": ["fictional/source-1"], "answer": SENTINEL},
+                      {"answer": SENTINEL, "must_cite": ["fictional/source-1"], "extra": SENTINEL}):
+            record = _synthetic_case()
+            record["expected"] = value
+            self.assert_refused(record, "expected keys or order")
+
+    def test_gold_shapes_coordinates_quote_lengths_and_must_cite_coverage(self) -> None:
+        value: object
+        for value in (None, [], {}):
+            record = _synthetic_case()
+            record["gold"] = value
+            self.assert_refused(record, "gold non-empty list")
+        record = _synthetic_case()
+        record["gold"] = [None]
+        self.assert_refused(record, "gold[1] mapping")
+        coordinate_cases = (
+            ("source_id", "bad source", "source_id"), ("sha256", "bad hash", "sha256"),
+            ("start", -1, "start"), ("start", True, "start"), ("start", "5", "start"),
+            ("end", 0, "end"), ("end", False, "end"), ("end", 5, "coordinates"),
+            ("quote", None, "quote length"), ("quote", "", "quote length"),
+            ("quote", "Wrong fictitious quote", "quote length"),
+        )
+        for key, value, rule in coordinate_cases:
+            with self.subTest(key=key, value=value):
+                record = _synthetic_case()
+                gold = cast(list[dict[str, object]], record["gold"])
+                gold[0][key] = value
+                self.assert_refused(record, f"gold[1].{rule}")
+        for key in ("source_id", "sha256", "start", "end", "quote"):
+            record = _synthetic_case()
+            gold = cast(list[dict[str, object]], record["gold"])
+            del gold[0][key]
+            self.assert_refused(record, "gold[1] keys or order")
+        record = _synthetic_case()
+        gold = cast(list[dict[str, object]], record["gold"])
+        gold[0] = dict(reversed(tuple(gold[0].items())))
+        self.assert_refused(record, "gold[1] keys or order")
+        record = _synthetic_case()
+        gold = cast(list[dict[str, object]], record["gold"])
+        gold.append({**gold[0], "source_id": "fictional/source-2"})
+        self.assert_refused(record, "gold[2].source_id absent from expected.must_cite")
+        expected = cast(dict[str, object], record["expected"])
+        expected["must_cite"] = ["fictional/source-1", "fictional/source-2"]
+        self.assertEqual(case_findings(record, synthetic.case_path("lookup"), 1), ())
+        record["cluster_id"] = "fictional/source-2"
+        self.assert_refused(record, "cluster_id must equal first gold source_id")
+
+    def test_reviews_have_only_csa_role_and_date_without_accepted_flags(self) -> None:
+        cases = (
+            ("review keys or order", {"by": "CSA-1", "on": "2001-01-02", "accepted_flags": []}),
+            ("review keys or order", {"by": "CSA-1", "on": "2001-01-02", "read": True}),
+            ("review keys or order", {"by": "CSA-1", "on": "2001-01-02", "read": False}),
+            ("review keys or order", {"on": "2001-01-02", "by": "CSA-1"}),
+            ("review.by role", {"by": "CHU-attorney-1", "on": "2001-01-02"}),
+            ("review.by role", {"by": "CSA-0", "on": "2001-01-02"}),
+            ("review.on ISO date", {"by": "CSA-1", "on": "2001-02-30"}),
+        )
+        for rule, review in cases:
+            record = _synthetic_case()
+            record["review"] = review
+            self.assert_refused(record, rule)
+
+    def test_public_case_findings_matches_loader_without_reading_a_set(self) -> None:
+        record = _synthetic_case()
+        record["template"] = "lookup@999"
+        record["question"] = SENTINEL + "\nSecond fictitious line"
+        relative = synthetic.case_path("lookup")
+        direct = case_findings(record, relative, 1, (court for court in ("ca6",)))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write(root, relative, json.dumps(record))
+            loaded = load_set(root, ("ca6",))
+        self.assertIsNone(loaded.loaded)
+        self.assertEqual(set(direct), set(loaded.findings))
+        self.assertTrue(all(finding.id == record["id"] for finding in direct))
+
+    def test_synthetic_cases_are_counted_beside_unsigned_harvest_cases(self) -> None:
+        first = _synthetic_case()
+        successor = _synthetic_case("research-qa-lookup-002")
+        successor["supersedes"] = first["id"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_research_cases(root, (_research_qa_case(), first, successor))
+            _write(root, "slices/demo/cases.ids", "research-qa-001\nresearch-qa-lookup-001\nresearch-qa-lookup-002")
+            result = load_set(root, ("ca6",))
+        self.assertTrue(result.ok, result.findings)
+        assert result.loaded is not None
+        self.assertEqual(result.loaded.unsigned_ids, frozenset({"research-qa-001"}))
+        selection = select_cases(result.loaded, "demo")
+        self.assertEqual(selection.counted, ("research-qa-lookup-002",))
+        self.assertEqual(selection.unsigned, ("research-qa-001",))
+
+    def test_signoff_naming_synthetic_case_is_refused_by_line(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_research_cases(root, (_research_qa_case(), _synthetic_case()))
+            _write_signoffs(root, (_signoff(), _signoff("research-qa-lookup-001", answer=SENTINEL)))
+            result = load_set(root, ("ca6",))
+        self.assertIsNone(result.loaded)
+        # The sign-off grammar admits the harvest series alone, so a synthetic
+        # id never reaches the relational pass.
+        findings = tuple(finding for finding in result.findings if finding.rule == "case_id pattern")
+        self.assertEqual(len(findings), 1)
+        self.assertEqual((findings[0].file, findings[0].id, findings[0].line), (signoffs.SIGNOFFS_PATH.as_posix(), None, 2))
+        self.assertEqual(findings[0].fix, signoffs.SIGNOFF_LINE_FIX)
+        self.assertNotIn(SENTINEL, "\n".join(finding.text() for finding in result.findings))
+
+    def test_shape_key_defaults_and_new_synthetic_only_declarations(self) -> None:
+        lookup = SHAPE_REGISTRY[("research-qa", "lookup")]
+        self.assertEqual(GOLD_COORDINATE_KEYS, tuple(cast(list[dict[str, object]], _synthetic_case()["gold"])[0]))
+        self.assertEqual(lookup.expected_keys, ())
+        self.assertEqual(lookup.expected_keys_for(), signoffs.EXPECTED_KEYS)
+        self.assertEqual(lookup.gold_keys, ())
+        self.assertEqual(lookup.gold_keys_for(), GOLD_COORDINATE_KEYS)
+        for category, extra in (("treatment", "state"), ("section-attribution", "section_type")):
+            with self.subTest(category=category):
+                spec = SHAPE_REGISTRY[("research-qa", category)]
+                self.assertEqual(spec.question_origins, (synthetic.SYNTHETIC_ORIGIN,))
+                self.assertFalse(spec.takes_signoff)
+                self.assertIs(spec.synthetic_keys, lookup.synthetic_keys)
+                self.assertIs(spec.zero_tolerance, True)
+                self.assertEqual(spec.base_keys, lookup.base_keys)
+                self.assertIs(spec.id_pattern, lookup.id_pattern)
+                self.assertIs(spec.cluster_pattern, lookup.cluster_pattern)
+                self.assertEqual(spec.review_keys, lookup.review_keys)
+                self.assertEqual(spec.review_keys_for(synthetic.SYNTHETIC_ORIGIN), ("by", "on"))
+                self.assertEqual(spec.expected_keys, (*signoffs.EXPECTED_KEYS, extra))
+                self.assertEqual(spec.expected_keys_for(), spec.expected_keys)
+                if category == "treatment":
+                    self.assertEqual(spec.gold_keys, (*GOLD_COORDINATE_KEYS, "citation_id", "signal_id", "pattern_set", "cluster"))
+                    self.assertEqual(spec.gold_keys_for(), spec.gold_keys)
+                else:
+                    self.assertEqual(spec.gold_keys, ())
+                    self.assertEqual(spec.gold_keys_for(), GOLD_COORDINATE_KEYS)
+                harvest = _research_qa_case(category=category)
+                self.assert_refused(harvest, "labels.origin")
+                written = _synthetic_case(category=category)
+                written["labels"] = ["chu-written", "rewritten"]
+                self.assert_refused(written, "labels.origin")
+
+    def test_new_shapes_load_and_count_each_declared_state_and_section_type(self) -> None:
+        for category, key, values in (
+            ("treatment", "state", (*TREATMENT_STATES, synthetic.NO_STATE)),
+            ("section-attribution", "section_type", SECTION_TYPES),
+        ):
+            records = []
+            for index, value in enumerate(values, start=1):
+                record = _synthetic_case(f"research-qa-{category}-{index:03d}", category=category)
+                cast(dict[str, object], record["expected"])[key] = value
+                record["labels"] = [synthetic.SYNTHETIC_ORIGIN, synthetic.CLOSED_BOOK_LABEL]
+                self.assertEqual(case_findings(record, synthetic.case_path(category), index, ("ca6",)), ())
+                records.append(record)
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "eval-v9"
+                relative = synthetic.case_path(category)
+                _write(root, relative, "".join(synthetic.case_line(record) for record in records).rstrip("\n"))
+                _write(root, "slices/demo/cases.ids", "\n".join(str(record["id"]) for record in records))
+                result = load_set(root, ("ca6",))
+            self.assertTrue(result.ok, result.findings)
+            assert result.loaded is not None
+            self.assertEqual(result.loaded.cases_by_file[relative], tuple(records))
+            self.assertEqual(result.loaded.unsigned_ids, frozenset())
+            self.assertEqual(select_cases(result.loaded, "demo").counted, tuple(str(record["id"]) for record in records))
+
+    def test_new_expected_keys_are_exact_ordered_and_not_shared_between_shapes(self) -> None:
+        for category in ("treatment", "section-attribution"):
+            spec = SHAPE_REGISTRY[("research-qa", category)]
+            for key in spec.expected_keys_for():
+                record = _synthetic_case(category=category)
+                del cast(dict[str, object], record["expected"])[key]
+                self.assert_refused(record, "expected keys or order")
+            for mutation in ("reverse", "extra", "other-shape"):
+                with self.subTest(category=category, mutation=mutation):
+                    record = _synthetic_case(category=category)
+                    expected = cast(dict[str, object], record["expected"])
+                    if mutation == "reverse":
+                        record["expected"] = dict(reversed(tuple(expected.items())))
+                    elif mutation == "extra":
+                        expected["extra"] = SENTINEL
+                    else:
+                        extra = spec.expected_keys_for()[-1]
+                        expected["section_type" if extra == "state" else "state"] = expected.pop(extra)
+                    self.assert_refused(record, "expected keys or order")
+
+    def test_new_expected_vocabularies_refuse_wrong_values(self) -> None:
+        value: object
+        for category, key in (("treatment", "state"), ("section-attribution", "section_type")):
+            for value in (None, "", SENTINEL, "NEGATIVE", "good law", 1, True, [], {}):
+                with self.subTest(category=category, value=value):
+                    record = _synthetic_case(category=category)
+                    cast(dict[str, object], record["expected"])[key] = value
+                    self.assert_refused(record, f"expected.{key}")
+
+    def test_new_gold_keys_are_exact_and_ordered(self) -> None:
+        for category in ("treatment", "section-attribution"):
+            spec = SHAPE_REGISTRY[("research-qa", category)]
+            for key in spec.gold_keys_for():
+                record = _synthetic_case(category=category)
+                del cast(list[dict[str, object]], record["gold"])[0][key]
+                self.assert_refused(record, "gold[1] keys or order")
+            for reverse in (False, True):
+                record = _synthetic_case(category=category)
+                gold = cast(list[dict[str, object]], record["gold"])
+                if reverse:
+                    gold[0] = dict(reversed(tuple(gold[0].items())))
+                else:
+                    gold[0]["extra"] = SENTINEL
+                self.assert_refused(record, "gold[1] keys or order")
+        for key in ("citation_id", "signal_id", "pattern_set", "cluster"):
+            record = _synthetic_case(category="section-attribution")
+            cast(list[dict[str, object]], record["gold"])[0][key] = SENTINEL
+            self.assert_refused(record, "gold[1] keys or order")
+
+    def test_treatment_gold_edge_field_grammars_and_each_entry(self) -> None:
+        value: object
+        for key, values in (
+            ("citation_id", (None, 1, [], "", "a" * 63, "a" * 65, "A" * 64, "g" * 64)),
+            ("signal_id", (None, 1, [], "", "a" * 63, "a" * 65, "A" * 64, "g" * 64)),
+            ("pattern_set", (None, 1, [], "", "treatment/patterns@0", "treatment/patterns@01", "fictional/patterns@1")),
+            ("cluster", (None, "123", 0, -1, True, False, 1.5, [], {})),
+        ):
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    record = _synthetic_case(category="treatment")
+                    gold = cast(list[dict[str, object]], record["gold"])
+                    gold.append({**gold[0], key: value})
+                    self.assert_refused(record, f"gold[2].{key}")
+        record = _synthetic_case(category="treatment")
+        gold = cast(list[dict[str, object]], record["gold"])
+        self.assertRegex(str(gold[0]["pattern_set"]), f"^{PATTERN_SET_PATTERN}$")
+        self.assertEqual(case_findings(record, synthetic.case_path("treatment"), 1), ())
+
+    def test_new_shape_refusals_locate_file_id_and_line_in_loader(self) -> None:
+        for category, key in (("treatment", "state"), ("section-attribution", "section_type")):
+            with self.subTest(category=category):
+                record = _synthetic_case(f"research-qa-{category}-002", category=category)
+                cast(dict[str, object], record["expected"])[key] = SENTINEL
+                relative = synthetic.case_path(category)
+                direct = case_findings(record, relative, 2, ("ca6",))
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory) / "eval-v9"
+                    _write(root, relative, synthetic.case_line(_synthetic_case(category=category))
+                           + synthetic.case_line(record).rstrip("\n"))
+                    result = load_set(root, ("ca6",))
+                self.assertIsNone(result.loaded)
+                self.assertEqual(result.findings, direct)
+                self.assertTrue(all(finding.file == relative and finding.id == record["id"] and finding.line == 2
+                                    for finding in result.findings))
+                self.assertNotIn(SENTINEL, "\n".join(finding.text() for finding in result.findings))
 
 
 class SegmenterCases(unittest.TestCase):

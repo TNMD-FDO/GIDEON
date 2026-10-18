@@ -148,6 +148,7 @@ def _document(loaded, **overrides: object) -> dict[str, object]:
         "run_id": RUN_ID,
         "product_version": gideon.__version__,
         "corpus_lockfile": None,
+        "generation_id": None,
         "eval_set_version": loaded.version,
         "hardware_profile": "fictitious-profile",
         "slice": "extraction",
@@ -186,6 +187,7 @@ def _write_references(
             repeats=1,
             set_digest=loaded.digest,
             cases={case_id: cases[case_id] for case_id in ids if case_id in cases},
+            verdict="pass",
         )
         path = checkout / reference.REFERENCE_ROOT / "extraction" / f"{list_name}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -358,6 +360,25 @@ class ReadRefusals(unittest.TestCase):
 
 class Writing(unittest.TestCase):
     """Writing is partitioned, owned, canonical, and repeatable."""
+
+    def test_format_two_writes_the_recorded_generation_and_run_verdict(self) -> None:
+        for generation in (None, "caselaw__corpus-2099-01-03__fictitious-embedding__sample"):
+            for verdict in ("pass", "fail"):
+                with self.subTest(generation=generation, verdict=verdict), tempfile.TemporaryDirectory() as directory:
+                    checkout = _checkout(directory)
+                    loaded = _loaded(checkout)
+                    host = WriterHost(_document(loaded, generation_id=generation, verdict=verdict))
+                    code, stdout, stderr = _invoke(host, checkout)
+                    self.assertEqual((code, stderr), (0, ""), stdout)
+                    files = sorted((checkout / reference.REFERENCE_ROOT / "extraction").glob("*.json"))
+                    self.assertTrue(files)
+                    for path in files:
+                        document = json.loads(path.read_text(encoding="utf-8"))
+                        self.assertEqual(document["format"], 2)
+                        self.assertEqual(document["generation_id"], generation)
+                        self.assertEqual(document["verdict"], verdict)
+                    result = reference.read_reference(checkout, "extraction", loaded.slice_lists["extraction"], loaded.version)
+                    self.assertEqual(result.findings, ())
 
     def test_malformed_reference_requires_removal_then_writes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

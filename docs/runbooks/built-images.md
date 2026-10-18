@@ -118,9 +118,10 @@ once, one pull request each. Complete them with one build:
   after a `/data/registry` loss, restore the registry from the backup set
   (`gideon restore --from staging`, or `--from target`;
   `/data/registry` is one of the set's file roots, so restoring the set brings
-  the registry back too; see `docs/runbooks/backup-restore.md`. Until then
-  `apply` refuses at its registry
-  stage.
+  the registry back too); on the build box a target restore seeds the registry
+  from the set at `fetch`, before anything in the run needs a built image, so
+  a wiped box restores in one run (see `docs/runbooks/backup-restore.md §5`).
+  Until then `apply` refuses at its registry stage.
 - Two builds from the same inputs produce two digests. The lock records the
   one pushed last; earlier ones stay in the registry until `registry gc`
   exists.

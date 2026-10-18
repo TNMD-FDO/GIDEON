@@ -8,19 +8,25 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
+from datetime import date, timedelta
 from itertools import combinations
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
+import yaml  # type: ignore[import-untyped]
 from test_evaluation_record import read_psql_set
 from test_evaluation_run import (
     NOW,
     ROOT,
     EvalHost,
+    _copy_sibling_artifacts,
     _generation_row,
     _invoke,
     _run_kwargs,
+    _sibling_row,
 )
 from test_judgments_slice import _fixture, _ranked_file
 
@@ -29,7 +35,13 @@ from gideon.evaluation.evalset import SET_ROOT, LoadedSet
 from gideon.evaluation.results import RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS, CallSurface
 from gideon.host import report
+from gideon.host.corpus.lockfile import (
+    read_lockfile_directory,
+    render_errors,
+    render_lockfile,
+)
 from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK
+from gideon.host.sysio import ReadBytesHost
 
 
 class SliceSurfaces(unittest.TestCase):
@@ -95,8 +107,14 @@ def _invoke_planted(
     """Run one surface set through the command with observable seams."""
 
     contexts: list[RunContext] = []
+    row = (
+        _sibling_row(checkout, site_path or ROOT / "config/site.example.yaml")
+        if stack_name == CI_STACK and generation_name is None
+        and CallSurface.STORES in surfaces and generation_reply is None
+        else _generation_row()
+    )
     host.generation_output = (
-        json.dumps(_generation_row()) + "\n"
+        json.dumps(row) + "\n"
         if generation_reply is None else generation_reply
     )
 
@@ -435,6 +453,7 @@ class StoresPreparation(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.checkout, _ids = _fixture(temporary.name, {1: 3})
+        _copy_sibling_artifacts(self.checkout)
         self.ranked_path, _data = _ranked_file(temporary.name, {1: (1,)})
         self.surfaces = frozenset({CallSurface.STORES})
 
@@ -453,6 +472,124 @@ class StoresPreparation(unittest.TestCase):
         self.assertNotIn("record:", stdout)
         self.assertNotIn("Traceback", stdout + stderr)
         self.assertFalse(any("INSERT INTO eval_runs" in (payload or "") for _argv, payload in host.calls))
+
+    def test_unnamed_ci_uses_newest_committed_label_and_site_embedding_space(self) -> None:
+        """A cut selects its own sample, including an instrument-only cut."""
+
+        directory = self.checkout / "corpus/lockfiles"
+        loaded = read_lockfile_directory(directory)
+        assert loaded.newest is not None
+        latest = loaded.newest
+        label = f"corpus-{date.fromisoformat(latest.label.removeprefix('corpus-')) + timedelta(days=1)}"
+        shutil.copytree(directory / latest.label, directory / label)
+        (directory / f"{label}.yaml").write_text(render_lockfile(replace(
+            latest, label=label, base=latest.label, reason="instrument",
+        )))
+        # A companion directory without its YAML is an unfinished cut, not the default.
+        (directory / "corpus-2999-01-01").mkdir()
+        path = self.checkout / "models.lock"
+        document = yaml.safe_load(path.read_text())
+        configured = command.site.load_site(ROOT / "config/site.example.yaml")
+        assert configured.config is not None
+        document["profiles"][configured.config.hardware_profile]["embedding_space"]["id"] = "fictitious-other-space"
+        path.write_text(yaml.safe_dump(document, sort_keys=False))
+        expected = _sibling_row(self.checkout)
+        self.assertEqual(expected["corpus_lockfile"], label)
+        self.assertIn("fictitious-other-space", expected["gen_id"])
+        host = EvalHost()
+        (code, stdout, stderr), contexts, _ = _invoke_planted(
+            host, self.checkout, self.ranked_path, self.surfaces,
+            stack_name=CI_STACK, flags=("--kind", "smoke"),
+        )
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        self.assertEqual(len(contexts), 1)
+        resolved = contexts[0].generation
+        assert resolved is not None
+        self.assertEqual((resolved.name, resolved.corpus_lockfile, resolved.state), (
+            expected["gen_id"], label, expected["state"],
+        ))
+        self.assertIn(f", generation {resolved.name} ({label}, {resolved.state})", stdout)
+        reads = [sql for _argv, sql in host.calls if "FROM public.index_generations" in (sql or "")]
+        self.assertEqual(len(reads), 1)
+        assert reads[0] is not None
+        self.assertIn("gen_id = :'v_name'", reads[0])
+        self.assertNotIn("state = 'live'", reads[0])
+        line = next(line for line in reads[0].splitlines() if line.startswith("\\set v_name "))
+        self.assertEqual(read_psql_set(line, "v_name"), resolved.name)
+
+    def test_no_completed_lockfile_refuses_before_generation_or_runner(self) -> None:
+        directory = self.checkout / "corpus/lockfiles"
+        shutil.rmtree(directory)
+        for unfinished in (False, True):
+            with self.subTest(unfinished=unfinished):
+                if unfinished:
+                    (directory / "corpus-2999-01-01").mkdir(parents=True)
+                host = EvalHost()
+                outcome, contexts, _ = _invoke_planted(
+                    host, self.checkout, self.ranked_path, self.surfaces,
+                    stack_name=CI_STACK, generation_reply="",
+                )
+                self.assert_refusal(host, outcome, contexts, f"no completed corpus lockfile in {directory}", report.command("corpus cut"))
+                self.assertFalse(any("index_generations" in (sql or "") for _argv, sql in host.calls))
+
+    def test_malformed_or_unreadable_lockfiles_refuse_with_loader_text_and_restore_fix(self) -> None:
+        directory = self.checkout / "corpus/lockfiles"
+        path = next(directory.glob("*.yaml"))
+        original = path.read_bytes()
+        for unreadable in (False, True):
+            with self.subTest(unreadable=unreadable):
+                path.write_bytes(original if unreadable else b"[]\n")
+                host = EvalHost()
+                with (
+                    patch.object(host, "read_bytes", side_effect=PermissionError("fictitious unreadable lockfile"))
+                    if unreadable else nullcontext()
+                ):
+                    errors = read_lockfile_directory(directory, host=cast(ReadBytesHost, host)).errors
+                    self.assertTrue(errors)
+                    outcome, contexts, _ = _invoke_planted(
+                        host, self.checkout, self.ranked_path, self.surfaces,
+                        stack_name=CI_STACK, generation_reply="",
+                    )
+                self.assert_refusal(host, outcome, contexts, render_errors(errors).splitlines()[0].split(" Fix: ")[0],
+                                    "Restore the lockfile and its companion files from the release checkout.")
+                self.assertFalse(any("index_generations" in (sql or "") for _argv, sql in host.calls))
+
+    def test_production_default_and_explicit_ci_name_need_no_default_artifacts(self) -> None:
+        shutil.rmtree(self.checkout / "corpus")
+        (self.checkout / "models.lock").unlink()
+        for stack_name, name in ((PRODUCTION_STACK, None), (CI_STACK, _generation_row()["gen_id"])):
+            with self.subTest(stack=stack_name):
+                host = EvalHost()
+                (code, stdout, stderr), contexts, _ = _invoke_planted(
+                    host, self.checkout, self.ranked_path, self.surfaces,
+                    stack_name=stack_name, generation_name=name,
+                )
+                self.assertEqual((code, stderr), (0, ""), stdout)
+                self.assertEqual(len(contexts), 1)
+                sql = next(sql for _argv, sql in host.calls if "FROM public.index_generations" in (sql or ""))
+                assert sql is not None
+                self.assertIn("collection = :'v_collection' AND state = 'live'" if name is None else "gen_id = :'v_name'", sql)
+
+    def test_default_refuses_model_lock_errors_and_names_an_unusable_space(self) -> None:
+        path = self.checkout / "models.lock"
+        original = path.read_text()
+        configured = command.site.load_site(ROOT / "config/site.example.yaml")
+        assert configured.config is not None
+        document = yaml.safe_load(original)
+        document["profiles"][configured.config.hardware_profile]["embedding_space"]["id"] = "x" * 256
+        for text in ("[]\n", yaml.safe_dump(document, sort_keys=False)):
+            with self.subTest(text=text):
+                path.write_text(text)
+                host = EvalHost()
+                outcome, contexts, _ = _invoke_planted(
+                    host, self.checkout, self.ranked_path, self.surfaces,
+                    stack_name=CI_STACK, generation_reply="",
+                )
+                self.assertEqual((outcome[0], outcome[2], contexts), (1, "", []), outcome[1])
+                self.assertIn("models.lock", outcome[1])
+                self.assertIn("Fix:", outcome[1])
+                self.assertIn(report.command("eval run --slice judgments --stack ci"), outcome[1])
+                self.assertFalse(any("index_generations" in (sql or "") for _argv, sql in host.calls))
 
     def test_invalid_name_and_missing_or_ambiguous_generation_refuse_with_selection_fix(self) -> None:
         row = _generation_row()

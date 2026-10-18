@@ -13,10 +13,19 @@ import unittest
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 from unittest.mock import Mock, patch
 
 from test_evaluation_record import read_psql_set
-from test_evaluation_run import ROOT, EvalHost, _generation_row, _invoke, _run_kwargs
+from test_evaluation_run import (
+    ROOT,
+    EvalHost,
+    _copy_sibling_artifacts,
+    _generation_row,
+    _invoke,
+    _run_kwargs,
+    _sibling_row,
+)
 from test_evaluation_set import (
     _judgment,
     _judgment_case,
@@ -28,11 +37,18 @@ from test_evaluation_set import (
 )
 
 from gideon.evaluation import golddrop_slice, judgments, record, sample, signoffs
-from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_cases
+from gideon.evaluation.evalset import (
+    SET_ROOT,
+    SHAPE_REGISTRY,
+    LoadedSet,
+    load_set,
+    select_cases,
+)
 from gideon.evaluation.generation import COLLECTION, GenerationAccess
 from gideon.evaluation.judgments import Judgment
 from gideon.evaluation.results import RunContext, SliceResult
 from gideon.host import report, stack
+from gideon.host.index.sample import sample_name
 from gideon.host.render.ci import CI_ROOT, CI_STACK
 
 PRIVATE = "[FICTIONAL TEST ONLY: private signed answer and question]"
@@ -90,6 +106,14 @@ def _manifest(loaded: LoadedSet) -> dict[str, str]:
 
 class DropBounds(unittest.TestCase):
     """A document counts once, and the ceiling is an exact whole-number ratio."""
+
+    def test_zero_tolerance_category_constant_is_removed(self) -> None:
+        self.assertFalse(hasattr(golddrop_slice, "ZERO_TOLERANCE_CATEGORIES"))
+
+    def test_treatment_and_section_attribution_shapes_are_zero_tolerance(self) -> None:
+        for category in ("treatment", "section-attribution"):
+            with self.subTest(category=category):
+                self.assertIs(SHAPE_REGISTRY[("research-qa", category)].zero_tolerance, True)
 
     def test_absent_changed_present_and_unversioned_gold(self) -> None:
         gold = {
@@ -189,6 +213,18 @@ class Runner(GoldDropFixture):
         checkpoint = Mock(side_effect=lambda: checkpoints.append(len(self.host.calls)))
         result = self.run_slice(context=replace(context, checkpoint=checkpoint))
         self.assertTrue(result.verdict, result.report)
+        self.assertEqual(result.gated_cases, sum(
+            SHAPE_REGISTRY[cast(
+                tuple[str, str],
+                (self.loaded.cases_by_id[case_id]["suite"], self.loaded.cases_by_id[case_id]["category"]),
+            )].zero_tolerance
+            for case_id in select_cases(self.loaded, "gold-drop").counted
+        ))
+        self.assertIn(
+            "zero-tolerance cases dropped 0: none\n"
+            "1 case, true failure rate ≤ 100.0 % (3/n at 95 %)\n",
+            result.report,
+        )
         self.assertGreaterEqual(checkpoint.call_count, 1)
         self.assertEqual(checkpoints[0], 0)
         self.assertEqual(len(self.host.calls), 1)
@@ -216,6 +252,12 @@ class Runner(GoldDropFixture):
         result = self.run_slice(loaded)
         self.assertFalse(result.verdict)
         self.assertTrue(all(row.verdict == "pass" for row in result.results))
+        self.assertEqual(result.gated_cases, 1)
+        self.assertIn(
+            "zero-tolerance cases dropped 0: none\n"
+            "1 case, failed: no bound (3/n at 95 % is a clean run's)\n",
+            result.report,
+        )
         self.assertEqual(tuple(row.case_id for row in result.results), select_cases(loaded, "gold-drop").counted)
         self.assertIn(f"{judged.query_id}: {judged.source_id}@{judged.sha256}", result.report)
         self.assertIn("gold-drop: fail", result.report)
@@ -237,6 +279,17 @@ class Runner(GoldDropFixture):
                 row = next(row for row in result.results if row.case_id == self.signed[0].case_id)
                 self.assertFalse(result.verdict)
                 self.assertEqual(row.verdict, "fail")
+                self.assertEqual(result.gated_cases, sum(
+                    SHAPE_REGISTRY[cast(
+                        tuple[str, str],
+                        (loaded.cases_by_id[case_id]["suite"], loaded.cases_by_id[case_id]["category"]),
+                    )].zero_tolerance
+                    for case_id in select_cases(loaded, "gold-drop").counted
+                ))
+                self.assertIn(
+                    "1 case, failed: no bound (3/n at 95 % is a clean run's)\n",
+                    result.report,
+                )
                 self.assertEqual(row.metrics, {"must_cite": 1, "dropped": [missing], "zero_tolerance": True})
                 self.assertIn(f"zero-tolerance cases dropped 1: {row.case_id}", result.report)
 
@@ -254,6 +307,25 @@ class Runner(GoldDropFixture):
         self.assertIn(f"cases dropped (reported) 1: {row.case_id}", result.report)
         self.assertIn("zero-tolerance cases dropped 0: none", result.report)
 
+    def test_registry_flag_controls_the_zero_tolerance_gate(self) -> None:
+        judged = tuple(replace(_judgment(), source_id=f"fictional/source-{index}") for index in range(1, 21))
+        loaded = self.with_judgments(judged)
+        for category, index in (("lookup", 0), ("synthesis", 1)):
+            key = ("research-qa", category)
+            spec = SHAPE_REGISTRY[key]
+            for zero_tolerance in (False, True):
+                with self.subTest(category=category, zero_tolerance=zero_tolerance):
+                    self.host.manifest = _manifest(loaded)
+                    missing = self.signed[index].must_cite[0]
+                    del self.host.manifest[missing]
+                    with patch.dict(SHAPE_REGISTRY, {key: replace(spec, zero_tolerance=zero_tolerance)}):
+                        result = self.run_slice(loaded)
+                    row = next(row for row in result.results if row.case_id == self.signed[index].case_id)
+                    self.assertEqual(row.verdict, "fail")
+                    self.assertEqual(row.metrics["dropped"], [missing])
+                    self.assertIs(row.metrics["zero_tolerance"], zero_tolerance)
+                    self.assertEqual(result.verdict, not zero_tolerance)
+
     def test_changed_judged_hash_drops_the_document_and_must_cite_case(self) -> None:
         judged = replace(_judgment(), source_id=self.signed[0].must_cite[0])
         loaded = self.with_judgments((judged,))
@@ -265,6 +337,44 @@ class Runner(GoldDropFixture):
         self.assertIn("dropped 1 (absent 0, hash changed 1)", result.report)
         self.assertIn("absent source ids: none", result.report)
         self.assertIn(f"hash changed source ids: {judged.source_id}", result.report)
+
+    def sample_context(self) -> RunContext:
+        context = _context(self.host)
+        assert context.generation is not None
+        return replace(context, generation=replace(
+            context.generation, name=sample_name(context.generation.name),
+        ))
+
+    def test_sample_reports_gold_absent_from_it_unbuilt_and_counts_the_rest(self) -> None:
+        judged = replace(_judgment(), source_id="fictional/judged-only", sha256="b" * 64)
+        loaded = self.with_judgments((judged,))
+        self.host.manifest = _manifest(loaded)
+        missing = self.signed[0].must_cite[0]
+        del self.host.manifest[missing]
+        del self.host.manifest[judged.source_id]
+        result = self.run_slice(loaded, self.sample_context())
+        self.assertTrue(result.verdict, result.report)
+        self.assertTrue(all(row.verdict == "pass" for row in result.results))
+        unbuilt = " ".join(sorted((missing, judged.source_id)))
+        self.assertIn(
+            f"unbuilt gold documents 2 (absent from the sample, not counted): {unbuilt}\n"
+            f"gold documents {len(sample.gold_hashes(loaded)) - 2}: dropped 0 (absent 0, hash changed 0), ",
+            result.report,
+        )
+        self.assertIn("judged queries with dropped coordinates 0:\n", result.report)
+        self.assertIn("gold-drop: pass", result.report)
+        self.assertNotIn("unbuilt", self.run_slice(loaded).report)
+
+    def test_sample_still_drops_a_changed_hash(self) -> None:
+        judged = replace(_judgment(), source_id=self.signed[0].must_cite[0])
+        loaded = self.with_judgments((judged,))
+        self.host.manifest = _manifest(loaded)
+        self.host.manifest[judged.source_id] = "b" * 64
+        result = self.run_slice(loaded, self.sample_context())
+        self.assertFalse(result.verdict)
+        self.assertEqual(result.results[0].verdict, "fail")
+        self.assertIn("unbuilt gold documents 0 (absent from the sample, not counted): none\n", result.report)
+        self.assertIn("dropped 1 (absent 0, hash changed 1)", result.report)
 
     def test_two_queries_two_hashes_drop_one_document_and_only_lost_coordinates(self) -> None:
         rows = (
@@ -306,12 +416,16 @@ class Runner(GoldDropFixture):
         result = self.run_slice(loaded)
         self.assertTrue(result.verdict, result.report)
         self.assertEqual(result.results, ())
+        self.assertEqual(result.gated_cases, 0)
+        self.assertIn("zero-tolerance cases dropped 0: none\n0 cases, no bound\n", result.report)
         self.assertIn("0 counted, 3 unsigned excluded", result.report)
         self.assertIn("gold documents 0: dropped 0 (absent 0, hash changed 0), ceiling 5 %", result.report)
 
     def test_unresolved_generation_fails_every_counted_case_without_a_read(self) -> None:
         result = self.run_slice(context=replace(_context(self.host), generation=None))
         self.assertFalse(result.verdict)
+        self.assertIsNone(result.gated_cases)
+        self.assertNotIn("3/n", result.report)
         self.assertEqual(tuple(row.case_id for row in result.results), select_cases(self.loaded, "gold-drop").counted)
         self.assertTrue(all(row.verdict == "fail" and row.metrics == {"problem": "generation-unresolved"} for row in result.results))
         self.assertIn("Fix: Run " + report.command("eval run --slice gold-drop --generation <name>"), result.report)
@@ -339,6 +453,8 @@ class Runner(GoldDropFixture):
                 self.host.manifest_code, self.host.manifest_error, self.host.manifest_stdout = code, error, reply
                 result = self.run_slice()
                 self.assertFalse(result.verdict)
+                self.assertIsNone(result.gated_cases)
+                self.assertNotIn("3/n", result.report)
                 self.assertEqual(tuple(row.case_id for row in result.results), select_cases(self.loaded, "gold-drop").counted)
                 self.assertTrue(all(row.verdict == "fail" and row.metrics == {"problem": "record-unreachable"} for row in result.results))
                 self.assertIn("record-unreachable: generation manifest", result.report)
@@ -374,7 +490,9 @@ class Command(GoldDropFixture):
         self.assertIn("unsigned excluded", stdout)
         self.assertNotIn(PRIVATE, stdout + stderr + sql)
 
-    def test_no_named_generation_and_no_live_row_refuses_preconditions_with_fix(self) -> None:
+    def test_unnamed_sibling_sample_absent_refuses_preconditions_with_fix(self) -> None:
+        _copy_sibling_artifacts(self.checkout)
+        row = _sibling_row(self.checkout)
         with patch("gideon.evaluation.stacks.secrets.select_directory"):
             code, stdout, stderr = _invoke(
                 ["eval", "run", "--slice", "gold-drop", "--stack", CI_STACK],
@@ -382,7 +500,8 @@ class Command(GoldDropFixture):
             )
         self.assertEqual((code, stderr), (1, ""))
         self.assertEqual(stdout.count("preconditions:"), 1)
-        self.assertIn(f"no live {COLLECTION} generation on the {CI_STACK} stack", stdout)
+        self.assertIn(f"generation {row['gen_id']} is not recorded on the {CI_STACK} stack", stdout)
+        self.assertIn(report.command(f"index build {COLLECTION} --sample --lockfile {row['corpus_lockfile']}"), stdout)
         self.assertIn(report.command(f"eval run --slice gold-drop --stack {CI_STACK}") + " --generation <name>", stdout)
         self.assertNotIn("run: ok", stdout)
         self.assertNotIn("record:", stdout)

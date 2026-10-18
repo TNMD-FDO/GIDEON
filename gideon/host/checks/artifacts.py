@@ -19,7 +19,7 @@ from gideon.host.models import GIGABYTE, select_profile
 from gideon.host.report import Problem
 from gideon.host.steps.nvidia import loaded_driver_version
 
-_JURISDICTION_FIX = (
+JURISDICTION_FIX = (
     "Correct the jurisdiction key in /etc/gideon/site.yaml; courts.yaml lists "
     "every court id with its level; re-run preflight."
 )
@@ -92,7 +92,7 @@ class JurisdictionCheck(PreflightCheck):
             return CheckReport(
                 Severity.REFUSE,
                 "invalid jurisdiction: " + "; ".join(problems),
-                _JURISDICTION_FIX,
+                JURISDICTION_FIX,
             )
         if context.lockfile is None:
             return CheckReport(

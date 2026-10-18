@@ -28,6 +28,8 @@ MANIFEST_NAME: Final = "manifest.json"
 TARBALL_NAME: Final = "secrets.tar.age"
 FILES_DIR: Final = "files"
 FRONTEND_UPLOADS: Final = "/data/bulk/openwebui"
+# The root carrying the host registry, which restore's fetch seeds from on the build box.
+REGISTRY_ROOT: Final = "data-registry"
 PUSH_RECORD_NAME: Final = "push.json"
 PARTIAL_SUFFIX: Final = ".partial"
 # The system account provision creates for the host services; the one name
@@ -123,7 +125,7 @@ def inventory_roots(checkout: str) -> tuple[InventoryRoot, ...]:
     return (
         InventoryRoot("etc-gideon", "/etc/gideon", etc_gideon_exclusions(), RootKind.SNAPSHOT, True, False),
         InventoryRoot("checkout", checkout, CHECKOUT_EXCLUSIONS, RootKind.SNAPSHOT, False, False),
-        InventoryRoot("data-registry", "/data/registry", (), RootKind.SNAPSHOT, True, False),
+        InventoryRoot(REGISTRY_ROOT, "/data/registry", (), RootKind.SNAPSHOT, True, False),
         InventoryRoot(
             "data-bulk-openwebui", FRONTEND_UPLOADS, (), RootKind.SNAPSHOT, True, True
         ),

@@ -3,6 +3,8 @@
 import ipaddress
 import re
 import subprocess
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -19,6 +21,8 @@ from gideon.host.steps import ProvisionContext, temporary_wgetrc, wget_argv
 
 PROBE_TIMEOUT_SECONDS = 10
 """Fixed wget connect/read timeout; operational, not a tuned product value."""
+PROBE_RETRY_WAIT_SECONDS = 5
+"""Fixed wait before re-probing hosts that gave no response; operational, like the timeout."""
 DOCKER_NETWORK_TIMEOUT_SECONDS = 10
 """Bound on each Docker network read; the client has no request timeout."""
 GETENT_TIMEOUT_SECONDS = 5
@@ -193,6 +197,9 @@ _HTTP_STATUS = re.compile(r"HTTP/[\d.]+\s+(\d{3})")
 # to every unsigned probe — their healthy behaviour).
 _REACHABLE_ERROR_STATUSES = frozenset({401, 404})
 
+# The one verdict a second probe can change: nothing answered at all.
+_NO_RESPONSE = "no response"
+
 
 def _probe_verdict(
     returncode: int, stderr: str, expect: tuple[int, ...] = ()
@@ -213,14 +220,22 @@ def _probe_verdict(
         ):
             return None
         return f"HTTP {statuses[-1]}" if statuses else "server error"
-    return "no response"
+    return _NO_RESPONSE
 
 
 class EgressCheck(PreflightCheck):
-    """Probe the pre-install egress destinations."""
+    """Probe the pre-install egress destinations.
+
+    A host that gave no response is probed once more, after one fixed wait,
+    with the same argv, so a transient miss does not refuse the run; a host
+    that answered with a status is judged on that one answer.
+    """
 
     name = "egress"
     summary = "probe required host-provisioning and install-upgrade egress"
+
+    def __init__(self, sleep: Callable[[float], None] = time.sleep) -> None:
+        self._sleep = sleep
 
     def run(self, context: PreflightContext) -> CheckReport:
         entries = _egress_hosts(context)
@@ -243,7 +258,12 @@ class EgressCheck(PreflightCheck):
                 lock=context.lock,
                 site=context.site,
             )
-            missed: list[str] = []
+
+            def probe(entry: EgressHost, argv: list[str]) -> str | None:
+                result = context.host.run(argv)
+                return _probe_verdict(result.returncode, result.stderr, entry.expect)
+
+            first_misses: list[tuple[EgressHost, list[str], str]] = []
             for entry in entries:
                 argv = wget_argv(provision_context, "/dev/null", entry.probe_url)
                 argv[1:1] = [
@@ -253,21 +273,35 @@ class EgressCheck(PreflightCheck):
                     f"--read-timeout={PROBE_TIMEOUT_SECONDS}",
                 ]
                 argv = wgetrc.prefix(argv)
-                result = context.host.run(argv)
-                verdict = _probe_verdict(
-                    result.returncode, result.stderr, entry.expect
-                )
+                verdict = probe(entry, argv)
                 if verdict is not None:
+                    first_misses.append((entry, argv, verdict))
+
+            if any(verdict == _NO_RESPONSE for _, _, verdict in first_misses):
+                self._sleep(PROBE_RETRY_WAIT_SECONDS)
+            missed: list[str] = []
+            recovered: list[str] = []
+            for entry, argv, verdict in first_misses:
+                if verdict != _NO_RESPONSE:
                     missed.append(f"{entry.host} ({verdict})")
+                    continue
+                second = probe(entry, argv)
+                if second is None:
+                    recovered.append(f"{entry.host} (first {verdict})")
+                else:
+                    missed.append(f"{entry.host} ({verdict}, then {second})")
+            second_probe = (
+                f"; on a second probe: {', '.join(recovered)}" if recovered else ""
+            )
             if missed:
                 return CheckReport(
                     Severity.REFUSE,
-                    f"unreachable hosts: {', '.join(missed)}",
+                    f"unreachable hosts: {', '.join(missed)}{second_probe}",
                     _EGRESS_FIX,
                 )
             return CheckReport(
                 Severity.PASS,
-                f"all {len(entries)} required egress hosts responded",
+                f"all {len(entries)} required egress hosts responded{second_probe}",
             )
 
 

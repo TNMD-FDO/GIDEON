@@ -68,22 +68,27 @@ _ROLE: Final = (
     r"(?:C\.\s*J\.|JJ\.|J\.|Chief Judge|Circuit Judge|District Judge|"
     r"Senior (?:Circuit |District )?Judge|Judge|Chief Justice|Justice)"
 )
-# A byline is a name and role followed by nothing, a joiners' clause (which may
-# wrap), or a disposition; a separate opinion's disposition runs to the line's
-# end in its own closed words, so prose that begins with a judge's name and
-# goes on to say "dissenting in that case, argued ..." is not one.
+# A byline is a paragraph's prefix: a name and role followed by nothing, a
+# joiners' clause (which may wrap), or a disposition, ending at the paragraph's
+# end or at the first period after it that whitespace follows, a role's own
+# period passed over. A separate opinion's disposition is its closed words, so
+# prose such as "dissenting in that case, argued ..." is not one.
 _DISPOSITION_WORDS: Final = (
     r"(?:in|part|and|the|judgment|result|concurring|dissenting|from|denial|of|"
     r"certiorari|per|curiam)\b"
 )
+_BYLINE_END: Final = r"(?:[\s.,:;]*$|\.[*†‡]?(?=\s)|(?<=\.)(?=\s))"
+_BYLINE_START: Final = (
+    rf"(?:{_NAME},\s*(?i:{_ROLE})|(?i:(?:Mr\.\s+)?(?:Chief\s+)?Justice)\s+{_NAME})"
+)
 _BYLINE_SUFFIX: Final = (
-    r"[\s.,:;]*(?:$|(?:with\s+whom\b[\s\S]{0,200}?\bjoin(?:s|ed)?\b[\s.,:;]*)?"
-    r"(?:$|(?:delivered|announced|for\s+the\s+court)\b"
-    rf"|(?:concurring|dissenting)\b(?:[\s,]+{_DISPOSITION_WORDS})*[\s.,:;]*$))"
+    r"[\s,:;]*(?:with\s+whom\b[\s\S]{0,200}?\bjoin(?:s|ed)?\b[^.]{0,80}?[\s,:;]*)?"
+    rf"(?:(?:delivered|announced|for\s+the\s+court)\b(?:{_ROLE}|[^.])*?{_BYLINE_END}"
+    rf"|(?:concurring|dissenting)\b(?:[\s,]+{_DISPOSITION_WORDS})*{_BYLINE_END}"
+    rf"|{_BYLINE_END})"
 )
 _AUTHOR: Final = re.compile(
-    rf"^(?:{_NAME},\s*(?i:{_ROLE})|(?i:(?:Mr\.\s+)?(?:Chief\s+)?Justice)\s+{_NAME})"
-    rf"(?i:{_BYLINE_SUFFIX})"
+    rf"{_BYLINE_START}(?i:{_BYLINE_SUFFIX})"
 )
 _PER_CURIAM: Final = re.compile(r"per\s+curiam\b", re.IGNORECASE)
 _CONCUR: Final = re.compile(r"\bconcurr(?:ing|ence|ed|s)?\b", re.IGNORECASE)
@@ -94,11 +99,37 @@ _MAJORITY: Final = re.compile(
     r"\b(?:delivered\s+the\s+opinion\s+of\s+the\s+court|for\s+the\s+court|"
     r"opinion\s+of\s+the\s+court)\b", re.IGNORECASE,
 )
-_JOINED: Final = re.compile(r"\bjoined\b", re.IGNORECASE)
+_JOINDER: Final = re.compile(r"\bjoin(?:s|ed)?\b", re.IGNORECASE)
 _ROLE_COUNT: Final = re.compile(rf"(?i:{_ROLE})")
-_PER_CURIAM_LINE: Final = re.compile(r"per\s+curiam[.:;]?\Z", re.IGNORECASE)
+_PARTICIPANT: Final = re.compile(
+    rf"^{_BYLINE_START}(?i:(?:{_ROLE}|[^.])*?\b(?:delivered|filed|joined|"
+    rf"took\s+no\s+part|{_CONCUR.pattern}|{_DISSENT.pattern})\b)"
+)
+_CLOSING: Final = re.compile(r"(?:It\s+is\s+so\s+ordered|So\s+ordered)\.\s+", re.IGNORECASE)
+_LINE_BREAK_HYPHEN: Final = re.compile(r"(?<=[a-z])-[ \t]*\n\s*(?=[a-z])")
+_PER_CURIAM_PREFIX: Final = re.compile(r"per\s+curiam(?:[.:;]|$)", re.IGNORECASE)
 _LEADING_LABEL: Final = re.compile(r"^\s*(\[[^\[\]\s]+\]|\d+\.|\*+)(?=\s|$)")
 _LAWBOX_LABEL: Final = re.compile(r"^\s*(\[[^\[\]\s]+\])(?=\s|$)")
+
+# exempt: these page shapes are starting values to be measured against opinion samples.
+_SLIP_HEAD: Final = re.compile(r"^(?:\(Slip Opinion\)|Cite as:)")
+_SLIP_EVEN_HEAD: Final = re.compile(r"[0-9]{1,3}\s+[A-Z][^a-z]*\bv\.(?:\s[^a-z]*)?(?:\b(?:ex rel|et al)\.[^a-z]*)*")
+_SLIP_OPINION_HEAD: Final = re.compile(rf"(?i:Opinion|Statement)\s+(?i:of)\s+{_NAME},\s*(?i:{_ROLE})[.,:;]?")
+_SLIP_NOTICE: Final = re.compile(r"^(?:NOTE|NOTICE):")
+_SLIP_COURT: Final = re.compile(r"SUPREME COURT OF THE UNITED STATES")
+_CALENDAR_DATE: Final = (
+    r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+    r"\s+[0-9]{1,2},\s+[0-9]{4}"
+)
+_SLIP_DATE: Final = re.compile(rf"\[{_CALENDAR_DATE}\]|\bDecided\s+{_CALENDAR_DATE}\s*[*†‡]?")
+_SLIP_HELD: Final = re.compile(r"^Held:")
+_SLIP_DIVIDER: Final = re.compile(r"^[ \t]*—{2,}[ \t]*", re.MULTILINE)
+_SLIP_FOOTNOTE: Final = re.compile(r"^([0-9]{1,3}|[*†‡])\s+\S")
+_CIRCUIT_HEAD: Final = re.compile(
+    r"Nos?\.\s+[0-9]{2}-[0-9]{4}(?:\s*[/,]\s*[0-9]{2}-[0-9]{4})*"
+    r"(?:\s+.*)?\s+Page\s+[0-9]+"
+)
+_CIRCUIT_FOOTNOTE: Final = re.compile(r"^[ \t]*([0-9]{1,3})[ \t]*$", re.MULTILINE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +169,24 @@ class _Run:
     opinion: int | None
 
 
+@dataclass(slots=True)
+class _PageState:
+    armed: str | None = None
+    page_head_start: int | None = None
+    expect_running_head: bool = False
+    running_head_kind: str | None = None
+    first_page: bool = False
+    alone: bool = False
+    alone_type: str | None = None
+    after_running_head: bool = False
+    in_caption: bool = False
+    caption_dated: bool = False
+    in_footnotes: bool = False
+    footnote_owed: bool = False
+    resume: bool = False
+    switch: str | None = None
+
+
 def paragraphs(text: str, start: int, end: int) -> list[_Paragraph]:
     """Return nonblank paragraph spans within a section of canonical text."""
 
@@ -162,8 +211,22 @@ def _heading(line: str) -> str | None:
     return HEADING_CUES.get(normalized)
 
 
-def _author(line: str) -> bool:
-    return bool(_PER_CURIAM_LINE.fullmatch(line) or _AUTHOR.match(line))
+def _unbroken(line: str) -> str:
+    return _LINE_BREAK_HYPHEN.sub("", line)
+
+
+def _byline(line: str) -> str | None:
+    # A word the dump hyphenated across a line break is read whole; one extra
+    # character prevents a truncated paragraph from passing as a byline that
+    # ends exactly at the bound.
+    bounded = _unbroken(line)[:LINE_MAX_CHARS + 1]
+    # A byline the dump ran on after the previous opinion's closing formula is read past it.
+    closing = _CLOSING.match(bounded)
+    position = closing.end() if closing else 0
+    match = _PER_CURIAM_PREFIX.match(bounded, position) or _AUTHOR.match(bounded, position)
+    if match and _eligible(bounded[:match.end()]):
+        return bounded[:match.end()]
+    return None
 
 
 def _disposition(line: str) -> str | None:
@@ -177,23 +240,188 @@ def _disposition(line: str) -> str | None:
         return "dissent"
     if concur:
         return "concurrence"
-    if _PLURALITY.search(line):
-        return "plurality"
+    # A byline delivering the Court's opinion in part is the Court's, though it announces the judgment.
     if _MAJORITY.search(line):
         return "majority"
+    if _PLURALITY.search(line):
+        return "plurality"
     return None
 
 
 def _participation(line: str) -> bool:
-    separate = bool(_CONCUR.search(line) or _DISSENT.search(line))
-    if _MAJORITY.search(line) and separate:
+    prefix = _byline(line)
+    if prefix is None:
+        return False
+    disposition = _disposition(prefix)
+    if (_JOINDER.search(prefix) and len(_ROLE_COUNT.findall(prefix)) >= 2
+            and (disposition is None or disposition in _COURT)):
         return True
-    return bool(_JOINED.search(line) and len(_ROLE_COUNT.findall(line)) >= 2
-                and _disposition(line) is None)
+    return bool(_PARTICIPANT.match(_unbroken(line)[len(prefix):].lstrip()))
 
 
 def _eligible(line: str) -> bool:
     return bool(line) and len(line) <= LINE_MAX_CHARS
+
+
+def _running_head(line: str) -> str | None:
+    if not _eligible(line):
+        return None
+    heading = _heading(line)
+    if heading == "syllabus":
+        return "syllabus"
+    if heading in {"majority", "per_curiam"}:
+        return "opinion"
+    if _SLIP_OPINION_HEAD.fullmatch(line) or _byline(line) == _unbroken(line):
+        return "separate"
+    return None
+
+
+def _even_head(line: str) -> str | None:
+    # An even page's head is its number and caption, read once a slip is armed;
+    # the running head after it, when the dump ran both into one line, is returned.
+    if _SLIP_EVEN_HEAD.fullmatch(line):
+        return ""
+    for space in _SPACES.finditer(line):
+        if (_SLIP_EVEN_HEAD.fullmatch(line[:space.start()])
+                and _running_head(line[space.end():]) is not None):
+            return line[space.end():]
+    return None
+
+
+def _read_running_head(state: _PageState, line: str, running: tuple[str, str]) -> bool:
+    state.running_head_kind = _running_head(line)
+    if state.running_head_kind == "separate":
+        prefix = _byline(line)
+        disposition = _disposition(prefix) if prefix is not None else None
+        if state.first_page:
+            # A slip whose first page heads a separate writing holds that writing alone.
+            state.alone = True
+            state.alone_type = disposition
+        elif disposition in _SEPARATE and disposition != running[0]:
+            # A page headed by a separate opinion is that opinion's, whatever its byline read.
+            state.switch = disposition
+    state.first_page = False
+    return state.running_head_kind is not None
+
+
+def _page(
+    state: _PageState, paragraph: _Paragraph, running: tuple[str, str],
+) -> tuple[bool, _Span | None]:
+    line = paragraph.line
+    lines = line.splitlines()
+    even = _even_head(lines[0].rstrip()) if state.armed == "slip" else None
+    slip_head = state.armed in {None, "slip"} and _SLIP_HEAD.match(lines[0]) or even is not None
+    circuit_head = (state.armed in {None, "circuit"} and len(lines) == 1
+                    and _CIRCUIT_HEAD.fullmatch(line))
+    if slip_head or circuit_head:
+        state.first_page = state.armed is None
+        state.armed = "slip" if slip_head else "circuit"
+        if slip_head:
+            # A caption that wraps leaves the running head on a later line of the head.
+            later = [part.strip() for part in lines[1:]]
+            head_line = even or next((part for part in later if _running_head(part)), later[0] if later else "")
+            state.page_head_start = paragraph.start
+            state.expect_running_head = not head_line
+            state.running_head_kind = None
+            state.after_running_head = bool(head_line) and _read_running_head(state, head_line, running)
+        if state.in_footnotes or state.in_caption:
+            state.in_footnotes = state.in_caption = False
+            state.resume = True
+        state.footnote_owed = False
+        return True, None
+
+    if state.armed == "slip":
+        if state.expect_running_head:
+            state.expect_running_head = False
+            if _read_running_head(state, line, running):
+                state.after_running_head = True
+                return True, None
+        after_running_head = state.after_running_head
+        state.after_running_head = False
+        if after_running_head and _SLIP_NOTICE.match(line):
+            return True, None
+        # A caption block reaches back only over its own page's head furniture.
+        head, state.page_head_start = state.page_head_start, None
+        if not state.in_caption and _SLIP_COURT.fullmatch(lines[0].rstrip()):
+            start = head if head is not None else paragraph.start
+            if state.alone:
+                # Its front block takes the writing's own type, or none for a statement.
+                state.alone = False
+                if state.alone_type is None:
+                    return True, None
+                return False, _Span(start, paragraph.end, state.alone_type, "line")
+            state.in_caption = True
+            state.caption_dated = False
+            return True, _Span(start, paragraph.end, "headmatter", "line")
+        if state.in_caption:
+            date = _SLIP_DATE.search(line)
+            # A date line merged with the summary's first sentence takes the summary's mark.
+            merged = date is not None and len(line) - date.end() > date.end()
+            if date is not None and not merged:
+                state.caption_dated = True
+                return True, None
+            if _byline(line) is not None:
+                state.in_caption = False
+            elif (state.running_head_kind == "syllabus"
+                    and (merged or state.caption_dated or _SLIP_HELD.match(line))):
+                state.in_caption = False
+                state.resume = False
+                return False, _Span(paragraph.start, paragraph.end, "syllabus", "line")
+            elif merged or state.caption_dated:
+                # After its date the block ends and the body resumes.
+                state.in_caption = False
+                state.resume = True
+            else:
+                return True, None
+    # A footnote block opens at a slip's rule or a circuit's number on a line of its own.
+    marker = _SLIP_DIVIDER if state.armed == "slip" else _CIRCUIT_FOOTNOTE if state.armed else None
+    found = marker.search(line) if marker is not None else None
+    if found is not None and found.start() > 0:
+        if state.in_footnotes:
+            found = None
+        else:
+            # Opened inside a paragraph, the paragraph takes its larger part's mark,
+            # and a body part that is larger leaves the footnote to the next paragraph.
+            state.in_footnotes = True
+            rest = line[found.start():] if state.armed == "circuit" else line[found.end():].lstrip()
+            if len(rest) <= found.start():
+                state.footnote_owed = True
+                return _body(state, paragraph, running)
+            return True, _Span(paragraph.start, paragraph.end, "footnote", "line", _footnote_label(state, rest))
+    if found is not None or state.in_footnotes:
+        state.in_footnotes = True
+        rest = line[found.end():].lstrip() if found is not None and state.armed == "slip" else line
+        if not rest:
+            # The rule alone continues the section; the footnote begins after it.
+            state.footnote_owed = True
+            return True, None
+        label = _footnote_label(state, rest)
+        if found is not None or label is not None or state.footnote_owed:
+            state.footnote_owed = False
+            return True, _Span(paragraph.start, paragraph.end, "footnote", "line", label)
+        return True, None
+    return _body(state, paragraph, running)
+
+
+def _footnote_label(state: _PageState, text: str) -> str | None:
+    opener = (_SLIP_FOOTNOTE if state.armed == "slip" else _CIRCUIT_FOOTNOTE).match(text)
+    return opener.group(1) if opener else None
+
+
+def _body(
+    state: _PageState, paragraph: _Paragraph, running: tuple[str, str],
+) -> tuple[bool, _Span | None]:
+    line = paragraph.line
+    if _eligible(line) and _participation(line):
+        if state.armed is not None and running[0] == "syllabus":
+            return True, None
+        state.resume = True
+        return True, _Span(paragraph.start, paragraph.end, "headmatter", "line")
+    if state.resume or state.switch is not None:
+        kind = running if state.switch is None else (state.switch, "line")
+        state.resume, state.switch = False, None
+        return False, _Span(paragraph.start, paragraph.end, *kind)
+    return False, None
 
 
 def _base(opinion_type: str | None, per_curiam: bool, element: str | None) -> tuple[str, str]:
@@ -286,8 +514,9 @@ def _structural(parsed: Parsed, column: str, paragraphs: list[_Paragraph]) -> li
         (span.start, span.end) for span in spans
     ] + [(block.start, block.end) for block in parsed.blocks if block.kind == "quote"])
     for paragraph in paragraphs:
-        if (_eligible(paragraph.line) and not _overlaps(paragraph.start, paragraph.end, starts, ends)
-                and _author(paragraph.line) and _participation(paragraph.line)):
+        if (column != "plain_text" and _eligible(paragraph.line)
+                and not _overlaps(paragraph.start, paragraph.end, starts, ends)
+                and _participation(paragraph.line)):
             spans.append(_Span(paragraph.start, paragraph.end, "headmatter", "line"))
 
     ordered = sorted(spans, key=lambda span: (span.start, span.end))
@@ -391,6 +620,7 @@ def segment(
     base: tuple[str, str] = ("unknown", "none")
     running: tuple[str, str] | None = None
     current_opinion: int | None = None
+    page = _PageState() if column == "plain_text" else None
     for run in _runs(text, spans, opinions):
         if run.span is not None:
             span = spans[run.span]
@@ -412,17 +642,25 @@ def segment(
             paragraph = paragraph_rows[paragraph_index]
             if paragraph.start >= run.end:
                 break
-            if paragraph.start < run.start or paragraph.end > run.end or not _eligible(paragraph.line):
+            if paragraph.start < run.start or paragraph.end > run.end:
                 continue
             if _overlaps(paragraph.start, paragraph.end, quote_starts, quote_ends):
                 continue
-            heading = _heading(paragraph.line)
+            if page is not None:
+                skip, opening = _page(page, paragraph, running)
+                if opening is not None:
+                    openings.append((opening.start, opening.section_type, opening.typed_by, opening.label))
+                    if not skip:
+                        running = opening.section_type, opening.typed_by
+                if skip:
+                    continue
+            heading = _heading(paragraph.line) if _eligible(paragraph.line) else None
             if heading == "notes":
                 continue
             if heading is not None:
                 running = _cued(heading, running, base)
-            elif _author(paragraph.line):
-                running = _cued(_disposition(paragraph.line), running, base)
+            elif (prefix := _byline(paragraph.line)) is not None:
+                running = _cued(_disposition(prefix), running, base)
             else:
                 continue
             openings.append((paragraph.start, *running, None))

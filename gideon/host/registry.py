@@ -15,6 +15,7 @@ from gideon.host.images import (
     MirroredImagePin,
     RegistryTarget,
     load_image_lock,
+    manifest_inspect_argv,
     parse_registry,
     proxy_environment,
     reference,
@@ -84,14 +85,6 @@ def _destination_repository(target: RegistryTarget, name: str) -> str:
     return f"docker://{target.authority}/{target.prefix}{name}"
 
 
-def _manifest_argv(target: RegistryTarget, image_reference: str) -> list[str]:
-    argv = ["docker", "manifest", "inspect"]
-    if target.scheme == "http":
-        argv.append("--insecure")
-    argv.append(image_reference)
-    return argv
-
-
 def _report(
     name: str,
     outcome: MirrorOutcome,
@@ -153,7 +146,7 @@ def _manifest_probe(
 ) -> subprocess.CompletedProcess[str] | None:
     try:
         result = io.run(
-            _manifest_argv(target, image_reference),
+            manifest_inspect_argv(target, image_reference),
             env=environment,
         )
     except OSError as exc:

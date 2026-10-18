@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from gideon.host import report
 from gideon.host.corpus.record import CutRow, read_lockfiles
 from gideon.host.index import buildreport, generations, record
+from gideon.host.index.treatment import RISK_STATES
 from gideon.host.render.worker import (
     GENERATION_PATTERN,
     PRECEDENTIAL_VALUES,
@@ -225,6 +226,17 @@ def _print_inventory(row: record.GenerationRow, build_report: buildreport.BuildR
         _print_line(
             f"gate cluster: seconds {cluster.seconds} of budget {cluster.budget}; "
             f"reused {'yes' if cluster.reused else 'no'}; {'pass' if cluster.passed else 'fail'}"
+        )
+    treatment = build_report.treatment
+    if treatment is None:
+        _print_line("treatment: none")
+    else:
+        states = ", ".join(
+            f"{state} {treatment.by_state[state]} ({_percent(treatment.by_state[state], treatment.clusters)}%)"
+            for state in RISK_STATES
+        )
+        _print_line(
+            f"treatment: clusters {treatment.clusters}; {states}; materialized {treatment.materialized_at}"
         )
     totals = totals_for(build_report.courts)
     _print_line(

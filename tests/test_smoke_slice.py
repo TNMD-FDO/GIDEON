@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import os
 import shutil
 import subprocess
@@ -16,20 +17,27 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
+import test_golddrop_slice
 from test_evaluation_run import (
     EvalHost,
     _assert_comparison_lines,
     _casecite_reply,
+    _copy_sibling_artifacts,
+    _generation_row,
     _invoke,
     _run_kwargs,
+    _sibling_row,
 )
+from test_evaluation_set import _judgment
 from test_guardrails_slice import JudgingDoorHost, _fixture_turns
 
 import gideon
 from gideon.evaluation import (
     command,
     extraction_slice,
+    golddrop_slice,
     guardrails_slice,
+    record,
     reference,
     smoke_slice,
     stacks,
@@ -41,6 +49,7 @@ from gideon.evaluation.evalset import (
     load_set,
     select_cases,
 )
+from gideon.evaluation.generation import GenerationAccess
 from gideon.evaluation.results import (
     CaseResult,
     ImageAccess,
@@ -103,9 +112,10 @@ def _temporary_smoke_set(root: Path) -> tuple[Path, LoadedSet]:
 
 
 def _context(
-    loaded: LoadedSet, *, host: JudgingDoorHost | None = None
-) -> tuple[JudgingDoorHost, RunContext]:
-    host = JudgingDoorHost() if host is None else host
+    loaded: LoadedSet, *, host: CommandDoorHost | None = None
+) -> tuple[CommandDoorHost, RunContext]:
+    host = CommandDoorHost() if host is None else host
+    host.stores.manifest = test_golddrop_slice._manifest(loaded)
     guardrails = tuple(
         case_id
         for case_id in loaded.active_ids
@@ -114,7 +124,11 @@ def _context(
     _host, _frontend, context = _fixture_turns(
         replace(loaded, active_ids=guardrails), host=host
     )
-    return host, replace(context, judge_prompt_id=None)
+    row = _generation_row()
+    return host, replace(
+        context, judge_prompt_id=None,
+        generation=GenerationAccess(row["gen_id"], row["corpus_lockfile"], row["state"]),
+    )
 
 
 def _mutating_guardrails(
@@ -153,6 +167,8 @@ class CommandDoorHost(JudgingDoorHost):
 
     def __init__(self) -> None:
         super().__init__()
+        self.stores = test_golddrop_slice.GoldDropHost()
+        self.stores.generation_output = json.dumps(_generation_row()) + "\n"
         self.locks: dict[str, str] = {}
         self.image_stdout: str | None = None
         self.image_returncode = 0
@@ -169,6 +185,13 @@ class CommandDoorHost(JudgingDoorHost):
         timeout: float | None = None,
         passthrough: bool = False,
     ) -> subprocess.CompletedProcess[str]:
+        if input is not None and (
+            "FROM public.index_generations" in input or "FROM public.generation_documents" in input
+        ):
+            return self.stores.run(
+                list(argv), check=check, input=input, cwd=cwd, env=env,
+                timeout=timeout, passthrough=passthrough,
+            )
         if tuple(argv)[:3] == ("docker", "image", "inspect"):
             return subprocess.CompletedProcess(list(argv), 0, "", "")
         if list(argv) == worker.psql_argv(stacks.CI_ROOT):
@@ -211,6 +234,9 @@ class CommandDoorHost(JudgingDoorHost):
         except FileNotFoundError:
             return Path(path).read_text(encoding=encoding)
 
+    def read_bytes(self, path: PathLike) -> bytes:
+        return Path(path).read_bytes()
+
     def take_lock(self, path: PathLike, record: str) -> str | None:
         key = os.fspath(path)
         holder = self.locks.get(key)
@@ -252,6 +278,12 @@ class SmokeRunner(unittest.TestCase):
                 self.assertFalse(result.verdict)
                 self.assertIn(f"image leg failed {len(failed)}:", result.report)
                 self.assertIn("zero-tolerance: fail", result.report)
+                self.assertEqual(result.gated_cases, len(_SAMPLE))
+                self.assertIn(
+                    "zero-tolerance: fail; 6 cases, failed: no bound "
+                    "(3/n at 95 % is a clean run's)\n",
+                    result.report,
+                )
                 self.assertNotIn("PRIVATE MATTER TEXT", result.report)
 
     def test_each_zero_tolerance_cause_fails_by_id(self) -> None:
@@ -286,6 +318,12 @@ class SmokeRunner(unittest.TestCase):
                 result = composite.run(loaded, "smoke", context)
                 self.assertFalse(result.verdict)
                 self.assertIn(positive, result.report)
+                self.assertEqual(result.gated_cases, len(_SAMPLE))
+                self.assertIn(
+                    "zero-tolerance: fail; 6 cases, failed: no bound "
+                    "(3/n at 95 % is a clean run's)\n",
+                    result.report,
+                )
                 self.assertIn(f"{cause} 1:", result.report)
                 self.assertEqual(host.judge_requests, [])
 
@@ -341,6 +379,11 @@ class SmokeRunner(unittest.TestCase):
                 result = composite.run(loaded, "smoke", replace(context, image=_IMAGE_ACCESS))
         self.assertTrue(result.verdict, result.report)
         self.assertIn("controls replaced 1 (reported, not gated)", result.report)
+        self.assertEqual(result.gated_cases, len(_SAMPLE))
+        self.assertIn(
+            "zero-tolerance: pass; 6 cases, true failure rate ≤ 50.0 % (3/n at 95 %)\n",
+            result.report,
+        )
         self.assertIn("controls declined 0 (reported, not gated)", result.report)
         self.assertIn("extraction bounds fail (reported, not gated)", result.report)
         self.assertIn("guardrails report (its verdict is reported, not smoke's)", result.report)
@@ -495,6 +538,7 @@ class SmokeRunner(unittest.TestCase):
         }
         guardrail_rows = tuple(row for row in result.results if row.case_id in guardrail_ids)
         self.assertEqual({row.case_id for row in guardrail_rows}, guardrail_ids)
+        self.assertEqual(result.gated_cases, len(guardrail_rows))
         self.assertTrue(all(row.verdict == "fail" for row in guardrail_rows))
         self.assertTrue(
             all(row.metrics.get("problem") == "turns-unavailable" for row in guardrail_rows)
@@ -517,7 +561,108 @@ class SmokeRunner(unittest.TestCase):
             host, context = _context(loaded)
             result = SLICE_RUNNERS["smoke"].runner(loaded, "smoke", context)
         self.assertNotIn(unsigned_id, {row.case_id for row in result.results})
+        self.assertEqual(result.gated_cases, len(_SAMPLE) - 1)
         self.assertEqual(host.judge_requests, [])
+
+
+class SmokeStores(test_golddrop_slice.GoldDropFixture):
+    """The gold-drop verdict gates smoke even without routed cases."""
+
+    def smoke_set(
+        self, counted: tuple[str, ...] = (), loaded: LoadedSet | None = None,
+    ) -> LoadedSet:
+        loaded = self.loaded if loaded is None else loaded
+        return replace(
+            loaded, slices={**loaded.slices, "smoke": counted},
+            slice_lists={**loaded.slice_lists, "smoke": {"fictitious": counted}},
+        )
+
+    def test_stores_part_runs_with_no_routed_case_over_the_whole_sets_gold(self) -> None:
+        loaded = self.smoke_set()
+        context = test_golddrop_slice._context(self.host)
+        result = SLICE_RUNNERS["smoke"].runner(loaded, "smoke", context)
+        self.assertTrue(result.verdict, result.report)
+        self.assertEqual(result.results, ())
+        self.assertEqual(result.gated_cases, 0)
+        self.assertIn("zero-tolerance: pass; 0 cases, no bound\n", result.report)
+        self.assertIn("gold-drop report (its verdict is smoke's):", result.report)
+        self.assertIn("0 counted, 0 unsigned excluded", result.report)
+        self.assertIn(f"gold documents {len(self.host.manifest)}: dropped 0", result.report)
+        self.assertIn("  gold-drop gate pass", result.report)
+        self.assertIn("smoke: pass; 0 cases, 0 at the frontend", result.report)
+        self.assertEqual(len(self.host.calls), 1)
+        argv, sql = self.host.calls[0]
+        self.assertEqual(argv, tuple(record.reader_argv(context.turns_dir)))
+        assert sql is not None and context.generation is not None
+        self.assertIn(worker.bind("v_name", context.generation.name), sql)
+        for source_id in self.host.manifest:
+            self.assertIn(source_id, sql)
+        self.assertIn("FROM public.generation_documents", sql)
+
+    def test_drop_above_the_ceiling_fails_smoke_without_a_routed_case(self) -> None:
+        total = len(self.host.manifest)
+        missing = next(iter(self.host.manifest))
+        del self.host.manifest[missing]
+        self.assertGreater(100, golddrop_slice.GOLD_DROP_CEILING_PERCENT * total)
+        result = SLICE_RUNNERS["smoke"].runner(
+            self.smoke_set(), "smoke", test_golddrop_slice._context(self.host),
+        )
+        self.assertFalse(result.verdict)
+        self.assertEqual(result.results, ())
+        self.assertIn("gate: gold documents dropped above the ceiling", result.report)
+        self.assertIn(missing, result.report)
+        self.assertIn("  gold-drop gate fail", result.report)
+        self.assertIn("zero-tolerance: fail", result.report)
+        self.assertIn("smoke: fail; 0 cases, 0 at the frontend", result.report)
+
+    def test_zero_tolerance_drop_fails_smoke_even_within_the_document_ceiling(self) -> None:
+        ceiling = golddrop_slice.GOLD_DROP_CEILING_PERCENT
+        total = -(-100 // ceiling)
+        loaded = self.with_judgments(tuple(
+            replace(_judgment(), source_id=f"fictional/source-{index}")
+            for index in range(1, total + 1)
+        ))
+        self.host.manifest = test_golddrop_slice._manifest(loaded)
+        self.assertLessEqual(100, ceiling * len(self.host.manifest))
+        case_id = self.signed[0].case_id
+        missing = self.signed[0].must_cite[0]
+        del self.host.manifest[missing]
+        result = SLICE_RUNNERS["smoke"].runner(
+            self.smoke_set((case_id,), loaded), "smoke", test_golddrop_slice._context(self.host),
+        )
+        self.assertFalse(result.verdict)
+        self.assertEqual(len(result.results), 1)
+        self.assertEqual((result.results[0].case_id, result.results[0].verdict), (case_id, "fail"))
+        self.assertIn(f"zero-tolerance cases dropped 1: {case_id}", result.report)
+        self.assertIn("gate: zero-tolerance gold cases dropped", result.report)
+        self.assertNotIn("gate: gold documents dropped above the ceiling", result.report)
+        self.assertIn("  gold-drop gate fail", result.report)
+        self.assertIn("smoke: fail; 1 cases, 0 at the frontend", result.report)
+
+    def test_unresolved_generation_or_unreachable_record_fails_smoke_with_no_case_rows(self) -> None:
+        for problem in ("generation-unresolved", "record-unreachable"):
+            with self.subTest(problem=problem):
+                context = test_golddrop_slice._context(self.host)
+                if problem == "generation-unresolved":
+                    context = replace(context, generation=None)
+                else:
+                    self.host.manifest_code = 1
+                result = SLICE_RUNNERS["smoke"].runner(self.smoke_set(), "smoke", context)
+                self.assertFalse(result.verdict)
+                self.assertEqual(result.results, ())
+                self.assertIn(problem + ":", result.report)
+                self.assertIn("Fix:", result.report)
+                self.assertIn("  gold-drop gate fail", result.report)
+                self.assertIn("smoke: fail; 0 cases, 0 at the frontend", result.report)
+
+    def test_composite_without_a_stores_part_reports_not_run_and_keeps_its_gate(self) -> None:
+        result = smoke_slice.Composite({}).run(
+            self.smoke_set(), "smoke", test_golddrop_slice._context(self.host),
+        )
+        self.assertTrue(result.verdict, result.report)
+        self.assertIn("  gold-drop gate not run", result.report)
+        self.assertNotIn("gold-drop report", result.report)
+        self.assertEqual(self.host.calls, [])
 
 
 class SmokeSet(unittest.TestCase):
@@ -629,6 +774,11 @@ class SmokeSet(unittest.TestCase):
                 row for row in result.results if row.case_id in guardrail_ids
             )
             self.assertTrue(guardrail_result_rows)
+            self.assertEqual(result.gated_cases, len(guardrail_result_rows))
+            self.assertIn(
+                "zero-tolerance: pass; 6 cases, true failure rate ≤ 50.0 % (3/n at 95 %)\n",
+                result.report,
+            )
             for row in guardrail_result_rows:
                 self.assertTrue({"role", "class", "stream"} <= set(row.metrics))
                 self.assertNotIn("problem", row.metrics)
@@ -653,6 +803,11 @@ class SmokeSet(unittest.TestCase):
         tree = ast.parse(
             (ROOT / "gideon/evaluation/smoke_slice.py").read_text(encoding="utf-8")
         )
+        self.assertEqual([
+            node.module for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and any(name.name == "CallSurface" for name in node.names)
+        ], ["gideon.evaluation.results"])
         allowed = set(__import__("sys").stdlib_module_names) | {"gideon"}
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -681,10 +836,12 @@ class SmokeCommand(unittest.TestCase):
                 loaded = _load(set_root)
             checkout = root / "checkout"
             checkout.mkdir()
+            _copy_sibling_artifacts(checkout)
             shutil.copytree(
                 ROOT / guardrails_slice.SEED_ROOT, checkout / guardrails_slice.SEED_ROOT
             )
             host = CommandDoorHost()
+            host.stores.generation_output = json.dumps(_sibling_row(checkout)) + "\n"
             _host, turns_context = _context(loaded, host=host)
             assert turns_context.turns is not None
             positive = next(
@@ -751,6 +908,7 @@ class SmokeCommand(unittest.TestCase):
         self.assertEqual((code, stderr), (1, ""), stdout)
         self.assertIn("smoke: fail", stdout)
         self.assertIn("extraction bounds pass (reported, not gated)", stdout)
+        self.assertIn("gold-drop gate pass", stdout)
         _assert_comparison_lines(self, stdout, word="FAIL")
 
     def test_failing_extraction_bounds_print_pass_with_passing_zero_tolerance(self) -> None:
@@ -758,6 +916,7 @@ class SmokeCommand(unittest.TestCase):
         self.assertEqual((code, stderr), (0, ""), stdout)
         self.assertIn("smoke: pass", stdout)
         self.assertIn("extraction bounds fail (reported, not gated)", stdout)
+        self.assertIn("gold-drop gate pass", stdout)
         _assert_comparison_lines(self, stdout, word="pass")
 
     def test_reference_regression_blocks_through_eval_run(self) -> None:
@@ -768,6 +927,7 @@ class SmokeCommand(unittest.TestCase):
             set_root, loaded = _temporary_smoke_set(input_parent)
             checkout = root / "checkout"
             checkout.mkdir()
+            _copy_sibling_artifacts(checkout)
             shutil.copytree(ROOT / "eval", checkout / "eval")
             shutil.rmtree(checkout / "eval" / "reference", ignore_errors=True)
             shutil.copy(ROOT / "courts.yaml", checkout / "courts.yaml")
@@ -780,7 +940,7 @@ class SmokeCommand(unittest.TestCase):
             target = extraction_ids[0]
             for list_name, case_ids in loaded.slice_lists["smoke"].items():
                 value = reference.ReferenceFile(
-                    format=reference.FORMAT_VERSION,
+                    format=1,
                     product_version=gideon.__version__,
                     corpus_lockfile=None,
                     eval_set_version=loaded.version,
@@ -797,6 +957,7 @@ class SmokeCommand(unittest.TestCase):
                 path.write_text(reference.serialize_reference(value), encoding="utf-8")
 
             host = CommandDoorHost()
+            host.stores.generation_output = json.dumps(_sibling_row(checkout)) + "\n"
             _host, turns_context = _context(loaded, host=host)
             assert turns_context.turns is not None
 

@@ -4,16 +4,19 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
-from typing import Final
+from pathlib import Path
+from typing import Final, cast
 
 from gideon.evaluation import record
 from gideon.host import report, stack
-from gideon.host.corpus.lockfile import LABEL
-from gideon.host.index import generations
+from gideon.host.corpus.lockfile import LABEL, read_lockfile_directory, render_errors
+from gideon.host.corpus.sources import SOURCES
+from gideon.host.index import build, generations
+from gideon.host.index.sample import sample_name
 from gideon.host.render.ci import CI_STACK
 from gideon.host.render.worker import GENERATION_PATTERN, GENERATION_STATES
 from gideon.host.report import Problem
-from gideon.host.sysio import Host, PathLike
+from gideon.host.sysio import Host, PathLike, ReadBytesHost
 from gideon.host.worker import bind
 
 COLLECTION: Final[str] = generations.COLLECTIONS[0].name
@@ -28,6 +31,38 @@ class GenerationAccess:
     name: str
     corpus_lockfile: str
     state: str
+
+
+def sibling_default(
+    host: Host, checkout: PathLike, site_path: PathLike, *, command_path: str,
+) -> str | Problem:
+    """Derive the newest committed lockfile's sample using the site's embedding space."""
+
+    root = Path(checkout)
+    directory = read_lockfile_directory(
+        root / "corpus/lockfiles", known_sources={source.name: source for source in SOURCES},
+        host=cast(ReadBytesHost, host),
+    )
+    retry = report.command(command_path)
+    if directory.errors:
+        fixes = "; ".join(dict.fromkeys(error.fix for error in directory.errors))
+        return Problem(render_errors(directory.errors), f"{fixes} Then run {retry} again.")
+    latest = directory.newest
+    if latest is None:
+        return Problem(
+            f"no completed corpus lockfile in {root / 'corpus/lockfiles'}",
+            f"Make a committed lockfile with {report.command('corpus cut')}, then run {retry} again.",
+        )
+    target = build.embed_target(cast(build.IndexHost, host), root, site_path, command_path)
+    if isinstance(target, Problem):
+        return target
+    try:
+        return sample_name(generations.generation_name(COLLECTION, latest.label, target.space_id))
+    except ValueError:
+        return Problem(
+            f"models.lock cannot name the sample for {latest.label}: generation name exceeds the store's grammar or byte limit",
+            f"Restore a valid embedding space id in models.lock, then run {retry} again.",
+        )
 
 
 def _select_sql(name: str | None) -> str:
@@ -76,6 +111,13 @@ def resolve_generation(
         f"({report.command('index report')} lists production's; "
         "the sibling's sample is <production name>__sample), then retry."
     )
+    if stack_name == CI_STACK:
+        label = name.split("__")[1] if name is not None and re.fullmatch(GENERATION_PATTERN, name) else "<label>"
+        sample_build = report.command(f"index build {COLLECTION} --sample --lockfile {label}")
+        selection_fix = (
+            f"Build it with {sample_build}, or name a built generation with "
+            f"{retry_command} --generation <name>, then retry."
+        )
     if name is not None and re.fullmatch(GENERATION_PATTERN, name) is None:
         return Problem("not a generation name", selection_fix)
     logs_fix = (

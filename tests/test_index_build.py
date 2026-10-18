@@ -22,7 +22,7 @@ from test_engine_verify import models_text
 from test_models_lock import VALID, VALID_WITH_SPACE
 
 from gideon.cli import build_parser
-from gideon.host import backuplock, models, report, stack, staging, worker
+from gideon.host import backuplock, caselaw, models, report, stack, staging, worker
 from gideon.host.corpus.lockfile import load_lockfile, render_lockfile
 from gideon.host.corpus.sources import SOURCES, SourceDefinition
 from gideon.host.index import (
@@ -33,6 +33,7 @@ from gideon.host.index import (
     guards,
     reserve,
     sample,
+    smoke,
     treatment,
 )
 from gideon.host.index.record import PromotedRow
@@ -146,6 +147,67 @@ class Build(unittest.TestCase):
         self.assertFalse(self.host.reports[-1]["wall_clock"]["whole_build"])
         self.assertEqual(self.host.reports[-1]["seconds"], 5)
 
+    def test_smoke_record_evidence_prints_between_preconditions_and_generation(self) -> None:
+        """A passing sample run licenses the build before its first write."""
+
+        label = self.fixture.labels[0]
+        inputs = self.inputs(label)
+        evidence = self.host.smoke_row
+        assert evidence is not None
+        code, out, err = self.run_build(label)
+        self.assertEqual((code, err), (0, ""), out)
+        stages = [line.split(":", 1)[0] for line in out.splitlines()]
+        self.assertEqual(stages[:3], ["preconditions", "smoke", "generation"])
+        self.assertEqual(stages.count("smoke"), 1)
+        self.assertIn(
+            f"smoke: ok — lockfile {inputs.label}, pipeline {inputs.pipeline}, "
+            f"embedding space {inputs.embedding_space}: run {evidence['run_id']} "
+            f"({evidence['stack']}, {evidence['kind']}, finished {NOW:%Y-%m-%dT%H:%M}Z)", out,
+        )
+        statements = self.host.statements
+        read = next(index for index, sql in enumerate(statements) if "FROM public.eval_runs" in sql)
+        write = next(index for index, sql in enumerate(statements) if "DO $generation$" in sql)
+        self.assertLess(read, write)
+        self.assertIn(worker.bind("v_label", label), statements[read])
+        self.assertIn(worker.bind("v_sample", smoke.expected_sample(inputs)), statements[read])
+        self.assertTrue(self.host.deferred)
+
+    def test_missing_smoke_refuses_before_any_write_or_job_and_releases_the_lock(self) -> None:
+        """Missing evidence names its inputs and recovery, leaving no generation."""
+
+        self.host.smoke_row = None
+        label = self.fixture.labels[0]
+        inputs = self.inputs(label)
+        corpus_rows = copy.deepcopy(self.host.record_rows)
+        code, out, err = self.run_build(label)
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertEqual([line.split(":", 1)[0] for line in out.splitlines()], ["preconditions", "smoke"])
+        self.assertIn(
+            f"smoke: refuse — no passing smoke run for lockfile {label}, pipeline {inputs.pipeline}, "
+            f"embedding space {inputs.embedding_space}: none names generation {smoke.expected_sample(inputs)}", out,
+        )
+        self.assertIn(report.command(f"index build caselaw --sample --lockfile {label}"), out)
+        self.assertIn(report.command(
+            f"eval run --slice smoke --stack ci --kind smoke --generation {smoke.expected_sample(inputs)}",
+        ), out)
+        self.assertIn(f"then retry {report.command(f'index build caselaw --lockfile {label}')}", out)
+        self.assertEqual((self.host.generations, self.host.jobs, self.host.reports), ({}, {}, []))
+        self.assertEqual(self.host.record_rows, corpus_rows)
+        self.assertFalse(any("DO $generation$" in sql for sql in self.host.statements))
+        self.assertIsNone(self.host.lock_holder)
+        self.assertEqual(self.host.lock_releases, 1)
+
+    def test_smoke_reader_failure_refuses_before_generation_and_releases_the_lock(self) -> None:
+        self.host.fail_phase = "smoke"
+        code, out, err = self.run_build()
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn("smoke: refuse — smoke reader failed: exit 3", out)
+        self.assertIn(stack.logs_fix(RENDERED, "postgres"), out)
+        self.assertNotIn("private diagnostic", out)
+        self.assertEqual((self.host.generations, self.host.jobs, self.host.reports), ({}, {}, []))
+        self.assertIsNone(self.host.lock_holder)
+        self.assertEqual(self.host.lock_releases, 1)
+
     def sample_inputs(self, gold: tuple[GoldDocument, ...] = ()) -> SampleInputs:
         return SampleInputs(gold, sample.SAMPLE_FILL_PER_MILLION, "eval-v1000")
 
@@ -168,6 +230,12 @@ class Build(unittest.TestCase):
         label = self.fixture.labels[0]
         base = self.inputs(label)
         selection = self.sample_inputs()
+        self.host.smoke_row = None
+        self.host.caselaw_anchor_counts = {
+            court: {"ready": 1, "anchored": 1, "by_text_source": {
+                "xml_harvard": {"documents": 1, "with_anchors": 1, "chars": 10, "anchored_chars": 10},
+            }} for court in base.courts
+        }
         production_rows = copy.deepcopy(self.host.record_rows)
         code, out, err = self.run_build(label, sample=selection)
         self.assertEqual((code, err), (0, ""), out)
@@ -182,18 +250,30 @@ class Build(unittest.TestCase):
         self.assertEqual(row.inputs_hash, sample.sample_inputs_hash(base.inputs_hash, label, selection.fill_per_million))
         self.assertEqual([args["sample"] for args in self.host.deferred], [sample.arguments(selection)] * 2)
         self.assertEqual([args["name"] for args in self.host.deferred], [name] * 2)
-        stages = ("preconditions", "lockfile", "generation", "build", "counts", "dense", "gold", "built")
+        stages = ("preconditions", "lockfile", "generation", "guard", "reserve", "build", "counts",
+                  "dense", "gold", "built", "treatment", "report")
         self.assertEqual(sorted(stages, key=lambda stage: out.index(f"{stage}: ok")), list(stages))
-        # The sibling's record holds no corpus, so the stages that read it there are not run.
         self.assertEqual([line for line in out.splitlines()
-                          if line.split(":")[0] in {"cluster", "treatment", "report"}], [])
-        self.assertEqual((self.host.treatment_payloads, self.host.reports), ([], []))
+                          if line.split(":")[0] in {"smoke", "cluster"}], [])
+        self.assertEqual(self.host.treatment_payloads[0]["gen_id"], name)
+        self.assertEqual(self.host.treatment_reads[0]["doc_ids"], [])
+        self.assertEqual(self.host.reports[0]["gen_id"], name)
+        self.assertEqual(self.host.reports[0]["treatment"], self.host.treatment_results[0].to_json())
+        self.assertTrue(self.host.reports[0]["wall_clock"]["whole_build"])
+        self.assertEqual(self.host.reports[0]["wall_clock"]["run_seconds"], self.time)
+        self.assertNotIn("cluster", self.host.reports[0]["gates"])
+        self.assertEqual(tuple(self.host.reports[0]["courts"]), tuple(sorted(base.courts)))
+        for court in base.courts:
+            self.assertEqual(self.host.reports[0]["courts"][court]["anchors"], self.host.caselaw_anchor_counts[court])
+            self.assertIsNotNone(self.host.reports[0]["courts"][court]["agreement"])
+            self.assertIsNotNone(self.host.reports[0]["gates"]["accounted"][court]["staged"])
         self.assertIn("gold 0, present 0", out)
         self.assertIn(f"eval set {selection.set_version}", out)
         state_commands = [argv for argv, sql, _ in self.host.executions if sql is None]
         self.assertEqual(state_commands, [
             *[stack.compose_argv(CI_ROOT, "ps", "--all", "--format", "json")] * 3,
             stack.compose_argv(RENDERED, "ps", "--all", "--format", "json"),
+            list(reserve.DATA_DF_ARGV),
             ["du", "-sb", f"{CI_QDRANT_DATA_ROOT}/collections/{name}"],
         ])
         for argv, sql, holder_text in self.host.executions:
@@ -203,10 +283,168 @@ class Build(unittest.TestCase):
             self.assertEqual(holder.command, f"gideon index build caselaw --sample --lockfile {label}")
             if sql is None:
                 continue
-            production_read = "ORDER BY c.label" in sql or "WITH RECURSIVE chain AS" in sql
-            self.assertEqual(argv, worker.psql_argv(RENDERED if production_read else CI_ROOT))
-            if not production_read:
-                self.assertNotIn(name, " ".join(argv))
+            self.assertNotIn(name, " ".join(argv))
+        self.assertEqual(len(self.host.statement_directories),
+                         sum(sql is not None for _, sql, _ in self.host.executions))
+        for directory, sql in self.host.statement_directories:
+            production_read = (
+                "ORDER BY c.label" in sql or "WITH RECURSIVE chain AS" in sql
+                or any(statement in sql for statement in (
+                    guards.CHUNK_PROJECTION_SQL, caselaw.CASELAW_COUNTS_SQL,
+                    caselaw.ANCHOR_COUNTS_SQL, treatment.READ_SQL,
+                ))
+            )
+            self.assertEqual(directory, RENDERED if production_read else str(CI_ROOT))
+
+    def test_sample_guard_refuses_the_whole_scope_before_any_job_or_report(self) -> None:
+        label = self.fixture.labels[0]
+        inputs = self.inputs(label)
+        profile_guards = build.chunk_guards(self.host, self.fixture.checkout, SITE_PATH, build.COMMAND_PATH)
+        assert isinstance(profile_guards, models.ChunkGuards)
+        chunks = profile_guards.build_refusal_chunks + 1
+        self.host.projection_counts = {"ready": 1, "chunked": 1, "chunks": chunks}
+        code, out, err = self.run_build(label, sample=self.sample_inputs())
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn(f"guard: refuse — {sample.sample_name(inputs.name)}", out)
+        self.assertIn(f"projected chunks {chunks}", out)
+        self.assertIn(f"build refusal {profile_guards.build_refusal_chunks}", out)
+        self.assertEqual((self.host.deferred, self.host.jobs, self.host.reports), ([], {}, []))
+        self.assertNotIn("reserve:", out)
+        self.assertNotIn("report:", out)
+        directory, sql = next((directory, sql) for directory, sql in self.host.statement_directories
+                              if guards.CHUNK_PROJECTION_SQL in sql)
+        self.assertEqual(directory, RENDERED)
+        self.assertEqual(self.host._bound(sql, "v_courts"), "{" + ",".join(inputs.courts) + "}")
+        self.assertEqual(self.host._bound(sql, "v_pipeline"), inputs.pipeline)
+        self.assertIsNone(self.host.engine_holder)
+        self.assert_sample_fix(out, label)
+
+    def test_sample_reserve_skips_without_a_live_sibling_and_judges_a_live_one(self) -> None:
+        label = self.fixture.labels[0]
+        name = sample.sample_name(self.inputs(label).name)
+        self.assertEqual(self.run_build(label, sample=self.sample_inputs())[0], 0)
+        self.assertEqual(len(self.host.reports), 1)
+        # The first run wrote a whole build; a refill reports only this run's time.
+        self.assertTrue(self.host.reports[0]["wall_clock"]["whole_build"])
+        for live_bytes in (0, self.host.free_bytes // 2, self.host.free_bytes):
+            with self.subTest(live_bytes=live_bytes):
+                self.host.promoted = () if live_bytes == 0 else (PromotedRow(name, "caselaw", live_bytes),)
+                self.host.statement_directories.clear()
+                self.host.deferred.clear()
+                self.host.reports.clear()
+                code, out, err = self.run_build(label, sample=self.sample_inputs())
+                verdict = reserve.judge(self.host.free_bytes, live_bytes)
+                self.assertEqual((code, err), (0 if verdict.build_cleared else 1, ""), out)
+                directories = [directory for directory, sql in self.host.statement_directories
+                               if "WHERE state = 'live'" in sql]
+                self.assertEqual(directories, [str(CI_ROOT)])
+                self.assertIn(list(reserve.DATA_DF_ARGV), self.host.calls)
+                if live_bytes == 0:
+                    self.assertIn("reserve: ok — skipped: no promoted generation for caselaw", out)
+                else:
+                    self.assertIn(reserve.describe(verdict), out)
+                if verdict.build_cleared:
+                    self.assertEqual(len(self.host.deferred), 2)
+                    self.assertEqual(len(self.host.reports), 1)
+                    self.assertFalse(self.host.reports[0]["wall_clock"]["whole_build"])
+                else:
+                    self.assertIn("reserve: refuse", out)
+                    self.assertEqual((self.host.deferred, self.host.reports), ([], []))
+                    self.assertNotIn("report:", out)
+                    self.assert_sample_fix(out, label)
+                self.assertIsNone(self.host.engine_holder)
+
+    def test_sample_treatment_is_bounded_by_the_whole_manifest_on_the_sibling(self) -> None:
+        label = self.fixture.labels[0]
+        self.host.manifest_rows = (
+            (sample.source_id("example", 90), "b" * 64, "d" * 64),
+            (sample.source_id("example", 10), "a" * 64, "c" * 64),
+        )
+        selection = self.sample_inputs((GoldDocument(self.host.manifest_rows[0][0], "b" * 64),))
+        code, out, err = self.run_build(label, sample=selection)
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(self.host.treatment_reads[0]["doc_ids"],
+                         [row[2] for row in sorted(self.host.manifest_rows)])
+        manifest = [(directory, sql) for directory, sql in self.host.statement_directories
+                    if "canonical_text_sha256, doc_id" in sql]
+        self.assertEqual(len(manifest), 1)
+        directory, sql = manifest[0]
+        self.assertEqual(directory, str(CI_ROOT))
+        self.assertEqual(self.host._bound(sql, "v_name"), sample.sample_name(self.inputs(label).name))
+        self.assertLess(self.host.statements.index(sql),
+                        next(index for index, statement in enumerate(self.host.statements)
+                             if treatment.READ_SQL in statement))
+
+    def test_sample_manifest_failure_refuses_treatment_and_reports_its_reader_fix(self) -> None:
+        label = self.fixture.labels[0]
+        self.host.fail_phase = "treatment-manifest"
+        code, out, err = self.run_build(label, sample=self.sample_inputs())
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn("treatment: refuse — generation manifest read failed (exit 3)", out)
+        self.assertIn(stack.logs_fix(CI_ROOT, "postgres"), out)
+        self.assertEqual((self.host.treatment_reads, self.host.treatment_payloads), ([], []))
+        self.assertEqual(self.host.reports[-1]["failed_stage"], "treatment")
+        self.assertIsNone(self.host.reports[-1]["treatment"])
+        self.assertIsNone(self.host.engine_holder)
+        self.assert_sample_fix(out, label)
+
+    def test_sample_build_counts_dense_and_built_failures_report_the_failed_stage(self) -> None:
+        label = self.fixture.labels[0]
+        for stage in ("build", "counts", "dense", "built"):
+            with self.subTest(stage=stage):
+                self.host.generations.clear()
+                self.host.reports.clear()
+                self.host.failure_reason = "store" if stage == "build" else None
+                self.host.finish_stamp = None if stage == "counts" else NOW.isoformat()
+                self.host.dense_failure_reason = "store" if stage == "dense" else None
+                self.host.dense_finish_stamp = None if stage == "built" else NOW.isoformat()
+                code, out, err = self.run_build(label, sample=self.sample_inputs())
+                self.assertEqual((code, err), (1, ""), out)
+                self.assertIn(f"{stage}: refuse", out)
+                self.assertIn("report: ok", out)
+                self.assertEqual(len(self.host.reports), 1)
+                payload = self.host.reports[0]
+                self.assertEqual(payload["gen_id"], sample.sample_name(self.inputs(label).name))
+                self.assertEqual(payload["failed_stage"], stage)
+                self.assertEqual(payload["failure_reason"], "store" if stage in {"build", "dense"} else None)
+                self.assertFalse(payload["wall_clock"]["whole_build"])
+                self.assertIsNone(payload["treatment"])
+                self.assertEqual(self.host.treatment_payloads, [])
+                self.assertIsNone(self.host.engine_holder)
+                self.assert_sample_fix(out, label)
+
+    def test_sample_gold_read_failure_writes_no_report_and_a_rerun_reaches_gold(self) -> None:
+        label = self.fixture.labels[0]
+        self.host.fail_phase = "gold"
+        code, out, err = self.run_build(label, sample=self.sample_inputs())
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn("gold: refuse — generation manifest read failed (exit 3)", out)
+        self.assertIn(stack.logs_fix(CI_ROOT, "postgres"), out)
+        self.assertEqual((self.host.reports, self.host.treatment_payloads), ([], []))
+        self.assertNotIn("report:", out)
+        self.assertNotIn("built:", out)
+        self.assertIsNone(self.host.engine_holder)
+        self.assert_sample_fix(out, label)
+        self.host.fail_phase = None
+        code, out, err = self.run_build(label, sample=self.sample_inputs())
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertNotIn("rejoined", out)
+        self.assertIn("gold: ok", out)
+        self.assertIn("report: ok", out)
+        self.assertEqual(len(self.host.reports), 1)
+        self.assertFalse(self.host.reports[0]["wall_clock"]["whole_build"])
+
+    def test_production_treatment_and_report_reads_use_only_the_rendered_tree(self) -> None:
+        code, out, err = self.run_build(self.fixture.labels[0])
+        self.assertEqual((code, err), (0, ""), out)
+        for statement in (treatment.READ_SQL, treatment.WRITE_SQL,
+                          caselaw.CASELAW_COUNTS_SQL, caselaw.ANCHOR_COUNTS_SQL,
+                          buildreport.WRITE_REPORT_SQL):
+            directories = [directory for directory, sql in self.host.statement_directories if statement in sql]
+            self.assertTrue(directories)
+            self.assertEqual(set(directories), {RENDERED})
+        self.assertIsNone(self.host.treatment_reads[0]["doc_ids"])
+        self.assertFalse(any("public.generation_documents" in sql for _, sql in self.host.statement_directories))
 
     def test_sample_rejoins_then_runs_both_halves_with_the_current_selection(self) -> None:
         """A rejoined job may carry an earlier gold selection, so each half runs again with this one."""
@@ -330,7 +568,8 @@ class Build(unittest.TestCase):
 
     def test_sample_interrupts_release_the_engine_at_each_stage(self) -> None:
         label = self.fixture.labels[0]
-        for phase in ("preconditions", "lockfile", "generation-read", "generation", "build", "counts", "dense", "gold"):
+        for phase in ("preconditions", "lockfile", "generation-read", "generation", "guard", "reserve",
+                      "build", "counts", "dense", "gold", "treatment-manifest", "treatment-read", "treatment", "report"):
             with self.subTest(phase=phase):
                 self.host.generations.clear()
                 self.host.jobs.clear()
@@ -415,7 +654,7 @@ class Build(unittest.TestCase):
             inputs = self.inputs(label)
             code, out, err = self.run_build(label)
             self.assertEqual((code, err), (0, ""), out)
-            for stage in ("preconditions", "generation", "guard", "reserve", "cluster", "build", "counts", "dense", "built", "treatment", "report"):
+            for stage in ("preconditions", "smoke", "generation", "guard", "reserve", "cluster", "build", "counts", "dense", "built", "treatment", "report"):
                 self.assertIn(f"{stage}: ok", out)
             self.assertIn(inputs.name, out)
             self.assertIn("building, created", out)
@@ -630,9 +869,10 @@ class Build(unittest.TestCase):
         self.assertEqual(len(self.host.treatment_payloads), 1)
         payload = self.host.treatment_payloads[0]
         self.assertEqual(payload["gen_id"], inputs.name)
-        self.assertEqual(payload["source"], inputs.snapshot[:-staging.DATE_SUFFIX_LENGTH])
-        self.assertEqual(payload["snapshot_date"], inputs.snapshot[-10:])
-        self.assertEqual(payload["courts"], list(inputs.courts))
+        read_payload = self.host.treatment_reads[0]
+        self.assertEqual(read_payload["source"], inputs.snapshot[:-staging.DATE_SUFFIX_LENGTH])
+        self.assertEqual(read_payload["snapshot_date"], inputs.snapshot[-10:])
+        self.assertEqual(read_payload["courts"], list(inputs.courts))
         self.assertIsNone(payload["treatment_source"])
         self.assertIsNone(payload["treatment_snapshot_date"])
         self.assertIsNone(self.host.reports[0]["treatment"]["treatment_snapshot"])
@@ -775,7 +1015,8 @@ class Build(unittest.TestCase):
         self.host.fail_phase = None
 
     def test_interrupts_report_continuation_or_record_state_and_release(self) -> None:
-        for phase, text in (("preconditions", "nothing was recorded"), ("generation", "nothing was recorded"),
+        for phase, text in (("preconditions", "nothing was recorded"), ("smoke", "nothing was recorded"),
+                            ("generation", "nothing was recorded"),
                             ("build", "the build continues in the worker"), ("counts", "the row stands")):
             with self.subTest(phase=phase):
                 self.host.interrupt_phase = phase

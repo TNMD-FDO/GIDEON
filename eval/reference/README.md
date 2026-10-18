@@ -30,7 +30,14 @@ contains:
 - `tag`: the product tag resolved to the recorded commit;
 - `slice` and `list`: the path identity;
 - `repeats`: the number of repeats folded into each verdict;
-- `set_digest`: the digest of the loaded eval set.
+- `set_digest`: the digest of the loaded eval set;
+- `generation_id`: from format 2, the generation read by the run, or null;
+- `verdict`: from format 2, the run's overall `pass` or `fail` verdict.
+
+New writes use format 2. Format-1 files omit `generation_id` and `verdict` and
+remain readable with their original bytes until their next re-record. A
+production build reads these two headers from matching format-2 smoke
+references as evidence of a passing run of its lockfile's sample generation.
 
 `cases` maps case ids to `pass` or `fail`. A case passes only when every one
 of its repeats passes. The four comparison lists are derived at run time:

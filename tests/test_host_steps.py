@@ -10,7 +10,6 @@ import contextlib
 import io
 import json
 import os
-import pwd
 import re
 import stat
 import subprocess
@@ -18,6 +17,9 @@ import unittest
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
+
+import yaml  # type: ignore[import-untyped]
 
 from gideon.host import dockerdaemon, report
 from gideon.host.checks import format_gb
@@ -134,10 +136,16 @@ from gideon.host.steps.services import (
     _RUNNER_REREGISTERED_ANNOUNCEMENT,
     _RUNNER_TOKEN_VARIABLE,
     _RUNNER_WAIT_FIX,
+    MASK_SETUP_FAILURE_CODE,
+    MASK_WRAPPER_PATH,
+    MASK_WRAPPER_PATHS,
+    SMOKE_WRAPPER_PATH,
     GhRunnerStep,
     KvmStep,
     RegistryStep,
     acceptance_image_path,
+    mask_wrapper_text,
+    smoke_wrapper_text,
 )
 from gideon.host.steps.site_dirs import (
     AGE_IDENTITY_LINE,
@@ -154,7 +162,7 @@ from gideon.host.steps.timezone import TimezoneStep
 from gideon.host.steps.tools import HostToolsStep
 from gideon.host.sysio import Command, PathLike
 from tools.exportboundary import absent_from_export
-from tools.mask import Facts, wrap
+from tools.mask import WRAPPER_PATH, wrap
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK = ROOT / "host.lock"
@@ -5545,8 +5553,8 @@ RUNNER_SUDOERS = "/etc/sudoers.d/gideon-acceptance"
 RUNNER_SUDOERS_CANDIDATE = "/etc/sudoers.d/gideon-acceptance.candidate"
 RUNNER_SUDOERS_TEXT = (
     "gh-runner ALL=(root) NOPASSWD: /usr/bin/python3 -m tools.acceptance *\n"
-    "gh-runner ALL=(root) NOPASSWD: /usr/bin/python3 -B -m tools.cistack smoke\n"
-    "gh-runner ALL=(root) NOPASSWD: /usr/bin/unshare --mount --net -- sh -c *\n"
+    "gh-runner ALL=(root) NOPASSWD: /usr/local/sbin/gideon-ci-smoke\n"
+    "gh-runner ALL=(root) NOPASSWD: /usr/local/sbin/gideon-mask\n"
 )
 RUNNER_VENV_QUERY = ("dpkg-query", "-W", "-f=${Status} ${Version}\\n", "python3-venv")
 RUNNER_VENV_INSTALL = ("apt-get", "install", "-y", "python3-venv")
@@ -5678,6 +5686,8 @@ class ServiceStepTests(unittest.TestCase):
         if token:
             files["/etc/gideon/secrets/gh_runner_token"] = "token\n"
         files[RUNNER_SUDOERS] = RUNNER_SUDOERS_TEXT
+        files[str(MASK_WRAPPER_PATH)] = mask_wrapper_text()
+        files[str(SMOKE_WRAPPER_PATH)] = smoke_wrapper_text()
         commands: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {
             ("getent", "passwd", "gh-runner"): completed(("getent", "passwd", "gh-runner"), "gh-runner:x:997:997::/home/gh-runner:/usr/sbin/nologin\n"),
             ("getent", "group", "docker"): completed(("getent", "group", "docker"), "docker:x:999:gh-runner\n"),
@@ -5695,6 +5705,8 @@ class ServiceStepTests(unittest.TestCase):
         commands.update(dict(apt_command_results(["python3-venv"])))
         stats = {
             RUNNER_SUDOERS: file_stat(0o440, 0, 0),
+            str(MASK_WRAPPER_PATH): file_stat(0o755, 0, 0),
+            str(SMOKE_WRAPPER_PATH): file_stat(0o755, 0, 0),
         }
         instances = (
             ("/opt/gh-runner", RUNNER_UNIT, RUNNER_PGREP, RUNNER_CONFIG_ARGV,
@@ -5979,16 +5991,128 @@ class ServiceStepTests(unittest.TestCase):
                 self.assertIn(RUNNER_SUDOERS, result.detail)
 
     def test_runner_sudoers_names_the_acceptance_smoke_and_mask_commands(self) -> None:
-        rules = RUNNER_SUDOERS_TEXT.splitlines()
-        self.assertEqual(len(rules), 3)
+        rules = GhRunnerStep._sudoers_text().splitlines()
         self.assertEqual(
-            rules[1],
-            "gh-runner ALL=(root) NOPASSWD: /usr/bin/python3 -B -m tools.cistack smoke",
+            rules,
+            [
+                "gh-runner ALL=(root) NOPASSWD: /usr/bin/python3 -m tools.acceptance *",
+                "gh-runner ALL=(root) NOPASSWD: /usr/local/sbin/gideon-ci-smoke",
+                "gh-runner ALL=(root) NOPASSWD: /usr/local/sbin/gideon-mask",
+            ],
         )
-        self.assertEqual(
-            rules[2],
-            "gh-runner ALL=(root) NOPASSWD: /usr/bin/unshare --mount --net -- sh -c *",
+        for rule in rules[1:]:
+            self.assertNotIn("*", rule)
+            self.assertNotIn("sh -c", rule)
+
+    def test_runner_wrapper_truth_table_reports_each_kind_of_drift(self) -> None:
+        for wrapper_path in (MASK_WRAPPER_PATH, SMOKE_WRAPPER_PATH):
+            path = str(wrapper_path)
+            for case in ("absent", "content", "mode", "owner", "group"):
+                with self.subTest(path=path, case=case):
+                    host = self._runner_host(registered="off", service=True)
+                    if case == "absent":
+                        del host.files[path]
+                        del host.stats[path]
+                    elif case == "content":
+                        host.files[path] = "fictitious wrong wrapper\n"
+                    elif case == "mode":
+                        host.stats[path] = file_stat(0o644, 0, 0)
+                    elif case == "owner":
+                        host.stats[path] = file_stat(0o755, 1000, 0)
+                    else:
+                        host.stats[path] = file_stat(0o755, 0, 1000)
+
+                    result = GhRunnerStep().check(context(host))
+
+                    self.assertEqual(result.disposition, Disposition.DRIFT)
+                    self.assertIn(path, result.detail)
+                    self.assertIn(path, result.fix)
+                    self.assertIn(f"{wrapper_path.name}:", result.detail)
+
+    def test_runner_unreadable_wrapper_is_unfixable(self) -> None:
+        for wrapper_path in (MASK_WRAPPER_PATH, SMOKE_WRAPPER_PATH):
+            with self.subTest(path=wrapper_path):
+                host = self._runner_host(registered="off", service=True)
+                original_read = host.read_text
+
+                def read_text(
+                    path: PathLike, *, encoding: str = "utf-8",
+                    wrapper_path: Path = wrapper_path, original_read=original_read,
+                ) -> str:
+                    if os.fspath(path) == str(wrapper_path):
+                        raise PermissionError("fictitious unreadable wrapper")
+                    return original_read(path, encoding=encoding)
+
+                with patch.object(host, "read_text", side_effect=read_text):
+                    result = GhRunnerStep().check(context(host))
+
+                self.assertEqual(result.disposition, Disposition.UNFIXABLE)
+                self.assertIn(str(wrapper_path), result.detail)
+                self.assertIn(str(wrapper_path), result.fix)
+
+    def test_runner_mask_wrapper_constants_match_the_mask(self) -> None:
+        from tools.mask import MASK_PATHS, SETUP_FAILURE_CODE
+
+        self.assertEqual(MASK_WRAPPER_PATHS, MASK_PATHS)
+        self.assertEqual(MASK_SETUP_FAILURE_CODE, SETUP_FAILURE_CODE)
+
+    def test_runner_wrappers_are_root_owned_before_sudoers_and_extraction(self) -> None:
+        host = self._runner_host(
+            registered="off", service=True, installed_version="0.0.0",
+            checks_installed_version="0.0.0",
         )
+        wrappers = (
+            (MASK_WRAPPER_PATH, mask_wrapper_text()),
+            (SMOKE_WRAPPER_PATH, smoke_wrapper_text()),
+        )
+        for missing in (str(MASK_WRAPPER_PATH), str(SMOKE_WRAPPER_PATH), RUNNER_SUDOERS):
+            del host.files[missing]
+            del host.stats[missing]
+
+        self.assertIsNone(GhRunnerStep().apply(context(host)))
+
+        validation = host.calls.index((
+            "run", (("visudo", "-c", "-f", RUNNER_SUDOERS_CANDIDATE), False)
+        ))
+        promotion = host.calls.index((
+            "run", (("mv", "-f", RUNNER_SUDOERS_CANDIDATE, RUNNER_SUDOERS), True)
+        ))
+        self.assertLess(validation, promotion)
+        for wrapper_path, expected in wrappers:
+            with self.subTest(path=wrapper_path):
+                path = str(wrapper_path)
+                self.assertEqual(host.files[path], expected)
+                self.assertIn((path, 0o755), host.write_modes)
+                ordered = [
+                    ("mkdir", (str(wrapper_path.parent), 0o755, True, True)),
+                    ("write_text", (path, expected)),
+                    ("chmod", (path, 0o755)),
+                    ("chown", (path, 0, 0)),
+                ]
+                positions = [host.calls.index(operation) for operation in ordered]
+                self.assertEqual(positions, sorted(positions))
+                self.assertLess(positions[-1], validation)
+        extractions = [
+            index for index, call in enumerate(host.calls)
+            if call[0] == "run" and isinstance(call[1], tuple) and call[1][0][0] == "tar"
+        ]
+        self.assertEqual(len(extractions), 2)
+        for extraction in extractions:
+            self.assertLess(promotion, extraction)
+
+    def test_runner_converged_wrappers_are_not_rewritten(self) -> None:
+        for wrapper_path in (MASK_WRAPPER_PATH, SMOKE_WRAPPER_PATH):
+            with self.subTest(path=wrapper_path):
+                host = self._runner_host(registered="off", service=True)
+
+                self.assertIsNone(GhRunnerStep().apply(context(host)))
+
+                mutations = [
+                    call for call in host.calls
+                    if call[0] in {"write_text", "chmod", "chown"}
+                    and isinstance(call[1], tuple) and call[1][0] == str(wrapper_path)
+                ]
+                self.assertEqual(mutations, [])
 
     def test_runner_sudoers_detects_drift_on_each_command_line(self) -> None:
         expected = RUNNER_SUDOERS_TEXT.splitlines()
@@ -6007,7 +6131,7 @@ class ServiceStepTests(unittest.TestCase):
                 self.assertEqual(result.disposition, Disposition.DRIFT)
                 self.assertIn("differs from the runner's rules", result.detail)
 
-    def test_workflow_python_commands_are_named_by_runner_sudoers(self) -> None:
+    def test_workflow_sudo_commands_are_named_by_runner_sudoers(self) -> None:
         rules = [line.split("NOPASSWD: ", 1)[1] for line in RUNNER_SUDOERS_TEXT.splitlines()]
         workflow_paths = [".github/workflows/ci.yml"]
         acceptance = ".github/workflows/acceptance.yml"
@@ -6023,48 +6147,36 @@ class ServiceStepTests(unittest.TestCase):
         seen = 0
         for relative in workflow_paths:
             for line in (ROOT / relative).read_text(encoding="utf-8").splitlines():
-                if "sudo python3 " not in line or line.lstrip().startswith("#"):
+                if "sudo " not in line or line.lstrip().startswith("#"):
                     continue
                 command = re.split(r" (?:[12]?>|\|)", line.split("sudo ", 1)[1], maxsplit=1)[0]
-                command = command.strip().replace("python3", "/usr/bin/python3", 1)
+                command = command.strip()
                 seen += 1
+                if command.startswith("/"):
+                    self.assertIn(command, rules, f"{relative} command has no exact sudoers rule: {command}")
+                    continue
+                self.assertTrue(command.startswith("python3 "), f"{relative}: unexpected sudo command: {command}")
+                command = command.replace("python3", "/usr/bin/python3", 1)
                 self.assertTrue(
                     any(allowed(command, rule) for rule in rules),
                     f"{relative} command has no sudoers rule: {command}",
                 )
         self.assertGreaterEqual(seen, 1)
 
-    def test_mask_root_stage_is_admitted_by_runner_sudoers(self) -> None:
-        facts = Facts(
-            effective_uid=lambda: 997,
-            effective_gid=lambda: 997,
-            supplementary_groups=lambda: (997, 999),
-            # Injected: uid 997 has no account on a hosted runner.
-            password_entry=lambda uid: pwd.struct_passwd(
-                ("gh-runner", "x", uid, 997, "", "/home/gh-runner", "/bin/bash")
-            ),
-            environment=lambda: {"HOME": "/home/gh-runner", "PATH": "/usr/bin"},
-        )
-        argv = wrap(
+        workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+        smoke = next(step for step in workflow["jobs"]["smoke"]["steps"] if step.get("name") == "Smoke on the sibling")
+        self.assertEqual(smoke["run"], f'sudo {SMOKE_WRAPPER_PATH} 2>&1 | tee "$RUNNER_TEMP/smoke.txt"')
+
+    def test_mask_wrapper_is_admitted_by_runner_sudoers(self) -> None:
+        wrapped = wrap(
             (".venv/bin/pytest", "tests/test_host_import_boundary.py"),
             paths=("/etc/gideon",),
-            facts=facts,
         )
-        self.assertEqual(argv[:3], ("sudo", "-n", "unshare"))
-        # sudo resolves the command to its absolute path and matches the rest
-        # word by word; the box's sudo-rs takes a wildcard only as a final "*".
-        command = ("/usr/bin/unshare", *argv[3:])
-
-        def admitted(rule: str) -> bool:
-            words = tuple(rule.split(" "))
-            if "*" not in rule:
-                return command == words
-            if words[-1] != "*" or rule.count("*") != 1:
-                return False
-            return command[: len(words) - 1] == words[:-1]
-
+        self.assertEqual(wrapped.argv, ("sudo", "-n", WRAPPER_PATH))
+        self.assertEqual(WRAPPER_PATH, str(MASK_WRAPPER_PATH))
         rules = [line.split("NOPASSWD: ", 1)[1] for line in RUNNER_SUDOERS_TEXT.splitlines()]
-        self.assertTrue(any(admitted(rule) for rule in rules))
+        self.assertIn(WRAPPER_PATH, rules)
+        self.assertNotIn("*", WRAPPER_PATH)
 
     def test_runner_sudoers_apply_validates_and_promotes_last(self) -> None:
         host = self._runner_host(

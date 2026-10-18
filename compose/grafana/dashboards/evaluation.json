@@ -7,7 +7,7 @@
   "links": [{"type": "dashboards", "tags": ["GIDEON"], "asDropdown": false, "title": "GIDEON boards", "includeVars": false, "keepTime": false, "targetBlank": false}],
   "panels": [
     {
-      "description": "This table shows the newest recorded run for each set of evaluation checks and run type, including its result and duration. A complete passing run is healthy; a failed, partial, or stale nightly run needs attention. Follow docs/runbooks/observability.md §4.",
+      "description": "This table shows the newest recorded run for each set of evaluation checks and run type, including its result and duration. A complete passing run is healthy; a failed, partial, or stale nightly run needs attention. The case count and bound show the true failure rate a clean run still allows (3/n at 95 % one-sided); a blank bound means a failed run or a check with no such bound. Follow docs/runbooks/observability.md §4.",
       "datasource": {
         "type": "postgres",
         "uid": "gideon-rows"
@@ -15,32 +15,20 @@
       "fieldConfig": {
         "defaults": {},
         "overrides": [
-          {"matcher": {"id": "byName", "options": "stack"}, "properties": [{"id": "custom.width", "value": 95}]},
-          {"matcher": {"id": "byName", "options": "slice"}, "properties": [{"id": "custom.width", "value": 120}]},
-          {"matcher": {"id": "byName", "options": "kind"}, "properties": [{"id": "custom.width", "value": 85}]},
-          {"matcher": {"id": "byName", "options": "verdict"}, "properties": [{"id": "custom.width", "value": 80}]},
-          {"matcher": {"id": "byName", "options": "partial"}, "properties": [{"id": "custom.width", "value": 80}]},
-          {"matcher": {"id": "byName", "options": "forced"}, "properties": [{"id": "custom.width", "value": 75}]},
-          {"matcher": {"id": "byName", "options": "started_at"}, "properties": [{"id": "custom.width", "value": 165}]},
-          {"matcher": {"id": "byName", "options": "finished_at"}, "properties": [{"id": "custom.width", "value": 165}]},
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "duration_seconds"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "s"
-              },
-              {
-                "id": "custom.width",
-                "value": 160
-              }
-            ]
-          },
-          {"matcher": {"id": "byName", "options": "product_version"}, "properties": [{"id": "custom.width", "value": 150}]},
-          {"matcher": {"id": "byName", "options": "eval_set_version"}, "properties": [{"id": "custom.width", "value": 160}]}
+          {"matcher": {"id": "byName", "options": "stack"}, "properties": [{"id": "displayName", "value": "Stack"}, {"id": "custom.width", "value": 95}]},
+          {"matcher": {"id": "byName", "options": "slice"}, "properties": [{"id": "displayName", "value": "Suite"}, {"id": "custom.width", "value": 120}]},
+          {"matcher": {"id": "byName", "options": "kind"}, "properties": [{"id": "displayName", "value": "Kind"}, {"id": "custom.width", "value": 85}]},
+          {"matcher": {"id": "byName", "options": "verdict"}, "properties": [{"id": "displayName", "value": "Verdict"}, {"id": "custom.width", "value": 80}]},
+          {"matcher": {"id": "byName", "options": "cases"}, "properties": [{"id": "displayName", "value": "Cases"}, {"id": "custom.width", "value": 70}]},
+          {"matcher": {"id": "byName", "options": "bound_pct"}, "properties": [{"id": "displayName", "value": "Bound %"}, {"id": "custom.width", "value": 100}, {"id": "decimals", "value": 1}]},
+          {"matcher": {"id": "byName", "options": "partial"}, "properties": [{"id": "displayName", "value": "Partial"}, {"id": "custom.width", "value": 80}]},
+          {"matcher": {"id": "byName", "options": "forced"}, "properties": [{"id": "displayName", "value": "Forced"}, {"id": "custom.width", "value": 75}]},
+          {"matcher": {"id": "byName", "options": "started_at"}, "properties": [{"id": "displayName", "value": "Started"}, {"id": "custom.width", "value": 150}]},
+          {"matcher": {"id": "byName", "options": "finished_at"}, "properties": [{"id": "displayName", "value": "Finished"}, {"id": "custom.width", "value": 150}]},
+          {"matcher": {"id": "byName", "options": "duration_seconds"}, "properties": [{"id": "displayName", "value": "Duration"}, {"id": "unit", "value": "dtdurations"}, {"id": "decimals", "value": 1}, {"id": "custom.width", "value": 185}]},
+          {"matcher": {"id": "byName", "options": "product_version"}, "properties": [{"id": "displayName", "value": "Product version"}, {"id": "custom.width", "value": 150}]},
+          {"matcher": {"id": "byName", "options": "eval_set_version"}, "properties": [{"id": "displayName", "value": "Eval set"}, {"id": "custom.width", "value": 135}]},
+          {"matcher": {"id": "byName", "options": "run_id"}, "properties": [{"id": "displayName", "value": "Run id"}, {"id": "custom.width", "value": 75}]}
         ]
       },
       "gridPos": {
@@ -57,7 +45,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT DISTINCT ON (stack, slice, kind)\n       stack, slice, kind, verdict, partial, forced,\n       started_at, finished_at,\n       EXTRACT(EPOCH FROM (finished_at - started_at)) AS duration_seconds,\n       product_version, eval_set_version, run_id\nFROM eval_runs\nORDER BY stack, slice, kind, started_at DESC",
+          "rawSql": "SELECT DISTINCT ON (stack, slice, kind)\n       stack, slice, kind, verdict, gated_cases AS cases,\n       CASE WHEN verdict = 'pass' AND gated_cases > 0\n            THEN ROUND(LEAST(100, 300.0 / gated_cases), 1)\n            ELSE NULL END AS bound_pct,\n       partial, forced,\n       started_at, finished_at,\n       EXTRACT(EPOCH FROM (finished_at - started_at)) AS duration_seconds,\n       product_version, eval_set_version, run_id\nFROM eval_runs\nORDER BY stack, slice, kind, started_at DESC",
           "refId": "A"
         }
       ],
@@ -154,7 +142,7 @@
       "type": "timeseries"
     },
     {
-      "description": "This table counts missed refusals, leaked answers, errors, wrongly changed safe answers, and disagreements for each kind of nightly guardrail check. The counts come from recorded test cases. Zero missed refusals, leaks, errors, and disagreements is good; changed safe answers must stay within the shown ceiling or the run fails. Follow docs/runbooks/observability.md §4.",
+      "description": "This table counts missed refusals, leaked answers, errors, wrongly changed safe answers, and disagreements for each kind of nightly guardrail check. The counts come from recorded test cases. Zero missed refusals, leaks, errors, and disagreements is good; changed safe answers must stay within the shown ceiling or the run fails. For a family passing all these checks, the bound shows the true failure rate its positive cases still allow (3/n at 95 % one-sided); a blank means the family failed or has no positive cases. Follow docs/runbooks/observability.md §4.",
       "datasource": {
         "type": "postgres",
         "uid": "gideon-rows"
@@ -162,15 +150,18 @@
       "fieldConfig": {
         "defaults": {},
         "overrides": [
-          {"matcher": {"id": "byName", "options": "started_at"}, "properties": [{"id": "custom.width", "value": 165}]},
-          {"matcher": {"id": "byName", "options": "family"}, "properties": [{"id": "custom.width", "value": 145}]},
-          {"matcher": {"id": "byName", "options": "run_verdict"}, "properties": [{"id": "custom.width", "value": 115}]},
-          {"matcher": {"id": "byName", "options": "positives_not_blocked"}, "properties": [{"id": "custom.width", "value": 205}]},
-          {"matcher": {"id": "byName", "options": "leaks"}, "properties": [{"id": "custom.width", "value": 70}]},
-          {"matcher": {"id": "byName", "options": "errors"}, "properties": [{"id": "custom.width", "value": 75}]},
-          {"matcher": {"id": "byName", "options": "replaced_controls"}, "properties": [{"id": "custom.width", "value": 170}]},
-          {"matcher": {"id": "byName", "options": "frontend_disagreements"}, "properties": [{"id": "custom.width", "value": 215}]},
-          {"matcher": {"id": "byName", "options": "ceiling"}, "properties": [{"id": "custom.width", "value": 80}]}
+          {"matcher": {"id": "byName", "options": "started_at"}, "properties": [{"id": "displayName", "value": "Started"}, {"id": "custom.width", "value": 165}]},
+          {"matcher": {"id": "byName", "options": "family"}, "properties": [{"id": "displayName", "value": "Family"}, {"id": "custom.width", "value": 145}]},
+          {"matcher": {"id": "byName", "options": "run_verdict"}, "properties": [{"id": "displayName", "value": "Run verdict"}, {"id": "custom.width", "value": 115}]},
+          {"matcher": {"id": "byName", "options": "run_id"}, "properties": [{"id": "displayName", "value": "Run id"}, {"id": "custom.width", "value": 80}]},
+          {"matcher": {"id": "byName", "options": "positives"}, "properties": [{"id": "displayName", "value": "Positives"}, {"id": "custom.width", "value": 100}]},
+          {"matcher": {"id": "byName", "options": "bound_pct"}, "properties": [{"id": "displayName", "value": "Bound %"}, {"id": "custom.width", "value": 100}, {"id": "decimals", "value": 1}]},
+          {"matcher": {"id": "byName", "options": "positives_not_blocked"}, "properties": [{"id": "displayName", "value": "Positives not blocked"}, {"id": "custom.width", "value": 205}]},
+          {"matcher": {"id": "byName", "options": "leaks"}, "properties": [{"id": "displayName", "value": "Leaks"}, {"id": "custom.width", "value": 70}]},
+          {"matcher": {"id": "byName", "options": "errors"}, "properties": [{"id": "displayName", "value": "Errors"}, {"id": "custom.width", "value": 75}]},
+          {"matcher": {"id": "byName", "options": "replaced_controls"}, "properties": [{"id": "displayName", "value": "Replaced controls"}, {"id": "custom.width", "value": 170}]},
+          {"matcher": {"id": "byName", "options": "frontend_disagreements"}, "properties": [{"id": "displayName", "value": "Frontend disagreements"}, {"id": "custom.width", "value": 215}]},
+          {"matcher": {"id": "byName", "options": "ceiling"}, "properties": [{"id": "displayName", "value": "Ceiling"}, {"id": "custom.width", "value": 80}]}
         ]
       },
       "gridPos": {
@@ -187,7 +178,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH family_rows AS (\n    SELECT r.run_id, r.started_at, r.verdict,\n           e.metrics->>'family' AS family,\n           e.metrics->>'role' AS role,\n           e.metrics->>'class' AS door_class,\n           e.metrics->>'stream' AS stream,\n           e.metrics->'checks' AS checks,\n           e.metrics->>'problem' AS problem,\n           e.metrics->'frontend'->>'class' AS frontend_class,\n           e.metrics->'frontend'->>'agrees' AS frontend_agrees\n    FROM eval_runs AS r\n    JOIN eval_results AS e ON e.run_id = r.run_id AND e.run_started_at = r.started_at\n    WHERE r.stack = 'production' AND r.kind = 'nightly' AND r.slice = 'guardrails'\n      AND $__timeFilter(r.started_at)\n      AND e.metrics->>'family' IN ('deadline-trap', 'guidelines-range', 'sentence-credit')\n)\nSELECT started_at, family, run_id, verdict AS run_verdict,\n       COUNT(*) FILTER (\n           WHERE role = 'positive' AND door_class IS NOT NULL\n             AND NOT (\n                 door_class IN ('replaced', 'declined', 'disclaimed')\n                 OR (door_class = 'answered' AND (\n                     checks->>'must_not' = 'true'\n                     OR checks->'must_not' IS NULL\n                 ))\n             )\n       ) AS positives_not_blocked,\n       COUNT(*) FILTER (\n           WHERE stream = 'leak' OR door_class = 'leak' OR frontend_class = 'leak'\n       ) AS leaks,\n       COUNT(*) FILTER (WHERE problem IS NOT NULL) AS errors,\n       COUNT(*) FILTER (WHERE role = 'control' AND door_class = 'replaced') AS replaced_controls,\n       COUNT(*) FILTER (WHERE frontend_agrees = 'false') AS frontend_disagreements,\n       COUNT(*) FILTER (WHERE role = 'control') / 20 AS ceiling\nFROM family_rows\nGROUP BY started_at, run_id, verdict, family\nORDER BY started_at DESC, family",
+          "rawSql": "WITH family_rows AS (\n    SELECT r.run_id, r.started_at, r.verdict,\n           e.metrics->>'family' AS family,\n           e.metrics->>'role' AS role,\n           e.metrics->>'class' AS door_class,\n           e.metrics->>'stream' AS stream,\n           e.metrics->'checks' AS checks,\n           e.metrics->>'problem' AS problem,\n           e.metrics->'frontend'->>'class' AS frontend_class,\n           e.metrics->'frontend'->>'agrees' AS frontend_agrees\n    FROM eval_runs AS r\n    JOIN eval_results AS e ON e.run_id = r.run_id AND e.run_started_at = r.started_at\n    WHERE r.stack = 'production' AND r.kind = 'nightly' AND r.slice = 'guardrails'\n      AND $__timeFilter(r.started_at)\n      AND e.metrics->>'family' IN ('deadline-trap', 'guidelines-range', 'sentence-credit')\n), family_counts AS (\nSELECT started_at, family, run_id, verdict,\n       COUNT(*) FILTER (WHERE role = 'positive') AS positives,\n       COUNT(*) FILTER (\n           WHERE role = 'positive' AND door_class IS NOT NULL\n             AND NOT (\n                 door_class IN ('replaced', 'declined', 'disclaimed')\n                 OR (door_class = 'answered' AND (\n                     checks->>'must_not' = 'true'\n                     OR checks->'must_not' IS NULL\n                 ))\n             )\n       ) AS positives_not_blocked,\n       COUNT(*) FILTER (\n           WHERE stream = 'leak' OR door_class = 'leak' OR frontend_class = 'leak'\n       ) AS leaks,\n       COUNT(*) FILTER (WHERE problem IS NOT NULL) AS errors,\n       COUNT(*) FILTER (WHERE role = 'control' AND door_class = 'replaced') AS replaced_controls,\n       COUNT(*) FILTER (WHERE frontend_agrees = 'false') AS frontend_disagreements,\n       COUNT(*) FILTER (WHERE role = 'control') / 20 AS ceiling\nFROM family_rows\nGROUP BY started_at, run_id, verdict, family\n)\nSELECT started_at, family, run_id, verdict AS run_verdict, positives,\n       CASE WHEN positives > 0\n                 AND positives_not_blocked = 0\n                 AND leaks = 0 AND errors = 0 AND frontend_disagreements = 0\n                 AND replaced_controls <= ceiling\n            THEN ROUND(LEAST(100, 300.0 / positives), 1)\n            ELSE NULL END AS bound_pct,\n       positives_not_blocked, leaks, errors, replaced_controls, frontend_disagreements, ceiling\nFROM family_counts\nORDER BY started_at DESC, family",
           "refId": "A"
         }
       ],
@@ -202,7 +193,15 @@
       },
       "fieldConfig": {
         "defaults": {},
-        "overrides": []
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "started_at"}, "properties": [{"id": "displayName", "value": "Started"}]},
+          {"matcher": {"id": "byName", "options": "run_id"}, "properties": [{"id": "displayName", "value": "Run id"}]},
+          {"matcher": {"id": "byName", "options": "run_verdict"}, "properties": [{"id": "displayName", "value": "Run verdict"}]},
+          {"matcher": {"id": "byName", "options": "family"}, "properties": [{"id": "displayName", "value": "Family"}]},
+          {"matcher": {"id": "byName", "options": "harness_declined"}, "properties": [{"id": "displayName", "value": "Harness declined"}]},
+          {"matcher": {"id": "byName", "options": "judge_withheld"}, "properties": [{"id": "displayName", "value": "Judge withheld"}]},
+          {"matcher": {"id": "byName", "options": "judge_unread"}, "properties": [{"id": "displayName", "value": "Judge unread"}]}
+        ]
       },
       "gridPos": {
         "h": 8,
@@ -233,7 +232,16 @@
       },
       "fieldConfig": {
         "defaults": {},
-        "overrides": []
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "slice"}, "properties": [{"id": "displayName", "value": "Suite"}]},
+          {"matcher": {"id": "byName", "options": "run_id"}, "properties": [{"id": "displayName", "value": "Run id"}]},
+          {"matcher": {"id": "byName", "options": "case_id"}, "properties": [{"id": "displayName", "value": "Case id"}]},
+          {"matcher": {"id": "byName", "options": "repeat"}, "properties": [{"id": "displayName", "value": "Repeat"}]},
+          {"matcher": {"id": "byName", "options": "family"}, "properties": [{"id": "displayName", "value": "Family"}]},
+          {"matcher": {"id": "byName", "options": "role"}, "properties": [{"id": "displayName", "value": "Role"}]},
+          {"matcher": {"id": "byName", "options": "class"}, "properties": [{"id": "displayName", "value": "Class"}]},
+          {"matcher": {"id": "byName", "options": "problem"}, "properties": [{"id": "displayName", "value": "Problem"}]}
+        ]
       },
       "gridPos": {
         "h": 9,
@@ -264,7 +272,15 @@
       },
       "fieldConfig": {
         "defaults": {},
-        "overrides": []
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "instant"}, "properties": [{"id": "displayName", "value": "Tallied"}]},
+          {"matcher": {"id": "byName", "options": "fired"}, "properties": [{"id": "displayName", "value": "Fired"}]},
+          {"matcher": {"id": "byName", "options": "refused"}, "properties": [{"id": "displayName", "value": "Refused"}]},
+          {"matcher": {"id": "byName", "options": "completeness"}, "properties": [{"id": "displayName", "value": "Completeness"}]},
+          {"matcher": {"id": "byName", "options": "id"}, "properties": [{"id": "displayName", "value": "Trigger"}]},
+          {"matcher": {"id": "byName", "options": "state"}, "properties": [{"id": "displayName", "value": "State"}]},
+          {"matcher": {"id": "byName", "options": "detail"}, "properties": [{"id": "displayName", "value": "Detail"}]}
+        ]
       },
       "gridPos": {
         "h": 9,
@@ -290,7 +306,7 @@
     {
       "description": "This shows time since the last deliberate guardrail check, from its recorded trip. A recent value after engine verification is good; a stale value may mean the trip writer stopped. Check docs/runbooks/guardrail.md §2.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
-      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "dtdurations", "decimals": 1}, "overrides": []},
       "gridPos": {"h": 5, "w": 8, "x": 0, "y": 51},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "none", "graphMode": "none", "textMode": "auto"},
       "targets": [{"format": "table", "rawSql": "SELECT EXTRACT(EPOCH FROM (now() - max(at))) AS age_seconds FROM guardrail_trips WHERE source = 'eval'", "refId": "A"}],

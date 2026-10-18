@@ -35,6 +35,7 @@ from gideon.host.sysio import Command, PathLike
 
 RENDERED = test_index_record.RENDERED
 WORK_ROOT = Path("/fictitious-report-work")
+CORPUS = "/fictitious-corpus-rendered"
 COMMAND_PATH = "index build caselaw --lockfile corpus-2099-01-03"
 
 
@@ -417,11 +418,53 @@ class Gather(unittest.TestCase):
         self.assertEqual(self.host.file_reads.count(self.host.stage_path), 1)
         self.assertEqual(observed.wall_clock, report_for().wall_clock)
         self.assertEqual(observed.metadata_changes, {})
+        self.assertTrue(all(argv == worker.psql_argv(RENDERED) for argv, _ in self.host.calls))
         self.assertNotIn("cluster", observed.gates)
         self.assertIsNone(observed.treatment)
         courts = [next(line for line in sql.splitlines() if line.startswith("\\set v_court "))
                   for _, sql in self.host.calls if sql is not None]
         self.assertEqual(courts, [worker.bind("v_court", court) for court in ("court1", "court1", "court2", "court2")])
+
+    def test_corpus_counts_and_anchors_use_corpus_directory_and_report_uses_record(self) -> None:
+        default = self.gather()
+        self.host.calls.clear()
+        observed = buildreport.gather(
+            self.host, RENDERED, self.inputs, self.row, 17, None, True,
+            corpus_dir=CORPUS, work_root=WORK_ROOT, command_path=COMMAND_PATH,
+        )
+        self.assertIsInstance(observed, buildreport.BuildReport)
+        assert isinstance(observed, buildreport.BuildReport)
+        self.assertEqual(observed.courts, default.courts)
+        self.assertEqual(observed.gates, default.gates)
+        self.assertEqual(observed.wall_clock, default.wall_clock)
+        self.assertEqual(observed.gen_id, self.row.gen_id)
+        self.assertEqual(len(self.host.calls), 2 * len(self.inputs.courts))
+        for argv, sql in self.host.calls:
+            self.assertEqual(argv, worker.psql_argv(CORPUS))
+            assert sql is not None
+            self.assertTrue(caselaw.CASELAW_COUNTS_SQL in sql or caselaw.ANCHOR_COUNTS_SQL in sql)
+        self.host.stdout = json.dumps(observed.to_json())
+        self.assertEqual(buildreport.write_report(self.host, RENDERED, observed), observed)
+        self.assertEqual(self.host.calls[-1][0], worker.psql_argv(RENDERED))
+        self.assertEqual(buildreport.read_report(self.host, RENDERED, self.row.gen_id), observed)
+        self.assertEqual(self.host.calls[-1][0], worker.psql_argv(RENDERED))
+
+    def test_corpus_read_failures_and_record_timestamp_failures_keep_their_fixes(self) -> None:
+        for code, row, directory in ((3, self.row, CORPUS),
+                                     (0, replace(self.row, created_at="fictitious invalid time"), RENDERED)):
+            with self.subTest(code=code):
+                self.host.code = code
+                self.host.calls.clear()
+                observed = buildreport.gather(
+                    self.host, RENDERED, self.inputs, row, 17, None, False,
+                    corpus_dir=CORPUS, work_root=WORK_ROOT, command_path=COMMAND_PATH,
+                )
+                self.assertIsInstance(observed, Problem)
+                assert isinstance(observed, Problem)
+                self.assertIn(stack.logs_fix(directory, "gideon-worker" if code else "postgres"), observed.fix)
+                self.assertIn(report.command(COMMAND_PATH), observed.fix)
+                if code:
+                    self.assertEqual(len(self.host.calls), 1)
 
     def test_cluster_gate_uses_recorded_seconds_timestamp_reuse_and_budget_edge(self) -> None:
         for seconds in (0, CLUSTER_BUDGET_SECONDS - 1, CLUSTER_BUDGET_SECONDS, CLUSTER_BUDGET_SECONDS + 1):

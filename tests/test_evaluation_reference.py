@@ -4,6 +4,7 @@ import json
 import shutil
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -25,6 +26,7 @@ VERSION = "eval-v-test"
 PRODUCT = "0.0.0-test"
 TAG = "v0.0.0-test"
 DIGEST = "f" * 64
+GENERATION = "caselaw__corpus-2099-01-03__fictitious-embedding__sample"
 
 
 def _file(
@@ -46,6 +48,7 @@ def _file(
         repeats=2,
         set_digest=DIGEST,
         cases={} if cases is None else cases,
+        verdict="pass",
     )
 
 
@@ -145,6 +148,26 @@ class Comparison(unittest.TestCase):
 class Serialization(unittest.TestCase):
     """The file is canonical JSON rather than an editable report."""
 
+    def test_both_formats_round_trip_without_changing_their_bytes(self) -> None:
+        values = (
+            replace(_file(), format=1, verdict=None),
+            _file(),
+            replace(_file(), generation_id=GENERATION, verdict="fail"),
+        )
+        for value in values:
+            with self.subTest(format=value.format, generation=value.generation_id), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = _write(root, value)
+                before = path.read_text(encoding="utf-8")
+                loaded = reference.read_reference(root, "extraction", {"cases": LISTS["cases"]}, VERSION)
+                self.assertEqual(loaded.findings, ())
+                assert loaded.reference is not None
+                self.assertEqual(loaded.reference.files, (value,))
+                self.assertEqual(reference.serialize_reference(loaded.reference.files[0]), before)
+                document = json.loads(before)
+                self.assertEqual("generation_id" in document, value.format == 2)
+                self.assertEqual("verdict" in document, value.format == 2)
+
     def test_serialization_is_key_ordered_ascii_and_newline_terminated(self) -> None:
         text = reference.serialize_reference(
             _file(
@@ -163,6 +186,45 @@ class Serialization(unittest.TestCase):
 
 class Reader(unittest.TestCase):
     """The reader collects content-free findings and distinguishes absence."""
+
+    def test_format_two_requires_valid_generation_and_run_verdict_headers(self) -> None:
+        invalid: tuple[tuple[str, object], ...] = (
+            ("generation_id", "fictitious-not-a-generation"), ("generation_id", 1),
+            ("verdict", "fictitious-unknown-verdict"), ("verdict", None), ("verdict", False),
+        )
+        for key, value in invalid:
+            with self.subTest(key=key, value=value), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = _write(root, _file())
+                document = json.loads(path.read_text())
+                document[key] = value
+                path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+                result = reference.read_reference(root, "extraction", {"cases": LISTS["cases"]}, VERSION)
+                self.assertIsNone(result.reference)
+                self.assertTrue(any(key in finding.rule for finding in result.findings))
+                self.assertTrue(all(finding.fix == "Restore the reference file from the release checkout, then retry." for finding in result.findings))
+        for key in ("generation_id", "verdict"):
+            with self.subTest(missing=key), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = _write(root, _file())
+                document = json.loads(path.read_text())
+                del document[key]
+                path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+                result = reference.read_reference(root, "extraction", {"cases": LISTS["cases"]}, VERSION)
+                self.assertIsNone(result.reference)
+                self.assertTrue(any(finding.rule == f"missing key {key!r}" for finding in result.findings))
+
+    def test_unsupported_format_is_refused_by_its_format_number(self) -> None:
+        for number in (3, True, "2", None):
+            with self.subTest(format=number), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = _write(root, _file())
+                document = json.loads(path.read_text())
+                document["format"] = number
+                path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+                result = reference.read_reference(root, "extraction", {"cases": LISTS["cases"]}, VERSION)
+                self.assertIsNone(result.reference)
+                self.assertTrue(any(finding.rule == "format number" for finding in result.findings))
 
     def test_no_reference_is_absent_not_malformed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -291,6 +353,29 @@ class CommittedReferences(unittest.TestCase):
         self.assertEqual(result.findings, ())
         assert result.loaded is not None
         return result.loaded
+
+    def test_committed_legacy_files_load_and_serialize_with_their_original_headers(self) -> None:
+        loaded = self._loaded()
+        for directory in sorted((ROOT / reference.REFERENCE_ROOT).iterdir()):
+            if not directory.is_dir():
+                continue
+            with self.subTest(slice=directory.name):
+                result = reference.read_reference(
+                    ROOT, directory.name, loaded.slice_lists[directory.name], loaded.version,
+                )
+                self.assertEqual(result.findings, ())
+                assert result.reference is not None
+                for value in result.reference.files:
+                    path = directory / f"{value.list}.json"
+                    text = path.read_text(encoding="utf-8")
+                    document = json.loads(text)
+                    self.assertEqual(value.format, document["format"])
+                    if value.format == 1:
+                        self.assertIsNone(value.generation_id)
+                        self.assertIsNone(value.verdict)
+                        self.assertNotIn("generation_id", document)
+                        self.assertNotIn("verdict", document)
+                    self.assertEqual(reference.serialize_reference(value), text)
 
     def test_the_committed_reference_loads_without_a_finding(self) -> None:
         loaded = self._loaded()

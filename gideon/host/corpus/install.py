@@ -33,7 +33,7 @@ from gideon.host.corpus.lockfile import (
 )
 from gideon.host.corpus.sources import SOURCES, SourceDefinition, data_file
 from gideon.host.courts import CourtMap
-from gideon.host.index import build, buildreport, dense, generations
+from gideon.host.index import build, buildreport, dense, generations, smoke
 from gideon.host.index import record as indexrecord
 from gideon.host.render.worker import (
     AGREEMENT_TABLE,
@@ -343,7 +343,7 @@ def _run_install_stages(
                 return code
     active_stage[0] = "collections"
     names = _collections(
-        host, rendered_dir, work_root, lockfile, inputs_by_collection, chunk_guards, sleep,
+        host, rendered_dir, checkout, work_root, lockfile, inputs_by_collection, chunk_guards, sleep,
         monotonic, clock, active_stage,
     )
     if isinstance(names, int):
@@ -367,7 +367,7 @@ def _run_install_stages(
 
 
 def _collections(
-    host: CorpusHost, rendered_dir: PathLike, work_root: PathLike, lockfile: Lockfile,
+    host: CorpusHost, rendered_dir: PathLike, checkout: Path, work_root: PathLike, lockfile: Lockfile,
     inputs_by_collection: tuple[dense.DenseInputs, ...], chunk_guards: models.ChunkGuards,
     sleep: Callable[[float], None], monotonic: Callable[[], float],
     clock: Callable[[], datetime], active_stage: list[str],
@@ -416,6 +416,12 @@ def _collections(
     ))
     names: list[str] = []
     for inputs, needs_build, unfinished in verdicts:
+        if needs_build:
+            active_stage[0] = "smoke"
+            evidence = smoke.smoke_evidence(host, rendered_dir, checkout, inputs, COMMAND_PATH)
+            if isinstance(evidence, Problem):
+                return _refuse("smoke", evidence.problem, evidence.fix)
+            report.print_stage(StageResult("smoke", True, smoke.stage_detail(evidence), ""))
         active_stage[0] = "generation"
         started_at = monotonic()
         outcome = indexrecord.write_building(host, rendered_dir, inputs, command_path=COMMAND_PATH)

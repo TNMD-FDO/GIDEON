@@ -22,7 +22,7 @@
     {
       "description": "This lists the page-class alerts firing now. An empty list means no page needs attention; a listed rule needs action. The Saturday heartbeat is not a page and never appears here. A silenced rule stays listed here until its condition clears; the box status marks it silenced and does not count it. Follow docs/runbooks/observability.md §4.",
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 16,
         "x": 0,
         "y": 0
@@ -53,7 +53,7 @@
     {
       "description": "This points to the box status command, Grafana's silences page, the boards available on this host, and the start-here card. A clear status report is good; a reported problem needs action. Begin with docs/runbooks/start-here.md §1.",
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 8,
         "x": 16,
         "y": 0
@@ -98,7 +98,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 8
+        "y": 10
       },
       "options": {
         "reduceOptions": {
@@ -173,7 +173,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 16
+        "y": 18
       },
       "options": {
         "reduceOptions": {
@@ -243,7 +243,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 16
+        "y": 18
       },
       "options": {
         "reduceOptions": {
@@ -298,7 +298,7 @@
         "h": 7,
         "w": 6,
         "x": 0,
-        "y": 23
+        "y": 25
       },
       "options": {
         "reduceOptions": {
@@ -351,7 +351,7 @@
         "h": 7,
         "w": 6,
         "x": 6,
-        "y": 23
+        "y": 25
       },
       "options": {
         "reduceOptions": {
@@ -404,7 +404,7 @@
         "h": 7,
         "w": 6,
         "x": 12,
-        "y": 23
+        "y": 25
       },
       "options": {
         "reduceOptions": {
@@ -459,7 +459,7 @@
         "h": 7,
         "w": 6,
         "x": 18,
-        "y": 23
+        "y": 25
       },
       "options": {
         "reduceOptions": {
@@ -492,9 +492,12 @@
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "drawStyle": "bars"
+            "drawStyle": "bars",
+            "fillOpacity": 80
           },
-          "unit": "short"
+          "unit": "short",
+          "decimals": 0,
+          "min": 0
         },
         "overrides": []
       },
@@ -502,7 +505,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 30
+        "y": 32
       },
       "options": {
         "legend": {
@@ -530,7 +533,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 37
+        "y": 39
       },
       "panels": [
         {
@@ -549,7 +552,7 @@
             "h": 8,
             "w": 6,
             "x": 0,
-            "y": 38
+            "y": 40
           },
           "options": {
             "legend": {
@@ -583,7 +586,7 @@
             "h": 8,
             "w": 6,
             "x": 6,
-            "y": 38
+            "y": 40
           },
           "options": {
             "legend": {
@@ -629,19 +632,38 @@
                     }
                   }
                 ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "/^(gideon-ci-|transcribe-|buildx_)/"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "legend": true,
+                      "tooltip": false,
+                      "viz": false
+                    }
+                  }
+                ]
               }
             ]
           },
           "gridPos": {
-            "h": 8,
+            "h": 26,
             "w": 12,
             "x": 12,
-            "y": 38
+            "y": 40
           },
           "options": {
             "legend": {
               "displayMode": "table",
-              "placement": "bottom"
+              "placement": "right",
+              "calcs": [
+                "lastNotNull"
+              ]
             }
           },
           "targets": [

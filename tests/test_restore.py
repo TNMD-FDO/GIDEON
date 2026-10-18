@@ -10,6 +10,7 @@ import unittest
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -23,6 +24,7 @@ from gideon.host import (
     backupset,
     cas,
     nogpu,
+    report,
     restore,
     secrets,
     site,
@@ -56,6 +58,9 @@ UPLOADS_ROOT = next(root for root in backupset.inventory_roots("/work/GIDEON") i
 DERIVED_ROOTS = tuple(
     root for root in backupset.inventory_roots("/work/GIDEON") if root.set_may_predate
 )
+REGISTRY_ROOT = next(root for root in backupset.inventory_roots("/work/GIDEON") if root.name == "data-registry")
+POSTGRES_IMAGE = "127.0.0.1:5000/postgres@sha256:" + "d" * 64
+POSTGRES_COMPOSE = f"services:\n  postgres:\n    image: {POSTGRES_IMAGE}\n"
 
 SITE = """\
 office:
@@ -182,6 +187,8 @@ class FakeHost:
         physical_escape: bool = False,
         extra_physical_file: tuple[str, str] | None = None,
         registry_active: bool = False,
+        registry_has_image: bool = True,
+        registry_image_after_restart: bool = True,
         gideon_ids: backupset.AccountIds = DEFAULT_GIDEON_IDS,
         fail_gideon_ids: bool = False,
         store_listing: str | None = None,
@@ -199,6 +206,8 @@ class FakeHost:
         self.physical_escape = physical_escape
         self.extra_physical_file = extra_physical_file
         self.registry_active = registry_active
+        self.registry_has_image = registry_has_image
+        self.registry_image_after_restart = registry_image_after_restart
         self.gideon_ids = gideon_ids
         self.fail_gideon_ids = fail_gideon_ids
         self.store_live = None if store_live is None else dict(store_live)
@@ -278,6 +287,13 @@ class FakeHost:
         del check, env
         command = tuple(argv)
         self.calls.append((command, input, None if cwd is None else os.fspath(cwd), timeout))
+        if command[:3] == ("docker", "manifest", "inspect"):
+            self.events.append("registry-probe")
+            return completed(command, returncode=0 if self.registry_has_image else 1)
+        if command == ("systemctl", "restart", "gideon-registry"):
+            self.events.append("registry-restart")
+            self.registry_has_image = self.registry_image_after_restart
+            return completed(command)
         if command == ("systemctl", "start", "gideon-registry"):
             self.events.append("registry-start")
         if command == tuple(stack.compose_argv(RENDERED, "up", "-d", *STORE_SERVICES)):
@@ -556,6 +572,195 @@ class RenderedRestoreCase(unittest.TestCase):
         patcher = patch.object(restore, "render_to_disk", side_effect=render)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+
+class RegistrySeed(RenderedRestoreCase):
+    def _host(self, **kwargs: Any) -> FakeHost:
+        fake = make_host(
+            source="target", remote_listing=f"{REMOTE_SNAPSHOT}\t1\n", **kwargs
+        )
+        fake.files[os.fspath(nogpu.BUILD_BOX_PATH)] = "declared\n"
+        fake.files[SITE_PATH] += "\nregistry: 127.0.0.1:5000\n"
+        fake.files[os.path.join(RENDERED, "compose.yaml")] = POSTGRES_COMPOSE
+        return fake
+
+    def _run(
+        self, fake: FakeHost, *, at: datetime | None = None
+    ) -> tuple[int, str, list[float]]:
+        output = io.StringIO()
+        errors = io.StringIO()
+        sleeps: list[float] = []
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            code = restore.run_restore(
+                argparse.Namespace(source="target", at=at.isoformat() if at is not None else None),
+                host=fake, now=NOW, sleep=sleeps.append,
+            )
+        self.assertEqual(errors.getvalue(), "")
+        return code, output.getvalue(), sleeps
+
+    def _registry_copy(self, label: str) -> str:
+        side = f"{backupset.STAGING}.fetch-{backupset.nightly_label(NOW)}"
+        return os.path.join(backupset.sets_dir(side), label, backupset.FILES_DIR, REGISTRY_ROOT.name)
+
+    def test_absent_image_is_verified_seeded_and_probed_before_identity_lookup(self) -> None:
+        fake = self._host(registry_has_image=False, fail_identity_exec=True)
+        code, output, sleeps = self._run(fake)
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("verify: ok", output)
+        self.assertIn(
+            f"fetched {REMOTE_SNAPSHOT}; selected set {LOCAL_SET}; "
+            f"seeded the host registry from set {LOCAL_SET}'s {REGISTRY_ROOT.name} copy "
+            "and restarted it; re-owned ",
+            output,
+        )
+        copy = self._registry_copy(LOCAL_SET)
+        probes = [index for index, call in enumerate(fake.calls) if call[0][:3] == ("docker", "manifest", "inspect")]
+        self.assertEqual(len(probes), 2)
+        for index in probes:
+            self.assertEqual(fake.calls[index][0], ("docker", "manifest", "inspect", "--insecure", POSTGRES_IMAGE))
+        checked = next(index for index, call in enumerate(fake.calls) if call[0] == ("sha256sum", "-c", "-") and call[2] == copy)
+        expected_checks = "".join(
+            f"{item.sha256}  {item.path}\n" for item in fake.manifest_value.inventory[REGISTRY_ROOT.name]
+            if item.kind == "f"
+        )
+        self.assertEqual(fake.calls[checked][1], expected_checks)
+        seeded = next(index for index, call in enumerate(fake.calls) if call[0] == ("rsync", "-a", copy + "/", REGISTRY_ROOT.source + "/"))
+        self.assertNotIn("--delete", fake.calls[seeded][0])
+        restarted = next(index for index, call in enumerate(fake.calls) if call[0] == ("systemctl", "restart", "gideon-registry"))
+        identity = next(index for index, call in enumerate(fake.calls) if "id" in call[0])
+        one_off = next(index for index, call in enumerate(fake.calls) if "id" in call[0] and "run" in call[0])
+        order = (probes[0], checked, seeded, restarted, probes[1], identity, one_off)
+        for before, after in pairwise(order):
+            self.assertLess(before, after)
+        self.assertEqual(fake.events[:3], ["registry-probe", "registry-restart", "registry-probe"])
+        self.assertEqual(sleeps, [])
+
+    def test_present_image_skips_seed_and_restart(self) -> None:
+        fake = self._host()
+        code, output, sleeps = self._run(fake)
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(fake.events.count("registry-probe"), 1)
+        self.assertNotIn("registry-restart", fake.events)
+        stopped = next(index for index, call in enumerate(fake.calls) if call[0][-1] == "down")
+        self.assertFalse(any(
+            call[0][0] == "rsync" and call[0][-1] == REGISTRY_ROOT.source + "/"
+            for call in fake.calls[:stopped]
+        ))
+        fetch = next(line for line in output.splitlines() if line.startswith("fetch:"))
+        self.assertIn("; the host registry holds the Postgres image; re-owned ", fetch)
+        self.assertNotIn("seeded", fetch)
+        self.assertEqual(sleeps, [])
+
+    def test_other_hosts_neither_probe_nor_name_a_seed_clause(self) -> None:
+        fake = make_host(
+            source="target", remote_listing=f"{REMOTE_SNAPSHOT}\t1\n", registry_has_image=False
+        )
+        code, output, sleeps = self._run(fake)
+
+        self.assertEqual(code, 0, output)
+        self.assertFalse(any(call[0][:3] == ("docker", "manifest", "inspect") for call in fake.calls))
+        self.assertNotIn("registry-restart", fake.events)
+        fetch = next(line for line in output.splitlines() if line.startswith("fetch:"))
+        self.assertIn(f"selected set {LOCAL_SET}; re-owned ", fetch)
+        self.assertNotIn("registry", fetch)
+        self.assertEqual(sleeps, [])
+
+    def test_seed_without_the_image_refuses_with_the_sets_release_after_the_bound(self) -> None:
+        fake = self._host(registry_has_image=False, registry_image_after_restart=False)
+        code, output, sleeps = self._run(fake)
+
+        self.assertEqual(code, 1, output)
+        fetch = next(line for line in output.splitlines() if line.startswith("fetch:"))
+        detail, fix = fetch.split(" Fix: ", 1)
+        release = fake.manifest_value.release
+        self.assertEqual(
+            detail,
+            "fetch: refuse — the host registry lacks the Postgres image after the seed "
+            f"from set {LOCAL_SET} (release {release})",
+        )
+        self.assertIn(f"Check out tag v{release}", fix)
+        self.assertIn(report.command("apply"), fix)
+        self.assertIn("then retry restore", fix)
+        self.assertIn("docs/runbooks/backup-restore.md §5.", fix)
+        self.assertEqual(sum(sleeps), restore.REGISTRY_SEED_WAIT_SECONDS)
+        self.assertTrue(all(0 < pause <= restore._REGISTRY_SEED_PROBE_INTERVAL_SECONDS for pause in sleeps))
+        self.assertEqual(fake.events, ["registry-probe", "registry-restart", *["registry-probe"] * (len(sleeps) + 1)])
+        self.assertFalse(any(call[0][-1] == "down" or call[0][:2] == ("systemctl", "stop") for call in fake.calls))
+        self.assertFalse(any("id" in call[0] for call in fake.calls))
+        self.assertNotIn("verify:", output)
+
+    def test_missing_or_fileless_registry_copy_refuses_with_the_build_fix(self) -> None:
+        value = manifest()
+        without_registry = {name: entries for name, entries in value.inventory.items() if name != REGISTRY_ROOT.name}
+        directory = replace(entry("blobs"), kind="d", sha256=None)
+        for inventory in (
+            without_registry,
+            {**without_registry, REGISTRY_ROOT.name: ()},
+            {**without_registry, REGISTRY_ROOT.name: (directory,)},
+        ):
+            with self.subTest(entries=inventory.get(REGISTRY_ROOT.name)):
+                fake = self._host(registry_has_image=False, manifest_value=replace(value, inventory=inventory))
+                code, output, sleeps = self._run(fake)
+
+                self.assertEqual(code, 1, output)
+                self.assertIn(f"fetch: refuse — set {value.label} carries no registry copy Fix: ", output)
+                self.assertIn("Build and push the built images with python3 -m tools.imagebuild <name>", output)
+                self.assertIn("docs/runbooks/built-images.md §2, then retry restore.", output)
+                self.assertEqual(fake.events, ["registry-probe"])
+                self.assertFalse(any(call[0][0] == "rsync" and call[0][-1] == REGISTRY_ROOT.source + "/" for call in fake.calls))
+                self.assertFalse(any("id" in call[0] or call[0][-1] == "down" for call in fake.calls))
+                self.assertEqual(sleeps, [])
+
+    def test_rendered_postgres_without_an_image_refuses_with_the_apply_fix(self) -> None:
+        fake = self._host()
+        fake.files[os.path.join(RENDERED, "compose.yaml")] = "services:\n  postgres: {}\n"
+        code, output, sleeps = self._run(fake)
+
+        self.assertEqual(code, 1, output)
+        self.assertIn(
+            "fetch: refuse — rendered Compose file names no image for postgres. "
+            f"Fix: Run {report.command('apply')}, then retry.",
+            output,
+        )
+        self.assertEqual(fake.events, [])
+        self.assertFalse(any("id" in call[0] or call[0][-1] == "down" for call in fake.calls))
+        self.assertEqual(sleeps, [])
+
+    def test_at_selects_the_older_registry_copy_before_identity_lookup(self) -> None:
+        at = NOW - timedelta(minutes=30)
+        older = replace(manifest(), archive_through=at)
+        later_finished = NOW - timedelta(minutes=10)
+        newer = replace(
+            older, label=LATER_SET, finished=later_finished, archive_through=later_finished,
+            inventory={name: entries for name, entries in older.inventory.items() if name != REGISTRY_ROOT.name},
+        )
+        fake = self._host(
+            registry_has_image=False, manifest_value=older, side_names=(LATER_SET, LOCAL_SET),
+            remote_record=backupset.PushRecord(REMOTE_SNAPSHOT, NOW, LATER_SET, NOW),
+        )
+        fake.files[os.path.join(backupset.set_dir(LATER_SET), backupset.MANIFEST_NAME)] = newer.to_json()
+        code, output, sleeps = self._run(fake, at=at)
+
+        self.assertEqual(code, 0, output)
+        self.assertIn(f"selected set {older.label}; seeded the host registry from set {older.label}'s", output)
+        seed = ("rsync", "-a", self._registry_copy(older.label) + "/", REGISTRY_ROOT.source + "/")
+        seeded = next(index for index, call in enumerate(fake.calls) if call[0] == seed)
+        identity = next(index for index, call in enumerate(fake.calls) if "id" in call[0])
+        self.assertLess(seeded, identity)
+        self.assertFalse(any(call[0][:2] == ("sha256sum", "-c") and call[2] == self._registry_copy(newer.label) for call in fake.calls))
+        self.assertEqual(sleeps, [])
+
+    def test_at_without_an_eligible_set_refuses_before_identity_lookup(self) -> None:
+        fake = self._host()
+        code, output, sleeps = self._run(fake, at=fake.manifest_value.finished - timedelta(seconds=1))
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("fetch: refuse — No complete backup set finished by --at;", output)
+        self.assertEqual(fake.events, [])
+        self.assertFalse(any("id" in call[0] or call[0][-1] == "down" for call in fake.calls))
+        self.assertEqual(sleeps, [])
 
 
 class RestoreContracts(RenderedRestoreCase):

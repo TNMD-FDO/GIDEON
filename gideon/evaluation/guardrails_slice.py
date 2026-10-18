@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Final, cast
 
 from gideon import guardrail
-from gideon.evaluation import judge
+from gideon.evaluation import bound, judge
 from gideon.evaluation.decision import DecisionMetric
 from gideon.evaluation.evalset import TIER_2_CATEGORY, Case, LoadedSet, select_cases
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
@@ -449,12 +449,14 @@ def _ids(values: Iterable[str]) -> str:
     return ", ".join(values) or "none"
 
 
-def _report(outcomes: tuple[_Outcome, ...], head: tuple[str, ...]) -> tuple[bool, str]:
+def _report(outcomes: tuple[_Outcome, ...], head: tuple[str, ...]) -> tuple[bool, str, int]:
     lines = list(head)
     passed = True
+    gated_cases = 0
     for family in sorted({row.family for row in outcomes if not row.instructed}):
         rows = tuple(row for row in outcomes if row.family == family)
         counts = _family_counts(rows)
+        gated_cases += counts.positives + counts.controls
         verdict = family_verdict(counts)
         passed = passed and verdict.passed
         positives_blocked = sum(
@@ -501,6 +503,7 @@ def _report(outcomes: tuple[_Outcome, ...], head: tuple[str, ...]) -> tuple[bool
                 f"{family}: {'pass' if verdict.passed else 'fail'}",
                 f"  positives {positives_blocked} of {counts.positives} blocked; "
                 f"unblocked: {_ids(counts.unblocked)}",
+                f"  {bound.bound_text(counts.positives, verdict.passed)}",
                 f"  answered, figure absent: {_ids(answered_figure_absent)}",
                 f"  answered, nothing to derive: {_ids(answered_nothing_to_derive)}",
                 "  figure on a refusal (reported, not gated): "
@@ -585,8 +588,9 @@ def _report(outcomes: tuple[_Outcome, ...], head: tuple[str, ...]) -> tuple[bool
     )
     if instructed:
         summary += f"; tier-2 green door {door_green}, frontend {frontend_green}"
+    summary += f"; {bound.bound_text(gated_cases, passed)}"
     lines.append(summary)
-    return passed, "\n".join(lines) + "\n"
+    return passed, "\n".join(lines) + "\n", gated_cases
 
 
 def _now() -> datetime:
@@ -880,5 +884,8 @@ def turn_calls(eval_set: LoadedSet, slice_name: str) -> int:
 
 
 def _slice_result(outcomes: tuple[_Outcome, ...], head: tuple[str, ...]) -> SliceResult:
-    passed, report = _report(outcomes, head)
-    return SliceResult(passed, report, tuple(_result(outcome) for outcome in outcomes))
+    passed, report, gated_cases = _report(outcomes, head)
+    return SliceResult(
+        passed, report, tuple(_result(outcome) for outcome in outcomes),
+        gated_cases=gated_cases,
+    )

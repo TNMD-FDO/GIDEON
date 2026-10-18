@@ -13,6 +13,7 @@ import subprocess
 import unittest
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import patch
 
 import gideon
@@ -207,7 +208,7 @@ class WriteRows(unittest.TestCase):
         self.assertIsNone(row.engine_in_flight_max)
         self.assertIsNone(row.engine_preemptions)
 
-    def test_engine_conditions_bind_integers_and_unknowns_in_the_last_columns(self) -> None:
+    def test_engine_conditions_bind_integers_and_unknowns_after_decision(self) -> None:
         for maximum, preemptions in ((7, 3), (0, 0), (None, None)):
             with self.subTest(maximum=maximum, preemptions=preemptions):
                 host = FakeHost()
@@ -218,7 +219,7 @@ class WriteRows(unittest.TestCase):
                 sql = host.calls[0][1]
                 assert sql is not None
                 insert = sql[sql.index("INSERT INTO eval_runs"):]
-                self.assertIn("decision, engine_in_flight_max, engine_preemptions) VALUES (", insert)
+                self.assertIn("decision, engine_in_flight_max, engine_preemptions, gated_cases) VALUES (", insert)
                 expected: list[str] = []
                 for name, value in (("engine_in_flight_max", maximum), ("engine_preemptions", preemptions)):
                     if value is None:
@@ -228,7 +229,27 @@ class WriteRows(unittest.TestCase):
                         line = next(line for line in sql.splitlines() if line.startswith(f"\\set {name} "))
                         self.assertEqual(int(read_psql_set(line, name)), value)
                         expected.append(f":'{name}'::integer")
-                self.assertTrue(insert.rstrip().endswith(", ".join(expected) + ");"))
+                self.assertTrue(insert.rstrip().endswith(", ".join([*expected, "NULL"]) + ");"))
+
+    def test_gated_cases_default_to_null_and_bind_integers_in_the_last_column(self) -> None:
+        self.assertIsNone(run_row().gated_cases)
+        for count in (39, 0, None):
+            with self.subTest(count=count):
+                host = FakeHost()
+                self.assertIsNone(record.write_rows(
+                    host, RENDERED, run_row(gated_cases=count), (),
+                ))
+                sql = host.calls[0][1]
+                assert sql is not None
+                insert = sql[sql.index("INSERT INTO eval_runs"):]
+                self.assertIn("engine_preemptions, gated_cases) VALUES (", insert)
+                if count is None:
+                    self.assertNotIn("\\set gated_cases ", sql)
+                    self.assertTrue(insert.rstrip().endswith(", NULL);"))
+                else:
+                    line = next(line for line in sql.splitlines() if line.startswith("\\set gated_cases "))
+                    self.assertEqual(int(read_psql_set(line, "gated_cases")), count)
+                    self.assertTrue(insert.rstrip().endswith(", :'gated_cases'::integer);"))
 
     def test_batch_binds_values_and_starts_with_both_partition_calls(self) -> None:
         host = FakeHost()
@@ -375,11 +396,12 @@ class WriteRows(unittest.TestCase):
 class ReadRows(unittest.TestCase):
     def test_read_uses_the_reader_argv_and_binds_the_run_id(self) -> None:
         run_id = "11111111-2222-4333-8444-555555555555"
-        document = {
+        document: dict[str, Any] = {
             "run": {
                 "run_id": run_id,
                 "product_version": gideon.__version__,
                 "corpus_lockfile": None,
+                "generation_id": None,
                 "eval_set_version": "eval-v-fictitious-test",
                 "hardware_profile": "fixture-profile",
                 "slice": "extraction",
@@ -403,6 +425,7 @@ class ReadRows(unittest.TestCase):
         self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(loaded.run_id, run_id)
+        self.assertIsNone(loaded.generation_id)
         self.assertFalse(loaded.forced)
         self.assertTrue(loaded.partial)
         self.assertEqual(loaded.decision, {"metric": "fixture-rate", "verdict": "wins"})
@@ -412,11 +435,29 @@ class ReadRows(unittest.TestCase):
         assert sql is not None
         self.assertIn(f"\\set run_id '{run_id}'", sql)
         self.assertIn("WHERE run_id = :'run_id'::uuid", sql)
+        self.assertIn("        generation_id,", sql)
+        self.assertIn("'generation_id', generation_id", sql)
         self.assertEqual(sql.count(run_id), 1)
         self.assertNotIn("metrics", sql)
         self.assertNotIn("judge", sql)
         self.assertNotIn("engine_in_flight_max", sql)
         self.assertNotIn("engine_preemptions", sql)
+        self.assertNotIn("gated_cases", sql)
+        generation = "caselaw__corpus-2099-01-03__fictitious-embedding__sample"
+        document["run"]["generation_id"] = generation
+        loaded, problem = record.read_run(FakeHost(stdout=json.dumps(document)), RENDERED, run_id)
+        self.assertIsNone(problem)
+        assert loaded is not None
+        self.assertEqual(loaded.generation_id, generation)
+        invalid: object
+        for invalid in (1, False, []):
+            with self.subTest(generation=invalid):
+                document["run"]["generation_id"] = invalid
+                loaded, problem = record.read_run(FakeHost(stdout=json.dumps(document)), RENDERED, run_id)
+                self.assertIsNone(loaded)
+                assert problem is not None
+                self.assertEqual(problem.problem, "recorded run has an invalid generation id")
+                self.assertIn("eval reference --run", problem.fix)
 
     def test_read_run_metrics_uses_metrics_reader_and_decodes_measurements(self) -> None:
         run_id = "11111111-2222-4333-8444-555555555555"
@@ -453,6 +494,7 @@ class ReadRows(unittest.TestCase):
         self.assertNotIn("judge", sql)
         self.assertNotIn("engine_in_flight_max", sql)
         self.assertNotIn("engine_preemptions", sql)
+        self.assertNotIn("gated_cases", sql)
 
     def test_read_run_metrics_refusals_carry_their_fixes(self) -> None:
         run_id = "11111111-2222-4333-8444-555555555555"
@@ -540,7 +582,7 @@ class ReadNewestRun(unittest.TestCase):
         self.assertIn("ORDER BY started_at DESC", sql)
         self.assertIn("finished_at AT TIME ZONE 'UTC'", sql)
         self.assertIn("'null'::json", sql)
-        for field in ("judge", "metrics", "decision", "overrides", "engine_in_flight_max", "engine_preemptions"):
+        for field in ("judge", "metrics", "decision", "overrides", "engine_in_flight_max", "engine_preemptions", "gated_cases"):
             with self.subTest(field=field):
                 self.assertIsNone(re.search(rf"\b{field}\b", sql))
 

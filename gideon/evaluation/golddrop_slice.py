@@ -7,19 +7,20 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final, cast
 
-from gideon.evaluation import record, sample
-from gideon.evaluation.evalset import LoadedSet, select_cases
+from gideon.evaluation import bound, record, sample
+from gideon.evaluation.evalset import SHAPE_REGISTRY, LoadedSet, select_cases
 from gideon.evaluation.results import CaseResult, RunContext, SliceResult
 from gideon.host import report, stack, staging
-from gideon.host.index.sample import SOURCE_ID_MAX_LENGTH, SOURCE_ID_PATTERN
+from gideon.host.index.sample import (
+    SAMPLE_SUFFIX,
+    SOURCE_ID_MAX_LENGTH,
+    SOURCE_ID_PATTERN,
+)
 from gideon.host.report import Problem
 from gideon.host.worker import bind
 
 # exempt: the gold-drop ceiling is a release decision, never moved to pass a generation.
 GOLD_DROP_CEILING_PERCENT: Final[int] = 5
-ZERO_TOLERANCE_CATEGORIES: Final[frozenset[tuple[str, str]]] = frozenset({
-    ("research-qa", "lookup"), ("research-qa", "edition"),
-})
 PROBLEMS: Final[frozenset[str]] = frozenset({"record-unreachable", "generation-unresolved"})
 MANIFEST_SQL: Final[str] = """SELECT row_to_json(manifest) FROM (
     SELECT source_id, canonical_text_sha256 FROM public.generation_documents
@@ -139,19 +140,26 @@ def run_gold_drop(loaded: LoadedSet, slice_name: str, context: RunContext) -> Sl
     if isinstance(manifest, Problem):
         return _failed(selection.counted, len(selection.unsigned), "record-unreachable", manifest)
 
+    # A sample holds the gold its build was given; gold landed since is unbuilt, not dropped.
+    sampled = generation.name.endswith(f"__{SAMPLE_SUFFIX}")
+    unbuilt = tuple(identifier for identifier in gold if identifier not in manifest) if sampled else ()
+    if unbuilt:
+        gold = {identifier: hashes for identifier, hashes in gold.items() if identifier in manifest}
     drops = dropped_documents(gold, manifest)
     dropped = set(drops.absent) | set(drops.changed)
     signoffs = {signoff.case_id: signoff for signoff in loaded.signoffs}
     results: list[CaseResult] = []
     dropped_cases: list[str] = []
     zero_tolerance_cases: list[str] = []
+    gated_cases = 0
     for case_id in selection.counted:
         context.checkpoint()
         must_cite = signoffs[case_id].must_cite
         case_dropped = sorted(set(must_cite) & dropped)
         case = loaded.cases_by_id[case_id]
         category = (cast(str, case["suite"]), cast(str, case["category"]))
-        zero_tolerance = category in ZERO_TOLERANCE_CATEGORIES
+        zero_tolerance = SHAPE_REGISTRY[category].zero_tolerance
+        gated_cases += int(zero_tolerance)
         if case_dropped:
             dropped_cases.append(case_id)
             if zero_tolerance:
@@ -163,7 +171,7 @@ def run_gold_drop(loaded: LoadedSet, slice_name: str, context: RunContext) -> Sl
 
     lost_coordinates: dict[str, set[str]] = {}
     for judgment in loaded.judgments:
-        if manifest.get(judgment.source_id) != judgment.sha256:
+        if judgment.source_id in gold and manifest.get(judgment.source_id) != judgment.sha256:
             lost_coordinates.setdefault(judgment.query_id, set()).add(
                 f"{judgment.source_id}@{judgment.sha256}"
             )
@@ -171,6 +179,8 @@ def run_gold_drop(loaded: LoadedSet, slice_name: str, context: RunContext) -> Sl
     lines = [
         f"generation {generation.name} ({generation.corpus_lockfile})",
         f"{len(selection.counted)} counted, {len(selection.unsigned)} unsigned excluded",
+        *((f"unbuilt gold documents {len(unbuilt)} (absent from the sample, not counted): "
+           + (" ".join(unbuilt) or "none"),) if sampled else ()),
         f"gold documents {len(gold)}: dropped {len(dropped)} "
         f"(absent {len(drops.absent)}, hash changed {len(drops.changed)}), "
         f"ceiling {GOLD_DROP_CEILING_PERCENT} %",
@@ -178,6 +188,7 @@ def run_gold_drop(loaded: LoadedSet, slice_name: str, context: RunContext) -> Sl
         f"hash changed source ids: {' '.join(drops.changed) or 'none'}",
         f"zero-tolerance cases dropped {len(zero_tolerance_cases)}: "
         + (" ".join(zero_tolerance_cases) or "none"),
+        bound.bound_text(gated_cases, gate.ok),
         f"cases dropped (reported) {len(dropped_cases)}: " + (" ".join(dropped_cases) or "none"),
         f"judged queries with dropped coordinates {len(lost_coordinates)}:",
     ]
@@ -185,4 +196,4 @@ def run_gold_drop(loaded: LoadedSet, slice_name: str, context: RunContext) -> Sl
         lines.append(f"{query_id}: {' '.join(sorted(coordinates))}")
     lines.extend(f"gate: {reason}" for reason in gate.reasons)
     lines.append(f"gold-drop: {'pass' if gate.ok else 'fail'}")
-    return SliceResult(gate.ok, "\n".join(lines) + "\n", tuple(results))
+    return SliceResult(gate.ok, "\n".join(lines) + "\n", tuple(results), gated_cases=gated_cases)

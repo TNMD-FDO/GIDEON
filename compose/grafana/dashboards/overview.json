@@ -9,14 +9,14 @@
   "panels": [
     {
       "description": "This lists the page-class alerts firing now. An empty list means no page needs attention; a listed rule needs action. The Saturday heartbeat is not a page and never appears here. A silenced rule stays listed here until its condition clears; the box status marks it silenced and does not count it. Follow docs/runbooks/observability.md §4.",
-      "gridPos": {"h": 8, "w": 16, "x": 0, "y": 0},
+      "gridPos": {"h": 10, "w": 16, "x": 0, "y": 0},
       "options": {"viewMode": "list", "groupMode": "default", "groupBy": [], "maxItems": 20, "sortOrder": 4, "dashboardAlerts": false, "alertName": "", "showInstances": true, "showInactiveAlerts": false, "alertInstanceLabelFilter": "{class=\"page\"}", "stateFilter": {"firing": true, "pending": false, "noData": true, "normal": false, "error": true, "recovering": false}},
       "title": "Needs attention",
       "type": "alertlist"
     },
     {
       "description": "This points to the box status command, Grafana's silences page, the boards available on this host, and the start-here card. A clear status report is good; a reported problem needs action. Begin with docs/runbooks/start-here.md §1.",
-      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+      "gridPos": {"h": 10, "w": 8, "x": 16, "y": 0},
       "options": {"mode": "markdown", "content": "$start_here"},
       "title": "Start here",
       "type": "text"
@@ -25,7 +25,7 @@
       "description": "This shows one tile per check a down rule watches: a tile named for a service is its metrics scrape, a tile ending in probe is the door check itself, and a tile ending in database is the database check. Up is healthy; a tile down for ten minutes (five for the engine) causes a page. Each tile is named in docs/runbooks/observability.md §3. Follow docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "short", "mappings": [{"type": "value", "options": {"1": {"text": "up", "color": "green", "index": 0}, "0": {"text": "down", "color": "red", "index": 1}}}]}, "overrides": []},
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 10},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "background", "graphMode": "none", "textMode": "value_and_name", "text": {"titleSize": 14, "valueSize": 28}},
       "targets": [
         {"expr": "up", "instant": true, "range": false, "legendFormat": "{{job}}", "refId": "A"},
@@ -42,7 +42,7 @@
         "defaults": {"unit": "percent", "min": 0, "max": 100, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": "$filesystem_percent"}]}},
         "overrides": []
       },
-      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 16},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 18},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "displayMode": "basic", "orientation": "horizontal", "showUnfilled": true},
       "targets": [
         {"expr": "100 * node_filesystem_avail_bytes{mountpoint=\"/data\"} / node_filesystem_size_bytes{mountpoint=\"/data\"}", "instant": true, "range": false, "legendFormat": "/data", "refId": "A"},
@@ -56,7 +56,7 @@
       "description": "This shows whole days until the ingress certificate expires, from its probe. $certificate_days days or more is healthy; fewer causes a page, and a renewal needs lead time from the office CA. Follow docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "suffix: days", "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": "$certificate_days"}]}}, "overrides": []},
-      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 16},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 18},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
       "targets": [{"expr": "floor((probe_ssl_earliest_cert_expiry{job=\"ingress\"} - time()) / 86400)", "instant": true, "range": false, "legendFormat": "certificate", "refId": "A"}],
       "title": "Certificate days left",
@@ -66,7 +66,7 @@
       "description": "This shows time since the newest completed backup set, from its recorded run. Under $backup_hours hours is good; an older or missing set causes a page. Follow docs/runbooks/observability.md §4.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
       "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": "$backup_threshold"}]}}, "overrides": []},
-      "gridPos": {"h": 7, "w": 6, "x": 0, "y": 23},
+      "gridPos": {"h": 7, "w": 6, "x": 0, "y": 25},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
       "targets": [{"format": "table", "rawSql": "SELECT EXTRACT(EPOCH FROM (now() - max(at))) AS age_seconds FROM audit_log WHERE kind = 'backup_run' AND detail->>'phase' = 'applied'", "refId": "A"}],
       "title": "Backup set age",
@@ -76,7 +76,7 @@
       "description": "This shows time since the newest off-box backup copy, from its recorded push. Under $backup_hours hours is good; an older or missing push causes a page. Follow docs/runbooks/observability.md §4.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
       "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": "$backup_threshold"}]}}, "overrides": []},
-      "gridPos": {"h": 7, "w": 6, "x": 6, "y": 23},
+      "gridPos": {"h": 7, "w": 6, "x": 6, "y": 25},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
       "targets": [{"format": "table", "rawSql": "SELECT EXTRACT(EPOCH FROM (now() - max(at))) AS age_seconds FROM audit_log WHERE kind = 'backup_push'", "refId": "A"}],
       "title": "Backup push age",
@@ -86,7 +86,7 @@
       "description": "This shows time since the newest passing backup drill, from its recorded result. Under $drill_days days is good; an older or missing passing drill causes a page. Follow docs/runbooks/observability.md §4.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
       "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": "$drill_threshold"}]}}, "overrides": []},
-      "gridPos": {"h": 7, "w": 6, "x": 12, "y": 23},
+      "gridPos": {"h": 7, "w": 6, "x": 12, "y": 25},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
       "targets": [{"format": "table", "rawSql": "SELECT EXTRACT(EPOCH FROM (now() - max(at))) AS age_seconds FROM audit_log WHERE kind = 'backup_drill' AND detail->>'result' = 'pass'", "refId": "A"}],
       "title": "Passing drill age",
@@ -96,7 +96,7 @@
       "description": "This shows the newest recorded backup drill result. Pass means the restore checks succeeded; failed means they did not and causes a page. Follow docs/runbooks/observability.md §4.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
       "fieldConfig": {"defaults": {"unit": "short", "mappings": [{"type": "value", "options": {"pass": {"color": "green", "index": 0}, "failed": {"color": "red", "index": 1}}}]}, "overrides": []},
-      "gridPos": {"h": 7, "w": 6, "x": 18, "y": 23},
+      "gridPos": {"h": 7, "w": 6, "x": 18, "y": 25},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "/^result$/", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
       "targets": [{"format": "table", "rawSql": "SELECT at AS time, detail->>'result' AS result FROM audit_log WHERE kind = 'backup_drill' ORDER BY at DESC LIMIT 1", "refId": "A"}],
       "title": "Last drill result",
@@ -105,8 +105,8 @@
     {
       "description": "This charts daily counts of user questions caught by each guardrail rule, from recorded trips. Some trips are expected; a sudden rise can mean more questions are being refused. Review docs/runbooks/guardrail.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
-      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars"}, "unit": "short"}, "overrides": []},
-      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 30},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80}, "unit": "short", "decimals": 0, "min": 0}, "overrides": []},
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 32},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
       "targets": [{"format": "time_series", "rawSql": "SELECT date_trunc('day', at) AS time, pattern_id AS metric, count(*) AS trips FROM guardrail_trips WHERE source = 'user' AND $__timeFilter(at) GROUP BY date_trunc('day', at), pattern_id ORDER BY time", "refId": "A"}],
       "timeFrom": "30d",
@@ -115,13 +115,13 @@
     },
     {
       "collapsed": true,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 37},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 39},
       "panels": [
         {
           "description": "This shows the host's average work waiting or running over one minute, reported by the host monitor. A steady value is normal; sustained growth can mean the box is overloaded. Check docs/runbooks/observability.md §4.",
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-          "gridPos": {"h": 8, "w": 6, "x": 0, "y": 38},
+          "gridPos": {"h": 8, "w": 6, "x": 0, "y": 40},
           "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
           "targets": [{"expr": "node_load1", "legendFormat": "load 1m", "refId": "A"}],
           "title": "Host load",
@@ -131,7 +131,7 @@
           "description": "This shows the percentage of host memory in use, calculated from the host monitor's available and total memory. A stable value with room left is good; a value near full leaves little room for work. Check docs/runbooks/observability.md §4.",
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []},
-          "gridPos": {"h": 8, "w": 6, "x": 6, "y": 38},
+          "gridPos": {"h": 8, "w": 6, "x": 6, "y": 40},
           "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
           "targets": [{"expr": "100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)", "legendFormat": "memory used", "refId": "A"}],
           "title": "Host memory",
@@ -140,9 +140,9 @@
         {
           "description": "This compares each service container's memory in use with its configured limit, from the container monitor. Use below the limit is normal; use near the limit leaves little room and may interrupt service. Check docs/runbooks/observability.md §4.",
           "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": [{"matcher": {"id": "byRegexp", "options": "/ limit$/"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}]},
-          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 38},
-          "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+          "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": [{"matcher": {"id": "byRegexp", "options": "/ limit$/"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}, {"matcher": {"id": "byRegexp", "options": "/^(gideon-ci-|transcribe-|buildx_)/"}, "properties": [{"id": "custom.hideFrom", "value": {"legend": true, "tooltip": false, "viz": false}}]}]},
+          "gridPos": {"h": 26, "w": 12, "x": 12, "y": 40},
+          "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull"]}},
           "targets": [
             {"expr": "sum by (name) (container_memory_working_set_bytes{name!=\"\"})", "legendFormat": "{{name}}", "refId": "A"},
             {"expr": "sum by (name) (container_spec_memory_limit_bytes{name!=\"\"} > 0)", "legendFormat": "{{name}} limit", "refId": "B"}

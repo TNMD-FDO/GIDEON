@@ -498,6 +498,18 @@ class PlaywrightPage:
         except Exception as exc:
             raise _page_error(exc) from exc
 
+    def scroll_widths(self, selector: str) -> tuple[int, int] | None:
+        try:
+            locator = self._page.locator(selector)
+            if locator.count() == 0:
+                return None
+            scroll_width, client_width = locator.first.evaluate(
+                "element => [element.scrollWidth, element.clientWidth]"
+            )
+            return scroll_width, client_width
+        except Exception as exc:
+            raise _page_error(exc) from exc
+
     def count(self, selector: str) -> int:
         try:
             return self._page.locator(selector).count()

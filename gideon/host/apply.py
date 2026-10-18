@@ -30,6 +30,7 @@ from gideon.host import (
 from gideon.host.egress import EgressAllowlist
 from gideon.host.images import (
     RegistryTarget,
+    manifest_inspect_argv,
     parse_registry,
     proxy_environment,
 )
@@ -353,10 +354,7 @@ def _registry_stage(io: Host, context: _ApplyContext) -> StageResult:
     missing: list[str] = []
     failures: list[str] = []
     for image_reference in context.references:
-        argv = ["docker", "manifest", "inspect"]
-        if context.target.scheme == "http":
-            argv.append("--insecure")
-        argv.append(image_reference)
+        argv = manifest_inspect_argv(context.target, image_reference)
         try:
             result = io.run(argv, env=environment)
         except OSError as exc:
