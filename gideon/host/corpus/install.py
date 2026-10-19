@@ -2,6 +2,9 @@
 
 Fetch, verify, record, stage, ingest, overruled, and agreement lead to collections,
 installed, clean, and retain.
+
+A stage counts write is one transaction: an interrupt leaves either no rows or
+the source's rows, which the next run compares.
 """
 
 import argparse
@@ -374,6 +377,9 @@ def _collections(
 ) -> tuple[str, ...] | int:
     """Report changed inputs, record each generation, and build or finish the changed ones."""
 
+    counts = record.read_stage_counts(host, rendered_dir, lockfile.label, command_path=COMMAND_PATH)
+    if isinstance(counts, Problem):
+        return _refuse("collections", counts.problem, counts.fix)
     verdicts: list[tuple[dense.DenseInputs, bool, bool]] = []
     for inputs in inputs_by_collection:
         row = indexrecord.read_generation_by_inputs(
@@ -392,17 +398,28 @@ def _collections(
         # A built generation's stages after built leave no mark but the report row they end in;
         # a report written before the treatment stage existed carries no treatment object.
         unfinished = False
+        report_only = False
         if row is not None and row.state == "built":
             newest = buildreport.read_report(host, rendered_dir, row.gen_id, command_path=COMMAND_PATH)
             if isinstance(newest, Problem):
                 return _refuse("collections", newest.problem, newest.fix)
             unfinished = newest is None or newest.failed_stage is not None or newest.treatment is None
+            if newest is not None:
+                source = inputs.snapshot[:-staging.DATE_SUFFIX_LENGTH]
+                accounted = newest.gates.get("accounted", {})
+                missing_staged = any(
+                    court in counts.get(source, {})
+                    and (court not in accounted or accounted[court].staged is None)
+                    for court in inputs.courts
+                )
+                report_only = missing_staged and not unfinished
+                unfinished = unfinished or missing_staged
         verdict = "needs build" if needs_build else "unchanged"
         generation = inputs.name if row is None else f"{row.gen_id} {row.state}"
         if row is not None and row.failure_reason is not None:
             generation += f": {row.failure_reason}"
         if unfinished:
-            generation += ", its treatment and report to finish"
+            generation += ", its report to re-gather" if report_only else ", its treatment and report to finish"
         report.print_stage(StageResult(
             "collections", True,
             f"{inputs.collection}: {verdict}; generation {generation}, inputs hash {inputs.inputs_hash}", "",
@@ -544,8 +561,14 @@ def _stage(
             if not _stage_matches(existing, snapshot, courts, inputs):
                 return _refuse("stage", f"{name}: stage record disagrees with the lockfile",
                                _stage_removal_fix(lockfile.label, name, work_root))
+            written = record.write_stage_counts(
+                host, rendered_dir, lockfile.label, name, existing, command_path=COMMAND_PATH,
+            )
+            if isinstance(written, Problem):
+                return _refuse("stage", f"{name}: {written.problem}", written.fix)
             _court_stage_rows(existing)
-            report.print_stage(StageResult("stage", True, f"{name}: complete; nothing deferred", ""))
+            detail = "counts already recorded" if written == 0 else "counts recorded"
+            report.print_stage(StageResult("stage", True, f"{name}: complete; nothing deferred; {detail}", ""))
             continue
         job = staging.defer_stage(
             host, rendered_dir, label=lockfile.label, snapshot=snapshot,
@@ -568,12 +591,18 @@ def _stage(
                 if not _stage_matches(outcome.record, snapshot, courts, inputs):
                     return _refuse("stage", f"{name}: stage record disagrees with the lockfile",
                                    _stage_removal_fix(lockfile.label, name, work_root))
+                written = record.write_stage_counts(
+                    host, rendered_dir, lockfile.label, name, outcome.record, command_path=COMMAND_PATH,
+                )
+                if isinstance(written, Problem):
+                    return _refuse("stage", f"{name}: {written.problem}", written.fix)
                 _court_stage_rows(outcome.record)
                 read_count = sum(outcome.record.records.values())
+                detail = "counts already recorded" if written == 0 else "counts recorded"
                 report.print_stage(StageResult(
                     "stage", True,
                     f"{name}: {len(courts)} courts staged, {read_count} records read, "
-                    f"{round(outcome.record.seconds)} seconds", "",
+                    f"{round(outcome.record.seconds)} seconds; {detail}", "",
                 ))
                 break
             now = monotonic()

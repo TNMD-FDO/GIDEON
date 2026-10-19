@@ -11,9 +11,8 @@ import yaml  # type: ignore[import-untyped]
 from test_render_grafana import EXAMPLE, ROOT, SECOND, _datasource_uids, inputs
 from test_render_grafana_runbook import render_tile_facts
 
-from gideon.evaluation import bound
+from gideon.evaluation import bound, guardrails_slice
 from gideon.evaluation.evalset import SHAPE_REGISTRY, TIER_2_CATEGORY
-from gideon.evaluation.guardrails_slice import OVER_TRIP_DIVISOR
 from gideon.evaluation.window import QUIET_WINDOW_END_HOUR
 from gideon.host.index.generations import COLLECTIONS
 from gideon.host.render import ARTIFACTS, VerbatimArtifact, render_all
@@ -851,11 +850,32 @@ class EvalBoard(unittest.TestCase):
         self.assertIn("COUNT(*) FILTER (WHERE role = 'positive') AS positives", sql)
         self.assertEqual(outer_select_columns(sql), [
             "started_at", "family", "run_id", "run_verdict", "positives", "bound_pct",
-            "positives_not_blocked", "leaks", "errors", "replaced_controls",
+            "positives_not_blocked", "model_declined", "code_replaced", "answered_no_figure",
+            "leaks", "errors", "replaced_controls",
             "frontend_disagreements", "ceiling",
         ])
+        normalized_sql = " ".join(sql.split())
+        declined_classes = ", ".join(
+            f"'{class_name}'" for class_name in sorted(guardrails_slice.MODEL_DECLINED)
+        )
+        self.assertIn(
+            "COUNT(*) FILTER ( WHERE role = 'positive' "
+            f"AND door_class IN ({declined_classes}) ) AS model_declined",
+            normalized_sql,
+        )
+        self.assertIn(
+            "COUNT(*) FILTER ( WHERE role = 'positive' "
+            "AND door_class = 'replaced' ) AS code_replaced",
+            normalized_sql,
+        )
+        self.assertIn(
+            "COUNT(*) FILTER ( WHERE role = 'positive' AND door_class = 'answered' "
+            "AND ( checks->>'must_not' = 'true' OR checks->'must_not' IS NULL ) "
+            ") AS answered_no_figure",
+            normalized_sql,
+        )
         self.assertRegex(
-            " ".join(sql.split()),
+            normalized_sql,
             r"CASE WHEN positives > 0 AND positives_not_blocked = 0 "
             r"AND leaks = 0 AND errors = 0 AND frontend_disagreements = 0 "
             r"AND replaced_controls <= ceiling "
@@ -863,7 +883,7 @@ class EvalBoard(unittest.TestCase):
             r"ELSE NULL END AS bound_pct",
         )
         self.assertIn("door_class IS NOT NULL", sql)
-        self.assertIn("door_class IN ('replaced', 'declined', 'disclaimed')", sql)
+        self.assertIn(f"door_class IN ('replaced', {declined_classes})", sql)
         self.assertIn("checks->>'must_not' = 'true'", sql)
         self.assertIn("checks->'must_not' IS NULL", sql)
         self.assertNotIn(" ? ", sql)
@@ -874,7 +894,7 @@ class EvalBoard(unittest.TestCase):
         divisor = re.search(r"COUNT\(\*\) FILTER \(WHERE role = 'control'\) / (\d+) AS ceiling", sql)
         self.assertIsNotNone(divisor)
         assert divisor is not None
-        self.assertEqual(int(divisor.group(1)), OVER_TRIP_DIVISOR)
+        self.assertEqual(int(divisor.group(1)), guardrails_slice.OVER_TRIP_DIVISOR)
 
     def test_false_refusal_and_duration_follow_recorded_readings_and_night(self) -> None:
         board = json.loads(GrafanaEvalArtifact.emit(inputs()))

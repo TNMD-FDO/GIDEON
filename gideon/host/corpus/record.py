@@ -1,4 +1,4 @@
-"""Write and read corpus lockfile and upstream observation rows."""
+"""Write and read corpus lockfiles, stage counts, and upstream observations."""
 
 import json
 import re
@@ -8,9 +8,14 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from typing import Final
 
-from gideon.host import report, stack, worker
+from gideon.host import report, stack, staging, worker
 from gideon.host.corpus.lockfile import LABEL, REASONS, Lockfile
-from gideon.host.render.worker import FAILURE_REASONS, SEGMENT_PATTERN
+from gideon.host.render.worker import (
+    COURT_PATTERN,
+    FAILURE_REASONS,
+    SEGMENT_PATTERN,
+    STAGE_TABLES,
+)
 from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
 
@@ -36,6 +41,17 @@ class CutRow:
     installed_at: str | None
     state: str
     sources: tuple[SourceBinding, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class StageCounts:
+    """One court's recorded stage counts and the original stage time."""
+
+    dockets: int
+    opinion_clusters: int
+    citations: int
+    opinions: int
+    staged_at: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +285,52 @@ BEGIN
 END
 $installed$;
 COMMIT;
+"""
+
+_WRITE_STAGE_COUNTS_SQL = """\\set QUIET on
+BEGIN;
+SELECT set_config('gideon.stage_counts_payload', :'v_payload', true) AS stored \\gset
+DO $stage_counts$
+DECLARE
+    payload jsonb := current_setting('gideon.stage_counts_payload')::jsonb;
+    counts jsonb;
+    recorded public.stage_counts%ROWTYPE;
+    inserted integer := 0;
+BEGIN
+    FOR counts IN SELECT value FROM jsonb_array_elements(payload->'courts') LOOP
+        SELECT * INTO recorded FROM public.stage_counts
+        WHERE label = payload->>'label' AND source = payload->>'source'
+          AND court = counts->>'court';
+        IF FOUND THEN
+            IF (recorded.dockets, recorded.opinion_clusters, recorded.citations, recorded.opinions)
+                IS DISTINCT FROM (
+                    (counts->>'dockets')::bigint, (counts->>'opinion_clusters')::bigint,
+                    (counts->>'citations')::bigint, (counts->>'opinions')::bigint
+                ) THEN
+                RAISE EXCEPTION 'STAGE_COUNTS_CONFLICT:%', counts->>'court';
+            END IF;
+        ELSE
+            INSERT INTO public.stage_counts (
+                label, source, court, dockets, opinion_clusters, citations, opinions, staged_at
+            ) VALUES (
+                payload->>'label', payload->>'source', counts->>'court',
+                (counts->>'dockets')::bigint, (counts->>'opinion_clusters')::bigint,
+                (counts->>'citations')::bigint, (counts->>'opinions')::bigint,
+                (payload->>'staged_at')::timestamptz
+            );
+            inserted := inserted + 1;
+        END IF;
+    END LOOP;
+    PERFORM set_config('gideon.stage_counts_inserted', inserted::text, true);
+END
+$stage_counts$;
+SELECT current_setting('gideon.stage_counts_inserted') AS v_inserted \\gset
+COMMIT;
+SELECT json_build_object('inserted', :'v_inserted'::integer);
+"""
+
+_READ_STAGE_COUNTS_SQL = """SELECT json_agg(row_to_json(s) ORDER BY source, court)
+FROM public.stage_counts s WHERE label = :'v_label';
 """
 
 _READ_SQL = """SELECT jsonb_build_object(
@@ -677,6 +739,96 @@ def write_derived_cut(
         result, rendered_dir, command_path=command_path,
         install_label=lockfile.base or lockfile.label,
     )
+
+
+def write_stage_counts(
+    host: Host, rendered_dir: PathLike, label: str, source: str, record: staging.StageRecord,
+    *, command_path: str,
+) -> int | Problem:
+    """Insert a validated stage's counts or compare the existing counts unchanged."""
+    payload = {
+        "label": label,
+        "source": source,
+        "staged_at": record.staged_at,
+        "courts": [
+            {
+                "court": court,
+                **{table.replace("-", "_"): record.counts[court][table]
+                   for table in STAGE_TABLES[1:]},
+            }
+            for court in record.courts
+        ],
+    }
+    sql = worker.bind("v_payload", json.dumps(payload, separators=(",", ":"))) + "\n" + _WRITE_STAGE_COUNTS_SQL
+    result = _run(host, rendered_dir, sql, command_path)
+    if isinstance(result, Problem):
+        return result
+    if result.returncode != 0:
+        conflict = re.search(r"STAGE_COUNTS_CONFLICT:([^\s]+)", result.stderr)
+        if conflict is not None:
+            return Problem(
+                f"stage counts for {conflict.group(1)} differ from the recorded ones",
+                "A label's counts are recorded once: make a new lockfile with "
+                f"{report.command('corpus cut')}, then install it with "
+                f"{report.command('corpus install')}.",
+            )
+        return _write_failure(result, rendered_dir, command_path=command_path)
+    try:
+        value = json.loads(result.stdout)
+    except ValueError:
+        value = None
+    if (
+        not isinstance(value, dict) or set(value) != {"inserted"}
+        or not isinstance(value["inserted"], int) or isinstance(value["inserted"], bool)
+        or not 0 <= value["inserted"] <= len(record.courts)
+    ):
+        return Problem("stage counts write returned an invalid outcome",
+                       database_fix(rendered_dir, command_path))
+    return value["inserted"]
+
+
+def read_stage_counts(
+    host: Host, directory: PathLike, label: str, *, command_path: str,
+) -> dict[str, dict[str, StageCounts]] | Problem:
+    """Read a label's stage counts through the caller's corpus database directory."""
+    sql = worker.bind("v_label", label) + "\n" + _READ_STAGE_COUNTS_SQL
+    result = _run(host, directory, sql, command_path)
+    if isinstance(result, Problem):
+        return result
+    fix = database_fix(directory, command_path)
+    if result.returncode != 0:
+        return Problem(f"stage counts read failed (exit {result.returncode})", fix)
+    content = result.stdout.strip()
+    if not content:
+        return {}
+    try:
+        value = json.loads(content)
+    except ValueError:
+        return Problem("stage counts row is invalid", fix)
+    if value is None:
+        return {}
+    if not isinstance(value, list):
+        return Problem("stage counts row is invalid", fix)
+    rows: dict[str, dict[str, StageCounts]] = {}
+    for row in value:
+        if (
+            not isinstance(row, dict) or set(row) != {
+                "label", "source", "court", "dockets", "opinion_clusters",
+                "citations", "opinions", "staged_at",
+            }
+            or row["label"] != label
+            or not isinstance(row["source"], str) or re.fullmatch(SEGMENT_PATTERN, row["source"]) is None
+            or not isinstance(row["court"], str) or re.fullmatch(COURT_PATTERN, row["court"]) is None
+            or any(not isinstance(row[key], int) or isinstance(row[key], bool) or row[key] < 0
+                   for key in ("dockets", "opinion_clusters", "citations", "opinions"))
+            or not _is_timestamp(row["staged_at"])
+            or row["court"] in rows.get(row["source"], {})
+        ):
+            return Problem("stage counts row is invalid", fix)
+        rows.setdefault(row["source"], {})[row["court"]] = StageCounts(
+            row["dockets"], row["opinion_clusters"], row["citations"], row["opinions"], row["staged_at"],
+        )
+    return rows
 
 
 def _parse_cut_row(value: object) -> CutRow | None:

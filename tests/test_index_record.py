@@ -13,6 +13,8 @@ from gideon.host.index.record import (
     BuildingOutcome,
     GenerationRow,
     PromotedRow,
+    PromotionOutcome,
+    promote_generation,
     read_generation,
     read_generation_by_inputs,
     read_generations,
@@ -153,6 +155,112 @@ class Writer(unittest.TestCase):
         assert isinstance(result, Problem)
         self.assertIn("exit 3", result.problem)
         self.assertNotIn("private text sentinel", result.problem + result.fix)
+
+
+class Promotion(unittest.TestCase):
+    """A promotion commits the new live row and all retirements together."""
+
+    def test_outcome_and_stdin_only_payload_for_each_record_directory(self) -> None:
+        retired = (
+            generation_name("caselaw", "corpus-2099-01-01", SPACE),
+            generation_name("caselaw", "corpus-2099-01-02", SPACE),
+        )
+        stamp = "2099-01-03T12:00:00+00:00"
+        for directory in (RENDERED, "/fictitious-sibling-rendered"):
+            for previous in ((), retired):
+                with self.subTest(directory=directory, retired=previous):
+                    host = FakeHost(stdout=json.dumps({"retired": previous, "promoted_at": stamp}) + "\n")
+                    self.assertEqual(
+                        promote_generation(host, directory, NAME, "caselaw", command_path="index promote"),
+                        PromotionOutcome(previous, stamp),
+                    )
+                    self.assertEqual(len(host.calls), 1)
+                    argv, sql = host.calls[0]
+                    self.assertEqual(argv, worker.psql_argv(directory))
+                    self.assertIn("gideon_worker", argv)
+                    self.assertIn("ON_ERROR_STOP=1", argv)
+                    assert sql is not None
+                    self.assertTrue(sql.startswith(worker.bind("v_payload", json.dumps(
+                        {"name": NAME, "collection": "caselaw"}, separators=(",", ":"),
+                    )) + "\n"))
+                    self.assertEqual(sql.count("\\set v_payload "), 1)
+                    self.assertIn("\\set QUIET on\nBEGIN;", sql)
+                    self.assertNotIn(NAME, " ".join(argv))
+                    self.assertNotIn("caselaw", " ".join(argv))
+
+    def test_no_row_guard_aborts_before_commit_in_the_retirement_transaction(self) -> None:
+        host = FakeHost(code=3, stderr="ERROR: generation is no longer built")
+        result = promote_generation(host, RENDERED, NAME, "caselaw", command_path="index promote")
+        self.assertEqual(result, Problem(
+            f"{NAME}: generation is no longer built; nothing was promoted or retired",
+            f"Run {report.command(f'index report {NAME}')} to read its state, "
+            f"then run {report.command('index promote')} again.",
+        ))
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        self.assertIn("ON_ERROR_STOP=1", argv)
+        assert sql is not None
+        self.assertEqual(sql.count("BEGIN;"), 1)
+        self.assertEqual(sql.count("COMMIT;"), 1)
+        retirement = sql.index("SET state = 'retired', retired_at = now()")
+        promotion = sql.index("SET state = 'live', promoted_at = now()")
+        guard = sql.index("IF NOT FOUND THEN")
+        abort = sql.index("RAISE EXCEPTION 'generation is no longer built'")
+        outcome = sql.index("SELECT current_setting('gideon.promotion_outcome')::jsonb;")
+        self.assertLess(sql.index("BEGIN;"), retirement)
+        self.assertLess(retirement, promotion)
+        self.assertLess(promotion, guard)
+        self.assertLess(guard, abort)
+        self.assertLess(abort, outcome)
+        self.assertLess(outcome, sql.index("COMMIT;"))
+        self.assertIn("WHERE collection = payload->>'collection' AND state = 'live'", sql)
+        self.assertIn("AND gen_id <> payload->>'name'", sql)
+        self.assertIn("RETURNING gen_id", sql)
+        self.assertIn("WHERE gen_id = payload->>'name' AND state = 'built'", sql)
+        self.assertIn("RETURNING promoted_at INTO promoted;\n    IF NOT FOUND THEN", sql)
+        self.assertNotIn("DELETE", sql)
+        self.assertTrue(sql.endswith("COMMIT;\n"))
+
+    def test_malformed_outcomes_refuse_with_database_fix(self) -> None:
+        retired = generation_name("caselaw", "corpus-2099-01-01", SPACE)
+        value = {"retired": [retired], "promoted_at": "2099-01-03T12:00:00+00:00"}
+        invalid_retired: tuple[object, ...] = (
+            None, retired, {}, [None], [True], [{}], [""], ["invalid"],
+            [retired, retired], [NAME], ["x" * 255],
+        )
+        invalid_timestamps: tuple[object, ...] = (None, "", True, 17, [])
+        invalid: tuple[object, ...] = (
+            None, [], {},
+            {"retired": []}, {"promoted_at": value["promoted_at"]},
+            {**value, "unexpected": "fictitious-private-diagnostic"},
+            *({**value, "retired": item} for item in invalid_retired),
+            *({**value, "promoted_at": item} for item in invalid_timestamps),
+        )
+        for stdout in ("", "broken", json.dumps(value) + "\n" + json.dumps(value), *(json.dumps(item) for item in invalid)):
+            with self.subTest(stdout=stdout):
+                host = FakeHost(stdout=stdout)
+                self.assertEqual(
+                    promote_generation(host, RENDERED, NAME, "caselaw", command_path="index promote"),
+                    Problem("generation promotion returned an invalid outcome", database_fix(RENDERED, "index promote")),
+                )
+                self.assertEqual(len(host.calls), 1)
+
+    def test_failed_exit_overrides_success_and_unavailable_tools_refuse_without_retry(self) -> None:
+        stdout = json.dumps({"retired": [], "promoted_at": "2099-01-03T12:00:00+00:00"})
+        for code, error in ((3, None), (127, None), (0, FileNotFoundError()), (0, subprocess.SubprocessError())):
+            with self.subTest(code=code, error=error):
+                host = FakeHost(code=code, error=error, stdout=stdout, stderr="fictitious-private-diagnostic")
+                result = promote_generation(host, RENDERED, NAME, "caselaw", command_path="index promote")
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                if code == 3:
+                    self.assertEqual(result.problem, "generation promotion failed (exit 3)")
+                    self.assertEqual(result.fix, database_fix(RENDERED, "index promote"))
+                else:
+                    self.assertIn("Restore Docker Compose and psql", result.fix)
+                self.assertIn(report.command("index promote"), result.fix)
+                self.assertNotIn(host.stderr, result.problem + result.fix)
+                self.assertEqual(len(host.calls), 1)
 
 
 class Reader(unittest.TestCase):

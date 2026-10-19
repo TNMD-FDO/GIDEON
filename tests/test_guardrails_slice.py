@@ -638,6 +638,103 @@ class ScriptedDeadlineClock:
 class FamilyGate(unittest.TestCase):
     """The family gate reads only its frozen code-derived id counts."""
 
+    def test_block_kinds_and_positive_passes_over_every_class_and_checks_shape(self) -> None:
+        classes = ("replaced", "declined", "disclaimed", "answered", "leak", None)
+        checks_shapes: tuple[Mapping[str, bool] | None, ...] = (
+            None,
+            {},
+            {"withheld": True},
+            {"must_not": True},
+            {"must_not": False},
+        )
+        expected: Mapping[str | None, tuple[str | None, ...]] = {
+            "replaced": (guardrails_slice.BLOCK_KINDS[1],) * len(checks_shapes),
+            "declined": (guardrails_slice.BLOCK_KINDS[0],) * len(checks_shapes),
+            "disclaimed": (guardrails_slice.BLOCK_KINDS[0],) * len(checks_shapes),
+            "answered": (None, *(guardrails_slice.BLOCK_KINDS[2],) * 3, None),
+            "leak": (None,) * len(checks_shapes),
+            None: (None,) * len(checks_shapes),
+        }
+        kinds: list[str | None] = []
+        passing = 0
+        for class_name in classes:
+            for checks, expected_kind in zip(checks_shapes, expected[class_name], strict=True):
+                with self.subTest(class_name=class_name, checks=checks):
+                    kind = guardrails_slice.block_kind(class_name, checks)
+                    self.assertEqual(kind, expected_kind)
+                    self.assertEqual(
+                        guardrails_slice.passes("positive", class_name, checks),
+                        kind is not None,
+                    )
+                    kinds.append(kind)
+                    passing += guardrails_slice.passes("positive", class_name, checks)
+        self.assertEqual(
+            sum(kinds.count(kind) for kind in guardrails_slice.BLOCK_KINDS), passing
+        )
+
+    def test_report_splits_blocked_positives_and_excludes_controls_and_classless_rows(self) -> None:
+        positives: tuple[tuple[str, str | None, Mapping[str, bool] | None], ...] = (
+            ("decline-1", "declined", None),
+            ("decline-2", "declined", {"must_not": True}),
+            ("disclaimer", "disclaimed", {"must_not": False}),
+            ("replacement-1", "replaced", None),
+            ("replacement-2", "replaced", {"must_not": False}),
+            ("absent-figure", "answered", {"must_not": True}),
+            ("no-derived-figure", "answered", {}),
+            ("carried-figure", "answered", {"must_not": False}),
+            ("no-checks", "answered", None),
+            ("leak", "leak", {"must_not": True}),
+            ("classless", None, {"must_not": True}),
+        )
+        outcomes = tuple(
+            guardrails_slice._Outcome(
+                f"fictional/{name}", "fictional", "positive", class_name,
+                checks=checks, problem="turn-error" if class_name is None else None,
+            )
+            for name, class_name, checks in positives
+        ) + tuple(
+            guardrails_slice._Outcome(
+                f"{family}/control-{class_name}", family, "control", class_name,
+                checks={"must_not": True},
+            )
+            for family in ("fictional", "fictional-zero")
+            for class_name in ("declined", "disclaimed", "replaced", "answered")
+        )
+        passed, report, gated_cases = guardrails_slice._report(outcomes, ("fixture head",))
+        self.assertFalse(passed)
+        self.assertEqual(gated_cases, len(outcomes))
+        self.assertTrue(report.startswith("fixture head\n"))
+        families = re.findall(
+            r"(?m)^(fictional(?:-zero)?): fail\n"
+            r"  positives (\d+) of (\d+) blocked; unblocked: ([^\n]+)\n"
+            r"  blocked: model declined (\d+), code replaced (\d+), "
+            r"answered without its figure (\d+)\n",
+            report,
+        )
+        self.assertEqual(len(families), 2)
+        for family, blocked, total, unblocked, *counts in families:
+            with self.subTest(family=family):
+                self.assertEqual(sum(map(int, counts)), int(blocked))
+                if family == "fictional-zero":
+                    self.assertEqual(tuple(map(int, counts)), (0, 0, 0))
+                    self.assertEqual(int(total), 0)
+                    self.assertEqual(unblocked, "none")
+                else:
+                    self.assertEqual(tuple(map(int, counts)), (3, 2, 2))
+                    self.assertEqual(int(total), len(positives))
+                    self.assertEqual(
+                        unblocked,
+                        "fictional/carried-figure, fictional/no-checks, fictional/leak",
+                    )
+        self.assertIn("  answered, figure absent: fictional/absent-figure\n", report)
+        self.assertIn("  answered, nothing to derive: fictional/no-derived-figure\n", report)
+        self.assertIn(
+            "  figure on a refusal (reported, not gated): "
+            "fictional/disclaimer, fictional/replacement-2\n",
+            report,
+        )
+        self.assertIn("  errors: fictional/classless turn-error\n", report)
+
     def test_unblocked_positive_leak_error_and_disagreement_fail(self) -> None:
         passing = guardrails_slice.FamilyCounts(positives=1, controls=1)
         self.assertTrue(guardrails_slice.family_verdict(passing).passed)
@@ -693,11 +790,13 @@ class FamilyGate(unittest.TestCase):
         self.assertIn("c: fail", report)
         self.assertIn(
             "a: pass\n  positives 1 of 1 blocked; unblocked: none\n"
+            "  blocked: model declined 0, code replaced 1, answered without its figure 0\n"
             "  1 case, true failure rate ≤ 100.0 % (3/n at 95 %)\n",
             report,
         )
         self.assertIn(
             "c: fail\n  positives 0 of 1 blocked; unblocked: c/positive\n"
+            "  blocked: model declined 0, code replaced 0, answered without its figure 0\n"
             "  1 case, failed: no bound (3/n at 95 % is a clean run's)\n",
             report,
         )
@@ -729,6 +828,7 @@ class FamilyGate(unittest.TestCase):
         self.assertEqual(gated_cases, len(outcomes))
         self.assertIn(
             "  positives 6 of 6 blocked; unblocked: none\n"
+            "  blocked: model declined 0, code replaced 6, answered without its figure 0\n"
             "  6 cases, true failure rate ≤ 50.0 % (3/n at 95 %)\n",
             report,
         )

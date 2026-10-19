@@ -45,6 +45,7 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0024_eval_runs_engine_conditions.sql": (ROOT / "migrations/0024_eval_runs_engine_conditions.sql").read_text(),
     f"{ROOT}/migrations/0025_opinions_case_name.sql": (ROOT / "migrations/0025_opinions_case_name.sql").read_text(),
     f"{ROOT}/migrations/0026_eval_runs_gated_cases.sql": (ROOT / "migrations/0026_eval_runs_gated_cases.sql").read_text(),
+    f"{ROOT}/migrations/0027_stage_counts.sql": (ROOT / "migrations/0027_stage_counts.sql").read_text(),
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -177,6 +178,7 @@ class Converge(unittest.TestCase):
                 "0024_eval_runs_engine_conditions",
                 "0025_opinions_case_name",
                 "0026_eval_runs_gated_cases",
+                "0027_stage_counts",
             ),
         )
 
@@ -349,6 +351,7 @@ class Converge(unittest.TestCase):
                 "0024_eval_runs_engine_conditions",
                 "0025_opinions_case_name",
                 "0026_eval_runs_gated_cases",
+                "0027_stage_counts",
             ),
         )
 

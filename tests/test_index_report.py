@@ -27,7 +27,6 @@ from gideon.host.render.worker import (
     GENERATION_STATES,
     PRECEDENTIAL_VALUES,
     STAGE_RECORD_NAME,
-    STAGE_TABLES,
     TEXT_SOURCES,
 )
 from gideon.host.report import Problem
@@ -106,7 +105,7 @@ def changed(payload: dict[str, Any], path: tuple[str, ...], value: object) -> di
 
 
 class ReportHost(test_index_record.FakeHost):
-    """Serve fictitious court aggregates and work files through a dict-only seam."""
+    """Serve fictitious recorded counts and agreement work through a dict-only seam."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -114,18 +113,18 @@ class ReportHost(test_index_record.FakeHost):
         self.work_dir = staging.work_directory(inputs.label, "fictions", work_root=WORK_ROOT)
         self.stage_path = str(self.work_dir / STAGE_RECORD_NAME)
         self.figure_path = str(self.work_dir / f"court1.{AGREEMENT_RECORD_NAME}")
-        stage = {
-            "schema": 1, "label": inputs.label, "source": "fictions", "snapshot": inputs.snapshot,
-            "courts": ["court1", "court2"], "inputs": {
-                table: {"path": f"fiction-{table}.csv.bz2", "sha256": "a" * 64, "size": 1}
-                for table in STAGE_TABLES
-            },
-            "records": dict.fromkeys(STAGE_TABLES, 7), "counts": {
-                "court1": dict.fromkeys(STAGE_TABLES[1:], 4),
-                "court2": dict.fromkeys(STAGE_TABLES[1:], 3),
-            }, "job": 31, "seconds": 0.5, "staged_at": report_for().written_at,
+        self.stage_counts_rows: list[dict[str, Any]] = [
+            {
+                "label": inputs.label, "source": "fictions", "court": court,
+                **dict.fromkeys(("dockets", "opinion_clusters", "citations", "opinions"), count),
+                "staged_at": report_for().written_at,
+            }
+            for court, count in (("court1", 4), ("court2", 3))
+        ]
+        self.files = {
+            self.stage_path: "malformed fictitious stage file",
+            self.figure_path: json.dumps(test_agreement_host.figure()),
         }
-        self.files = {self.stage_path: json.dumps(stage), self.figure_path: json.dumps(test_agreement_host.figure())}
         self.file_reads: list[str] = []
         self.counts = count_rows()
         self.anchors = anchor_rows()
@@ -147,6 +146,8 @@ class ReportHost(test_index_record.FakeHost):
         result = super().run(argv, check=check, input=input, cwd=cwd, env=env,
                              timeout=timeout, passthrough=passthrough)
         if result.returncode == 0 and input is not None:
+            if "FROM public.stage_counts" in input:
+                return subprocess.CompletedProcess(list(argv), 0, json.dumps(self.stage_counts_rows), "")
             if "INSERT INTO public.build_reports" in input:
                 payload = json.loads(input.split("\n", 1)[0].removeprefix("\\set v_payload '").removesuffix("'"))
                 column = payload["treatment"]
@@ -415,17 +416,18 @@ class Gather(unittest.TestCase):
         self.assertIsNone(observed.courts["court2"].agreement)
         self.assertEqual(observed.gates["accounted"]["court1"], buildreport.Accounted(4, 5, 3, 1, True))
         self.assertEqual(observed.gates["accounted"]["court2"], buildreport.Accounted(3, 2, 0, 2, False))
-        self.assertEqual(self.host.file_reads.count(self.host.stage_path), 1)
+        self.assertNotIn(self.host.stage_path, self.host.file_reads)
+        self.assertEqual(sum("FROM public.stage_counts" in (sql or "") for _, sql in self.host.calls), 1)
         self.assertEqual(observed.wall_clock, report_for().wall_clock)
         self.assertEqual(observed.metadata_changes, {})
         self.assertTrue(all(argv == worker.psql_argv(RENDERED) for argv, _ in self.host.calls))
         self.assertNotIn("cluster", observed.gates)
         self.assertIsNone(observed.treatment)
         courts = [next(line for line in sql.splitlines() if line.startswith("\\set v_court "))
-                  for _, sql in self.host.calls if sql is not None]
+                  for _, sql in self.host.calls if sql is not None and "\\set v_court " in sql]
         self.assertEqual(courts, [worker.bind("v_court", court) for court in ("court1", "court1", "court2", "court2")])
 
-    def test_corpus_counts_and_anchors_use_corpus_directory_and_report_uses_record(self) -> None:
+    def test_stage_opinion_and_anchor_counts_use_corpus_directory_and_report_uses_record(self) -> None:
         default = self.gather()
         self.host.calls.clear()
         observed = buildreport.gather(
@@ -438,11 +440,13 @@ class Gather(unittest.TestCase):
         self.assertEqual(observed.gates, default.gates)
         self.assertEqual(observed.wall_clock, default.wall_clock)
         self.assertEqual(observed.gen_id, self.row.gen_id)
-        self.assertEqual(len(self.host.calls), 2 * len(self.inputs.courts))
+        self.assertEqual(len(self.host.calls), 1 + 2 * len(self.inputs.courts))
         for argv, sql in self.host.calls:
             self.assertEqual(argv, worker.psql_argv(CORPUS))
             assert sql is not None
-            self.assertTrue(caselaw.CASELAW_COUNTS_SQL in sql or caselaw.ANCHOR_COUNTS_SQL in sql)
+            self.assertTrue("FROM public.stage_counts" in sql
+                            or caselaw.CASELAW_COUNTS_SQL in sql or caselaw.ANCHOR_COUNTS_SQL in sql)
+        self.assertNotIn(self.host.stage_path, self.host.file_reads)
         self.host.stdout = json.dumps(observed.to_json())
         self.assertEqual(buildreport.write_report(self.host, RENDERED, observed), observed)
         self.assertEqual(self.host.calls[-1][0], worker.psql_argv(RENDERED))
@@ -461,7 +465,7 @@ class Gather(unittest.TestCase):
                 )
                 self.assertIsInstance(observed, Problem)
                 assert isinstance(observed, Problem)
-                self.assertIn(stack.logs_fix(directory, "gideon-worker" if code else "postgres"), observed.fix)
+                self.assertIn(stack.logs_fix(directory, "postgres"), observed.fix)
                 self.assertIn(report.command(COMMAND_PATH), observed.fix)
                 if code:
                     self.assertEqual(len(self.host.calls), 1)
@@ -499,30 +503,37 @@ class Gather(unittest.TestCase):
         self.assertTrue(all("INSERT" not in (sql or "") and "DELETE" not in (sql or "")
                             for _, sql in self.host.calls))
 
-    def test_absent_work_records_keep_counts_and_nullable_observations(self) -> None:
+    def test_absent_work_records_keep_recorded_stage_counts_and_null_agreement(self) -> None:
         self.host.files.clear()
         observed = self.gather()
         for court, row in observed.gates["accounted"].items():
-            self.assertIsNone(row.staged)
-            self.assertIsNone(row.passed)
+            recorded = next(counts for counts in self.host.stage_counts_rows if counts["court"] == court)
+            self.assertEqual(row.staged, recorded["opinions"])
+            self.assertEqual(row.passed, row.recorded >= recorded["opinions"])
             self.assertIsNone(observed.courts[court].agreement)
             self.assertEqual(row.recorded, self.host.counts[court]["opinions"])
+        self.assertNotIn(self.host.stage_path, self.host.file_reads)
         self.assertEqual(buildreport.BuildReport.from_json(observed.to_json()), observed)
 
-    def test_other_snapshot_and_missing_court_have_no_staged_comparison(self) -> None:
-        original = json.loads(self.host.files[self.host.stage_path])
-        for variant in (
-            {**original, "snapshot": "fictions-2099-02-02"},
-            {**original, "courts": ["court1"], "counts": {"court1": original["counts"]["court1"]}},
-        ):
-            with self.subTest(variant=variant):
-                self.host.files[self.host.stage_path] = json.dumps(variant)
-                observed = self.gather()
-                self.assertIsNone(observed.gates["accounted"]["court2"].staged)
-                self.assertIsNone(observed.gates["accounted"]["court2"].passed)
-                if variant["snapshot"] != self.inputs.snapshot:
-                    self.assertIsNone(observed.gates["accounted"]["court1"].staged)
-                    self.assertIsNone(observed.gates["accounted"]["court1"].passed)
+    def test_label_without_recorded_counts_has_no_staged_comparison(self) -> None:
+        self.host.stage_counts_rows.clear()
+        observed = self.gather()
+        for row in observed.gates["accounted"].values():
+            self.assertIsNone(row.staged)
+            self.assertIsNone(row.passed)
+
+    def test_missing_court_has_no_staged_comparison(self) -> None:
+        self.host.stage_counts_rows = self.host.stage_counts_rows[:1]
+        observed = self.gather()
+        self.assertIsNone(observed.gates["accounted"]["court2"].staged)
+        self.assertIsNone(observed.gates["accounted"]["court2"].passed)
+        self.assertEqual(observed.gates["accounted"]["court1"].staged, self.host.stage_counts_rows[0]["opinions"])
+
+    def test_counts_for_another_source_have_no_staged_comparison(self) -> None:
+        for row in self.host.stage_counts_rows:
+            row["source"] = "other-fictions"
+        observed = self.gather()
+        self.assertTrue(all(row.staged is None for row in observed.gates["accounted"].values()))
 
     def test_unbuilt_lifecycle_and_absent_half_seconds_are_null(self) -> None:
         observed = self.gather(replace(self.row, state="building", counts={}, dense_built_at=None, built_at=None))
@@ -545,16 +556,21 @@ class Gather(unittest.TestCase):
                     self.assertNotIn("snapshot", payload["courts"]["court1"]["agreement"])
 
     def test_reader_problems_refuse_instead_of_returning_partial_reports(self) -> None:
-        for path in (self.host.stage_path, self.host.figure_path):
-            with self.subTest(path=path):
-                saved = self.host.files[path]
-                self.host.files[path] = "malformed fictitious record"
+        for malformed in ("stage counts", "agreement"):
+            with self.subTest(malformed=malformed):
+                saved = self.host.files[self.host.figure_path]
+                saved_counts = copy.deepcopy(self.host.stage_counts_rows)
+                if malformed == "stage counts":
+                    self.host.stage_counts_rows[0]["opinions"] = -1
+                else:
+                    self.host.files[self.host.figure_path] = "malformed fictitious record"
                 observed = buildreport.gather(self.host, RENDERED, self.inputs, self.row, 17, None, False,
                                               work_root=WORK_ROOT, command_path=COMMAND_PATH)
                 self.assertIsInstance(observed, Problem)
                 assert isinstance(observed, Problem)
                 self.assertIn(report.command(COMMAND_PATH), observed.fix)
-                self.host.files[path] = saved
+                self.host.stage_counts_rows = saved_counts
+                self.host.files[self.host.figure_path] = saved
         self.host.code = 3
         self.host.calls.clear()
         observed = buildreport.gather(self.host, RENDERED, self.inputs, self.row, 17, None, False,

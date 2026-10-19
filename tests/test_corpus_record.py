@@ -1,4 +1,4 @@
-"""Corpus lockfile and upstream observation statements over a recording host."""
+"""Corpus lockfile, stage count, and observation statements over a recording host."""
 
 import json
 import re
@@ -8,25 +8,30 @@ from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
-from gideon.host import report, stack, worker
+from gideon.host import report, stack, staging, worker
 from gideon.host.corpus.lockfile import load_lockfile, render_errors
 from gideon.host.corpus.record import (
     WATCH_STATE_SQL,
     CutRow,
     InstalledOutcome,
     Observation,
+    StageCounts,
     WatchState,
     copy_lockfile,
+    database_fix,
     read_cut,
     read_lockfiles,
+    read_stage_counts,
     read_watch_state,
     write_cut,
     write_derived_cut,
     write_install,
     write_installed,
     write_observations,
+    write_stage_counts,
 )
 from gideon.host.corpus.sources import SourceDefinition
+from gideon.host.render.worker import STAGE_TABLES
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike, RealHost
 from gideon.host.worker import psql_argv
@@ -424,6 +429,189 @@ class DerivedWriter(unittest.TestCase):
         assert isinstance(result, Problem)
         self.assertIn("exit 4", result.problem)
         self.assertIn("corpus cut", result.fix)
+
+
+class StageCountsWriter(unittest.TestCase):
+    """A stage's count payload is bound once and write outcomes refuse conflicts."""
+
+    def setUp(self) -> None:
+        self.record = staging.StageRecord(
+            label="corpus-2099-01-03", source="example", snapshot="example-2099-01-02",
+            courts=["ca6", "ca9"], inputs={}, records={},
+            counts={
+                "ca6": {"dockets": 0, "opinion-clusters": 2, "citations": 3, "opinions": 4},
+                "ca9": {"dockets": 5, "opinion-clusters": 6, "citations": 7, "opinions": 8},
+            },
+            job=1, seconds=0.5, staged_at="2099-01-03T04:05:06+00:00", schema=1,
+        )
+
+    def write(self, host: FakeHost) -> int | Problem:
+        return write_stage_counts(
+            host, RENDERED, self.record.label, self.record.source, self.record,
+            command_path="corpus install",
+        )
+
+    def test_one_transaction_binds_all_values_on_stdin_and_parses_inserted_count(self) -> None:
+        host = FakeHost(stdout=json.dumps({"inserted": len(self.record.courts)}) + "\n")
+        self.assertEqual(self.write(host), len(self.record.courts))
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, psql_argv(RENDERED))
+        for value in (self.record.label, self.record.source, self.record.staged_at, *self.record.courts):
+            self.assertNotIn(value, " ".join(argv))
+        assert sql is not None
+        match = re.search(r"\\set v_payload '([^']*)'", sql)
+        assert match is not None
+        self.assertEqual(json.loads(match.group(1)), {
+            "label": self.record.label,
+            "source": self.record.source,
+            "staged_at": self.record.staged_at,
+            "courts": [
+                {"court": court, **{table.replace("-", "_"): self.record.counts[court][table]
+                                    for table in STAGE_TABLES[1:]}}
+                for court in self.record.courts
+            ],
+        })
+        self.assertEqual(sql.count("BEGIN;"), 1)
+        self.assertEqual(sql.count("COMMIT;"), 1)
+        self.assertIn("\\set QUIET on", sql)
+        self.assertIn("DO $stage_counts$", sql)
+        self.assertIn("IS DISTINCT FROM", sql)
+        self.assertIn("STAGE_COUNTS_CONFLICT:%", sql)
+        self.assertIn("INSERT INTO public.stage_counts", sql)
+        self.assertNotIn("UPDATE public.stage_counts", sql)
+        self.assertNotIn("DELETE", sql)
+        self.assertTrue(sql.rstrip().endswith("SELECT json_build_object('inserted', :'v_inserted'::integer);"))
+
+    def test_repeat_and_partial_insert_counts_are_returned(self) -> None:
+        for inserted in (0, 1):
+            with self.subTest(inserted=inserted):
+                self.assertEqual(self.write(FakeHost(stdout=json.dumps({"inserted": inserted}))), inserted)
+
+    def test_conflict_names_court_and_requires_new_cut(self) -> None:
+        court = self.record.courts[1]
+        host = FakeHost(code=3, stderr=f"ERROR: STAGE_COUNTS_CONFLICT:{court}\n")
+        result = self.write(host)
+        self.assertIsInstance(result, Problem)
+        assert isinstance(result, Problem)
+        self.assertEqual(result.problem, f"stage counts for {court} differ from the recorded ones")
+        self.assertIn("recorded once", result.fix)
+        self.assertIn(report.command("corpus cut"), result.fix)
+        self.assertIn(report.command("corpus install"), result.fix)
+        self.assertNotIn("delete", result.fix.lower())
+        self.assertNotIn("remove", result.fix.lower())
+
+    def test_database_failure_refuses_even_with_valid_stdout(self) -> None:
+        host = FakeHost(code=3, stdout='{"inserted": 0}', stderr="foreign key violation")
+        result = self.write(host)
+        self.assertIsInstance(result, Problem)
+        assert isinstance(result, Problem)
+        self.assertIn("exit 3", result.problem)
+        self.assertEqual(result.fix, database_fix(RENDERED, "corpus install"))
+
+    def test_invalid_write_outcome_refuses(self) -> None:
+        for value in ("", "not json", "null", "[]", "{}", '{"inserted": true}',
+                      '{"inserted": -1}', '{"inserted": "1"}', '{"inserted": 1.5}',
+                      json.dumps({"inserted": len(self.record.courts) + 1}),
+                      '{"inserted": 0, "extra": 1}'):
+            with self.subTest(value=value):
+                result = self.write(FakeHost(stdout=value))
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertIn("invalid outcome", result.problem)
+                self.assertEqual(result.fix, database_fix(RENDERED, "corpus install"))
+
+    def test_unavailable_tool_refuses_with_restore_fix(self) -> None:
+        for host in (FakeHost(code=127), FakeHost(error=FileNotFoundError("docker")),
+                     FakeHost(error=subprocess.TimeoutExpired("docker", 1))):
+            with self.subTest(code=host.code, error=host.error):
+                result = self.write(host)
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertIn("Restore Docker Compose and psql", result.fix)
+                self.assertIn("corpus install", result.fix)
+                self.assertEqual(len(host.calls), 1)
+
+
+class StageCountsReader(unittest.TestCase):
+    """Recorded court counts are grouped by source and malformed rows refuse."""
+
+    def setUp(self) -> None:
+        self.row = {
+            "label": "corpus-2099-01-03", "source": "example", "court": "ca6",
+            "dockets": 0, "opinion_clusters": 2, "citations": 3, "opinions": 4,
+            "staged_at": "2099-01-03T04:05:06+00:00",
+        }
+        self.directory = "/production-rendered"
+
+    def read(self, host: FakeHost) -> dict[str, dict[str, StageCounts]] | Problem:
+        return read_stage_counts(
+            host, self.directory, str(self.row["label"]), command_path="index build",
+        )
+
+    def test_rows_are_grouped_and_read_from_the_named_directory(self) -> None:
+        rows = [self.row, {**self.row, "court": "ca9", "opinions": 2**32},
+                {**self.row, "source": "other-example"}]
+        host = FakeHost(stdout=json.dumps(rows) + "\n")
+        self.assertEqual(self.read(host), {
+            "example": {
+                "ca6": StageCounts(0, 2, 3, 4, str(self.row["staged_at"])),
+                "ca9": StageCounts(0, 2, 3, 2**32, str(self.row["staged_at"])),
+            },
+            "other-example": {"ca6": StageCounts(0, 2, 3, 4, str(self.row["staged_at"]))},
+        })
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, psql_argv(self.directory))
+        self.assertNotIn(str(self.row["label"]), " ".join(argv))
+        assert sql is not None
+        self.assertIn(worker.bind("v_label", str(self.row["label"])), sql)
+        self.assertIn("FROM public.stage_counts s WHERE label = :'v_label'", sql)
+        self.assertIn("ORDER BY source, court", sql)
+
+    def test_absent_label_is_an_empty_mapping(self) -> None:
+        for stdout in ("", "\n", "null\n", "[]\n"):
+            with self.subTest(stdout=stdout):
+                self.assertEqual(self.read(FakeHost(stdout=stdout)), {})
+
+    def test_malformed_rows_refuse_with_database_fix(self) -> None:
+        invalid = ["not json", "{}", "0", '[null]', json.dumps([self.row, self.row])]
+        for field in self.row:
+            invalid.append(json.dumps([{key: value for key, value in self.row.items() if key != field}]))
+        for field in ("dockets", "opinion_clusters", "citations", "opinions"):
+            invalid.extend(json.dumps([{**self.row, field: value}]) for value in (-1, True, 1.5, "2", None))
+        for field, values in (
+            ("label", ("corpus-2099-01-04", None)),
+            ("source", ("", "Example!", None)),
+            ("court", ("", "CA6", "x" * 33, None)),
+            ("staged_at", ("2099-01-03T04:05:06", "not a timestamp", None)),
+        ):
+            invalid.extend(json.dumps([{**self.row, field: value}]) for value in values)
+        invalid.append(json.dumps([{**self.row, "extra": 1}]))
+        for stdout in invalid:
+            with self.subTest(stdout=stdout):
+                result = self.read(FakeHost(stdout=stdout))
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertIn("invalid", result.problem)
+                self.assertEqual(result.fix, database_fix(self.directory, "index build"))
+
+    def test_failed_read_refuses_even_with_valid_stdout(self) -> None:
+        result = self.read(FakeHost(code=4, stdout=json.dumps([self.row])))
+        self.assertIsInstance(result, Problem)
+        assert isinstance(result, Problem)
+        self.assertIn("exit 4", result.problem)
+        self.assertEqual(result.fix, database_fix(self.directory, "index build"))
+
+    def test_tool_failure_refuses_without_retry(self) -> None:
+        for host in (FakeHost(code=127), FakeHost(error=OSError("docker unavailable"))):
+            with self.subTest(code=host.code, error=host.error):
+                result = self.read(host)
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertIn("Restore Docker Compose and psql", result.fix)
+                self.assertIn("index build", result.fix)
+                self.assertEqual(len(host.calls), 1)
 
 
 class Reader(unittest.TestCase):

@@ -146,9 +146,13 @@ def _loaded(*, label_hash: str = TEXT_HASH, second: bool = False, unsigned: bool
     )
 
 
-def _context(host: SegmenterHost, *, image: bool = True, turns_dir: str = "/tmp/segmenter-rendered") -> RunContext:
+def _context(
+    host: SegmenterHost, *, image: bool = True, turns_dir: str = "/tmp/segmenter-rendered",
+    production_dir: str | None = None,
+) -> RunContext:
     return RunContext(
-        cast(Host, host), turns_dir, turns_dir, None, None, 1, lambda _line: None,
+        cast(Host, host), turns_dir, turns_dir if production_dir is None else production_dir,
+        None, None, 1, lambda _line: None,
         image=ImageAccess("registry.example/gideon@sha256:" + "e" * 64, ROOT) if image else None,
     )
 
@@ -341,6 +345,17 @@ class Gate(unittest.TestCase):
 
 class Runner(unittest.TestCase):
     """The candidate, record, and checked labels jointly decide each case."""
+
+    def test_document_read_is_production_record_on_the_sibling(self) -> None:
+        from gideon.evaluation import record
+
+        host = SegmenterHost()
+        context = _context(host, turns_dir="/fictitious-sibling-rendered", production_dir="/tmp/segmenter-rendered")
+        result = run_segmenter(_loaded(), "segmenter-300", context)
+        self.assertTrue(result.verdict, result.report)
+        reads = [list(argv) for argv, sql in host.calls if sql and "\\set opinion_ids " in sql]
+        self.assertEqual(reads, [record.reader_argv("/tmp/segmenter-rendered")])
+        self.assertFalse(any("/fictitious-sibling-rendered" in " ".join(argv) for argv, _ in host.calls))
 
     def test_clean_case_and_content_free_report(self) -> None:
         host = SegmenterHost()
@@ -656,7 +671,8 @@ class Command(unittest.TestCase):
                     **_run_kwargs(host, checkout=checkout),
                 )
             self.assertEqual((code, stderr), (0, ""), stdout)
-            from gideon.evaluation import stacks
+            from gideon.evaluation import record, stacks
 
             read_argv = next(argv for argv, sql in host.calls if sql and "\\set opinion_ids " in sql)
-            self.assertIn(str(stacks.CI_ROOT), read_argv)
+            self.assertEqual(list(read_argv), record.reader_argv(_run_kwargs(host, checkout=checkout)["rendered_dir"]))
+            self.assertNotIn(str(stacks.CI_ROOT), read_argv)

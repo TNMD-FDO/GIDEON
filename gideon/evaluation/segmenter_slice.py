@@ -1,4 +1,8 @@
-"""Gate mislabels, type precision, unknown share, and page-locator counts against checked labels and the record."""
+"""Gate mislabels, type precision, unknown share, and page-locator counts against checked labels and the record.
+
+The document read is a corpus read: production's record on both stacks, the
+sibling's holding no documents.
+"""
 
 import json
 import re
@@ -225,8 +229,8 @@ def slice_gate(
 
 def _record_fix(context: RunContext) -> str:
     return (
-        f"Run {report.command('apply')} for this stack and inspect "
-        f"{stack.logs_fix(context.turns_dir, record.POSTGRES_SERVICE)}, then retry."
+        f"Run {report.command('apply')} and inspect "
+        f"{stack.logs_fix(context.production_dir, record.POSTGRES_SERVICE)}, then retry."
     )
 
 
@@ -271,13 +275,17 @@ def _decode_document(value: object) -> RecordDocument | None:
 def _read_documents(
     opinion_ids: tuple[int, ...], context: RunContext
 ) -> Mapping[int, RecordDocument] | Problem:
-    """Read all ready opinions in one metrics-role statement."""
+    """Read all ready opinions in one metrics-role statement against production's record.
+
+    The documents are a corpus read, as a sample build's are: the sibling's
+    record holds no documents, so both stacks read production's.
+    """
 
     values = json.dumps(sorted(set(opinion_ids)))
     sql = f"\\set opinion_ids '{values}'\n{DOCUMENTS_SQL}"
     fix = _record_fix(context)
     try:
-        result = context.host.run(record.reader_argv(context.turns_dir), input=sql)
+        result = context.host.run(record.reader_argv(context.production_dir), input=sql)
     except (OSError, subprocess.SubprocessError):
         return Problem("segmenter record read could not run", fix)
     if result.returncode != 0:

@@ -78,7 +78,6 @@ def start_screen(tree_root: Path | None = None) -> str:
 
 _LANDING: Final = {
     "host gpu": "the escape hatch, pulled only on eval evidence of reranker latency during bulk embedding",
-    "index promote": "lands in slice 3 (v0.4.0)",
     "index gc": "lands in slice 3 (v0.4.0)",
     "registry gc": "in the recorded command surface, no slice scheduled",
     "audit query": "in the recorded command surface, no slice scheduled",
@@ -138,6 +137,12 @@ def _index_build(args: argparse.Namespace) -> int:
 
         return host_cli._guarded("index build", sample.run_sample_build, args)
     return host_cli.run_index_build(args)
+
+
+def _index_promote(args: argparse.Namespace) -> int:
+    from gideon.evaluation import command
+
+    return host_cli.run_index_promote(args, run_gates=command.run_eval)
 
 
 def _run_reference(args: argparse.Namespace) -> int:
@@ -382,10 +387,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="build the eval sample generation on the CI sibling, without clusters, risk states, or a report",
     )
     build.set_defaults(handler=_index_build, command_path="index build")
-    promote = _stub_parser(
-        index_sub, "promote", "index promote", "switch serving to a generation"
+    promote = index_sub.add_parser(
+        "promote", help="switch serving to a built generation",
+        description=(
+            "Switch serving to a built generation. Run build-gates as one recorded evaluation run, "
+            "promote the record, then point both stores' aliases at the generation. The previous "
+            "generation is retired for seven days. A name ending in __sample targets the CI sibling. "
+            "Run again on a live generation to converge its aliases without repeating the gates."
+        ),
     )
     promote.add_argument("gen", help="generation to promote")
+    promote.set_defaults(handler=_index_promote, command_path="index promote")
     _stub_parser(index_sub, "gc", "index gc", "drop retired generations past their hold")
     index_report = index_sub.add_parser(
         "report", help="print the corpus inventory from the record",

@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, fields
 from typing import Self, TypedDict
 
 from gideon.host import agreement, caselaw, report, staging, worker
-from gideon.host.corpus.record import database_fix
+from gideon.host.corpus import record as corpusrecord
 from gideon.host.index import record
 from gideon.host.index.generations import GenerationInputs
 from gideon.host.index.treatment import RISK_STATES, Treatment
@@ -362,20 +362,23 @@ def gather(
     corpus_dir: PathLike | None = None,
     command_path: str = "index build",
 ) -> BuildReport | Problem:
-    """Gather the corpus's counts, the record's row, and optional work files."""
+    """Gather counts, the generation's row, and optional agreement work files.
+
+    ``corpus_dir`` selects the corpus database for stage, opinion, and anchor
+    counts, defaulting to the generation record's rendered directory.
+    """
 
     problem = staging.snapshot_problem(inputs.snapshot, command_path, subject="build report")
     if problem is not None:
         return problem
     source = inputs.snapshot[:-staging.DATE_SUFFIX_LENGTH]
-    stage = staging.read_record(
-        host, inputs.label, source, work_root=work_root, command_path=command_path,
-    )
-    if isinstance(stage, Problem):
-        return stage
-    # A stage of another snapshot, or without a court, has no count to compare.
-    staged_counts = stage.counts if stage is not None and stage.snapshot == inputs.snapshot else {}
     corpus_dir = rendered_dir if corpus_dir is None else corpus_dir
+    rows = corpusrecord.read_stage_counts(
+        host, corpus_dir, inputs.label, command_path=command_path,
+    )
+    if isinstance(rows, Problem):
+        return rows
+    staged_counts = rows.get(source, {})
     courts: dict[str, CourtEntry] = {}
     accounted: dict[str, Accounted] = {}
     for court in sorted(inputs.courts):
@@ -401,13 +404,13 @@ def gather(
             field.name: getattr(figure, field.name) for field in fields(CourtAgreement)
         })
         courts[court] = CourtEntry(counts, anchors, court_agreement)
-        staged = staged_counts[court]["opinions"] if court in staged_counts else None
+        staged = staged_counts[court].opinions if court in staged_counts else None
         accounted[court] = Accounted(
             staged, counts.opinions, counts.by_status.get("ready", 0),
             counts.by_status.get("failed", 0),
             None if staged is None else counts.opinions >= staged,
         )
-    fix = database_fix(rendered_dir, command_path)
+    fix = corpusrecord.database_fix(rendered_dir, command_path)
     if not agreement.aware_time(row.created_at) or (
         row.built_at is not None and not agreement.aware_time(row.built_at)
     ):
@@ -463,7 +466,7 @@ def write_report(
 ) -> BuildReport | Problem:
     """Append one report, returning its database-assigned write timestamp."""
 
-    fix = database_fix(rendered_dir, command_path)
+    fix = corpusrecord.database_fix(rendered_dir, command_path)
     payload = build_report.to_json()
     if BuildReport.from_json(payload) is None:
         return Problem("build report payload is invalid", fix)
@@ -488,7 +491,7 @@ def read_report(
     result = _run(host, rendered_dir, sql, command_path)
     if isinstance(result, Problem):
         return result
-    fix = database_fix(rendered_dir, command_path)
+    fix = corpusrecord.database_fix(rendered_dir, command_path)
     if result.returncode != 0:
         return Problem(f"build report read failed (exit {result.returncode})", fix)
     if not result.stdout.strip():

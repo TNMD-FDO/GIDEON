@@ -270,7 +270,8 @@ class Build(unittest.TestCase):
         for court in base.courts:
             self.assertEqual(self.host.reports[0]["courts"][court]["anchors"], self.host.caselaw_anchor_counts[court])
             self.assertIsNotNone(self.host.reports[0]["courts"][court]["agreement"])
-            self.assertIsNotNone(self.host.reports[0]["gates"]["accounted"][court]["staged"])
+            self.assertEqual(self.host.reports[0]["gates"]["accounted"][court]["staged"],
+                             self.host.stage_counts_rows[(label, self.fixture.source.name, court)]["opinions"])
         self.assertIn("gold 0, present 0", out)
         self.assertIn(f"eval set {selection.set_version}", out)
         state_commands = [argv for argv, sql, _ in self.host.executions if sql is None]
@@ -293,12 +294,18 @@ class Build(unittest.TestCase):
         for directory, sql in self.host.statement_directories:
             production_read = (
                 "ORDER BY c.label" in sql or "WITH RECURSIVE chain AS" in sql
+                or "FROM public.stage_counts" in sql
                 or any(statement in sql for statement in (
                     guards.CHUNK_PROJECTION_SQL, caselaw.CASELAW_COUNTS_SQL,
                     caselaw.ANCHOR_COUNTS_SQL, treatment.READ_SQL,
                 ))
             )
             self.assertEqual(directory, RENDERED if production_read else str(CI_ROOT))
+        reads = [(directory, sql) for directory, sql in self.host.statement_directories
+                 if "FROM public.stage_counts" in sql]
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(reads[0][0], RENDERED)
+        self.assertIn(worker.bind("v_label", label), reads[0][1])
 
     def test_sample_guard_refuses_the_whole_scope_before_any_job_or_report(self) -> None:
         label = self.fixture.labels[0]

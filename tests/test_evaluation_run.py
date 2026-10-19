@@ -2340,6 +2340,9 @@ class SliceRegistry(unittest.TestCase):
         self.assertIsNone(spec.turn_calls)
         self.assertIsNone(spec.decision)
         self.assertNotIn("count-gates", SMOKE_PARTS)
+        for instruction in ("installing label", "installed label", "corpus install <label>", "re-gather",
+                            "no recorded counts", "nothing re-stages"):
+            self.assertIn(instruction, spec.gate_fix)
 
     def test_gold_drop_entry_reads_only_stores_and_keeps_no_reference(self) -> None:
         from gideon.evaluation.golddrop_slice import run_gold_drop

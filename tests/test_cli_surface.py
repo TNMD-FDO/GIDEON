@@ -33,7 +33,6 @@ TOP_LEVEL = [
 # lands in, or the command's own words.
 STUBS = [
     (["host", "gpu"], "escape hatch"),
-    (["index", "promote", "1"], "slice 3"),
     (["index", "gc"], "slice 3"),
     (["registry", "gc"], "no slice scheduled"),
     (["audit", "query"], "no slice scheduled"),
@@ -101,6 +100,13 @@ class Start(unittest.TestCase):
 
 
 class Help(unittest.TestCase):
+    def test_index_promote_help_names_the_built_generation(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["index", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn("switch serving to a built generation", collapsed(out.getvalue()))
+
     def test_lists_every_top_level_command(self) -> None:
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:

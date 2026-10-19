@@ -177,9 +177,10 @@ _COUNT_GATES: Final[SliceSpec] = SliceSpec(
     gate_fail="a count gate failed",
     gate_fix=(
         "Review the count-gates report's court lines and the rules that name them; "
-        "finish the label's ingest and its build's report with corpus install <label> "
-        "while the label stands installing (an installed label re-runs nothing: "
-        "its report stands as the build's record), then retry."
+        "finish an installing label's ingest and build report with corpus install <label>, "
+        "and re-gather an installed label's report that lacks a staged count the record holds "
+        "with the same corpus install <label> (a label with no recorded counts keeps its staged "
+        "count null, and nothing re-stages it), then retry."
     ),
     categories=frozenset({("build-gates", "count-gates")}),
     turn_calls=None,

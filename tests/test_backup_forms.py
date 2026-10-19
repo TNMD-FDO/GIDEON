@@ -63,7 +63,7 @@ class BackupForms(test_restore.RenderedRestoreCase):
             return lines[-1]
 
         def derived_missing_secret_fix() -> str:
-            value = derivedstores._secret(
+            value = derivedstores.store_secret(
                 test_derivedstores.FakeHost([], secrets_present=False), QDRANT_SECRET_NAME
             )
             assert isinstance(value, Problem)

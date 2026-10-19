@@ -6,7 +6,7 @@
 # set is built into its image. Exact pins only; the toolchain is moved by a person,
 # never the pin watch.
 ruff==0.16.8
-mypy==2.3.1
+mypy==2.4.0
 pytest==9.1.1
 # The gate's pytest step runs across worker processes, capped in tools/gate.py.
 # Its one dependency, execnet, is admitted by the environment comparison's closure

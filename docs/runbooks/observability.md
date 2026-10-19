@@ -99,7 +99,8 @@ and the runbook section to follow.
 - **Eval** (GPU hosts only) — the newest run of each suite and kind; each
   nightly verdict as a point, with an aborted run distinct from a failed run;
   the guardrails gate's counts per family beside the run verdict and the
-  replaced-control ceiling; the harness's and judge's false-refusal counts and
+  replaced-control ceiling, its blocked positives split as model declined,
+  code replaced, and answered without its figure; the harness's and judge's false-refusal counts and
   unread controls; run duration against the nine-hour night; and the failed
   case IDs of the newest nightly runs. The Proposals waiting table shows the
   newest daily tally, its completeness, and its recorded trigger rows. Below

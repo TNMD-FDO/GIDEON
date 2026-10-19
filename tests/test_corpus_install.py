@@ -91,6 +91,7 @@ class FakeHost(RealHost):
         self.euid = 0
         self.record_rows: dict[str, dict[str, Any]] = {}
         self.snapshot_rows: dict[tuple[str, str], dict[str, Any]] = {}
+        self.stage_counts_rows: dict[tuple[str, str, str], dict[str, Any]] = {}
         self.last_payload: dict[str, Any] | None = None
         self.record_writes = 0
         self.supersede_on_write = False
@@ -215,14 +216,16 @@ class FakeHost(RealHost):
             "finished_at": NOW.isoformat(),
         }
 
-    def seed_finished_report(self, row: GenerationRow) -> dict[str, Any]:
+    def seed_finished_report(self, row: GenerationRow, courts: tuple[str, ...]) -> dict[str, Any]:
         """Record a completed fictitious build without running its stages."""
 
         assert row.built_at is not None
         seconds = int((datetime.fromisoformat(row.built_at) - datetime.fromisoformat(row.created_at)).total_seconds())
         completed = buildreport.BuildReport(
             row.gen_id, (NOW + timedelta(microseconds=len(self.reports) + 1)).isoformat(),
-            row.state, None, row.failure_reason, 0, {}, {}, {},
+            row.state, None, row.failure_reason, 0, {}, {}, {"accounted": {
+                court: buildreport.Accounted(0, 0, 0, 0, True) for court in courts
+            }},
             buildreport.WallClock(
                 0, None, None, row.created_at, row.lexical_built_at,
                 row.dense_built_at, row.built_at, seconds, False,
@@ -573,6 +576,38 @@ class FakeHost(RealHost):
             assert input is not None
             statement_dir = RENDERED if command == worker.psql_argv(RENDERED) else str(CI_ROOT)
             self.statement_directories.append((statement_dir, input))
+            if "DO $stage_counts$" in input or "FROM public.stage_counts" in input:
+                self.statements.append(input)
+                phase = "stage-counts-write" if "DO $stage_counts$" in input else "stage-counts-read"
+                if self.interrupt_phase == phase:
+                    raise KeyboardInterrupt
+                if self.fail_phase == phase:
+                    return subprocess.CompletedProcess(command, 3, "", "private diagnostic")
+                if phase == "stage-counts-write":
+                    stage_payload = json.loads(self._bound(input, "v_payload"))
+                    pending: dict[tuple[str, str, str], dict[str, Any]] = {}
+                    for counts in stage_payload["courts"]:
+                        key = (stage_payload["label"], stage_payload["source"], counts["court"])
+                        held_counts = self.stage_counts_rows.get(key)
+                        if held_counts is not None:
+                            if any(held_counts[field] != counts[field] for field in (
+                                "dockets", "opinion_clusters", "citations", "opinions",
+                            )):
+                                return subprocess.CompletedProcess(
+                                    command, 3, "", f"ERROR: STAGE_COUNTS_CONFLICT:{counts['court']}\n",
+                                )
+                        else:
+                            pending[key] = {
+                                "label": stage_payload["label"], "source": stage_payload["source"],
+                                **counts, "staged_at": stage_payload["staged_at"],
+                            }
+                    self.stage_counts_rows.update(pending)
+                    return subprocess.CompletedProcess(command, 0, json.dumps({"inserted": len(pending)}), "")
+                counts_label = self._bound(input, "v_label")
+                return subprocess.CompletedProcess(command, 0, json.dumps([
+                    counts for (label, _, _), counts in sorted(self.stage_counts_rows.items())
+                    if label == counts_label
+                ]), "")
             if (
                 "WITH RECURSIVE chain AS" in input
                 or command == worker.psql_argv(CI_ROOT) and "DO $cut$" in input
@@ -922,6 +957,7 @@ class FakeHost(RealHost):
                         "by_precedential": {"published": count},
                         "by_failure_reason": {},
                     }
+                    self.caselaw_counts[court] = counts
                 return subprocess.CompletedProcess(command, 0, json.dumps(counts) + "\n", "")
             if "DO $cut$" in input:
                 self.record_writes += 1
@@ -1154,12 +1190,18 @@ class Install(unittest.TestCase):
         )
 
     def seed_report_work(self, label: str) -> None:
-        """Seed the stage and agreement records read by the build report."""
+        """Seed recorded counts and the stage and agreement work files."""
 
         self._seed_complete_stage(label)
         record = staging.read_record(self.host, label, self.source.name, work_root=self.work)
         assert isinstance(record, staging.StageRecord)
         for court in record.courts:
+            self.host.stage_counts_rows[(label, record.source, court)] = {
+                "label": label, "source": record.source, "court": court,
+                **{table.replace("-", "_"): record.counts[court][table]
+                   for table in worker_identity.STAGE_TABLES[1:]},
+                "staged_at": record.staged_at,
+            }
             self.host._write_agreement(92, {"label": label, "snapshot": record.snapshot, "court": court})
 
     def _seed_complete_stage(self, label: str | None = None) -> Path:
@@ -1812,10 +1854,20 @@ class Install(unittest.TestCase):
         self._assert_build_rows(out)
         self.assertIn("ca6: dockets 1, opinion-clusters 1, citations 1, opinions 1", out)
         self.assertIn("scotus: dockets 2, opinion-clusters 2, citations 2, opinions 2", out)
-        self.assertIn("example: 2 courts staged, 15 records read, 8 seconds", out)
+        self.assertIn("example: 2 courts staged, 15 records read, 8 seconds; counts recorded", out)
         self.assertEqual(len(self.host.stage_deferred), 1)
         self.assertEqual(self.host.stage_deferred[0]["courts"], ["ca6", "scotus"])
         self.assertEqual(tuple(self.host.stage_deferred[0]["inputs"]), worker_identity.STAGE_TABLES)
+        job, args = next(iter(self.host.stage_jobs.items()))
+        staged = self.host.stage_record(job, args)
+        self.assertEqual(self.host.stage_counts_rows, {
+            (staged["label"], staged["source"], court): {
+                "label": staged["label"], "source": staged["source"], "court": court,
+                **{table.replace("-", "_"): staged["counts"][court][table]
+                   for table in worker_identity.STAGE_TABLES[1:]},
+                "staged_at": staged["staged_at"],
+            } for court in staged["courts"]
+        })
         self.assertEqual([args["court"] for args in self.host.caselaw_deferred], ["ca6", "scotus"])
         self.assertEqual(self.host.caselaw_events[:2], [("defer", "ca6"), ("defer", "scotus")])
         self.assertTrue(all(set(args) == {"label", "snapshot", "court", "courts", "pipeline"}
@@ -1856,13 +1908,66 @@ class Install(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertIn("ca6: dockets 1, opinion-clusters 1, citations 1, opinions 1", out)
         self.assertIn("scotus: dockets 2, opinion-clusters 2, citations 2, opinions 2", out)
-        self.assertIn("example: complete; nothing deferred", out)
+        self.assertIn("example: complete; nothing deferred; counts recorded", out)
+        self.assertEqual(len(self.host.stage_counts_rows), len(self._lockfile().courts))
         self.assertEqual(self.host.stage_deferred, [])
         again, rerun, _ = self.run_install()
         self.assertEqual(again, 0, rerun)
         self.assertIn(f"stage: ok — {self.labels[0]} is installed; nothing to do", rerun)
         self.assertFalse((self.work / self.labels[0]).exists())
         self.assertEqual(self.host.stage_deferred, [])
+
+    def test_stage_repeat_keeps_recorded_counts_and_original_timestamp(self) -> None:
+        self.host.interrupt_caselaw_job = True
+        code, out, err = self.run_install()
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn("counts recorded", out)
+        recorded = copy.deepcopy(self.host.stage_counts_rows)
+        directory = staging.work_directory(self.labels[0], self.source.name, work_root=self.work)
+        path = directory / worker_identity.STAGE_RECORD_NAME
+        staged = json.loads(path.read_text())
+        staged["staged_at"] = (NOW + timedelta(days=1)).isoformat()
+        path.write_text(json.dumps(staged))
+        self.host.interrupt_caselaw_job = False
+        code, out, err = self.run_install()
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("example: complete; nothing deferred; counts already recorded", out)
+        self.assertEqual(self.host.stage_counts_rows, recorded)
+        self.assertEqual(len(self.host.stage_deferred), 1)
+
+    def test_stage_counts_conflict_refuses_before_ingest_without_partial_inserts(self) -> None:
+        directory = self._seed_complete_stage()
+        staged = json.loads((directory / worker_identity.STAGE_RECORD_NAME).read_text())
+        court = staged["courts"][-1]
+        self.host.stage_counts_rows[(self.labels[0], self.source.name, court)] = {
+            "label": self.labels[0], "source": self.source.name, "court": court,
+            **{table.replace("-", "_"): staged["counts"][court][table]
+               for table in worker_identity.STAGE_TABLES[1:]},
+            "opinions": staged["counts"][court]["opinions"] + 1,
+            "staged_at": staged["staged_at"],
+        }
+        recorded = copy.deepcopy(self.host.stage_counts_rows)
+        code, out, err = self.run_install()
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn(f"stage: refuse — example: stage counts for {court} differ from the recorded ones", out)
+        self.assertIn(report.command("corpus cut"), out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertNotIn("<label>", out)
+        self.assertNotIn("ingest:", out)
+        self.assertEqual(self.host.stage_counts_rows, recorded)
+        self.assertEqual(self.host.stage_deferred, [])
+        self.assertEqual(self.host.caselaw_deferred, [])
+
+    def test_stage_counts_write_failure_preserves_database_fix(self) -> None:
+        self.host.fail_phase = "stage-counts-write"
+        code, out, err = self.run_install()
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn("stage: refuse", out)
+        self.assertIn("corpus record write failed (exit 3)", out)
+        self.assertIn(stack.logs_fix(RENDERED, "postgres"), out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertEqual(self.host.stage_counts_rows, {})
+        self.assertNotIn("ingest:", out)
 
     def test_ingest_waits_once_per_round_and_reports_a_minute_heartbeat(self) -> None:
         self._enable_stage()

@@ -185,7 +185,7 @@ class Clients(unittest.TestCase):
                 )
             ]
         )
-        reply = derivedstores._qdrant_request(
+        reply = derivedstores.qdrant_request(
             host,
             RENDERED,
             Q_KEY,
@@ -226,7 +226,7 @@ class Clients(unittest.TestCase):
         listing = FakeHost(
             [q_step("GET", "/collections", {"result": {"collections": []}})]
         )
-        derivedstores._qdrant_request(listing, RENDERED, Q_KEY, "GET", "/collections")
+        derivedstores.qdrant_request(listing, RENDERED, Q_KEY, "GET", "/collections")
         no_body = listing.calls[0][1]
         assert no_body is not None
         self.assertIn("Content-Length: 0\r\n", no_body)
@@ -234,7 +234,7 @@ class Clients(unittest.TestCase):
 
     def test_opensearch_request_quotes_credential_and_body_on_stdin(self) -> None:
         host = FakeHost([os_step("PUT", "/_snapshot/gideon", {"acknowledged": True})])
-        reply = derivedstores._opensearch_request(
+        reply = derivedstores.opensearch_request(
             host,
             RENDERED,
             OS_PASSWORD,
@@ -280,7 +280,7 @@ class Clients(unittest.TestCase):
         for raw, words in q_cases:
             with self.subTest(words=words):
                 host = FakeHost([Step(QDRANT_SERVICE_NAME, "GET", "/collections", raw)])
-                reply = derivedstores._qdrant_request(
+                reply = derivedstores.qdrant_request(
                     host, RENDERED, Q_KEY, "GET", "/collections"
                 )
                 self.assertIsInstance(reply, report.Problem)
@@ -293,7 +293,7 @@ class Clients(unittest.TestCase):
 
         normalized = q_reply({"result": {"collections": []}}).replace("\r\n", "\n")
         host = FakeHost([Step(QDRANT_SERVICE_NAME, "GET", "/collections", normalized)])
-        reply = derivedstores._qdrant_request(host, RENDERED, Q_KEY, "GET", "/collections")
+        reply = derivedstores.qdrant_request(host, RENDERED, Q_KEY, "GET", "/collections")
         self.assertNotIsInstance(reply, report.Problem)
 
         os_cases = (
@@ -325,7 +325,7 @@ class Clients(unittest.TestCase):
                         )
                     ]
                 )
-                reply = derivedstores._opensearch_request(
+                reply = derivedstores.opensearch_request(
                     host, RENDERED, OS_PASSWORD, "GET", "/_snapshot/gideon/_all"
                 )
                 self.assertIsInstance(reply, report.Problem)
@@ -353,7 +353,7 @@ class Clients(unittest.TestCase):
                         )
                     ]
                 )
-                reply = derivedstores._opensearch_request(
+                reply = derivedstores.opensearch_request(
                     host, RENDERED, OS_PASSWORD, "GET", "/_snapshot/gideon/_all"
                 )
                 self.assertIsInstance(reply, kind)
@@ -374,7 +374,7 @@ class Clients(unittest.TestCase):
                 )
             ]
         )
-        reply = derivedstores._qdrant_request(
+        reply = derivedstores.qdrant_request(
             host, RENDERED, Q_KEY, "GET", "/collections"
         )
         self.assertIsInstance(reply, report.Problem)

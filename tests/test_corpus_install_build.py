@@ -15,7 +15,7 @@ from unittest.mock import patch
 import test_corpus_install
 from test_corpus_install import NOW, FakeHost
 
-from gideon.host import models, report
+from gideon.host import models, report, stack
 from gideon.host.corpus import install
 from gideon.host.corpus.lockfile import Lockfile, load_lockfile, render_lockfile
 from gideon.host.corpus.sources import SourceDefinition
@@ -103,7 +103,7 @@ class InstallBuild(unittest.TestCase):
         )
         fixture.host.generations[row.gen_id] = row
         if state == "built" and finished_report:
-            fixture.host.seed_finished_report(row)
+            fixture.host.seed_finished_report(row, lockfile.courts)
         return row
 
     def _assert_released(self, host: FakeHost) -> None:
@@ -158,7 +158,7 @@ class InstallBuild(unittest.TestCase):
 
     def test_built_generation_with_a_newest_failed_treatment_report_is_finished(self) -> None:
         row = self._seed_generation(self.fixture, "built")
-        failed = self.host.seed_finished_report(row)
+        failed = self.host.seed_finished_report(row, self.fixture._lockfile().courts)
         failed.update(failed_stage="treatment", treatment=None)
         previous = copy.deepcopy(self.host.reports)
         self._assert_finished_install(row, self.fixture.run_install(), [])
@@ -179,7 +179,7 @@ class InstallBuild(unittest.TestCase):
     def test_built_generation_with_a_newest_finished_report_stays_unchanged(self) -> None:
         row = self._seed_generation(self.fixture, "built")
         self.host.reports[-1].update(failed_stage="treatment", treatment=None)
-        completed = self.host.seed_finished_report(row)
+        completed = self.host.seed_finished_report(row, self.fixture._lockfile().courts)
         code, out, err = self.fixture.run_install()
         self.assertEqual((code, err), (0, ""), out)
         self.assertIn(
@@ -214,6 +214,103 @@ class InstallBuild(unittest.TestCase):
         self.assertEqual(self.host.reports, [])
         self.assertEqual(self.host.generations[row.gen_id], row)
         self.assertEqual(self.host.record_rows[self.fixture.labels[0]]["state"], "installed")
+        self._assert_released(self.host)
+
+    def test_newly_recorded_counts_recover_a_built_generations_report(self) -> None:
+        self.fixture._hold_record("installing")
+        row = self._seed_generation(self.fixture, "built")
+        completed = self.host.reports[-1]
+        for accounted in completed["gates"]["accounted"].values():
+            accounted.update(staged=None, **{"pass": None})
+        previous = copy.deepcopy(self.host.reports)
+        self.assertEqual(self.host.stage_counts_rows, {})
+        code, out, err = self.fixture.run_install()
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("counts recorded", out)
+        self.assertIn(f"generation {row.gen_id} built, its report to re-gather", out)
+        self.assertIn("report: ok", out)
+        self.assertEqual(self.host.reports[:-1], previous)
+        for court, accounted in self.host.reports[-1]["gates"]["accounted"].items():
+            self.assertEqual(accounted["staged"], self.host.stage_counts_rows[(self.fixture.labels[0], self.fixture.source.name, court)]["opinions"])
+        self.assertEqual(self.host.deferred, [])
+        self.assertEqual(self.host.jobs, {})
+        self._assert_released(self.host)
+
+    def test_installed_label_recovers_null_or_missing_staged_counts_without_build_jobs(self) -> None:
+        for missing in ("null", "entry"):
+            with self.subTest(missing=missing):
+                fixture = self._new_fixture()
+                host: FakeHost = fixture.host
+                code, out, err = fixture.run_install()
+                self.assertEqual((code, err), (0, ""), out)
+                label = fixture.labels[0]
+                row = next(iter(host.generations.values()))
+                completed = host.reports[-1]
+                court = next(iter(completed["gates"]["accounted"]))
+                if missing == "null":
+                    completed["gates"]["accounted"][court].update(staged=None, **{"pass": None})
+                else:
+                    del completed["gates"]["accounted"][court]
+                previous = copy.deepcopy(host.reports)
+                deferred = copy.deepcopy((host.stage_deferred, host.caselaw_deferred,
+                                          host.agreement_deferred, host.deferred))
+                statements = len(host.statements)
+                self.assertFalse((fixture.work / label).exists())
+                code, out, err = fixture.run_install()
+                self.assertEqual((code, err), (0, ""), out)
+                self.assertIn(
+                    f"collections: ok — {row.collection}: unchanged; generation {row.gen_id} built, "
+                    f"its report to re-gather, inputs hash {row.inputs_hash}", out,
+                )
+                self.assertIn("collections: ok — 0 of 1 need a build, 1 to finish", out)
+                for stage in ("stage", "ingest", "overruled", "agreement"):
+                    self.assertIn(f"{stage}: ok — {label} is installed; nothing to do", out)
+                self.assertIn(f"treatment: ok — {row.gen_id}:", out)
+                self.assertIn(f"report: ok — {row.gen_id}:", out)
+                for stage in ("smoke", "cluster", "build", "counts", "dense", "built"):
+                    self.assertFalse(any(line.startswith(f"{stage}:") for line in out.splitlines()), out)
+                self.assertEqual((host.stage_deferred, host.caselaw_deferred,
+                                  host.agreement_deferred, host.deferred), deferred)
+                self.assertEqual(host.generations[row.gen_id], row)
+                self.assertEqual(host.reports[:-1], previous)
+                self.assertEqual(len(host.reports), len(previous) + 1)
+                for court, accounted in host.reports[-1]["gates"]["accounted"].items():
+                    self.assertEqual(accounted["staged"], host.stage_counts_rows[(label, fixture.source.name, court)]["opinions"])
+                reads = [sql for sql in host.statements[statements:] if "FROM public.stage_counts" in sql]
+                self.assertEqual(len(reads), 2)
+                self.assertFalse(any("DO $stage_counts$" in sql for sql in host.statements[statements:]))
+                reports = len(host.reports)
+                code, out, err = fixture.run_install()
+                self.assertEqual((code, err), (0, ""), out)
+                self.assertNotIn("to re-gather", out)
+                self.assertEqual(len(host.reports), reports)
+                self.assertIsNone(host.lock_holder)
+
+    def test_installed_label_without_recorded_counts_keeps_null_report(self) -> None:
+        self.fixture._hold_record("installed")
+        self._seed_generation(self.fixture, "built")
+        completed = self.host.reports[-1]
+        for accounted in completed["gates"]["accounted"].values():
+            accounted.update(staged=None, **{"pass": None})
+        previous = copy.deepcopy(self.host.reports)
+        self.assertEqual(self.host.stage_counts_rows, {})
+        code, out, err = self.fixture.run_install()
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertNotIn("to re-gather", out)
+        self.assertNotIn("report:", out)
+        self.assertEqual(self.host.reports, previous)
+        self.assertEqual(self.host.stage_counts_rows, {})
+        self.assertEqual(self.host.stage_deferred, [])
+        self.assertEqual(self.host.deferred, [])
+        self._assert_released(self.host)
+
+    def test_collections_counts_read_failure_refuses_with_database_fix(self) -> None:
+        self.host.fail_phase = "stage-counts-read"
+        out = self._assert_refusal(self.fixture.run_install(), "collections", "stage counts read failed (exit 3)")
+        self.assertIn(stack.logs_fix(test_corpus_install.RENDERED, "postgres"), out)
+        self.assertEqual(self.host.generations, {})
+        self.assertEqual(self.host.deferred, [])
+        self.assertEqual(self.host.record_rows[self.fixture.labels[0]]["state"], "installing")
         self._assert_released(self.host)
 
     def test_treatment_failure_while_finishing_keeps_the_label_installing(self) -> None:

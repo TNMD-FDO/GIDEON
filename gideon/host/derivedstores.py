@@ -104,7 +104,7 @@ def _diagnostic(value: object, credential: str = "") -> str:
     return line[:_DIAGNOSTIC_LIMIT]
 
 
-def _secret(io: Host, name: str) -> str | report.Problem:
+def store_secret(io: Host, name: str) -> str | report.Problem:
     read = secrets.read_secret(io, name)
     if read.problem is not None:
         fix = (
@@ -262,7 +262,7 @@ def _run_request(
     )
 
 
-def _qdrant_request(
+def qdrant_request(
     io: Host,
     rendered_dir: PathLike,
     key: str,
@@ -312,7 +312,7 @@ def _curl_quoted(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _opensearch_request(
+def opensearch_request(
     io: Host,
     rendered_dir: PathLike,
     password: str,
@@ -504,11 +504,11 @@ def _stale_qdrant_dirs(
 def _snapshot_qdrant(
     io: Host, rendered_dir: PathLike, qdrant_root: PathLike, clock: Callable[[], float]
 ) -> StoreSnapshot | report.Problem:
-    key = _secret(io, QDRANT_SECRET_NAME)
+    key = store_secret(io, QDRANT_SECRET_NAME)
     if isinstance(key, report.Problem):
         return key
     started = clock()
-    reply = _qdrant_request(io, rendered_dir, key, "GET", "/collections")
+    reply = qdrant_request(io, rendered_dir, key, "GET", "/collections")
     if isinstance(reply, report.Problem):
         return reply
     collections = _qdrant_collections(reply.data, rendered_dir)
@@ -517,7 +517,7 @@ def _snapshot_qdrant(
     total_bytes = 0
     for collection in collections:
         path = f"/collections/{collection}/snapshots"
-        created = _qdrant_request(
+        created = qdrant_request(
             io,
             rendered_dir,
             key,
@@ -532,7 +532,7 @@ def _snapshot_qdrant(
             return entry
         name, size = entry
         total_bytes += size
-        listing = _qdrant_request(io, rendered_dir, key, "GET", path)
+        listing = qdrant_request(io, rendered_dir, key, "GET", path)
         if isinstance(listing, report.Problem):
             return listing
         names = _qdrant_snapshot_names(listing.data, rendered_dir)
@@ -547,7 +547,7 @@ def _snapshot_qdrant(
         for older in names:
             if older == name:
                 continue
-            deleted = _qdrant_request(
+            deleted = qdrant_request(
                 io, rendered_dir, key, "DELETE", f"{path}/{older}?wait=true"
             )
             if isinstance(deleted, report.Problem):
@@ -596,7 +596,7 @@ def _register_repository(
     io: Host, rendered_dir: PathLike, password: str
 ) -> report.Problem | None:
     path = f"/_snapshot/{OPENSEARCH_REPOSITORY}"
-    registered = _opensearch_request(
+    registered = opensearch_request(
         io,
         rendered_dir,
         password,
@@ -625,7 +625,7 @@ def _register_repository(
 def _snapshot_opensearch(
     io: Host, rendered_dir: PathLike, now: datetime, clock: Callable[[], float]
 ) -> StoreSnapshot | report.Problem:
-    password = _secret(io, OPENSEARCH_PASSWORD_SECRET_NAME)
+    password = store_secret(io, OPENSEARCH_PASSWORD_SECRET_NAME)
     if isinstance(password, report.Problem):
         return password
     started = clock()
@@ -633,7 +633,7 @@ def _snapshot_opensearch(
     registration = _register_repository(io, rendered_dir, password)
     if registration is not None:
         return registration
-    listed = _opensearch_request(
+    listed = opensearch_request(
         io,
         rendered_dir,
         password,
@@ -674,7 +674,7 @@ def _snapshot_opensearch(
         created_name = OPENSEARCH_SNAPSHOT_PREFIX + now.astimezone(UTC).strftime(
             "%Y%m%dt%H%M%Sz"
         )
-        created = _opensearch_request(
+        created = opensearch_request(
             io,
             rendered_dir,
             password,
@@ -733,7 +733,7 @@ def _snapshot_opensearch(
                 OPENSEARCH_SERVICE_NAME,
                 "opensearch snapshot indices differ from the listing",
             )
-    listing = _opensearch_request(
+    listing = opensearch_request(
         io, rendered_dir, password, "GET", f"{repository_path}/_all"
     )
     if isinstance(listing, report.Problem):
@@ -750,7 +750,7 @@ def _snapshot_opensearch(
     for older in snapshots:
         if older == created_name:
             continue
-        deleted = _opensearch_request(
+        deleted = opensearch_request(
             io, rendered_dir, password, "DELETE", f"{repository_path}/{older}"
         )
         if isinstance(deleted, report.Problem):
@@ -845,7 +845,7 @@ def _recover_qdrant(
             newest[collection] = file
     if not newest:
         return StoreRecovery(QDRANT_SERVICE_NAME, (), clock() - started, True)
-    key = _secret(io, QDRANT_SECRET_NAME)
+    key = store_secret(io, QDRANT_SECRET_NAME)
     if isinstance(key, report.Problem):
         return key
     for collection, file in sorted(newest.items()):
@@ -864,7 +864,7 @@ def _recover_qdrant(
             )
         if _CHECKSUM.fullmatch(checksum) is not None:
             body["checksum"] = checksum
-        reply = _qdrant_request(
+        reply = qdrant_request(
             io, rendered_dir, key, "PUT",
             f"/collections/{collection}/snapshots/recover?wait=true",
             body=body, bound=STORE_SNAPSHOT_WAIT_SECONDS,
@@ -921,12 +921,12 @@ def _recovery_snapshots(
 def _recover_opensearch(
     io: Host, rendered_dir: PathLike, clock: Callable[[], float]
 ) -> StoreRecovery | report.Problem:
-    password = _secret(io, OPENSEARCH_PASSWORD_SECRET_NAME)
+    password = store_secret(io, OPENSEARCH_PASSWORD_SECRET_NAME)
     if isinstance(password, report.Problem):
         return password
     started = clock()
     repository = f"/_snapshot/{OPENSEARCH_REPOSITORY}"
-    removed = _opensearch_request(
+    removed = opensearch_request(
         io, rendered_dir, password, "DELETE", repository,
         accepted_statuses=frozenset({200, 404}),
     )
@@ -935,7 +935,7 @@ def _recover_opensearch(
     registration = _register_repository(io, rendered_dir, password)
     if registration is not None:
         return registration
-    listed = _opensearch_request(io, rendered_dir, password, "GET", f"{repository}/_all")
+    listed = opensearch_request(io, rendered_dir, password, "GET", f"{repository}/_all")
     if isinstance(listed, report.Problem):
         return listed
     snapshots = _recovery_snapshots(listed.data, rendered_dir)
@@ -947,13 +947,13 @@ def _recover_opensearch(
     if not indices:
         return StoreRecovery(OPENSEARCH_SERVICE_NAME, (), clock() - started, True)
     for index in indices:
-        deleted = _opensearch_request(
+        deleted = opensearch_request(
             io, rendered_dir, password, "DELETE", f"/{index}",
             accepted_statuses=frozenset({200, 404}),
         )
         if isinstance(deleted, report.Problem):
             return deleted
-    restored = _opensearch_request(
+    restored = opensearch_request(
         io, rendered_dir, password, "POST",
         f"{repository}/{name}/_restore?wait_for_completion=true",
         body={"indices": ",".join(indices), "include_global_state": False},

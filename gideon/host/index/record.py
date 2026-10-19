@@ -1,4 +1,4 @@
-"""Read generation records and write their identities and measured footprints."""
+"""Read generation records and write their identities, footprints, and promotions."""
 
 import json
 import re
@@ -62,6 +62,14 @@ class BuildingOutcome:
     state: str
 
 
+@dataclass(frozen=True, slots=True)
+class PromotionOutcome:
+    """The generations retired by a promotion and its recorded time."""
+
+    retired: tuple[str, ...]
+    promoted_at: str
+
+
 _WRITE_SQL = """BEGIN;
 SELECT set_config('gideon.generation_payload', :'v_payload', true) AS stored \\gset
 DO $generation$
@@ -120,6 +128,43 @@ SELECT jsonb_build_object(
     'dense_bytes', (counts->>'dense_bytes')::bigint,
     'bytes', bytes
 ) FROM written;
+"""
+
+
+_NOT_BUILT = "generation is no longer built"
+_PROMOTE_SQL = f"""\\set QUIET on
+BEGIN;
+SELECT set_config('gideon.promotion_payload', :'v_payload', true) AS stored \\gset
+DO $promotion$
+DECLARE
+    payload jsonb := current_setting('gideon.promotion_payload')::jsonb;
+    retired jsonb;
+    promoted timestamptz;
+BEGIN
+    WITH retired_generations AS (
+        UPDATE public.index_generations
+        SET state = 'retired', retired_at = now()
+        WHERE collection = payload->>'collection' AND state = 'live'
+          AND gen_id <> payload->>'name'
+        RETURNING gen_id
+    )
+    SELECT COALESCE(jsonb_agg(gen_id ORDER BY gen_id), '[]'::jsonb)
+    INTO retired FROM retired_generations;
+
+    UPDATE public.index_generations
+    SET state = 'live', promoted_at = now()
+    WHERE gen_id = payload->>'name' AND state = 'built'
+    RETURNING promoted_at INTO promoted;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION '{_NOT_BUILT}';
+    END IF;
+    PERFORM set_config('gideon.promotion_outcome', jsonb_build_object(
+        'retired', retired, 'promoted_at', promoted
+    )::text, true);
+END
+$promotion$;
+SELECT current_setting('gideon.promotion_outcome')::jsonb;
+COMMIT;
 """
 
 
@@ -358,6 +403,45 @@ def write_footprint(
     ):
         return Problem("generation footprint write returned invalid byte counts", fix)
     return value
+
+
+def promote_generation(
+    host: Host, rendered_dir: PathLike, name: str, collection: str, *, command_path: str,
+) -> PromotionOutcome | Problem:
+    """Retire the collection's live rows and promote a built candidate atomically."""
+
+    payload = {"name": name, "collection": collection}
+    sql = worker.bind("v_payload", json.dumps(payload, separators=(",", ":"))) + "\n" + _PROMOTE_SQL
+    result = _run(host, rendered_dir, sql, command_path)
+    if isinstance(result, Problem):
+        return result
+    fix = database_fix(rendered_dir, command_path)
+    if result.returncode != 0:
+        if _NOT_BUILT in result.stderr:
+            return Problem(
+                f"{name}: {_NOT_BUILT}; nothing was promoted or retired",
+                f"Run {report.command(f'index report {name}')} to read its state, "
+                f"then run {report.command(command_path)} again.",
+            )
+        return Problem(f"generation promotion failed (exit {result.returncode})", fix)
+    try:
+        value = json.loads(result.stdout)
+    except ValueError:
+        value = None
+    if (
+        not isinstance(value, dict) or set(value) != {"retired", "promoted_at"}
+        or not isinstance(value["retired"], list)
+        or any(
+            not isinstance(retired, str)
+            or re.fullmatch(GENERATION_PATTERN, retired) is None
+            or len(retired.encode()) >= 255 or retired == name
+            for retired in value["retired"]
+        )
+        or len(set(value["retired"])) != len(value["retired"])
+        or not isinstance(value["promoted_at"], str) or not value["promoted_at"]
+    ):
+        return Problem("generation promotion returned an invalid outcome", fix)
+    return PromotionOutcome(tuple(value["retired"]), value["promoted_at"])
 
 
 def _parse_manifest_row(line: str, *, with_doc_id: bool) -> dict[str, str] | None:
