@@ -196,7 +196,7 @@ files:
     mode: "0644"
     owners: []
   "systemd/gideon-eval-nightly.service":
-    sha256: "29a61ce813d5393ca847429932dbb9d6469b0681dfe4c407d6cdc2e447acbeaf"
+    sha256: "f4baf267399563fc9f09a092b78ba693d56f2a6dc1cba222dbdd0b1f98b781e3"
     mode: "0644"
     owners: []
   "systemd/gideon-eval-nightly.timer":

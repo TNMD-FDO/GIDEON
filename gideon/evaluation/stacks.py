@@ -27,13 +27,19 @@ class StackPaths:
     flag_fragment: str
 
 
+def flag_fragment(name: str) -> str:
+    """The stack's fragment of a retry command, read without selecting anything."""
+
+    return "" if name == PRODUCTION_STACK else f" --stack {name}"
+
+
 def resolve_stack(name: str, production_dir: PathLike) -> StackPaths:
     """Resolve a stack name, selecting the sibling's secrets for a ``ci`` run."""
 
     if name == PRODUCTION_STACK:
-        return StackPaths(name, Path(production_dir), None, "")
+        return StackPaths(name, Path(production_dir), None, flag_fragment(name))
     if name == CI_STACK:
         secrets_dir = Path(CI_SECRETS_DIR)
         secrets.select_directory(secrets_dir)
-        return StackPaths(name, Path(CI_ROOT), secrets_dir, f" --stack {CI_STACK}")
+        return StackPaths(name, Path(CI_ROOT), secrets_dir, flag_fragment(name))
     raise ValueError(f"unsupported evaluation stack: {name}")

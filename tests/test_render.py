@@ -1285,8 +1285,9 @@ class Core(unittest.TestCase):
                     self.assertEqual(
                         exec_lines,
                         [
-                            "ExecStart=-/usr/bin/python3 -m gideon eval run --slice general-smoke --kind nightly",
-                            "ExecStart=/usr/bin/python3 -m gideon eval run --slice guardrails --kind nightly",
+                            "ExecStart=/usr/bin/python3 -m gideon eval run"
+                            + "".join(f" --slice {name}" for name in systemd.NIGHTLY_SUITES)
+                            + " --kind nightly",
                         ]
                         + (
                             [
@@ -1299,11 +1300,14 @@ class Core(unittest.TestCase):
                     )
                     self.assertEqual(
                         [
-                            line.split(" --slice ", 1)[1].split(" ", 1)[0]
-                            for line in exec_lines
-                            if " --slice " in line
+                            fragment.split(" ", 1)[0]
+                            for fragment in exec_lines[0].split(" --slice ")[1:]
                         ],
                         list(systemd.NIGHTLY_SUITES),
+                    )
+                    self.assertEqual(
+                        [line.startswith("ExecStart=-") for line in exec_lines],
+                        [False] + ([True] if build_box else []),
                     )
                     self.assertIn(
                         f"TimeoutStartSec={systemd.NIGHTLY_TIMEOUT_START_SECONDS}", service

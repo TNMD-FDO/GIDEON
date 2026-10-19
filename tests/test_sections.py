@@ -127,6 +127,14 @@ class Segment(unittest.TestCase):
             ("EXAMPLE, J., dissenting in part.", "concurrence_dissent", "line"),
             ("EXAMPLE, J., concurring in part and dissenting in part, per curiam.",
              "per_curiam", "line"),
+            ("MR. JUSTICE EXAMPLE, whom MR. JUSTICE SAMPLE joins, dissenting.", "dissent", "line"),
+            ("MR. JUSTICE EXAMPLE, with whom THE CHIEF JUSTICE concurred, dissenting.",
+             "dissent", "line"),
+            ("MR. JUSTICE EXAMPLE, after making the foregoing statement, delivered the opinion "
+             "of the court.", "majority", "line"),
+            ("JUSTICE EXAMPLE, with whom JUSTICE SAMPLE concurred, concurring in the judgment.",
+             "concurrence", "line"),
+            ("EXAMPLE, J., dissenting in part, concurring in part.", "concurrence_dissent", "line"),
         )
         for line, kind, typed_by in cases:
             for column in ("plain_text", "html"):
@@ -263,6 +271,9 @@ class Segment(unittest.TestCase):
             "Example, J., wrote separately to dissent from the remand.",
             "Justice Example, dissenting in that case, argued the search was unreasonable.",
             "Justice Example, dissenting.The fictional sentence continues without whitespace.",
+            "Justice Example, as Justice Sample noted, dissenting from the remand would be wrong.",
+            "Justice Example, after making a long and fictional statement of the facts of this "
+            "case at some length, delivered the opinion of the court.",
         ):
             for column in ("plain_text", "html"):
                 with self.subTest(prose=prose, column=column):
@@ -308,6 +319,8 @@ class Segment(unittest.TestCase):
         cases = (
             "SAMPLE, C. J., delivered the opinion of the court, in which EXAMPLE, J., "
             "joined. FICTION, J., delivered a separate dissenting opinion.",
+            "SAMPLE, C. J., delivered the opinion of the court, in which EXAMPLE, J., "
+            "concurred. FICTION, J., delivered a separate dissenting opinion.",
             "SAMPLE, J., with whom EXAMPLE, J., joined.",
             "SAMPLE, J., with whom EXAMPLE, J., joins.",
             "JUSTICE SAMPLE, with whom JUSTICE EXAMPLE and JUSTICE FICTION join.",

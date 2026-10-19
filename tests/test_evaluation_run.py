@@ -731,7 +731,8 @@ class Command(unittest.TestCase):
         for kind in kind_action.choices:
             with self.subTest(kind=kind):
                 args = parser.parse_args(["eval", "run", "--slice", "smoke", "--kind", kind])
-                mode, problem = command._resolve_mode(args, args.slice)
+                self.assertEqual(args.slice, ["smoke"])
+                mode, problem = command._resolve_mode(args, args.slice[0])
                 self.assertIsNone(problem)
                 self.assertEqual(mode.kind, kind)
                 self.assertIn(mode.kind, command._KINDS)
@@ -739,7 +740,8 @@ class Command(unittest.TestCase):
         args = parser.parse_args(
             ["eval", "run", "--slice", "smoke", "--decision", "--against", RUN_ID]
         )
-        mode, problem = command._resolve_mode(args, args.slice)
+        self.assertEqual(args.slice, ["smoke"])
+        mode, problem = command._resolve_mode(args, args.slice[0])
         self.assertIsNone(problem)
         self.assertEqual(mode.kind, "decision")
         self.assertIn(mode.kind, command._KINDS)
@@ -1390,6 +1392,7 @@ def _invoke_engine_command(
     host: EvalHost,
     *,
     slice_name: str = "smoke",
+    second_slice_name: str | None = None,
     stack_name: str = "ci",
     kind: str = "smoke",
     rendered_dir: Path | None = None,
@@ -1399,6 +1402,8 @@ def _invoke_engine_command(
     sleep: Callable[[float], None] | None = None,
     on_run: Callable[[RunContext], SliceResult] | None = None,
     generation_reply: str | None = None,
+    verdicts: Mapping[str, bool] | None = None,
+    run_id_factory: Callable[[], str] | None = None,
 ) -> tuple[int, str, str, dict[str, list[Any]]]:
     observed: dict[str, list[Any]] = {
         "contexts": [],
@@ -1416,12 +1421,13 @@ def _invoke_engine_command(
         return command.door.ProbeResult(True, "door ready", None)
 
     def run_slice(
-        _loaded: LoadedSet, _slice_name: str, context: RunContext
+        _loaded: LoadedSet, selected_name: str, context: RunContext
     ) -> SliceResult:
         observed["contexts"].append(context)
         if on_run is not None:
             return on_run(context)
-        return SliceResult(True, "smoke run report\n", ())
+        verdict = True if verdicts is None else verdicts[selected_name]
+        return SliceResult(verdict, "smoke run report\n", ())
 
     def resolve_engine(
         _host: Host, path: PathLike, **_kwargs: Any
@@ -1430,11 +1436,14 @@ def _invoke_engine_command(
         return command.engine.EngineTarget("fictitious-profile", "fictitious-model", 1)
 
     set_args = [] if set_root is None else ["--set", str(set_root)]
+    names = (slice_name,) if second_slice_name is None else (slice_name, second_slice_name)
     args = [
-        "eval", "run", "--slice", slice_name, "--stack", stack_name,
+        "eval", "run", *(flag for name in names for flag in ("--slice", name)), "--stack", stack_name,
         "--kind", kind, *set_args,
     ]
     run_kwargs = _run_kwargs(host)
+    if run_id_factory is not None:
+        run_kwargs["run_id_factory"] = run_id_factory
     if rendered_dir is not None:
         run_kwargs["rendered_dir"] = rendered_dir
     if clock is not None:
@@ -1444,14 +1453,18 @@ def _invoke_engine_command(
     if sleep is not None:
         run_kwargs["sleep"] = sleep
     replacement = dict(command.SLICE_RUNNERS)
-    replacement[slice_name] = replace(replacement[slice_name], runner=run_slice)
-    if stack_name == CI_STACK and CallSurface.STORES in replacement[slice_name].surfaces:
-        host.generation_output = (
-            json.dumps(_sibling_row(run_kwargs["checkout_root"])) + "\n"
-            if generation_reply is None else generation_reply
-        )
-    elif CallSurface.STORES in replacement[slice_name].surfaces:
-        host.generation_output = json.dumps(_generation_row()) + "\n"
+    for name in names:
+        if name in replacement:
+            replacement[name] = replace(replacement[name], runner=run_slice)
+    first_spec = replacement.get(slice_name)
+    if first_spec is not None and CallSurface.STORES in first_spec.surfaces:
+        if stack_name == CI_STACK:
+            host.generation_output = (
+                json.dumps(_sibling_row(run_kwargs["checkout_root"])) + "\n"
+                if generation_reply is None else generation_reply
+            )
+        else:
+            host.generation_output = json.dumps(_generation_row()) + "\n"
     with (
         patch.object(
             command.engine,
@@ -2704,6 +2717,200 @@ def _challenger_invoke(
     return code, stdout, stderr, contexts
 
 
+class NightlySuites(unittest.TestCase):
+    """The nightly suites share one process and one engine-lock claim."""
+
+    def test_two_suites_run_in_order_and_last_gate_sets_exit(self) -> None:
+        names = ("general-smoke", "guardrails")
+        run_ids = (RUN_ID, "22222222-3333-4444-8555-666666666666")
+        for outcomes in ((False, True), (True, False)):
+            with self.subTest(outcomes=outcomes):
+                host = ChallengerHost()
+                ids = iter(run_ids)
+                code, stdout, stderr, _observed = _invoke_engine_command(
+                    host,
+                    slice_name=names[0],
+                    second_slice_name=names[1],
+                    stack_name="production",
+                    kind=command.NIGHTLY_KIND,
+                    clock=_nightly_start,
+                    verdicts=dict(zip(names, outcomes, strict=True)),
+                    run_id_factory=ids.__next__,
+                )
+                self.assertEqual((code, stderr), (0 if outcomes[-1] else 1, ""), stdout)
+                lines = stdout.splitlines()
+                suites = [i for i, line in enumerate(lines) if line.startswith("suite: ok")]
+                loads = [i for i, line in enumerate(lines) if line.startswith("load: ok")]
+                self.assertEqual(len(suites), 2, stdout)
+                self.assertEqual(len(loads), 2, stdout)
+                for place, name in enumerate(names):
+                    self.assertIn(f"{place + 1} of 2: {name}, run {run_ids[place]}", lines[suites[place]])
+                    self.assertIn(f"in {name},", lines[loads[place]])
+                    self.assertLess(suites[place], loads[place])
+                self.assertLess(loads[0], suites[1])
+                preconditions = [line for line in lines if line.startswith("preconditions: ok")]
+                self.assertEqual(len(preconditions), 2, stdout)
+                self.assertIn("engine lock taken", preconditions[0])
+                self.assertIn("engine lock held by this process", preconditions[1])
+                gates = [line for line in lines if line.startswith("gate:")]
+                self.assertEqual([line.startswith("gate: ok") for line in gates], list(outcomes))
+                statements = [
+                    statement for argv, statement in host.calls
+                    if argv[0] == "docker" and statement is not None
+                    and "INSERT INTO eval_runs" in statement
+                ]
+                self.assertEqual(len(statements), 2, stdout)
+                recorded_ids = [
+                    read_psql_set(next(line for line in statement.splitlines() if line.startswith("\\set run_id ")), "run_id")
+                    for statement in statements
+                ]
+                recorded_names = [
+                    read_psql_set(next(line for line in statement.splitlines() if line.startswith("\\set slice ")), "slice")
+                    for statement in statements
+                ]
+                self.assertEqual(recorded_ids, list(run_ids))
+                self.assertEqual(len(set(recorded_ids)), 2)
+                self.assertEqual(recorded_names, list(names))
+                self.assertEqual((host.acquisitions, host.releases), (1, 1))
+                self.assertEqual(host.locks, {})
+
+    def test_unknown_first_suite_does_not_stop_the_second(self) -> None:
+        host = ChallengerHost()
+        names = ("visibly-fictitious-missing-slice", "guardrails")
+        code, stdout, stderr, _observed = _invoke_engine_command(
+            host,
+            slice_name=names[0],
+            second_slice_name=names[1],
+            stack_name="production",
+            kind=command.NIGHTLY_KIND,
+            clock=_nightly_start,
+        )
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        lines = stdout.splitlines()
+        first_suite = next(i for i, line in enumerate(lines) if line.startswith("suite: ok") and names[0] in line)
+        first_load = next(i for i, line in enumerate(lines) if line.startswith("load: refuse"))
+        second_suite = next(i for i, line in enumerate(lines) if line.startswith("suite: ok") and names[1] in line)
+        second_load = next(i for i, line in enumerate(lines) if line.startswith("load: ok") and names[1] in line)
+        self.assertLess(first_suite, first_load)
+        self.assertLess(first_load, second_suite)
+        self.assertLess(second_suite, second_load)
+        self.assertIn("unknown slice", lines[first_load])
+        self.assertEqual(sum(line.startswith("run: ok") for line in lines), 1)
+        self.assertEqual(sum(line.startswith("record: ok") for line in lines), 1)
+        self.assertEqual(sum(line.startswith("gate: ok") for line in lines), 1)
+        self.assertEqual((host.acquisitions, host.releases), (1, 1))
+        self.assertEqual(
+            sum("INSERT INTO eval_runs" in (statement or "") for _, statement in host.calls), 1
+        )
+
+    def test_lock_poll_at_night_end_leaves_second_suite_outside_window(self) -> None:
+        host = ChallengerHost()
+        night = _nightly_start()
+        end = datetime.combine(night.date() + timedelta(days=1), time(6), tzinfo=night.tzinfo)
+        now = [end - timedelta(minutes=1)]
+        holder = backuplock.Record("visibly fictitious holder", os.getpid() + 1, night)
+        host.locks[backuplock.ENGINE_LOCK.path] = holder.to_json()
+        sleeps: list[float] = []
+
+        def advance(seconds: float) -> None:
+            sleeps.append(seconds)
+            now[0] += timedelta(seconds=seconds)
+
+        code, stdout, stderr, _observed = _invoke_engine_command(
+            host,
+            slice_name="general-smoke",
+            second_slice_name="guardrails",
+            stack_name="production",
+            kind=command.NIGHTLY_KIND,
+            clock=lambda: now[0],
+            sleep=advance,
+        )
+        self.assertEqual((code, stderr), (1, ""), stdout)
+        lines = stdout.splitlines()
+        suites = [i for i, line in enumerate(lines) if line.startswith("suite: ok")]
+        refusals = [i for i, line in enumerate(lines) if line.startswith("preconditions: refuse")]
+        self.assertEqual(len(suites), 2)
+        self.assertEqual(len(refusals), 2)
+        self.assertLess(suites[0], refusals[0])
+        self.assertLess(refusals[0], suites[1])
+        self.assertLess(suites[1], refusals[1])
+        self.assertIn("through the night's end", lines[refusals[0]])
+        self.assertIn("outside the quiet window", lines[refusals[1]])
+        self.assertEqual(sleeps, [command.NIGHTLY_LOCK_POLL_SECONDS])
+        self.assertEqual(len(host.lock_records), 1)
+        self.assertEqual((host.acquisitions, host.releases), (0, 0))
+        self.assertNotIn("run:", stdout)
+        self.assertNotIn("record:", stdout)
+        self.assertFalse(any("INSERT INTO eval_runs" in (statement or "") for _, statement in host.calls))
+
+    def test_one_nightly_slice_keeps_the_single_pass_shape(self) -> None:
+        host = ChallengerHost()
+        code, stdout, stderr, _observed = _invoke_engine_command(
+            host,
+            slice_name="general-smoke",
+            stack_name="production",
+            kind=command.NIGHTLY_KIND,
+            clock=_nightly_start,
+        )
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        self.assertNotIn("suite:", stdout)
+        self.assertEqual(sum(line.startswith("record: ok") for line in stdout.splitlines()), 1)
+        self.assertEqual((host.acquisitions, host.releases), (1, 1))
+
+    def test_multiple_or_repeated_slices_refuse_before_any_stage(self) -> None:
+        cases = (
+            (["--slice", "general-smoke", "--slice", "guardrails", "--kind", "manual", "--stack", "ci", "--force"],
+             ["general-smoke", "guardrails"], "nightly", False, None, True, None),
+            (["--slice", "guardrails", "--slice", "general-smoke", "--decision", "--against", RUN_ID],
+             ["guardrails", "general-smoke"], "nightly", False, None, False, None),
+            (["--slice", "general-smoke", "--slice", "general-smoke", "--kind", "nightly"],
+             ["general-smoke"], "nightly", False, None, False, None),
+            (["--slice", "guardrails", "--slice", "guardrails", "--decision", "--against", RUN_ID, "--force"],
+             ["guardrails"], "manual", True, RUN_ID, True, None),
+            (["--slice", "gold-drop", "--slice", "count-gates", "--generation", "corpus-2026-10-13"],
+             ["gold-drop", "count-gates"], "nightly", False, None, False, "corpus-2026-10-13"),
+        )
+        for flags, expected_names, kind, decision_flag, against, force, generation in cases:
+            with self.subTest(flags=flags):
+                host = ChallengerHost()
+                with patch.object(command.stacks.secrets, "select_directory") as select_directory:
+                    code, stdout, stderr = _invoke(["eval", "run", *flags], **_run_kwargs(host))
+                select_directory.assert_not_called()
+                self.assertEqual((code, stdout), (1, ""))
+                self.assertIn("Fix: Run ", stderr)
+                self.assertEqual(host.lock_records, [])
+                self.assertEqual((host.acquisitions, host.releases), (0, 0))
+                self.assertEqual(host.calls, [])
+                self.assertEqual(host.reads, [])
+                match = re.search(r"Fix: Run (?:sudo python3 -m )?gideon (eval run .+), then retry\.", stderr)
+                assert match is not None, stderr
+                retry = build_parser().parse_args(shlex.split(match.group(1)))
+                self.assertEqual(retry.slice, expected_names)
+                self.assertEqual(retry.kind, kind)
+                self.assertEqual(retry.decision, decision_flag)
+                self.assertEqual(retry.against, against)
+                self.assertEqual(retry.force, force)
+                self.assertEqual(retry.generation, generation)
+                if "--stack" in flags:
+                    self.assertEqual(retry.stack, "ci")
+
+    def test_challenger_still_refuses_a_list_of_slices(self) -> None:
+        host = ChallengerHost()
+        code, stdout, stderr = _invoke(
+            ["eval", "run", "--challenger", "--stack", "ci", "--slice", "general-smoke", "--slice", "guardrails"],
+            **_run_kwargs(host),
+        )
+        self.assertEqual((code, stdout), (1, ""))
+        self.assertIn("--challenger cannot be combined with --slice", stderr)
+        self.assertEqual(host.calls, [])
+        self.assertEqual(host.lock_records, [])
+        match = re.search(r"Fix: Run (?:sudo python3 -m )?gideon (eval run .+), then retry\.", stderr)
+        assert match is not None, stderr
+        retry = build_parser().parse_args(shlex.split(match.group(1)))
+        self.assertIsNone(retry.slice)
+        self.assertIsNone(command._challenger_flag_problem(retry))
+
+
 class ChallengerPair(unittest.TestCase):
     def test_each_pass_reads_and_records_its_own_conditions_span(self) -> None:
         host = ChallengerHost()
@@ -2756,6 +2963,7 @@ class ChallengerPair(unittest.TestCase):
                         f"gideon eval run: --challenger requires --stack ci Fix: Run {prefix} {retry}, then retry.\n",
                     )
                     parsed = build_parser().parse_args(shlex.split(retry))
+                    self.assertIsNone(parsed.slice)
                     self.assertIsNone(command._challenger_flag_problem(parsed))
 
                     code, stdout, stderr = _invoke(
@@ -2823,6 +3031,7 @@ class ChallengerPair(unittest.TestCase):
         for text in commands:
             with self.subTest(command=text):
                 args = build_parser().parse_args(shlex.split(text))
+                self.assertIsNone(args.slice)
                 self.assertIsNone(command._challenger_flag_problem(args))
         code, stdout, stderr = _invoke(["eval", "run"], **_run_kwargs(EvalHost()))
         self.assertEqual((code, stdout), (1, ""))
@@ -2849,6 +3058,7 @@ class ChallengerPair(unittest.TestCase):
                 assert match is not None
                 command_text = match.group(1)
                 parsed = build_parser().parse_args(command_text.split())
+                self.assertIsNone(parsed.slice)
                 self.assertIsNone(command._challenger_flag_problem(parsed))
         for stack_flags in ((), ("--stack", "production")):
             host = ChallengerHost()

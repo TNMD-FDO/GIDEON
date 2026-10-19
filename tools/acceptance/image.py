@@ -51,7 +51,7 @@ ROOT_LV_MIB: Final = 128 * 1024
 # store's image) beside the compressed layers a pull keeps while it extracts.
 DOCKER_LV_MIB: Final = 24 * 1024
 SWAP_LV_MIB: Final = 2 * 1024
-IMAGE_FIX: Final = "Inspect qemu-img, guestfish, and virt-customize output, then retry acceptance."
+IMAGE_FIX: Final = "Inspect qemu-img, guestfish, virt-customize, git, and ssh-keygen output, then retry acceptance."
 
 
 def _partition_sectors() -> tuple[tuple[int, int], ...]:
@@ -153,7 +153,70 @@ def _run(
     return None
 
 
-def _mirror(ctx: HarnessContext, mirror: Path) -> StageResult | None:
+def _trust_commit(ctx: HarnessContext, worktree: Path, mirror: Path, tag: str) -> StageResult:
+    signers = worktree / "config/release-signers"
+    try:
+        public_key = ctx.host.read_text(ctx.spec.run_dir / "signing-key.pub").strip()
+        original = ctx.host.read_text(signers)
+        separator = "" if not original or original.endswith("\n") else "\n"
+        ctx.host.write_text(
+            signers,
+            original + separator + f'gideon-acceptance namespaces="git" {public_key}\n',
+            mode=0o644,
+        )
+    except (OSError, UnicodeError) as exc:
+        return StageResult(
+            "image",
+            False,
+            f"could not append the rehearsal signer: {exc}",
+            IMAGE_FIX,
+        )
+    committed = _run(
+        ctx.host,
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "-c",
+            "user.name=gideon-acceptance",
+            "-c",
+            "user.email=acceptance@gideon.invalid",
+            "commit",
+            "-qam",
+            "acceptance: trust the rehearsal key",
+        ],
+        detail="committed trust in the rehearsal key",
+    )
+    if committed is not None:
+        return committed
+    try:
+        resolved = ctx.host.run(["git", "-C", str(worktree), "rev-parse", "HEAD"])
+    except (OSError, subprocess.SubprocessError) as exc:
+        return StageResult(
+            "image",
+            False,
+            f"could not resolve the trust commit: {exc}",
+            IMAGE_FIX,
+        )
+    if resolved.returncode != 0 or not resolved.stdout.strip():
+        return _failed("image", "could not resolve the trust commit", resolved)
+    trust_commit = resolved.stdout.strip()
+    tagged = _run(
+        ctx.host,
+        ["git", "-C", str(mirror), "tag", tag, trust_commit],
+        detail=f"tagged the mirror {tag}",
+    )
+    if tagged is not None:
+        return tagged
+    return StageResult(
+        "image",
+        True,
+        f"trust commit {trust_commit}",
+        "",
+    )
+
+
+def _mirror(ctx: HarnessContext, mirror: Path) -> StageResult:
     result = _run(
         ctx.host,
         checkout_git(
@@ -168,29 +231,74 @@ def _mirror(ctx: HarnessContext, mirror: Path) -> StageResult | None:
     if result is not None:
         return result
 
-    tag_probe = ctx.host.run(
-        checkout_git(
-            ctx.checkout,
-            "rev-parse",
-            "--verify",
-            f"refs/tags/{ctx.spec.ref}",
-        ),
-        cwd=ctx.checkout,
-    )
-    if tag_probe.returncode == 0:
-        ctx.spec = replace(ctx.spec, clone_ref=ctx.spec.ref)
-        return None
+    key = ctx.spec.run_dir / "signing-key"
+    if not ctx.host.exists(key):
+        generated = _run(
+            ctx.host,
+            [
+                "ssh-keygen",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                "gideon-acceptance",
+                "-f",
+                str(key),
+            ],
+            detail="generated the run-local signing key",
+        )
+        if generated is not None:
+            return generated
+    try:
+        fingerprint = ctx.host.run(["ssh-keygen", "-lf", str(key.with_suffix(".pub"))])
+    except (OSError, subprocess.SubprocessError) as exc:
+        return StageResult(
+            "image",
+            False,
+            f"could not fingerprint the signing key: {exc}",
+            IMAGE_FIX,
+        )
+    if fingerprint.returncode != 0 or not fingerprint.stdout.strip():
+        return _failed("image", "could not fingerprint the signing key", fingerprint)
 
     tag = f"acceptance-{ctx.spec.resolved_commit[:12]}"
-    result = _run(
+    worktree = ctx.spec.run_dir / "trust"
+    added = _run(
         ctx.host,
-        ["git", "-C", str(mirror), "tag", tag, ctx.spec.resolved_commit],
-        detail=f"tagged the mirror {tag}",
+        [
+            "git",
+            "-C",
+            str(mirror),
+            "worktree",
+            "add",
+            "--detach",
+            str(worktree),
+            ctx.spec.resolved_commit,
+        ],
+        detail="created the trust worktree",
     )
-    if result is not None:
-        return result
+    if added is not None:
+        return added
+    try:
+        outcome = _trust_commit(ctx, worktree, mirror, tag)
+    finally:
+        removed = _run(
+            ctx.host,
+            ["git", "-C", str(mirror), "worktree", "remove", "--force", str(worktree)],
+            detail="removed the trust worktree",
+        )
+    if not outcome.ok:
+        return outcome
+    if removed is not None:
+        return removed
     ctx.spec = replace(ctx.spec, clone_ref=tag)
-    return None
+    return StageResult(
+        "image",
+        True,
+        f"{outcome.detail}; signing key {fingerprint.stdout.strip()}",
+        "",
+    )
 
 
 def build(ctx: HarnessContext) -> StageResult:
@@ -225,7 +333,7 @@ def build(ctx: HarnessContext) -> StageResult:
 
     mirror = run_dir / "GIDEON.git"
     mirrored = _mirror(ctx, mirror)
-    if mirrored is not None:
+    if not mirrored.ok:
         return mirrored
 
     customized = _run(
@@ -251,6 +359,6 @@ def build(ctx: HarnessContext) -> StageResult:
     return StageResult(
         "image",
         True,
-        f"created OS disk {OS_DISK_SIZE} and data disk {DATA_DISK_SIZE}",
+        f"created OS disk {OS_DISK_SIZE} and data disk {DATA_DISK_SIZE}; {mirrored.detail}",
         "",
     )

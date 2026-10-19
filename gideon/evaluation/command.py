@@ -1,4 +1,4 @@
-"""The ordered host command for loading, running, and gating an eval slice."""
+"""The ordered host command for loading, running, and gating eval slices."""
 
 import argparse
 import subprocess
@@ -59,6 +59,7 @@ from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 _COMMAND: Final[str] = "eval run"
 _MANUAL_KIND: Final[str] = "manual"
 _SMOKE_KIND: Final[str] = "smoke"
+# The nightly kind runs its ordered suites in one process under one engine-lock claim.
 NIGHTLY_KIND: Final[str] = "nightly"
 _DECISION_KIND: Final[str] = "decision"
 _KINDS: Final[frozenset[str]] = frozenset({_MANUAL_KIND, _SMOKE_KIND, NIGHTLY_KIND, _DECISION_KIND})
@@ -209,6 +210,16 @@ def _resolve_mode(args: argparse.Namespace, slice_name: object) -> tuple[_Mode, 
     mode = _Mode(_DECISION_KIND if decision and not challenger_mode else kind, challenger_mode)
     label = slice_name if isinstance(slice_name, str) and slice_name else "<name>"
     return mode, _paired_flag_problem(label, decision=decision, against=against, kind=kind)
+
+
+def _slice_names(value: object) -> tuple[str, ...]:
+    """Read absent, hand-built, or parser-supplied slice names in order."""
+
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list):
+        return tuple(value)
+    return ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -720,6 +731,31 @@ def _paired_flag_problem(
         return Problem(
             f"--decision records its own kind, not {kind!r}",
             f"Remove --kind {kind} when running --decision, then retry.",
+        )
+    return None
+
+
+def _suite_problem(
+    names: tuple[str, ...], mode: _Mode, command_flags: str, nightly_flags: str
+) -> Problem | None:
+    """Refuse a name given twice, or more than one name outside the nightly kind.
+
+    ``command_flags`` are the run's own retry flags; ``nightly_flags`` the same
+    run's under the nightly kind, the one kind that takes a list.
+    """
+
+    unique = tuple(dict.fromkeys(names))
+    flags = command_flags if len(unique) == 1 or mode.kind == NIGHTLY_KIND else nightly_flags
+    retry = "eval run" + "".join(f" --slice {name}" for name in unique) + flags
+    if len(unique) != len(names):
+        return Problem(
+            "a slice was named more than once",
+            f"Run {report.command(retry)}, then retry.",
+        )
+    if len(names) > 1 and mode.kind != NIGHTLY_KIND:
+        return Problem(
+            "more than one --slice requires --kind nightly",
+            f"Run {report.command(retry)}, then retry.",
         )
     return None
 
@@ -1848,7 +1884,8 @@ def run_eval(
     io = RealHost() if host is None else host
     now = (lambda: datetime.now(UTC)) if clock is None else clock
     new_run_id = (lambda: str(uuid4())) if run_id_factory is None else run_id_factory
-    mode, paired_problem = _resolve_mode(args, getattr(args, "slice", None))
+    names = _slice_names(getattr(args, "slice", None))
+    mode, paired_problem = _resolve_mode(args, names[0] if names else None)
     entry: challenger.ChallengerEntry | None = None
     subject: challenger.ChallengerSubject | None = None
     if mode.challenger:
@@ -1904,16 +1941,26 @@ def run_eval(
             )
         )
     stack_name = getattr(args, "stack", PRODUCTION_STACK)
-    paths = stacks.resolve_stack(stack_name, rendered_dir)
-    command_flags = ("" if mode.challenger else paths.flag_fragment) + mode.kind_flags
+    stack_flag = stacks.flag_fragment(stack_name)
+    command_flags = ("" if mode.challenger else stack_flag) + mode.kind_flags
     against = getattr(args, "against", None)
     if mode.pairs and isinstance(against, str) and against:
         command_flags += f" --decision --against {against}"
-    if getattr(args, "force", False):
-        command_flags += " --force"
+    force_flag = " --force" if getattr(args, "force", False) else ""
     generation_name = getattr(args, "generation", None)
-    if generation_name is not None:
-        command_flags += f" --generation {generation_name}"
+    generation_flag = "" if generation_name is None else f" --generation {generation_name}"
+    command_flags += force_flag + generation_flag
+    # Judged before the stack resolves, since a ci stack selects its secrets directory.
+    suite_problem = _suite_problem(
+        names,
+        mode,
+        command_flags,
+        f"{stack_flag} --kind {NIGHTLY_KIND}{force_flag}{generation_flag}",
+    )
+    if suite_problem is not None:
+        print(refusal(_COMMAND, suite_problem.problem, suite_problem.fix), file=sys.stderr)
+        return 1
+    paths = stacks.resolve_stack(stack_name, rendered_dir)
     actual_models = checkout / "models.lock" if models_path is None else models_path
     supplied_root = getattr(args, "set", None)
     set_root = checkout / SET_ROOT if supplied_root is None else Path(supplied_root)
@@ -1922,7 +1969,7 @@ def run_eval(
         slice_name=(
             subject.slice_name
             if mode.challenger and subject is not None
-            else getattr(args, "slice", None)
+            else names[0] if names else None
         ),
         mode=mode,
         paths=paths,
@@ -1950,7 +1997,18 @@ def run_eval(
 
     try:
         if not mode.challenger:
-            return _run_body(request, seams, _Pass(new_run_id())).exit_code
+            if len(names) <= 1:
+                return _run_body(request, seams, _Pass(new_run_id())).exit_code
+            exit_code = 0
+            for index, name in enumerate(names, 1):
+                run_id = new_run_id()
+                print_stage(
+                    StageResult("suite", True, f"{index} of {len(names)}: {name}, run {run_id}", "")
+                )
+                exit_code = _run_body(
+                    replace(request, slice_name=name), seams, _Pass(run_id)
+                ).exit_code
+            return exit_code
 
         assert entry is not None and subject is not None
         release_id, challenger_id = new_run_id(), new_run_id()

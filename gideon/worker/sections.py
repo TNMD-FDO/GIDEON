@@ -63,6 +63,8 @@ _HEADING_PUNCT: Final = re.compile(r"[^\w\s]|_")
 _SPACES: Final = re.compile(r"\s+")
 
 # exempt: these bounded byline and disposition shapes are starting values to be measured.
+PREAMBLE_MAX_CHARS: Final = 60
+_JOINDER_VERBS: Final = r"\b(?:join|joins|joined|concur|concurs|concurred)\b"
 _NAME: Final = r"[A-Z][A-Za-z'’.-]*(?:\s+[A-Z][A-Za-z'’.-]*){0,3}"
 _ROLE: Final = (
     r"(?:C\.\s*J\.|JJ\.|J\.|Chief Judge|Circuit Judge|District Judge|"
@@ -72,7 +74,11 @@ _ROLE: Final = (
 # joiners' clause (which may wrap), or a disposition, ending at the paragraph's
 # end or at the first period after it that whitespace follows, a role's own
 # period passed over. A separate opinion's disposition is its closed words, so
-# prose such as "dissenting in that case, argued ..." is not one.
+# prose such as "dissenting in that case, argued ..." is not one. One short
+# clause naming no judge may stand before a disposition, never before a bare
+# end, and is tried last, so a disposition's own comma never opens one; the
+# disposition is read from the words after the joiners' clause, whose verb
+# may be a concurrence's.
 _DISPOSITION_WORDS: Final = (
     r"(?:in|part|and|the|judgment|result|concurring|dissenting|from|denial|of|"
     r"certiorari|per|curiam)\b"
@@ -81,11 +87,23 @@ _BYLINE_END: Final = r"(?:[\s.,:;]*$|\.[*†‡]?(?=\s)|(?<=\.)(?=\s))"
 _BYLINE_START: Final = (
     rf"(?:{_NAME},\s*(?i:{_ROLE})|(?i:(?:Mr\.\s+)?(?:Chief\s+)?Justice)\s+{_NAME})"
 )
-_BYLINE_SUFFIX: Final = (
-    r"[\s,:;]*(?:with\s+whom\b[\s\S]{0,200}?\bjoin(?:s|ed)?\b[^.]{0,80}?[\s,:;]*)?"
+_BYLINE_JOINERS: Final = (
+    rf"(?:(?:with\s+)?whom\b[\s\S]{{0,200}}?{_JOINDER_VERBS}[^.]{{0,80}}?[\s,:;]*)?"
+)
+_BYLINE_TAIL: Final = (
     rf"(?:(?:delivered|announced|for\s+the\s+court)\b(?:{_ROLE}|[^.])*?{_BYLINE_END}"
     rf"|(?:concurring|dissenting)\b(?:[\s,]+{_DISPOSITION_WORDS})*{_BYLINE_END}"
-    rf"|{_BYLINE_END})"
+    r")"
+)
+_BYLINE_PREAMBLE: Final = (
+    r"(?!\s*(?:(?:with\s+)?whom|concurring|dissenting|delivered|announced|"
+    r"for\s+the\s+court|per\s+curiam)\b)"
+    rf"(?![^.,]*\b{_ROLE}(?!\w))[^.,]{{1,{PREAMBLE_MAX_CHARS}}},\s*"
+)
+_BYLINE_SUFFIX: Final = (
+    rf"[\s,:;]*(?:{_BYLINE_JOINERS}(?P<tail>{_BYLINE_TAIL})"
+    rf"|{_BYLINE_JOINERS}{_BYLINE_END}"
+    rf"|{_BYLINE_PREAMBLE}{_BYLINE_JOINERS}(?P<tail_after_preamble>{_BYLINE_TAIL}))"
 )
 _AUTHOR: Final = re.compile(
     rf"{_BYLINE_START}(?i:{_BYLINE_SUFFIX})"
@@ -99,7 +117,7 @@ _MAJORITY: Final = re.compile(
     r"\b(?:delivered\s+the\s+opinion\s+of\s+the\s+court|for\s+the\s+court|"
     r"opinion\s+of\s+the\s+court)\b", re.IGNORECASE,
 )
-_JOINDER: Final = re.compile(r"\bjoin(?:s|ed)?\b", re.IGNORECASE)
+_JOINDER: Final = re.compile(_JOINDER_VERBS, re.IGNORECASE)
 _ROLE_COUNT: Final = re.compile(rf"(?i:{_ROLE})")
 _PARTICIPANT: Final = re.compile(
     rf"^{_BYLINE_START}(?i:(?:{_ROLE}|[^.])*?\b(?:delivered|filed|joined|"
@@ -215,14 +233,18 @@ def _unbroken(line: str) -> str:
     return _LINE_BREAK_HYPHEN.sub("", line)
 
 
+def _after_closing(line: str) -> int:
+    # A byline the dump ran on after the previous opinion's closing formula is read past it.
+    closing = _CLOSING.match(line)
+    return closing.end() if closing else 0
+
+
 def _byline(line: str) -> str | None:
     # A word the dump hyphenated across a line break is read whole; one extra
     # character prevents a truncated paragraph from passing as a byline that
     # ends exactly at the bound.
     bounded = _unbroken(line)[:LINE_MAX_CHARS + 1]
-    # A byline the dump ran on after the previous opinion's closing formula is read past it.
-    closing = _CLOSING.match(bounded)
-    position = closing.end() if closing else 0
+    position = _after_closing(bounded)
     match = _PER_CURIAM_PREFIX.match(bounded, position) or _AUTHOR.match(bounded, position)
     if match and _eligible(bounded[:match.end()]):
         return bounded[:match.end()]
@@ -230,6 +252,12 @@ def _byline(line: str) -> str | None:
 
 
 def _disposition(line: str) -> str | None:
+    match = _AUTHOR.match(line, _after_closing(line))
+    if match is not None:
+        tail = match.group("tail") or match.group("tail_after_preamble")
+        if tail is None:
+            return None
+        line = tail
     if _PER_CURIAM.search(line):
         return "per_curiam"
     concur = bool(_CONCUR.search(line))

@@ -40,6 +40,7 @@ class UpgradeHost(ReadBytesHost, LockingHost, Protocol):
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
+_RELEASE_SIGNERS: Final = Path("config/release-signers")
 
 
 def _upgrade() -> str:
@@ -77,6 +78,15 @@ _PRE_RELEASE_SET_SUFFIX: Final = re.compile(r"-\d{8}T\d{6}Z$")
 # the previous release; at or after its apply only a rollback goes back.
 def _before_new_tree_fix(tag: str) -> str:
     return f"Correct the refusal, then re-run {_upgrade()} {tag}."
+
+
+def _signature_fix(tag: str) -> str:
+    return (
+        "The tag was not installed. Confirm the tag on the project's tags page and "
+        f"release note, then re-run {_upgrade()} {tag}. If it was signed by a newer "
+        f"key, first run {_upgrade()} <tag> for the release whose config/release-signers "
+        "carries it. See docs/runbooks/install-upgrade.md §2."
+    )
 
 
 _PREFLIGHT_ADVISORY_FIX: Final = (
@@ -516,6 +526,44 @@ def _fetch_stage(
     if before is not None and before != target_commit:
         detail += f"; moved from {before} by this fetch"
     return StageResult("fetch", True, detail, ""), target_commit, from_commit
+
+
+def _signature_stage(
+    io: Host,
+    *,
+    checkout: Path,
+    owner: _CheckoutOwner,
+    tag: str,
+) -> StageResult:
+    signers = checkout / _RELEASE_SIGNERS
+    if not io.exists(signers):
+        return StageResult(
+            "signature",
+            False,
+            f"release signers file {signers} is missing",
+            f"Restore {signers} from the installed release tag as {owner.name}, then "
+            f"re-run {_upgrade()} {tag}. See docs/runbooks/release-files.md §12.",
+        )
+    try:
+        result = _run_git(
+            io,
+            checkout,
+            owner,
+            ("-c", f"gpg.ssh.allowedSignersFile={signers}", "verify-tag", tag),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        result = subprocess.CompletedProcess([], 1, "", str(exc))
+    if result.returncode != 0:
+        return StageResult(
+            "signature",
+            False,
+            f"tag {tag} is not signed by the release key: {command_detail(result)}",
+            _signature_fix(tag),
+        )
+    detail = f"tag {tag} is signed by the release key"
+    if result.stdout.strip() or result.stderr.strip():
+        detail += f": {command_detail(result)}"
+    return StageResult("signature", True, detail, "")
 
 
 def _tree_version(
@@ -1673,6 +1721,12 @@ def run_upgrade(
         )
     print_stage(fetched)
     if not fetched.ok or target_commit is None or from_commit is None:
+        return 1
+
+    with timer.timed("signature"):
+        signature = _signature_stage(io, checkout=root, owner=owner, tag=tag)
+    print_stage(signature)
+    if not signature.ok:
         return 1
 
     with timer.timed("version"):

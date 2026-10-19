@@ -7,6 +7,7 @@ import io
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import unittest
 import xml.etree.ElementTree as ET
@@ -14,12 +15,13 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import cast
 from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.host import backuproots, backupset, cas, derivedstores, stack, stages
+from gideon.host import backuproots, backupset, cas, derivedstores, stack, stages, sysio
 from gideon.host import install as host_install
 from gideon.host import restore as host_restore
 from gideon.host import site as host_site
@@ -78,6 +80,7 @@ NETWORK = (
     "Autostart: yes\n"
 )
 RESOLVED = "a" * 40
+TRUST_COMMIT = "b" * 40
 # Every git call on the box's checkout names it safe: the harness runs as root
 # over a CSA-owned tree and never runs git as that owner.
 REV_PARSE = ("git", "-c", f"safe.directory={CHECKOUT}", "rev-parse", "--verify", "HEAD^{commit}")
@@ -163,6 +166,7 @@ class FakeHost:
             tuple[tuple[str, ...], Mapping[str, str] | None, str | None, PathLike | None]
         ] = []
         self.writes: list[str] = []
+        self.reads: list[str] = []
         self.directories: set[str] = set()
         self.chowns: list[tuple[str, int, int]] = []
         self.domain_xml: str | None = None
@@ -185,7 +189,12 @@ class FakeHost:
         self.calls.append((command, env, input, cwd))
         if command[:2] == ("ssh-keygen", "-t"):
             key_path = command[command.index("-f") + 1]
+            self.files[key_path] = "FICTITIOUS PRIVATE KEY\n"
             self.files[f"{key_path}.pub"] = "ssh-ed25519 AAAA acceptance-key\n"
+        if command[:1] == ("git",) and command[3:6] == ("worktree", "add", "--detach"):
+            self.files[str(Path(command[6]) / "config/release-signers")] = self.files.get(
+                str(CHECKOUT / "config/release-signers"), "# Fictitious release signers.\n"
+            )
         if command[:2] == ("virsh", "define"):
             self.domain_xml = self.files.get(command[2], "")
         outcome = self.commands.get(command)
@@ -259,6 +268,7 @@ class FakeHost:
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
         del encoding
         key = os.fspath(path)
+        self.reads.append(key)
         try:
             return self.files[key]
         except KeyError:
@@ -324,6 +334,7 @@ class FakeHost:
 
 def base_files() -> dict[str, str]:
     return {
+        str(CHECKOUT / "config/release-signers"): "# Fictitious release signers.\n",
         str(CHECKOUT / "host.lock"): LOCK.read_text(),
         str(CHECKOUT / "tools/acceptance/domain.xml.tmpl"): TEMPLATE.read_text(),
         str(CHECKOUT / "tools/acceptance/site.yaml.tmpl"): (
@@ -374,16 +385,22 @@ def phase_b_commands(name: str = "test-vm") -> dict[tuple[str, ...], subprocess.
         str(run_dir / "GIDEON.git"),
     )
     commands[mirror_clone] = completed(mirror_clone)
-    tag_probe = (
-        "git",
-        "-c",
-        f"safe.directory={CHECKOUT}",
-        "rev-parse",
-        "--verify",
-        "refs/tags/HEAD",
+    generate = ("ssh-keygen", "-t", "ed25519", "-N", "", "-C", "gideon-acceptance", "-f", str(run_dir / "signing-key"))
+    commands[generate] = completed(generate)
+    fingerprint = ("ssh-keygen", "-lf", str(run_dir / "signing-key.pub"))
+    commands[fingerprint] = completed(fingerprint, stdout="256 SHA256:fictitious-rehearsal gideon-acceptance (ED25519)\n")
+    worktree = run_dir / "trust"
+    add = ("git", "-C", str(run_dir / "GIDEON.git"), "worktree", "add", "--detach", str(worktree), RESOLVED)
+    commit = (
+        "git", "-C", str(worktree), "-c", "user.name=gideon-acceptance",
+        "-c", "user.email=acceptance@gideon.invalid", "commit", "-qam", "acceptance: trust the rehearsal key",
     )
-    commands[tag_probe] = completed(tag_probe, returncode=128)
-    tag = ("git", "-C", str(run_dir / "GIDEON.git"), "tag", f"acceptance-{RESOLVED[:12]}", RESOLVED)
+    remove = ("git", "-C", str(run_dir / "GIDEON.git"), "worktree", "remove", "--force", str(worktree))
+    for git_command in (add, commit, remove):
+        commands[git_command] = completed(git_command)
+    head = ("git", "-C", str(worktree), "rev-parse", "HEAD")
+    commands[head] = completed(head, stdout=TRUST_COMMIT + "\n")
+    tag = ("git", "-C", str(run_dir / "GIDEON.git"), "tag", f"acceptance-{RESOLVED[:12]}", TRUST_COMMIT)
     commands[tag] = completed(tag)
     customize = (
         "virt-customize",
@@ -2073,35 +2090,97 @@ class PhaseBBuild(unittest.TestCase):
             commands,
         )
         self.assertIn(
-            ("git", "-C", str(RUN_DIR / "GIDEON.git"), "tag", f"acceptance-{RESOLVED[:12]}", RESOLVED),
+            ("git", "-C", str(RUN_DIR / "GIDEON.git"), "tag", f"acceptance-{RESOLVED[:12]}", TRUST_COMMIT),
             commands,
         )
         self.assertEqual(ctx.spec.clone_ref, f"acceptance-{RESOLVED[:12]}")
+        self.assertIn(f"trust commit {TRUST_COMMIT}", result.detail)
+        self.assertIn("SHA256:fictitious-rehearsal", result.detail)
+        self.assertIn(
+            ("ssh-keygen", "-t", "ed25519", "-N", "", "-C", "gideon-acceptance", "-f", str(RUN_DIR / "signing-key")),
+            commands,
+        )
+        self.assertEqual(
+            host.files[str(RUN_DIR / "trust/config/release-signers")],
+            host.files[str(CHECKOUT / "config/release-signers")]
+            + 'gideon-acceptance namespaces="git" ssh-ed25519 AAAA acceptance-key\n',
+        )
+        self.assertNotIn(str(RUN_DIR / "signing-key"), host.reads)
+        self.assertIn(str(RUN_DIR / "signing-key.pub"), host.reads)
+        self.assertIn(
+            ("git", "-C", str(RUN_DIR / "trust"), "-c", "user.name=gideon-acceptance", "-c", "user.email=acceptance@gideon.invalid", "commit", "-qam", "acceptance: trust the rehearsal key"),
+            commands,
+        )
+        self.assertIn(
+            ("git", "-C", str(RUN_DIR / "GIDEON.git"), "worktree", "remove", "--force", str(RUN_DIR / "trust")),
+            commands,
+        )
         customize = next(command for command in commands if command[:1] == ("virt-customize",))
         self.assertIn("--no-network", customize)
         self.assertIn("--copy-in", customize)
         self.assertIn("dracut --force --no-hostonly --regenerate-all", customize)
 
-    def test_tag_ref_is_cloned_without_creating_a_mirror_only_tag(self) -> None:
+    def test_tag_ref_receives_the_trust_commit_and_mirror_only_tag(self) -> None:
         host = FakeHost(commands=phase_b_commands(), files=base_files())
         tag_ref = replace(harness_context(host).spec, ref="v9.8.7")
         ctx = harness_context(host)
         ctx.spec = tag_ref
-        tag_probe = (
-            "git",
-            "-c",
-            f"safe.directory={CHECKOUT}",
-            "rev-parse",
-            "--verify",
-            "refs/tags/v9.8.7",
+        result = image.build(ctx)
+
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(ctx.spec.clone_ref, f"acceptance-{RESOLVED[:12]}")
+        self.assertIn(f"trust commit {TRUST_COMMIT}", result.detail)
+        self.assertIn(
+            ("git", "-C", str(RUN_DIR / "GIDEON.git"), "tag", ctx.spec.clone_ref, TRUST_COMMIT),
+            [call[0] for call in host.calls],
         )
-        host.commands[tag_probe] = completed(tag_probe, stdout=RESOLVED + "\n")
+
+    def test_kept_run_reuses_its_signing_key(self) -> None:
+        host = FakeHost(commands=phase_b_commands(), files=base_files())
+        key = str(RUN_DIR / "signing-key")
+        host.files[key] = "FICTITIOUS EXISTING PRIVATE KEY\n"
+        host.files[key + ".pub"] = "ssh-ed25519 AAAA existing-run-key\n"
+        ctx = harness_context(host)
+        ctx.spec = replace(ctx.spec, keep=True)
 
         result = image.build(ctx)
 
         self.assertTrue(result.ok, result.detail)
-        self.assertEqual(ctx.spec.clone_ref, "v9.8.7")
-        self.assertFalse(any(command[0:4] == ("git", "-C", str(RUN_DIR / "GIDEON.git"), "tag") for command in (call[0] for call in host.calls)))
+        self.assertFalse(any(call[0][:2] == ("ssh-keygen", "-t") for call in host.calls))
+        self.assertEqual(host.files[key], "FICTITIOUS EXISTING PRIVATE KEY\n")
+        self.assertIn("existing-run-key", host.files[str(RUN_DIR / "trust/config/release-signers")])
+        self.assertNotIn(key, host.reads)
+
+    def test_failed_fingerprint_refuses_even_when_it_prints_a_fingerprint(self) -> None:
+        host = FakeHost(commands=phase_b_commands(), files=base_files())
+        command = ("ssh-keygen", "-lf", str(RUN_DIR / "signing-key.pub"))
+        host.commands[command] = completed(command, 1, "SHA256:fictitious-rehearsal", "cannot fingerprint")
+
+        result = image.build(harness_context(host))
+
+        self.assertFalse(result.ok)
+        self.assertIn("cannot fingerprint", result.detail)
+        self.assertTrue(result.fix)
+        self.assertEqual(host.writes, [])
+
+    def test_trust_failure_removes_its_worktree_and_refuses(self) -> None:
+        for operation in ("commit", "remove"):
+            with self.subTest(operation=operation):
+                commands = phase_b_commands()
+                command = next(command for command in commands if operation in command)
+                commands[command] = completed(command, 1, stderr=f"{operation} refused")
+                host = FakeHost(commands=commands, files=base_files())
+
+                result = image.build(harness_context(host))
+
+                self.assertFalse(result.ok)
+                self.assertIn(f"{operation} refused", result.detail)
+                self.assertTrue(result.fix)
+                self.assertIn(
+                    ("git", "-C", str(RUN_DIR / "GIDEON.git"), "worktree", "remove", "--force", str(RUN_DIR / "trust")),
+                    [call[0] for call in host.calls],
+                )
+                self.assertFalse(any(call[0][0] == "virt-customize" for call in host.calls))
 
     def test_seed_contains_the_two_csas_and_unprivileged_backup_account(self) -> None:
         host = FakeHost(commands=phase_b_commands(), files=base_files())
@@ -2132,6 +2211,85 @@ class PhaseBBuild(unittest.TestCase):
         commands = [call[0] for call in host.calls]
         self.assertIn(("ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(RUN_DIR / "id_ed25519"), "-C", ctx.run_id), commands)
         self.assertIn(("cloud-localds", str(RUN_DIR / "seed.iso"), str(RUN_DIR / "user-data"), str(RUN_DIR / "meta-data")), commands)
+
+
+@unittest.skipUnless(shutil.which("git") and shutil.which("ssh-keygen"), "git and ssh-keygen are required")
+class RealRehearsalSigning(unittest.TestCase):
+    def test_trust_commit_and_signed_rc_with_no_global_git_configuration(self) -> None:
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        checkout = root / "checkout"
+        checkout.mkdir()
+        run_dir = root / "run"
+        run_dir.mkdir()
+        global_config = root / "gitconfig"
+        global_config.write_text("", encoding="utf-8")
+        environment = patch.dict(os.environ, {
+            "GIT_CONFIG_GLOBAL": str(global_config), "GIT_CONFIG_NOSYSTEM": "1",
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        host = sysio.RealHost()
+
+        def git(repository: Path, *arguments: str) -> str:
+            result = host.run(["git", "-C", str(repository), *arguments])
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return result.stdout.strip()
+
+        version = checkout / "gideon/__init__.py"
+        version.parent.mkdir()
+        version.write_text('__version__ = "1.2.3"\n', encoding="utf-8")
+        signers = checkout / "config/release-signers"
+        signers.parent.mkdir()
+        original_signers = "# Fictitious release signers.\n"
+        signers.write_text(original_signers, encoding="utf-8")
+        git(checkout, "init", "-q")
+        git(checkout, "add", ".")
+        git(checkout, "-c", "user.name=Fictitious Maintainer", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fictitious release")
+        resolved = git(checkout, "rev-parse", "HEAD")
+        git(checkout, "tag", "v1.2.3")
+        spec = RunSpec("v1.2.3", resolved, "test-vm", run_dir, root / "out", False, None)
+        ctx = HarnessContext(host, FakeFetcher(), checkout, SITE, TEMPLATE, spec, address="192.0.2.1")
+        mirror = run_dir / "GIDEON.git"
+
+        row = image._mirror(ctx, mirror)
+
+        self.assertTrue(row.ok, row.detail)
+        trust_commit = git(mirror, "rev-parse", ctx.spec.clone_ref)
+        self.assertEqual(ctx.spec.clone_ref, f"acceptance-{resolved[:12]}")
+        self.assertNotEqual(trust_commit, resolved)
+        self.assertIn(f"trust commit {trust_commit}", row.detail)
+        self.assertIn("SHA256:", row.detail)
+        self.assertEqual(git(mirror, "diff", "--name-only", resolved, trust_commit), "config/release-signers")
+        trusted = git(mirror, "show", f"{trust_commit}:config/release-signers")
+        public_key = (run_dir / "signing-key.pub").read_text(encoding="utf-8").strip()
+        self.assertEqual(trusted, original_signers + f'gideon-acceptance namespaces="git" {public_key}')
+        self.assertEqual(git(checkout, "status", "--porcelain"), "")
+        self.assertFalse((run_dir / "trust").exists())
+        destination = root / "vm.git"
+        git(root, "clone", "--mirror", str(mirror), str(destination))
+
+        def local_git(
+            io: sysio.Host, argv: Sequence[str], *, env: Mapping[str, str] | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            command = list(argv)
+            if "push" in command:
+                command[command.index("push") + 1] = str(destination)
+            return io.run(command, env=env)
+
+        with patch.object(rehearsal, "_git", side_effect=local_git):
+            made = rehearsal.make_tag(ctx, "1.2.3", "v1.2.4-rc.1")
+
+        self.assertIsNone(made, made)
+        self.assertEqual(git(destination, "cat-file", "-t", "v1.2.4-rc.1"), "tag")
+        self.assertEqual(git(destination, "show", "v1.2.4-rc.1:config/release-signers"), trusted)
+        self.assertEqual(git(destination, "rev-parse", "v1.2.4-rc.1^"), trust_commit)
+        self.assertEqual(git(destination, "show", "v1.2.4-rc.1:gideon/__init__.py"), '__version__ = "1.2.4-rc.1"')
+        trusted_path = root / "release-signers"
+        trusted_path.write_text(trusted + "\n", encoding="utf-8")
+        git(destination, "-c", f"gpg.ssh.allowedSignersFile={trusted_path}", "verify-tag", "v1.2.4-rc.1")
+        self.assertFalse((run_dir / "rehearsal").exists())
 
 
 class VmContracts(unittest.TestCase):
@@ -2451,7 +2609,7 @@ class PhaseFourRehearsal(unittest.TestCase):
         )
         host.commands[show] = completed(show, stdout='__version__ = "1.2.3"\n')
         host.files[str(worktree / "gideon/__init__.py")] = '__version__ = "1.2.3"\n'
-        add = ("git", "-C", str(mirror), "worktree", "add", "--detach", str(worktree), RESOLVED)
+        add = ("git", "-C", str(mirror), "worktree", "add", "--detach", str(worktree), ctx.spec.clone_ref)
         commit = (
             "git",
             "-C",
@@ -2464,7 +2622,11 @@ class PhaseFourRehearsal(unittest.TestCase):
             "-qam",
             "acceptance: rehearse v1.2.4-rc.1",
         )
-        tag = ("git", "-C", str(worktree), "tag", "v1.2.4-rc.1")
+        tag = (
+            "git", "-C", str(worktree), "-c", "user.name=gideon-acceptance",
+            "-c", "user.email=acceptance@gideon.invalid", "-c", "gpg.format=ssh",
+            "-c", f"user.signingkey={RUN_DIR / 'signing-key'}", "tag", "-s", "-m", "v1.2.4-rc.1", "v1.2.4-rc.1",
+        )
         push = (
             "git",
             "-C",
@@ -2535,9 +2697,9 @@ class PhaseFourRehearsal(unittest.TestCase):
         self.assertEqual(
             [call[0] for call in git_calls[1:]],
             [
-                ("git", "-C", str(RUN_DIR / "GIDEON.git"), "worktree", "add", "--detach", str(RUN_DIR / "rehearsal"), RESOLVED),
+                ("git", "-C", str(RUN_DIR / "GIDEON.git"), "worktree", "add", "--detach", str(RUN_DIR / "rehearsal"), ctx.spec.clone_ref),
                 ("git", "-C", str(RUN_DIR / "rehearsal"), "-c", "user.name=gideon-acceptance", "-c", "user.email=acceptance@gideon.invalid", "commit", "-qam", "acceptance: rehearse v1.2.4-rc.1"),
-                ("git", "-C", str(RUN_DIR / "rehearsal"), "tag", "v1.2.4-rc.1"),
+                ("git", "-C", str(RUN_DIR / "rehearsal"), "-c", "user.name=gideon-acceptance", "-c", "user.email=acceptance@gideon.invalid", "-c", "gpg.format=ssh", "-c", f"user.signingkey={RUN_DIR / 'signing-key'}", "tag", "-s", "-m", "v1.2.4-rc.1", "v1.2.4-rc.1"),
                 ("git", "-C", str(RUN_DIR / "rehearsal"), "push", "ssh://csa1@192.168.122.10/srv/GIDEON.git", "refs/tags/v1.2.4-rc.1"),
                 ("git", "-C", str(RUN_DIR / "GIDEON.git"), "worktree", "remove", "--force", str(RUN_DIR / "rehearsal")),
             ],

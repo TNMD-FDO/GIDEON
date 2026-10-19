@@ -6,7 +6,9 @@ custody in place, and the Docker, Compose, toolkit, and driver refusals
 each read before any write.
 """
 
+import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -50,6 +52,7 @@ from gideon.host.steps import (
     Step,
     StepFailure,
     apt_install,
+    openpgp_fingerprint,
     package_version,
 )
 from gideon.host.steps.accounts import CsaAccountsStep, ServiceUserStep
@@ -84,6 +87,7 @@ from gideon.host.steps.docker import (
     _DAEMON,
     _JOURNALD_CAT,
     _JOURNALD_TEXT,
+    _KEY_FINGERPRINT,
     _KEY_URL,
     _KEYRING,
     _PACKAGES,
@@ -93,6 +97,7 @@ from gideon.host.steps.docker import (
     _SUITE,
     JOURNALD_DROP_IN,
     DockerEngineStep,
+    _verify_keyring,
 )
 from gideon.host.steps.maintenance import (
     _PERIODIC,
@@ -169,6 +174,7 @@ LOCK = ROOT / "host.lock"
 MODELS = ROOT / "models.lock"
 EXAMPLE = ROOT / "config/site.example.yaml"
 BASELINE = ROOT / "tests/fixtures/host/baseline-post-reinstall"
+DOCKER_RELEASE_KEY = (ROOT / "tests/fixtures/docker-release-ce-deb.asc").read_text(encoding="utf-8")
 MODELS_LOCK = load_models_lock(MODELS).lock
 assert MODELS_LOCK is not None
 
@@ -1841,6 +1847,181 @@ class AptInstallTests(unittest.TestCase):
         self.assertIn(("run", (("apt-get", "install", "-y", absent), True)), host.calls)
 
 
+def armored_packet(packet: bytes) -> str:
+    return (
+        "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\n"
+        + base64.b64encode(packet).decode("ascii")
+        + "\n-----END PGP PUBLIC KEY BLOCK-----\n"
+    )
+
+
+def release_key_packets() -> bytes:
+    body = DOCKER_RELEASE_KEY.split("\n\n", 1)[1].split("\n=", 1)[0]
+    return base64.b64decode("".join(body.split()))
+
+
+FICTITIOUS_KEY_BODY = b"\x04fictitious public key"
+FICTITIOUS_KEY = armored_packet(
+    b"\xc6" + bytes([len(FICTITIOUS_KEY_BODY)]) + FICTITIOUS_KEY_BODY
+)
+
+
+class OpenPgpFingerprintTests(unittest.TestCase):
+    def test_release_key_matches_published_fingerprint(self) -> None:
+        self.assertEqual(openpgp_fingerprint(DOCKER_RELEASE_KEY), _KEY_FINGERPRINT)
+
+    def test_changed_base64_body_fails_armor_checksum(self) -> None:
+        start = DOCKER_RELEASE_KEY.index("\n\n") + 2
+        index = start + 30
+        changed = "A" if DOCKER_RELEASE_KEY[index] != "A" else "B"
+        text = DOCKER_RELEASE_KEY[:index] + changed + DOCKER_RELEASE_KEY[index + 1:]
+        with self.assertRaisesRegex(ValueError, "armor checksum mismatch"):
+            openpgp_fingerprint(text)
+
+    def test_non_key_and_empty_text_refuse(self) -> None:
+        for text in ("fictitious non-key text", ""):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "no armored public key block"):
+                openpgp_fingerprint(text)
+
+    def test_old_and_new_packet_lengths_and_armor_headers(self) -> None:
+        expected = hashlib.sha1(
+            b"\x99" + len(FICTITIOUS_KEY_BODY).to_bytes(2, "big") + FICTITIOUS_KEY_BODY
+        ).hexdigest().upper()
+        headers = [
+            b"\x98" + bytes([len(FICTITIOUS_KEY_BODY)]),
+            b"\x99" + len(FICTITIOUS_KEY_BODY).to_bytes(2, "big"),
+            b"\x9a" + len(FICTITIOUS_KEY_BODY).to_bytes(4, "big"),
+            b"\xc6" + bytes([len(FICTITIOUS_KEY_BODY)]),
+            b"\xc6\xff" + len(FICTITIOUS_KEY_BODY).to_bytes(4, "big"),
+        ]
+        for header in headers:
+            with self.subTest(header=header):
+                text = armored_packet(header + FICTITIOUS_KEY_BODY)
+                text = text.replace("BLOCK-----\n\n", "BLOCK-----\nComment: fictitious\n\n", 1)
+                self.assertEqual(openpgp_fingerprint(text), expected)
+        body = FICTITIOUS_KEY_BODY + b"x" * 200
+        packet = b"\xc6" + bytes([192, len(body) - 192]) + body
+        self.assertEqual(
+            openpgp_fingerprint(armored_packet(packet)),
+            hashlib.sha1(b"\x99" + len(body).to_bytes(2, "big") + body).hexdigest().upper(),
+        )
+
+    def test_invalid_packets_refuse_with_lowercase_reasons(self) -> None:
+        for packet, reason in (
+            (b"", "no openpgp packets"),
+            (b"\x00", "invalid packet header"),
+            (b"\xc6", "truncated packet length"),
+            (b"\xc6\xc0", "truncated packet length"),
+            (b"\xc6\xff\x00", "truncated packet length"),
+            (b"\x99\x00", "truncated packet length"),
+            (b"\xc6\xe0", "partial packet length"),
+            (b"\x9b", "indeterminate packet length"),
+            (b"\xcd\x01\x04", "first packet is not a public key"),
+            (b"\xc6\x00", "empty public key packet"),
+            (b"\xc6\x02\x04", "truncated packet body"),
+            (b"\xc6\x01\x05", "key version 5 is not v4"),
+        ):
+            with self.subTest(packet=packet), self.assertRaisesRegex(ValueError, reason):
+                openpgp_fingerprint(armored_packet(packet))
+
+    def test_release_key_with_anything_appended_refuses(self) -> None:
+        released = release_key_packets()
+        extra_key = b"\xc6" + bytes([len(FICTITIOUS_KEY_BODY)]) + FICTITIOUS_KEY_BODY
+        for text, reason in (
+            (armored_packet(released + extra_key), "more than one primary key"),
+            (armored_packet(released + b"\xc5\x01\x04"), "unexpected packet tag 5"),
+            (DOCKER_RELEASE_KEY + FICTITIOUS_KEY, "text after the armor block"),
+        ):
+            with self.subTest(reason=reason), self.assertRaisesRegex(ValueError, reason):
+                openpgp_fingerprint(text)
+        self.assertEqual(openpgp_fingerprint(armored_packet(released)), _KEY_FINGERPRINT)
+
+    def test_invalid_armor_refuses(self) -> None:
+        for text, reason in (
+            (FICTITIOUS_KEY.replace("\n\n", "\n"), "invalid armor header"),
+            (FICTITIOUS_KEY.replace("-----END PGP PUBLIC KEY BLOCK-----", ""), "missing armor end"),
+            (FICTITIOUS_KEY.replace("\n\n", "\n\n!"), "invalid armor base64"),
+            (FICTITIOUS_KEY.replace("-----END", "=!!!!\n-----END"), "invalid armor base64"),
+        ):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, reason):
+                openpgp_fingerprint(text)
+
+
+class DockerKeyringVerificationTests(unittest.TestCase):
+    def test_downloaded_wrong_key_is_removed_before_source_or_apt(self) -> None:
+        partial = f"{_KEYRING}.partial"
+        host = FakeHost(files={partial: FICTITIOUS_KEY}, commands=docker_absent_commands())
+
+        with self.assertRaises(StepFailure) as raised:
+            DockerEngineStep().apply(context(host))
+
+        self.assertIn(partial, raised.exception.detail)
+        self.assertIn(_KEY_FINGERPRINT, raised.exception.detail)
+        self.assertIn(openpgp_fingerprint(FICTITIOUS_KEY), raised.exception.detail)
+        self.assertIn(str(_KEYRING), raised.exception.fix)
+        self.assertIn(_KEY_URL, raised.exception.fix)
+        self.assertNotIn(partial, host.files)
+        self.assertIn(("unlink", partial), host.calls)
+        self.assertNotIn(str(_KEYRING), host.files)
+        self.assertNotIn(str(_SOURCE), host.files)
+        self.assertFalse(any(argv[0] in {"mv", "apt-get"} for argv, _, _ in host.runs))
+
+    def test_downloaded_release_key_with_an_appended_key_is_never_moved(self) -> None:
+        partial = f"{_KEYRING}.partial"
+        host = FakeHost(
+            files={partial: DOCKER_RELEASE_KEY + FICTITIOUS_KEY}, commands=docker_absent_commands()
+        )
+
+        with self.assertRaises(StepFailure) as raised:
+            DockerEngineStep().apply(context(host))
+
+        self.assertIn("text after the armor block", raised.exception.detail)
+        self.assertNotIn(partial, host.files)
+        self.assertFalse(any(argv[0] in {"mv", "apt-get"} for argv, _, _ in host.runs))
+
+    def test_present_wrong_keyring_refuses_before_source_or_apt(self) -> None:
+        host = FakeHost(files={str(_KEYRING): FICTITIOUS_KEY}, commands=docker_absent_commands())
+
+        with self.assertRaises(StepFailure) as raised:
+            DockerEngineStep().apply(context(host))
+
+        self.assertIn(str(_KEYRING), raised.exception.detail)
+        self.assertIn(_KEY_FINGERPRINT, raised.exception.detail)
+        self.assertIn(openpgp_fingerprint(FICTITIOUS_KEY), raised.exception.detail)
+        self.assertNotIn(str(_SOURCE), host.files)
+        self.assertFalse(any(argv[0] in {"wget", "mv", "apt-get"} for argv, _, _ in host.runs))
+
+    def test_present_right_keyring_proceeds_before_source_and_apt(self) -> None:
+        files = docker_recipe_files(docker_policy())
+        del files[str(_SOURCE)]
+        host = FakeHost(files=files, commands=docker_absent_commands())
+
+        DockerEngineStep().apply(context(host))
+
+        self.assertEqual(host.files[str(_SOURCE)], _REPO)
+        self.assertIn(("run", (("apt-get", "update"), True)), host.calls)
+        self.assertFalse(any(argv[0] in {"wget", "mv"} for argv, _, _ in host.runs))
+
+    def test_keyring_read_and_parse_failures_name_expected_fingerprint_and_fix(self) -> None:
+        for files, reason in (({}, str(_KEYRING)), ({str(_KEYRING): "non-key text"}, "no armored public key block")):
+            with self.subTest(files=files), self.assertRaises(StepFailure) as raised:
+                _verify_keyring(context(FakeHost(files=files)), str(_KEYRING))
+            self.assertIn(str(_KEYRING), raised.exception.detail)
+            self.assertIn(_KEY_FINGERPRINT, raised.exception.detail)
+            self.assertIn(reason, raised.exception.detail)
+            self.assertIn(str(_KEYRING), raised.exception.fix)
+            self.assertIn(_KEY_URL, raised.exception.fix)
+
+    def test_present_sufficient_docker_skips_wrong_keyring(self) -> None:
+        files = docker_recipe_files(docker_policy())
+        files[str(_KEYRING)] = FICTITIOUS_KEY
+        host = FakeHost(files=files, commands={**docker_commands(), **docker_package_commands()})
+
+        DockerEngineStep().apply(context(host))
+
+        self.assertNotIn(("read_text", str(_KEYRING)), host.calls)
+
+
 class DockerKeyringOrderTests(unittest.TestCase):
     def test_apply_fetches_keyring_before_writing_the_source_entry(self) -> None:
         gpg = os.fspath(_KEYRING)
@@ -1865,7 +2046,7 @@ class DockerKeyringOrderTests(unittest.TestCase):
             ("systemctl", "restart", "docker"),
         ):
             commands[argv] = completed(argv)
-        host = FakeHost(commands=commands)
+        host = FakeHost(commands=commands, files={f"{gpg}.partial": DOCKER_RELEASE_KEY})
         DockerEngineStep().apply(context(host))
         fetch_index = host.calls.index(("run", (wget, True)))
         write_index = next(
@@ -2717,7 +2898,7 @@ def docker_recipe_files(daemon: Mapping[str, object]) -> dict[str, str]:
     files = docker_files(daemon)
     del files[_OLD_DOCKER_KEYRING]
     del files[_OLD_DOCKER_SOURCE]
-    files[os.fspath(_KEYRING)] = "key"
+    files[os.fspath(_KEYRING)] = DOCKER_RELEASE_KEY
     files[os.fspath(_SOURCE)] = _REPO
     return files
 
@@ -3615,13 +3796,14 @@ class DockerSourceTests(unittest.TestCase):
         self.assertEqual(host.files[os.fspath(_SOURCE)], before)
 
     def test_recipe_entry_drift_keeps_source_and_fetches_only_empty_keyring(self) -> None:
-        for key in (None, "", "key"):
+        for key in (None, "", DOCKER_RELEASE_KEY):
             with self.subTest(key=key):
                 files = docker_recipe_files(docker_policy())
                 if key is None:
                     del files[os.fspath(_KEYRING)]
                 else:
                     files[os.fspath(_KEYRING)] = key
+                files[f"{_KEYRING}.partial"] = DOCKER_RELEASE_KEY
                 host = FakeHost(files=files, commands=docker_absent_commands())
                 checked = DockerEngineStep().check(context(host))
                 self.assertEqual(checked.disposition, Disposition.DRIFT)
@@ -3655,6 +3837,7 @@ class DockerSourceTests(unittest.TestCase):
         del files[os.fspath(_KEYRING)]
         del files[os.fspath(_SOURCE)]
         files["/etc/apt/sources.list.d/ubuntu.sources.curtin.orig"] = _REPO
+        files[f"{_KEYRING}.partial"] = DOCKER_RELEASE_KEY
         host = FakeHost(files=files, commands=docker_absent_commands())
         checked = DockerEngineStep().check(context(host))
         self.assertEqual(checked.disposition, Disposition.DRIFT)
@@ -3834,6 +4017,8 @@ class DockerSourceTests(unittest.TestCase):
         }
         for name, files, commands, writes_source, fetches_key, refuses in cases:
             with self.subTest(name=name):
+                if fetches_key:
+                    files[f"{_KEYRING}.partial"] = DOCKER_RELEASE_KEY
                 host = FakeHost(files=files, commands=commands)
                 if refuses:
                     with self.assertRaises(StepFailure):
@@ -5552,7 +5737,6 @@ RUNNER_REMOVE_ARGV = ("runuser", "-u", "gh-runner", "--", "./config.sh", "remove
 RUNNER_SUDOERS = "/etc/sudoers.d/gideon-acceptance"
 RUNNER_SUDOERS_CANDIDATE = "/etc/sudoers.d/gideon-acceptance.candidate"
 RUNNER_SUDOERS_TEXT = (
-    "gh-runner ALL=(root) NOPASSWD: /usr/bin/python3 -m tools.acceptance *\n"
     "gh-runner ALL=(root) NOPASSWD: /usr/local/sbin/gideon-ci-smoke\n"
     "gh-runner ALL=(root) NOPASSWD: /usr/local/sbin/gideon-mask\n"
 )
@@ -5990,17 +6174,16 @@ class ServiceStepTests(unittest.TestCase):
                 self.assertEqual(result.disposition, Disposition.DRIFT)
                 self.assertIn(RUNNER_SUDOERS, result.detail)
 
-    def test_runner_sudoers_names_the_acceptance_smoke_and_mask_commands(self) -> None:
+    def test_runner_sudoers_names_the_smoke_and_mask_commands(self) -> None:
         rules = GhRunnerStep._sudoers_text().splitlines()
         self.assertEqual(
             rules,
             [
-                "gh-runner ALL=(root) NOPASSWD: /usr/bin/python3 -m tools.acceptance *",
                 "gh-runner ALL=(root) NOPASSWD: /usr/local/sbin/gideon-ci-smoke",
                 "gh-runner ALL=(root) NOPASSWD: /usr/local/sbin/gideon-mask",
             ],
         )
-        for rule in rules[1:]:
+        for rule in rules:
             self.assertNotIn("*", rule)
             self.assertNotIn("sh -c", rule)
 
@@ -6133,34 +6316,15 @@ class ServiceStepTests(unittest.TestCase):
 
     def test_workflow_sudo_commands_are_named_by_runner_sudoers(self) -> None:
         rules = [line.split("NOPASSWD: ", 1)[1] for line in RUNNER_SUDOERS_TEXT.splitlines()]
-        workflow_paths = [".github/workflows/ci.yml"]
-        acceptance = ".github/workflows/acceptance.yml"
-        if not absent_from_export(acceptance, ROOT):
-            workflow_paths.append(acceptance)
-
-        def allowed(command: str, rule: str) -> bool:
-            # sudo matches a rule without a wildcard exactly, arguments included.
-            if rule.endswith(" *"):
-                return command.startswith(rule.removesuffix("*"))
-            return command == rule
-
+        relative = ".github/workflows/ci.yml"
         seen = 0
-        for relative in workflow_paths:
-            for line in (ROOT / relative).read_text(encoding="utf-8").splitlines():
-                if "sudo " not in line or line.lstrip().startswith("#"):
-                    continue
-                command = re.split(r" (?:[12]?>|\|)", line.split("sudo ", 1)[1], maxsplit=1)[0]
-                command = command.strip()
-                seen += 1
-                if command.startswith("/"):
-                    self.assertIn(command, rules, f"{relative} command has no exact sudoers rule: {command}")
-                    continue
-                self.assertTrue(command.startswith("python3 "), f"{relative}: unexpected sudo command: {command}")
-                command = command.replace("python3", "/usr/bin/python3", 1)
-                self.assertTrue(
-                    any(allowed(command, rule) for rule in rules),
-                    f"{relative} command has no sudoers rule: {command}",
-                )
+        for line in (ROOT / relative).read_text(encoding="utf-8").splitlines():
+            if "sudo " not in line or line.lstrip().startswith("#"):
+                continue
+            command = re.split(r" (?:[12]?>|\|)", line.split("sudo ", 1)[1], maxsplit=1)[0]
+            command = command.strip()
+            seen += 1
+            self.assertIn(command, rules, f"{relative} command has no exact sudoers rule: {command}")
         self.assertGreaterEqual(seen, 1)
 
         workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))

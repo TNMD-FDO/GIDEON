@@ -144,7 +144,17 @@ def _build_rc(ctx: HarnessContext, worktree: Path, version: str, tag: str) -> St
     )
     if commit.returncode != 0:
         return _git_failure("could not commit the rehearsal tag", commit)
-    tagged = _git(ctx.host, ["git", "-C", str(worktree), "tag", tag])
+    tagged = _git(
+        ctx.host,
+        [
+            "git", "-C", str(worktree),
+            "-c", "user.name=gideon-acceptance",
+            "-c", "user.email=acceptance@gideon.invalid",
+            "-c", "gpg.format=ssh",
+            "-c", f"user.signingkey={ctx.spec.run_dir / 'signing-key'}",
+            "tag", "-s", "-m", tag, tag,
+        ],
+    )
     if tagged.returncode != 0:
         return _git_failure("could not tag the rehearsal worktree", tagged)
     if ctx.address is None:
@@ -173,7 +183,7 @@ def make_tag(ctx: HarnessContext, version: str, tag: str) -> StageResult | None:
     worktree = ctx.spec.run_dir / WORKTREE_NAME
     add = _git(
         ctx.host,
-        ["git", "-C", str(mirror), "worktree", "add", "--detach", str(worktree), ctx.spec.resolved_commit],
+        ["git", "-C", str(mirror), "worktree", "add", "--detach", str(worktree), ctx.spec.clone_ref],
     )
     if add.returncode != 0:
         return _git_failure("could not create the rehearsal worktree", add)

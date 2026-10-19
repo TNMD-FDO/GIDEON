@@ -6,7 +6,7 @@ This runbook explains the committed files named by a refusal, and who may change
 
 Every file in this runbook is release content. The office edits `/etc/gideon/site.yaml` and the supplied secrets under `/etc/gideon/secrets/`; it does not edit files in the install home. A value in a release file changes in a release, usually through a pin-watch pull request.
 
-A refusal naming one of these files at `host provision`, `preflight`, `apply`, `models pull`, or `gideon proposals` means the copy in `/opt/gideon` differs from the release tag. Run `git status --short` there to see the changed file. As the install directory's owner, restore that file from the release tag or clone the tag again, then repeat the refused command. The refusal's “Edit …” instruction is for the person responsible for changing the file in a release.
+A refusal naming one of these files at `host provision`, `preflight`, `apply`, `models pull`, `upgrade`, or `gideon proposals` means the copy in `/opt/gideon` differs from the release tag. Run `git status --short` there to see the changed file. As the install directory's owner, restore that file from the release tag or clone the tag again, then repeat the refused command. The refusal's “Edit …” instruction is for the person responsible for changing the file in a release.
 
 ## 2. `host.lock`
 
@@ -247,3 +247,11 @@ If the command refuses:
 Ctrl-C is safe: the lock is released, and a repeat run records a lockfile written before the interruption without rewriting it.
 
 After a total-loss recovery by `docs/runbooks/backup-restore.md §5`, the corpus record returns with the restored set. If the release's newest committed lockfile already carries the office's courts, install that lockfile with `corpus install <label>`. If the release lacks the office's derived lockfile, run this cut again from the same committed base with the same IDs on a later UTC date; it writes the same pins and courts under a new label.
+
+## 12. `config/release-signers`
+
+This allowed-signers file contains the public keys trusted to sign release tags. It ships with the release and its public export; it is not an office setting. `upgrade` runs `git verify-tag` as the checkout's owner against the installed tree's copy, never the fetched tag's copy, before checking anything out. A lightweight, unsigned, foreign-key, or unverifiable tag refuses.
+
+The release maintainer changes this file at a key rotation. Add the new key's line in a release signed by the old key; sign the next release with the new key; remove the old line one release later. The release note names the rotation. This overlap lets a box one release behind verify the next tag. An office whose installed release does not yet trust the new key upgrades first to the release that adds it.
+
+If `upgrade` names a missing or damaged file, restore `config/release-signers` from the **installed** release tag as the checkout's owner, then run `gideon upgrade <tag>` again. Do not copy the file from the tag that failed verification or add a key by hand to bypass the refusal. Follow `docs/runbooks/install-upgrade.md §2` when the tag itself does not verify.

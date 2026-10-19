@@ -53,8 +53,8 @@ class RunSpec:
     out: Path
     keep: bool
     until: str | None
-    # The tag the VM clones: the ref itself when it is a tag, else the
-    # mirror-only acceptance-<sha12> tag the image stage makes.
+    # The mirror-only acceptance-<sha12> tag: the release plus one signers line
+    # trusting the run-local key, so rehearsal verifies without the release key.
     clone_ref: str = ""
     full_restore: bool = False
     cotenant: str = ""

@@ -1,0 +1,6 @@
+# The keys that sign GIDEON's release tags, in ssh-keygen's allowed-signers format.
+# `upgrade` reads this file from the tree it runs from, never from the tag it fetched,
+# and refuses a tag no line here signed. A new key's line is added in a release the
+# old key signs, and the old line is removed one release later, so a box one release
+# behind still verifies. See docs/runbooks/release-files.md §12.
+gideon-release namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILz22X4Ymxp4F43wV9cqn+Whk/uH6O5ELJ9Ul+K67sKx gideon-release

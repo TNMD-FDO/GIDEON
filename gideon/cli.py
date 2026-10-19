@@ -450,8 +450,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_run.add_argument(
         "--slice",
+        action="append",
         metavar="NAME",
-        help="frozen slice to run",
+        help="frozen slice to run; repeat with --kind nightly for the night's suites in order",
     )
     eval_run.add_argument(
         "--set",

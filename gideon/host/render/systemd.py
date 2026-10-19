@@ -32,8 +32,9 @@ NIGHTLY_CALENDAR: Final = "*-*-* 21:00:00"
 PROPOSALS_TALLY_CALENDAR: Final = "*-*-* 07:00:00"
 # Before the 07:00 tally, so a dump seen Monday morning reaches that morning's nudge.
 UPSTREAM_WATCH_CALENDAR: Final = "Mon *-*-* 06:30:00"
+# One undashed command runs the suites in order, so a stop's SIGTERM ends the unit.
 NIGHTLY_SUITES: Final = ("general-smoke", "guardrails")
-# The build box alone runs this line with `-`, so a failed pair never fails the unit.
+# The build box's challenger is last: `-` keeps a failed pair off the unit's verdict.
 NIGHTLY_CHALLENGER_COMMAND: Final = "eval run --challenger --stack ci --kind nightly"
 # Ten hours, 21:00 to 06:00 plus the last judge readings and one turn's bound:
 # a backstop the command's own 06:00 deadline is meant to make unreachable.
@@ -173,7 +174,7 @@ class VerifyTimerArtifact(_SystemdArtifact):
 
 
 class NightlyServiceArtifact(_SystemdArtifact):
-    """Render the nightly eval suites and the build box's third challenger line."""
+    """Render the suites in one undashed command, then the build box's challenger."""
 
     name = "gideon-eval-nightly-service"
     relative_path = "systemd/gideon-eval-nightly.service"
@@ -186,6 +187,7 @@ class NightlyServiceArtifact(_SystemdArtifact):
 
     def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
         substitutions = dict(super()._substitutions(inputs))
+        substitutions["suite_flags"] = "".join(f" --slice {name}" for name in NIGHTLY_SUITES)
         substitutions["challenger_line"] = (
             f"ExecStart=-/usr/bin/python3 -m gideon {NIGHTLY_CHALLENGER_COMMAND}\n"
             if inputs.build_box

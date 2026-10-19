@@ -369,6 +369,12 @@ def _git(root: Path, *arguments: str) -> None:
 
 
 class CommittedTree(unittest.TestCase):
+    def test_release_signers_are_carried(self) -> None:
+        path = Path("config/release-signers")
+        self.assertTrue((ROOT / path).is_file())
+        self.assertFalse(is_excluded(path.as_posix()))
+        self.assertFalse(absent_from_export(path, ROOT))
+
     def test_committed_attributes(self) -> None:
         items = rule_attributes(ROOT)
         if items:

@@ -44,6 +44,7 @@ EXCLUDED_PREFIXES = (
     "tests/test_evidence_hygiene.py",  # the tracker assets' secret check
     "tests/test_release_git.py",  # bin/release-git's tests
     "tests/test_release_lock.py",  # bin/release-lock's tests
+    "tests/test_release_tag.py",  # bin/release-tag's tests
     "tests/test_export_tree_check.py",  # bin/export-tree-check's tests
     "tests/test_venv_build.py",  # bin/venv-build's tests
     "tests/test_worktree_claim.py",  # bin/worktree-claim's tests
@@ -71,7 +72,6 @@ EXCLUDED_PREFIXES = (
     "eval/sets/eval-v1/slices/gold-drop",  # the gold-drop slice ids must leave with their excluded research questions
     "eval/reference/extraction/harvest.json",  # the harvest reference must leave with its id list
     "eval/reference/smoke/harvest.json",  # the smoke harvest reference must leave with its id list
-    ".github/workflows/acceptance.yml",  # the box acceptance workflow
     ".github/workflows/pin-watch.yml",  # the box pin-watch workflow
     ".github/dependabot.yml",  # Dependabot's development-repository trigger
     "bin",  # the development lifecycle launcher, naming excluded paths

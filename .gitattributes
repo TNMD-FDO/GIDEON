@@ -31,6 +31,7 @@ tests/test_skills_vendored.py export-ignore
 tests/test_evidence_hygiene.py export-ignore
 tests/test_release_git.py export-ignore
 tests/test_release_lock.py export-ignore
+tests/test_release_tag.py export-ignore
 tests/test_export_tree_check.py export-ignore
 tests/test_venv_build.py export-ignore
 tests/test_worktree_claim.py export-ignore
@@ -58,7 +59,6 @@ eval/sets/eval-v1/slices/judgments/ export-ignore
 eval/sets/eval-v1/slices/gold-drop/ export-ignore
 eval/reference/extraction/harvest.json export-ignore
 eval/reference/smoke/harvest.json export-ignore
-.github/workflows/acceptance.yml export-ignore
 .github/workflows/pin-watch.yml export-ignore
 .github/dependabot.yml export-ignore
 bin/ export-ignore

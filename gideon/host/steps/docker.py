@@ -34,6 +34,7 @@ from gideon.host.steps import (
     apt_install,
     box_wide_shortfall,
     fetch_file,
+    openpgp_fingerprint,
     package_version,
     stderr_first_line,
 )
@@ -54,6 +55,8 @@ _JOURNAL_DIR = Path("/var/log/journal")
 # comments also start "# /", so a header is a whole line naming one path.
 _JOURNALD_HEADER = re.compile(r"^# (/\S+)$")
 _KEY_URL = "https://download.docker.com/linux/ubuntu/gpg"
+# The primary key fingerprint Docker publishes for its release key.
+_KEY_FINGERPRINT = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 _REPOSITORY = "https://download.docker.com/linux/ubuntu"
 _SOURCE_TYPE = "deb"
 # The suite is the codename of the release pinned by the lock and moves with it.
@@ -164,6 +167,23 @@ def _keyring_empty(context: ProvisionContext) -> bool:
         return not context.host.read_text(_KEYRING).strip()
     except (OSError, UnicodeError):
         return True
+
+
+def _verify_keyring(context: ProvisionContext, path: str) -> None:
+    """Refuse a key file whose primary fingerprint is not Docker's release key."""
+
+    try:
+        found = openpgp_fingerprint(context.host.read_text(path))
+    except (OSError, ValueError) as exc:
+        found = str(exc)
+    else:
+        if found == _KEY_FINGERPRINT:
+            return
+    raise StepFailure(
+        f"{path} is not Docker's release key: expected fingerprint {_KEY_FINGERPRINT}, found {found}",
+        f"Remove {_KEYRING} if present, confirm {_KEY_URL} serves Docker's release key, "
+        "then re-run provision.",
+    )
 
 
 def _version(text: str) -> tuple[int, int] | None:
@@ -699,7 +719,12 @@ class DockerEngineStep(Step):
             # leave a source line referencing a keyring that is not there, or every
             # later apt-get update on the box fails.
             if not context.host.exists(_KEYRING) or _keyring_empty(context):
-                fetch_file(context, _KEY_URL, str(_KEYRING))
+                fetch_file(
+                    context, _KEY_URL, str(_KEYRING),
+                    verify=lambda path: _verify_keyring(context, path),
+                )
+            else:
+                _verify_keyring(context, str(_KEYRING))
             if not context.host.exists(_SOURCE):
                 context.host.write_text(_SOURCE, _REPO)
         apt_install(context, _PACKAGES)

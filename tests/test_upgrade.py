@@ -7,6 +7,7 @@ import io
 import itertools
 import json
 import os
+import shutil
 import subprocess
 import unittest
 from collections.abc import Mapping, Sequence
@@ -44,7 +45,7 @@ NEXT_MAJOR = f"v{CURRENT.major + 1}.0.0"
 NEXT_MAJOR_PATCH = f"v{CURRENT.major + 1}.0.1"
 SECOND_MAJOR_PATCH = f"v{CURRENT.major + 2}.0.1"
 FORWARD_ROWS = [
-    "preconditions", "fetch", "version", "preflight", "backup", "audit-intent",
+    "preconditions", "fetch", "signature", "version", "preflight", "backup", "audit-intent",
     "checkout", "provision", "preflight", "apply", "verify", "engine-verify", "audit-applied",
 ]
 ROLLBACK_ROWS = [
@@ -146,6 +147,7 @@ class FakeHost:
         owner_uid: int = 1000,
         dirty: bool = False,
         fetch_ok: bool = True,
+        signed: bool = True,
         tag_present: bool = True,
         cached_commit: str | None = None,
         head: str = FROM_COMMIT,
@@ -169,6 +171,7 @@ class FakeHost:
         self.owner_uid = owner_uid
         self.dirty = dirty
         self.fetch_ok = fetch_ok
+        self.signed = signed
         self.tag_present = tag_present
         self.cached_commit = cached_commit
         self.fetched = False
@@ -190,6 +193,7 @@ class FakeHost:
         self.calls: list[tuple[tuple[str, ...], str | None, bool]] = []
         self.child_environments: list[Mapping[str, str] | None] = []
         self.files: dict[str, str] = {str(EXAMPLE): EXAMPLE.read_text()}
+        self.files[f"{CHECKOUT}/config/release-signers"] = "# Fictitious release signers.\n"
         for path in (
             ROOT / "host.lock",
             ROOT / "models.lock",
@@ -265,6 +269,10 @@ class FakeHost:
         return completed(command)
 
     def _git(self, command: tuple[str, ...], arguments: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        if arguments[:3] == ("-c", f"gpg.ssh.allowedSignersFile={CHECKOUT}/config/release-signers", "verify-tag"):
+            if self.signed:
+                return completed(command, stdout='Good "git" signature for fictitious-release\n')
+            return subprocess.CompletedProcess(command, 1, "No principal matched.\n", "Untrusted signature.\n")
         if arguments == ("rev-parse", "--is-inside-work-tree"):
             return completed(command, stdout="true\n")
         if arguments == ("status", "--porcelain", "--untracked-files=no"):
@@ -598,6 +606,80 @@ class PrecheckoutPreflight(CommandRunner):
 class UpgradeTests(CommandRunner):
     """The forward path: ``upgrade <tag>``."""
 
+    def test_signature_refusal_stops_after_fetch_in_both_command_forms(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                prefix = "gideon" if installed else "sudo python3 -m gideon"
+                host = FakeHost(signed=False)
+
+                code, out, err, runners, backend = self.run_upgrade(host)
+
+                self.assertEqual(code, 1, out + err)
+                self.assertEqual(err, "")
+                self.assertEqual(rows_of(out), ["preconditions", "fetch", "signature"])
+                self.assertIn(
+                    f"signature: refuse — tag {HIGHER} is not signed by the release key: "
+                    "Untrusted signature. | No principal matched. Fix: The tag was not "
+                    "installed. Confirm the tag on the project's tags page and release "
+                    f"note, then re-run {prefix} upgrade {HIGHER}. If it was signed by "
+                    f"a newer key, first run {prefix} upgrade <tag> for the release whose "
+                    "config/release-signers carries it. See docs/runbooks/install-upgrade.md §2.\n",
+                    out,
+                )
+                if installed:
+                    self.assertNotIn("python3 -m gideon", out)
+                self.assertEqual(host.head, FROM_COMMIT)
+                self.assertEqual(host.writes, [])
+                self.assertEqual(runners.calls, [])
+                self.assertEqual(backend.rows, [])
+                self.assertEqual(host.git_calls()[-1], git_as_owner(
+                    "-c", f"gpg.ssh.allowedSignersFile={CHECKOUT}/config/release-signers",
+                    "verify-tag", HIGHER,
+                ))
+
+    def test_missing_signers_refuses_with_restore_fix_in_both_command_forms(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                prefix = "gideon" if installed else "sudo python3 -m gideon"
+                host = FakeHost()
+                signers = f"{CHECKOUT}/config/release-signers"
+                del host.files[signers]
+
+                code, out, err, runners, backend = self.run_upgrade(host)
+
+                self.assertEqual(code, 1, out + err)
+                self.assertEqual(err, "")
+                self.assertEqual(rows_of(out), ["preconditions", "fetch", "signature"])
+                self.assertIn(
+                    f"signature: refuse — release signers file {signers} is missing "
+                    f"Fix: Restore {signers} from the installed release tag as {OWNER}, "
+                    f"then re-run {prefix} upgrade {HIGHER}. "
+                    "See docs/runbooks/release-files.md §12.\n",
+                    out,
+                )
+                self.assertEqual(host.git_calls()[-1], git_as_owner("rev-parse", "HEAD"))
+                self.assertEqual(host.head, FROM_COMMIT)
+                self.assertEqual(host.writes, [])
+                self.assertEqual(runners.calls, [])
+                self.assertEqual(backend.rows, [])
+
+    def test_verifier_that_cannot_run_refuses_with_its_problem_and_fix(self) -> None:
+        for problem in (OSError("ssh-keygen unavailable"), subprocess.SubprocessError("verifier unavailable")):
+            with self.subTest(problem=problem), patch.object(upgrade, "_run_git", side_effect=problem):
+                row = upgrade._signature_stage(
+                    cast(sysio.Host, FakeHost()), checkout=Path(CHECKOUT),
+                    owner=upgrade._CheckoutOwner(OWNER, 1000), tag=HIGHER,
+                )
+                self.assertFalse(row.ok)
+                self.assertEqual(row.name, "signature")
+                self.assertEqual(row.detail, f"tag {HIGHER} is not signed by the release key: {problem}")
+                self.assertIn("upgrade " + HIGHER, row.fix)
+                self.assertIn("docs/runbooks/install-upgrade.md §2", row.fix)
+
     def test_fixes_follow_the_run_form(self) -> None:
         self.addCleanup(report.set_form_from_environment, os.environ.copy())
         for installed in (False, True):
@@ -676,6 +758,7 @@ class UpgradeTests(CommandRunner):
                 git_as_owner("fetch", "--tags", "--force", "origin"),
                 git_as_owner("rev-parse", f"{HIGHER}^{{commit}}"),
                 git_as_owner("rev-parse", "HEAD"),
+                git_as_owner("-c", f"gpg.ssh.allowedSignersFile={CHECKOUT}/config/release-signers", "verify-tag", HIGHER),
                 git_as_owner("show", f"{HIGHER}:gideon/__init__.py"),
                 git_as_owner("checkout", "--detach", HIGHER),
             ],
@@ -714,6 +797,7 @@ class UpgradeTests(CommandRunner):
         assert isinstance(durations, Mapping)
         self.assertIn("new-tree-preflight", durations)
         self.assertIn("apply", durations)
+        self.assertIn("signature", durations)
 
     def test_no_gpu_marker_does_not_add_flags_to_child_argv(self) -> None:
         host = FakeHost(applied_release=HIGHER.removeprefix("v"))
@@ -1154,6 +1238,110 @@ class RealCloneFetchTests(unittest.TestCase):
             self.assertEqual(target_commit, origin_commit)
             self.assertEqual(from_commit, clone_head)
             self.assertEqual(git(checkout, "rev-parse", f"{tag}^{{commit}}"), origin_commit)
+
+
+@unittest.skipUnless(shutil.which("ssh-keygen"), "ssh-keygen is not installed")
+class RealGitSignatureTests(unittest.TestCase):
+    """Verify real tag shapes against the installed tree's trusted key."""
+
+    def setUp(self) -> None:
+        if shutil.which("git") is None:
+            self.skipTest("git is not installed")
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.checkout = self.root / "checkout"
+        self.checkout.mkdir()
+        global_config = self.root / "gitconfig"
+        global_config.write_text(
+            "[user]\nname = Fictitious Release Maintainer\nemail = release@example.invalid\n",
+            encoding="utf-8",
+        )
+        environment = patch.dict(os.environ, {
+            "GIT_CONFIG_GLOBAL": str(global_config), "GIT_CONFIG_NOSYSTEM": "1",
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.release_key = self.root / "release-key"
+        self.foreign_key = self.root / "foreign-key"
+        for key in (self.release_key, self.foreign_key):
+            result = subprocess.run(
+                ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.signers = self.checkout / "config/release-signers"
+        self.signers.parent.mkdir()
+        self.signers.write_text(
+            'fictitious-release namespaces="git" '
+            + self.release_key.with_suffix(".pub").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        git(self.checkout, "init", "-q")
+        git(self.checkout, "add", ".")
+        git(self.checkout, "commit", "-qm", "fictitious installed trust")
+        self.installed_commit = git(self.checkout, "rev-parse", "HEAD")
+        # The target trusts the foreign key; verification must use the running tree.
+        self.signers.write_text(
+            'fictitious-foreign namespaces="git" '
+            + self.foreign_key.with_suffix(".pub").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        git(self.checkout, "commit", "-qam", "fictitious target trust")
+        self.target_commit = git(self.checkout, "rev-parse", "HEAD")
+        git(self.checkout, "checkout", "-q", "--detach", self.installed_commit)
+
+    def sign_tag(self, key: Path) -> None:
+        git(
+            self.checkout, "-c", "gpg.format=ssh", "-c", f"user.signingkey={key}",
+            "tag", "-s", "-m", HIGHER, HIGHER, self.target_commit,
+        )
+
+    def verify(self) -> report.StageResult:
+        row = upgrade._signature_stage(
+            sysio.RealHost(), checkout=self.checkout,
+            owner=upgrade._CheckoutOwner("root", 0), tag=HIGHER,
+        )
+        self.assertEqual(git(self.checkout, "rev-parse", "HEAD"), self.installed_commit)
+        self.assertNotEqual(self.installed_commit, self.target_commit)
+        return row
+
+    def assert_refused(self) -> None:
+        row = self.verify()
+        self.assertFalse(row.ok, row.detail)
+        self.assertEqual(row.name, "signature")
+        self.assertIn(f"tag {HIGHER} is not signed by the release key: ", row.detail)
+        self.assertIn("upgrade " + HIGHER, row.fix)
+        self.assertIn("docs/runbooks/install-upgrade.md §2", row.fix)
+
+    def test_release_key_tag_passes_using_the_running_tree_signers(self) -> None:
+        self.sign_tag(self.release_key)
+
+        row = self.verify()
+
+        self.assertTrue(row.ok, row.detail)
+        self.assertEqual(row.fix, "")
+        self.assertIn(f"tag {HIGHER} is signed by the release key", row.detail)
+        self.assertIn('Good "git" signature for fictitious-release', row.detail)
+        self.assertNotEqual(
+            git(self.checkout, "show", f"{HIGHER}:config/release-signers"),
+            self.signers.read_text(encoding="utf-8").strip(),
+        )
+
+    def test_lightweight_tag_refuses_without_checkout(self) -> None:
+        git(self.checkout, "tag", HIGHER, self.target_commit)
+
+        self.assert_refused()
+
+    def test_unsigned_annotated_tag_refuses_without_checkout(self) -> None:
+        git(self.checkout, "tag", "-a", "-m", HIGHER, HIGHER, self.target_commit)
+
+        self.assert_refused()
+
+    def test_foreign_key_tag_refuses_even_when_the_target_trusts_it(self) -> None:
+        self.sign_tag(self.foreign_key)
+
+        self.assert_refused()
 
 
 def rollback_host(**kwargs: Any) -> FakeHost:

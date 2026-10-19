@@ -723,8 +723,8 @@ class GhRunnerStep(Step):
     """Converge two organization runner instances under one user and sudoers file.
 
     A job on one instance never holds the other's release or registration.
-    Both share the gh-runner account and its sudoers rules for the acceptance
-    harness and the provision-owned gideon-ci-smoke and gideon-mask wrappers.
+    Both share the gh-runner account and its sudoers rules for the
+    provision-owned gideon-ci-smoke and gideon-mask wrappers.
     """
 
     name = "gh-runner"
@@ -735,8 +735,6 @@ class GhRunnerStep(Step):
     @staticmethod
     def _sudoers_text() -> str:
         return (
-            f"{_RUNNER_USER} ALL=(root) NOPASSWD: "
-            "/usr/bin/python3 -m tools.acceptance *\n"
             f"{_RUNNER_USER} ALL=(root) NOPASSWD: "
             f"{SMOKE_WRAPPER_PATH}\n"
             f"{_RUNNER_USER} ALL=(root) NOPASSWD: "
@@ -1040,7 +1038,7 @@ class GhRunnerStep(Step):
             context.host.chown(path, 0, 0)
 
     def _ensure_sudoers(self, context: ProvisionContext) -> None:
-        """Validate the acceptance runner's sudoers rule as a candidate, then promote it."""
+        """Validate the runner's wrapper rules as a candidate, then promote them."""
 
         if self._sudoers_check(context) is None:
             return

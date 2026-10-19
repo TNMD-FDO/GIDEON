@@ -31,7 +31,15 @@ same command is run again after the fix.
    sudo install -d -o <account> -g <account> /opt/gideon
    git clone --branch <tag> https://github.com/TNMD-FDO/GIDEON /opt/gideon
    cd /opt/gideon
+   git -c gpg.ssh.allowedSignersFile=config/release-signers verify-tag <tag>
    ```
+
+   Run the verification as the checkout's owner. The first clone trusts the key
+   it carries, so this proves only that the tag was signed by the key in that
+   tree. Compare its ed25519 fingerprint with
+   `SHA256:1YFQeEq2Jz/7kdmW4zkjXR3QBxvYQlqPUvnsYYD7rHw`.
+   From then on, every `upgrade` verifies the next tag against the installed
+   tree's `config/release-signers`.
 
    `<account>` is the CSA's own Linux login, the one `id -un` prints, never root
    or a GitHub account. `<tag>` is a release tag. For example, with login `csa`
@@ -41,8 +49,11 @@ same command is run again after the fix.
    the [repository's tags page](https://github.com/TNMD-FDO/GIDEON/tags).
 
    The owner matters later: `upgrade` runs git as whoever owns the directory,
-   so no root-owned file lands in the tree. The repository is public, so the
-   clone and `upgrade`'s fetch need no GitHub account or credentials.
+   so no root-owned file lands in the tree. Provision installs a root-owned
+   `/usr/local/bin/gideon` wrapper that runs this checkout as root, so whoever
+   can change the checkout can run code as root: keep the owner the CSA's
+   sudo-holding login, one person. The repository is public, so the clone and
+   `upgrade`'s fetch need no GitHub account or credentials.
 2. **Provision the host**. One line per step; the first run prints the backup
    public key and the age identity
    **once** (store the identity in the office password manager before going
@@ -270,7 +281,7 @@ two-digit position in the table:
 | `preflight` (12) | `./preflight.sh` | `12-preflight.txt` |
 | `install` (13) | `./install.sh` | `13-install.txt` |
 | `alerts` (14) | `alerts test` | `14-alerts.txt` |
-| `rehearse` (16) | `./upgrade.sh <rc tag>`, `--rollback`, again, again | `16-rehearse-1-upgrade.txt` … `16-rehearse-4-rollback.txt` |
+| `rehearse` (16) | `./upgrade.sh <rc tag>`, `--rollback`, again, again — signed by the run-local key trusted by the mirror's trust commit | `16-rehearse-1-upgrade.txt` … `16-rehearse-4-rollback.txt` |
 | `restore` (17) | `backup push`, `restore --from target`, `apply` | `17-restore-1-push.txt`, `17-restore-2-restore.txt`, `17-restore-3-apply.txt` |
 | `verify` (18) | `./preflight.sh` | `18-verify-preflight.txt` |
 
@@ -284,14 +295,14 @@ and leave only their row.
 provision) and `--keep` leaves the VM defined and running: the harness prints
 its address, and the run's SSH key and known-hosts file stay under
 `/var/lib/libvirt/images/gideon-acceptance/<name>/`; the next run tears a
-same-named leftover down first, along with the sink's firewall rule. The runner is permitted to invoke the harness
-by the one sudoers line the `gh-runner` provision step converges; it is already
-root-equivalent through the docker group, never runs pull-request code, and the
-line names one checkout module.
+same-named leftover down first, along with the sink's firewall rule. The harness
+runs on the build box under a CSA's or the dev seat's own sudo; no runner invokes
+it.
 
 Acceptance runs happen at minor tags only: run against the local tag before
-the push, then run again on the pushed tag and keep its transcripts as an
-artifact. Patch tags never run the harness. A tag can name any commit its
+the push, its rows and transcripts committed as the tag's evidence, the record;
+re-made at any later tree by the same run from the box's checkout. Patch tags
+never run the harness. A tag can name any commit its
 pusher can reach, so the trust is the two CSAs authorized to create a `v*` tag,
 not anything in the tag's tree; a `v*` ruleset restricts who can create tags an
 office clones. The release's two-CSA run proves the install sequence in a clean
@@ -327,13 +338,13 @@ that backup's timeline, and its target, the third timeline lesson after
 provision row also carries the failed command's own text now, which is what
 made the second of these visible.
 
-**The `v0.1.0` run.** The local-tag acceptance run on TNMD's box, 2026-09-03T21:28:56-05:00 to 2026-09-03T21:34:41-05:00, before the push: every stage ok, exit 0 — the VM installed to its URL, `alerts test` delivered through the sink, the four rehearsal legs on `v0.1.1-rc.1`, the push and the target restore, verify at release 0.1.0 by the applied record and the checkout's `--version`, sixteen authenticated TLS messages, thirteen transcripts, the VM torn down. The pushed tag's own run is the standing record.
+**The `v0.1.0` run.** The local-tag acceptance run on TNMD's box, 2026-09-03T21:28:56-05:00 to 2026-09-03T21:34:41-05:00, before the push: every stage ok, exit 0 — the VM installed to its URL, `alerts test` delivered through the sink, the four rehearsal legs on `v0.1.1-rc.1`, the push and the target restore, verify at release 0.1.0 by the applied record and the checkout's `--version`, sixteen authenticated TLS messages, thirteen transcripts, the VM torn down. The evidence commit's rows are the standing record; the pushed tag's own run, below, was the record until the tag-triggered run was retired.
 
-**The CI record.** The pushed tag's run refused at `boot`: its output directory was relative to the runner's workspace, while libvirt opened the console log from its own working directory; local runs had used an absolute output path. The root run also left root-owned bytecode caches in the workspace, which made the next checkout fail because the runner could not remove them. Hotfix `v0.1.1` uses an absolute output path, avoids writing bytecode after the harness starts, returns the checkout's caches with the transcripts, and lets an operator dispatch the acceptance workflow again for a selected tag. The standing rerun against `v0.1.0` passed every stage from 2026-09-04T02:51:53Z to 2026-09-04T02:57:48Z; its transcripts were preserved as an artifact, and the workspace held nothing root-owned afterward. A red tag run whose cause is the harness or the workflow, not the tag's tree, is re-made the same way, by dispatching the acceptance workflow at that tag.
+**The CI record.** The pushed tag's run refused at `boot`: its output directory was relative to the runner's workspace, while libvirt opened the console log from its own working directory; local runs had used an absolute output path. The root run also left root-owned bytecode caches in the workspace, which made the next checkout fail because the runner could not remove them. Hotfix `v0.1.1` uses an absolute output path, avoids writing bytecode after the harness starts, returns the checkout's caches with the transcripts, and lets an operator dispatch the acceptance workflow again for a selected tag. The standing rerun against `v0.1.0` passed every stage from 2026-09-04T02:51:53Z to 2026-09-04T02:57:48Z; its transcripts were preserved as an artifact, and the workspace held nothing root-owned afterward. While the workflow stood, a red tag run whose cause was the harness or the workflow, not the tag's tree, was re-made the same way, by dispatching the acceptance workflow at that tag.
 
-**The `v0.2.0` run.** Both acceptance forms ran against the local tag on TNMD's box from the release worktree before the push: the no-GPU install passed every stage in 1252 seconds, with `alerts test`, four rehearsal legs on `v0.2.1-rc.1`, the push and target restore, sixteen authenticated TLS messages, and thirteen transcripts. The full-restore form then restored the box's newest set from release 0.1.81; it passed every stage in 1196 seconds and the run directory peaked at 155 GB. The box itself then upgraded 0.1.82 to 0.2.0 from the checkout on `main`; `engine-verify` passed. The run transcripts are kept with the release records, and the pushed tag's own two-step run is the standing record.
+**The `v0.2.0` run.** Both acceptance forms ran against the local tag on TNMD's box from the release worktree before the push: the no-GPU install passed every stage in 1252 seconds, with `alerts test`, four rehearsal legs on `v0.2.1-rc.1`, the push and target restore, sixteen authenticated TLS messages, and thirteen transcripts. The full-restore form then restored the box's newest set from release 0.1.81; it passed every stage in 1196 seconds and the run directory peaked at 155 GB. The box itself then upgraded 0.1.82 to 0.2.0 from the checkout on `main`; `engine-verify` passed. The run transcripts are kept with the release records, and the pushed tag's own two-step run was the standing record while the tag-triggered run stood.
 
-**The `v0.3.0` run.** The tag was cut twice. At the first cut, the install form went red twice on the office resolvers answering `0.0.0.0` for `huggingface.co` (cleared by an allowlist entry for the box), and once at its in-VM restore, which ran inside the 01:00 backup's minutes and passed on the next run started outside that hour. The full-restore form then went red at its second `apply`: the restored applied record names the build box's nightly units, which the no-GPU VM never linked, and `apply` refused to disable them. That fix moved the tag. At the re-cut tag, the no-GPU install passed every stage in 1137 seconds (eleven authenticated TLS messages, thirteen transcripts, about 52 GB allocated), and the full-restore form restored the box's newest set from release 0.2.98 and passed every stage in 1101 seconds (about 168 GB at its peak). The box then upgraded 0.2.98 to 0.3.0 from `/opt/gideon` in about six minutes; its apply recreated nothing, and `engine-verify` passed. The run transcripts are kept with the release records, and the pushed tag's own two-step run is the standing record.
+**The `v0.3.0` run.** The tag was cut twice. At the first cut, the install form went red twice on the office resolvers answering `0.0.0.0` for `huggingface.co` (cleared by an allowlist entry for the box), and once at its in-VM restore, which ran inside the 01:00 backup's minutes and passed on the next run started outside that hour. The full-restore form then went red at its second `apply`: the restored applied record names the build box's nightly units, which the no-GPU VM never linked, and `apply` refused to disable them. That fix moved the tag. At the re-cut tag, the no-GPU install passed every stage in 1137 seconds (eleven authenticated TLS messages, thirteen transcripts, about 52 GB allocated), and the full-restore form restored the box's newest set from release 0.2.98 and passed every stage in 1101 seconds (about 168 GB at its peak). The box then upgraded 0.2.98 to 0.3.0 from `/opt/gideon` in about six minutes; its apply recreated nothing, and `engine-verify` passed. The run transcripts are kept with the release records, and the pushed tag's own two-step run was the standing record while the tag-triggered run stood.
 
 ## 2. Upgrading: `gideon upgrade <tag>`
 
@@ -359,9 +370,10 @@ weeknights 19:00–06:00 and Friday 19:00 to Monday 06:00 in the site's timezone
 (TNMD: America/Chicago). Work is window-bound when it sends requests to the
 engine on GPU 0. The one scheduled thing that does is the nightly:
 `gideon-eval-nightly.timer` fires at 21:00 office time every night, weekends
-included, and runs the `general-smoke` and `guardrails` suites of kind
-`nightly`; each is refused outside 19:00–06:00, waits while another GIDEON run
-holds the engine, and is stopped at 06:00 and recorded partial. A **maintenance
+included, and runs the `general-smoke` and `guardrails` suites as one
+`--kind nightly` process under one engine lock claim. It refuses outside
+19:00–06:00, waits once behind another GIDEON run's lock, and stops each
+suite at 06:00, recording it partial. A **maintenance
 window** is a span inside the quiet window, announced at least one working day
 ahead, weekend nights by default — the only sanctioned unavailability. An
 engine swap, a driver, engine, or Docker change, and every upgrade on a
@@ -378,6 +390,7 @@ A model upgrade's proof window precedes its tag: announce it under
 |---|---|---|
 | `preconditions` | root, a valid site file, Docker Compose answering, the checkout a git work tree with a clean status, its owner resolved from the directory | commit or stash as the owner; re-run |
 | `fetch` | `git fetch --tags --force origin` as the owner; the tag must resolve to a commit, and a tag the fetch moved is named with both commits. A failed fetch with the tag already present continues and says so | fetch by hand as the owner with the same command, then re-run |
+| `signature` | `git verify-tag` as the owner against the installed tree's `config/release-signers`; a lightweight, unsigned, foreign-key, or unverifiable tag refuses before anything is checked out | confirm the tag on the project's tags page and release note, then re-run; for a newer signing key, upgrade first to the release whose signers file carries it; a missing signers file is restored by `docs/runbooks/release-files.md §12` |
 | `version` | the tag's tree must declare the version its name says; a lower version refuses (naming `upgrade --rollback` and `restore`); the same version is a re-run; **a different major prints the release note's `## Breaking` section first and refuses without `--acknowledge-breaking`** | read the section, then re-run with the flag |
 | `preflight` | the current tree's install-time checks refuse as `./preflight.sh` does. Provision steps are reported here; an unconverged step warns instead of refusing because the new release's `provision` stage converges it and its `preflight` judges it | correct the office service it names; re-run |
 | `backup` | the pre-upgrade set, `pre-<tag>`, a full set whose manifest must record the commit the checkout is leaving (rollback's way back). When the plain label exists from an attempt that never crossed the checkout, a suffixed `pre-<tag>-<timestamp>` set is taken (the earlier one may predate later writes). When the checkout already stands at the tag, an earlier attempt crossed it: the newest `pre-<tag>[-…]` set naming another release is **reused**, never re-taken | the backup's own rows carry the fix |

@@ -1,8 +1,11 @@
 """Provisioning step contracts and the ordered step registry."""
 
+import base64
+import binascii
+import hashlib
 import re
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -157,15 +160,25 @@ def temporary_wgetrc(host: Host, *, command: str, prefix: str = "gideon") -> Ite
         host.unlink(path, missing_ok=True)
 
 
-def fetch_file(context: "ProvisionContext", url: str, dest: str) -> None:
+def fetch_file(
+    context: "ProvisionContext", url: str, dest: str,
+    *, verify: Callable[[str], None] | None = None,
+) -> None:
     """Download *url* to *dest* via a .partial temporary and an atomic move.
 
     wget -O truncates its target immediately, so a failed download must never
     write to *dest* directly — a later run would see the stub and skip it.
+    An optional verifier reads the partial before promotion; a refusal removes it.
     """
 
     partial = f"{dest}.partial"
     context.host.run(wget_argv(context, partial, url), check=True)
+    if verify is not None:
+        try:
+            verify(partial)
+        except Exception:
+            context.host.unlink(partial, missing_ok=True)
+            raise
     context.host.run(["mv", "-f", partial, dest], check=True)
 
 
@@ -180,6 +193,120 @@ def checksum_matches(context: "ProvisionContext", path: str, expected: str) -> b
         return False
     match = _SHA256_LINE.match(result.stdout.strip())
     return match is not None and match.group(1).lower() == expected.lower()
+
+
+def openpgp_fingerprint(text: str) -> str:
+    """Read the primary v4 fingerprint from an armored OpenPGP public key."""
+
+    lines = iter(text.splitlines())
+    if not any(line.strip() == "-----BEGIN PGP PUBLIC KEY BLOCK-----" for line in lines):
+        raise ValueError("no armored public key block")
+    for line in lines:
+        if not line.strip():
+            break
+        if ":" not in line:
+            raise ValueError("invalid armor header")
+    else:
+        raise ValueError("missing armor body")
+    encoded = []
+    checksum = None
+    for line in lines:
+        line = line.strip()
+        if line == "-----END PGP PUBLIC KEY BLOCK-----":
+            break
+        if line.startswith("="):
+            checksum = line[1:]
+            if next(lines, "").strip() != "-----END PGP PUBLIC KEY BLOCK-----":
+                raise ValueError("missing armor end")
+            break
+        encoded.append(line)
+    else:
+        raise ValueError("missing armor end")
+    # apt trusts every key the file holds, so a second block is never ignored.
+    if any(line.strip() for line in lines):
+        raise ValueError("text after the armor block")
+    try:
+        data = base64.b64decode("".join(encoded), validate=True)
+        expected_crc = base64.b64decode(checksum, validate=True) if checksum is not None else None
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("invalid armor base64") from exc
+    if expected_crc is not None:
+        crc = 0xB704CE
+        for octet in data:
+            crc ^= octet << 16
+            for _ in range(8):
+                crc <<= 1
+                if crc & 0x1000000:
+                    crc ^= 0x1864CFB
+        if expected_crc != crc.to_bytes(3, "big"):
+            raise ValueError("armor checksum mismatch")
+    packets = list(_openpgp_packets(data))
+    if not packets:
+        raise ValueError("no openpgp packets")
+    (tag, body), *rest = packets
+    if tag != _PUBLIC_KEY_TAG:
+        raise ValueError("first packet is not a public key")
+    if not body:
+        raise ValueError("empty public key packet")
+    if body[0] != 4:
+        raise ValueError(f"key version {body[0]} is not v4")
+    if len(body) > 0xFFFF:
+        raise ValueError("public key packet is too long")
+    # Every packet is read: a key appended after the pinned one would be trusted too.
+    for tag, _ in rest:
+        if tag == _PUBLIC_KEY_TAG:
+            raise ValueError("more than one primary key")
+        if tag not in _KEY_COMPANION_TAGS:
+            raise ValueError(f"unexpected packet tag {tag}")
+    return hashlib.sha1(b"\x99" + len(body).to_bytes(2, "big") + body).hexdigest().upper()
+
+
+_PUBLIC_KEY_TAG = 6
+# Signature, trust, user ID, public subkey, and user attribute: what an exported
+# public key carries beside its primary. A subkey is trusted only through the
+# primary's binding signature, so it needs no pin of its own.
+_KEY_COMPANION_TAGS = frozenset({2, 12, 13, 14, 17})
+
+
+def _openpgp_packets(data: bytes) -> Iterator[tuple[int, bytes]]:
+    """Split binary OpenPGP data into (tag, body) pairs, old and new headers alike."""
+
+    offset = 0
+    while offset < len(data):
+        header = data[offset]
+        if not header & 0x80:
+            raise ValueError("invalid packet header")
+        start = offset + 1
+        if header & 0x40:
+            tag = header & 0x3F
+            if len(data) < start + 1:
+                raise ValueError("truncated packet length")
+            first = data[start]
+            if first < 192:
+                length, start = first, start + 1
+            elif first < 224:
+                if len(data) < start + 2:
+                    raise ValueError("truncated packet length")
+                length, start = ((first - 192) << 8) + data[start + 1] + 192, start + 2
+            elif first == 255:
+                if len(data) < start + 5:
+                    raise ValueError("truncated packet length")
+                length, start = int.from_bytes(data[start + 1:start + 5], "big"), start + 5
+            else:
+                raise ValueError("partial packet length")
+        else:
+            tag = (header >> 2) & 0x0F
+            length_type = header & 0x03
+            if length_type == 3:
+                raise ValueError("indeterminate packet length")
+            size = 1 << length_type
+            if len(data) < start + size:
+                raise ValueError("truncated packet length")
+            length, start = int.from_bytes(data[start:start + size], "big"), start + size
+        if start + length > len(data):
+            raise ValueError("truncated packet body")
+        yield tag, data[start:start + length]
+        offset = start + length
 
 
 _APT_UPGRADE = re.compile(r"^Inst\s+(\S+)\s+\[([^]]+)\]\s+\((\S+)")
