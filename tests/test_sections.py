@@ -179,6 +179,346 @@ class Segment(unittest.TestCase):
         )
         self.assertEqual(self.kinds(result), [("concurrence", "line"), ("concurrence", "line")])
 
+    def test_a_bare_byline_compares_the_whole_opening_judge_name(self) -> None:
+        for first, bare, expected in (
+            ("JUSTICE EXAMPLE delivered the opinion of the Court.",
+             "JUSTICE SAMPLE:", ("unknown", "none")),
+            ("JUSTICE EXAMPLE delivered the opinion of the Court.",
+             "JUSTICE EXAMPLE:", ("majority", "line")),
+            ("Mr. Justice EXAMPLE delivered the opinion of the Court.",
+             "EXAMPLE, J.", ("majority", "line")),
+            ("EXAMPLE, Circuit Judge, delivered the opinion of the court.",
+             "R. GUY EXAMPLE, Circuit Judge.", ("unknown", "none")),
+        ):
+            for column in ("plain_text", "html"):
+                with self.subTest(first=first, bare=bare, column=column):
+                    raw = (f"{first}\n\nFictional court reasoning.\n\n{bare}\n\n"
+                           "More fictional reasoning." if column == "plain_text" else
+                           f"<p>{first}</p><p>Fictional court reasoning.</p><p>{bare}</p>"
+                           "<p>More fictional reasoning.</p>")
+                    parsed, result = self.parsed_sections(column, raw)
+                    self.assertEqual(self.kinds(result), [("majority", "line"), expected])
+                    self.assertEqual(result[1].char_start, parsed.text.index(bare))
+
+    def test_a_disposition_after_a_different_judges_bare_line_opens_dissent(self) -> None:
+        first = "JUSTICE EXAMPLE delivered the opinion of the Court."
+        bare = "JUSTICE SAMPLE:"
+        dissent = "JUSTICE FICTION, dissenting."
+        for column in ("plain_text", "html"):
+            with self.subTest(column=column):
+                raw = (f"{first}\n\nFictional court reasoning.\n\n{bare}\n\n"
+                       f"Fictional separate reasoning.\n\n{dissent}\n\nFictional dissent."
+                       if column == "plain_text" else
+                       f"<p>{first}</p><p>Fictional court reasoning.</p><p>{bare}</p>"
+                       f"<p>Fictional separate reasoning.</p><p>{dissent}</p><p>Fictional dissent.</p>")
+                parsed, result = self.parsed_sections(column, raw)
+                self.assertEqual(self.kinds(result), [
+                    ("majority", "line"), ("unknown", "none"), ("dissent", "line"),
+                ])
+                self.assertEqual([section.char_start for section in result], [
+                    0, parsed.text.index(bare), parsed.text.index(dissent),
+                ])
+
+    def test_a_different_judges_bare_line_spends_the_panel_arming(self) -> None:
+        first = "Mr. Justice EXAMPLE delivered the opinion of the Court:"
+        armed = "Before we consider the instructions, the judge's charge is read whole."
+        bares = ("Mr. Justice SAMPLE:", "Mr. Justice FICTION stated that he dissented from the "
+                 "opinion of the Court, delivered by Mr. Justice Example.")
+        for column in ("plain_text", "html"):
+            with self.subTest(column=column):
+                paragraphs = (first, armed, "Fictional court reasoning.", bares[0],
+                              "Fictional concurrence.", bares[1], "Fictional dissent.")
+                raw = ("\n\n".join(paragraphs) if column == "plain_text"
+                       else "".join(f"<p>{paragraph}</p>" for paragraph in paragraphs))
+                parsed, result = self.parsed_sections(column, raw)
+                self.assertEqual(self.kinds(result), [
+                    ("majority", "line"), ("unknown", "none"), ("unknown", "none"),
+                ])
+                self.assertEqual([section.char_start for section in result], [
+                    0, *(parsed.text.index(bare) for bare in bares),
+                ])
+
+    def test_a_different_judges_bare_line_continues_a_typed_or_per_curiam_opinion(self) -> None:
+        bare = "JUSTICE SAMPLE:"
+        for first, row_type, per_curiam, expected in (
+            ("JUSTICE EXAMPLE delivered the opinion of the Court.",
+             "020lead", False, ("majority", "row")),
+            ("JUSTICE EXAMPLE delivered the opinion of the Court.",
+             "010combined", True, ("per_curiam", "flag")),
+            ("PER CURIAM.", "010combined", False, ("per_curiam", "line")),
+        ):
+            for column in ("plain_text", "html"):
+                with self.subTest(first=first, row_type=row_type, per_curiam=per_curiam, column=column):
+                    raw = (f"{first}\n\nFictional court reasoning.\n\n{bare}\n\n"
+                           "More fictional reasoning." if column == "plain_text" else
+                           f"<p>{first}</p><p>Fictional court reasoning.</p><p>{bare}</p>"
+                           "<p>More fictional reasoning.</p>")
+                    parsed, result = self.parsed_sections(
+                        column, raw, opinion_type=row_type, per_curiam=per_curiam,
+                    )
+                    self.assertEqual(self.kinds(result), [expected, expected])
+                    self.assertEqual(result[1].char_start, parsed.text.index(bare))
+
+    def test_a_later_court_byline_changes_the_opening_judge(self) -> None:
+        first = "JUSTICE EXAMPLE delivered the opinion of the Court."
+        second = "JUSTICE SAMPLE delivered the opinion of the Court."
+        bare = "SAMPLE, J."
+        for column in ("plain_text", "html"):
+            with self.subTest(column=column):
+                raw = (f"{first}\n\nFictional court reasoning.\n\n{second}\n\n"
+                       f"More fictional court reasoning.\n\n{bare}\n\nFictional continuation."
+                       if column == "plain_text" else
+                       f"<p>{first}</p><p>Fictional court reasoning.</p><p>{second}</p>"
+                       f"<p>More fictional court reasoning.</p><p>{bare}</p><p>Fictional continuation.</p>")
+                parsed, result = self.parsed_sections(column, raw)
+                self.assertEqual(self.kinds(result), [
+                    ("majority", "line"), ("majority", "line"), ("majority", "line"),
+                ])
+                self.assertEqual([section.char_start for section in result], [
+                    0, parsed.text.index(second), parsed.text.index(bare),
+                ])
+
+    def test_a_bare_byline_after_a_dissent_heading_continues_dissent(self) -> None:
+        first = "JUSTICE EXAMPLE delivered the opinion of the Court."
+        bare = "JUSTICE SAMPLE:"
+        for column in ("plain_text", "html"):
+            with self.subTest(column=column):
+                raw = (f"{first}\n\nFictional court reasoning.\n\nDISSENT\n\n{bare}\n\n"
+                       "Fictional dissent." if column == "plain_text" else
+                       f"<p>{first}</p><p>Fictional court reasoning.</p><h2>DISSENT</h2>"
+                       f"<p>{bare}</p><p>Fictional dissent.</p>")
+                parsed, result = self.parsed_sections(column, raw)
+                self.assertEqual(self.kinds(result), [
+                    ("majority", "line"), ("dissent", "line"), ("dissent", "line"),
+                ])
+                self.assertEqual([section.char_start for section in result], [
+                    0, parsed.text.index("DISSENT"), parsed.text.index(bare),
+                ])
+
+    def test_circuit_footnote_resumption_keeps_the_opening_judge(self) -> None:
+        first = "JUSTICE EXAMPLE delivered the opinion of the Court."
+        bare = "JUSTICE SAMPLE:"
+        resumed = "Fictional court reasoning on the second page."
+        header = "No. 00-0000 Example v. Sample Page"
+        raw = "\n\n".join((
+            f"{header} 1", first, "Fictional court reasoning.", "1", "A fictional footnote.",
+            f"{header} 2", resumed, bare, "Fictional separate reasoning.",
+        ))
+        parsed, result = self.parsed_sections("plain_text", raw)
+        self.assertEqual(self.kinds(result), [
+            ("unknown", "none"), ("majority", "line"), ("footnote", "line"),
+            ("majority", "line"), ("unknown", "none"),
+        ])
+        self.assertEqual(result[2].label, "1")
+        self.assertEqual([section.char_start for section in result], [
+            0, parsed.text.index(first), parsed.text.index("\n\n1\n\n") + 2,
+            parsed.text.index(resumed), parsed.text.index(bare),
+        ])
+
+    def test_markup_footnote_resumption_keeps_the_opening_judge(self) -> None:
+        first = "JUSTICE EXAMPLE delivered the opinion of the Court."
+        bare = "JUSTICE SAMPLE:"
+        resumed = "The fictional court reasoning resumes."
+        raw = (
+            f'<p>{first}</p><p>Fictional court reasoning.</p>'
+            '<div class="footnote"><p>[1] A fictional footnote.</p></div>'
+            f'<p>{resumed}</p><p>{bare}</p><p>Fictional separate reasoning.</p>'
+        )
+        parsed, result = self.parsed_sections("html", raw)
+        self.assertEqual(self.kinds(result), [
+            ("majority", "line"), ("footnote", "markup"),
+            ("majority", "line"), ("unknown", "none"),
+        ])
+        self.assertEqual([section.char_start for section in result], [
+            0, parsed.text.index("[1] A fictional footnote."),
+            parsed.text.index(resumed), parsed.text.index(bare),
+        ])
+
+    def test_panel_line_arms_the_first_bare_byline(self) -> None:
+        byline = "EXAMPLE, Circuit Judge. The first fictional sentence."
+        raw = "\n\n".join((
+            "Fictional opening text.",
+            "Before: EXAMPLE, SAMPLE, and FICTION, Circuit Judges.",
+            byline, "More fictional reasoning.",
+        ))
+        parsed, result = self.parsed_sections("plain_text", raw)
+        self.assertEqual(self.kinds(result), [("unknown", "none"), ("majority", "line")])
+        self.assertEqual(result[0].char_end, parsed.text.index(byline))
+        self.assertEqual(result[1].char_start, parsed.text.index(byline))
+
+    def test_later_bare_bylines_revert_and_do_not_reopen_the_court_opinion(self) -> None:
+        bylines = (
+            "EXAMPLE, Circuit Judge. The first fictional sentence.",
+            "SAMPLE, Circuit Judge.", "FICTION, Circuit Judge.",
+        )
+        raw = "\n\n".join((
+            "Fictional opening text.",
+            "Before: EXAMPLE, SAMPLE, and FICTION, Circuit Judges.",
+            bylines[0], "More fictional reasoning.", bylines[1],
+            "A second fictional body.", bylines[2], "A third fictional body.",
+        ))
+        parsed, result = self.parsed_sections("plain_text", raw)
+        self.assertEqual(self.kinds(result), [
+            ("unknown", "none"), ("majority", "line"),
+            ("unknown", "none"), ("unknown", "none"),
+        ])
+        self.assertEqual([section.char_start for section in result], [
+            0, *(parsed.text.index(byline) for byline in bylines),
+        ])
+
+    def test_bare_byline_without_a_panel_line_stays_unknown(self) -> None:
+        byline = "EXAMPLE, Circuit Judge. The first fictional sentence."
+        parsed, result = self.parsed_sections(
+            "plain_text", f"Fictional opening text.\n\n{byline}\n\nMore fictional reasoning.",
+        )
+        self.assertEqual(self.kinds(result), [("unknown", "none"), ("unknown", "none")])
+        self.assertEqual(result[1].char_start, parsed.text.index(byline))
+
+    def test_before_prose_does_not_arm_a_bare_byline(self) -> None:
+        byline = "EXAMPLE, Circuit Judge. The first fictional sentence."
+        raw = "\n\n".join((
+            "Fictional opening text.", "Before the trial began, the parties met.",
+            byline, "More fictional reasoning.",
+        ))
+        parsed, result = self.parsed_sections("plain_text", raw)
+        self.assertEqual(self.kinds(result), [("unknown", "none"), ("unknown", "none")])
+        self.assertEqual(result[1].char_start, parsed.text.index(byline))
+
+    def test_circuit_footnote_resumption_preserves_the_bare_opening(self) -> None:
+        first = "EXAMPLE, Circuit Judge. The first fictional sentence."
+        second = "SAMPLE, Circuit Judge."
+        resumed = "Fictional body on the second page."
+        header = "No. 00-0000 Example v. Sample Page"
+        raw = "\n\n".join((
+            f"{header} 1", "Fictional opening text.",
+            "Before: EXAMPLE, SAMPLE, and FICTION, Circuit Judges.",
+            first, "More fictional reasoning.", "1", "A fictional footnote.",
+            f"{header} 2", resumed, second, "A second fictional body.",
+        ))
+        parsed, result = self.parsed_sections("plain_text", raw)
+        self.assertEqual(self.kinds(result), [
+            ("unknown", "none"), ("majority", "line"), ("footnote", "line"),
+            ("majority", "line"), ("unknown", "none"),
+        ])
+        self.assertEqual(result[2].label, "1")
+        self.assertEqual([section.char_start for section in result], [
+            0, parsed.text.index(first), parsed.text.index("\n\n1\n\n") + 2,
+            parsed.text.index(resumed), parsed.text.index(second),
+        ])
+
+    def test_markup_footnote_preserves_the_bare_opening(self) -> None:
+        first = "EXAMPLE, Circuit Judge. The first fictional sentence."
+        second = "SAMPLE, Circuit Judge."
+        resumed = "The fictional body resumes."
+        raw = (
+            '<p>Fictional opening text.</p>'
+            '<p>Before: EXAMPLE, SAMPLE, and FICTION, Circuit Judges.</p>'
+            f'<p>{first}</p><p>More fictional reasoning.</p>'
+            '<div class="footnote"><p>[1] A fictional footnote.</p></div>'
+            f'<p>{resumed}</p><p>{second}</p><p>A second fictional body.</p>'
+        )
+        parsed, result = self.parsed_sections("html", raw)
+        self.assertEqual(self.kinds(result), [
+            ("unknown", "none"), ("majority", "line"), ("footnote", "markup"),
+            ("majority", "line"), ("unknown", "none"),
+        ])
+        self.assertEqual([section.char_start for section in result], [
+            0, parsed.text.index(first), parsed.text.index("[1] A fictional footnote."),
+            parsed.text.index(resumed), parsed.text.index(second),
+        ])
+
+    def test_opinion_heading_clears_the_bare_opening(self) -> None:
+        first = "EXAMPLE, Circuit Judge. The first fictional sentence."
+        second = "SAMPLE, Circuit Judge."
+        raw = "\n\n".join((
+            "Fictional opening text.",
+            "Before: EXAMPLE, SAMPLE, and FICTION, Circuit Judges.",
+            first, "More fictional reasoning.", "OPINION", second,
+            "A second fictional body.",
+        ))
+        parsed, result = self.parsed_sections("plain_text", raw)
+        self.assertEqual(self.kinds(result), [
+            ("unknown", "none"), ("majority", "line"),
+            ("majority", "line"), ("majority", "line"),
+        ])
+        self.assertEqual([section.char_start for section in result], [
+            0, parsed.text.index(first), parsed.text.index("OPINION"), parsed.text.index(second),
+        ])
+
+    def test_armed_bare_bylines_continue_under_each_typed_base(self) -> None:
+        panel = "Before: EXAMPLE, SAMPLE, and FICTION, Circuit Judges."
+        byline = "EXAMPLE, Circuit Judge. The first fictional sentence."
+        raw = f"{panel}\n\nFictional opening text.\n\n{byline}\n\nMore fictional reasoning."
+        for row_type, base in sections.ROW_TYPES.items():
+            with self.subTest(row_type=row_type):
+                parsed, result = self.parsed_sections("plain_text", raw, opinion_type=row_type)
+                self.assertEqual(self.kinds(result), [(base, "row"), (base, "row")])
+                self.assertEqual(result[1].char_start, parsed.text.index(byline))
+        parsed, flagged = self.parsed_sections("plain_text", raw, per_curiam=True)
+        self.assertEqual(self.kinds(flagged), [("per_curiam", "flag"), ("per_curiam", "flag")])
+        self.assertEqual(flagged[1].char_start, parsed.text.index(byline))
+        for label, base in sections.ELEMENT_TYPES.items():
+            with self.subTest(element=label):
+                parsed, result = self.parsed_sections(
+                    "xml_harvard", f'<opinion type="{label}"><p>{panel}</p>'
+                    f'<p>Fictional opening text.</p><p>{byline}</p>'
+                    '<p>More fictional reasoning.</p></opinion>',
+                )
+                self.assertEqual(self.kinds(result), [(base, "element"), (base, "element")])
+                self.assertEqual(result[1].char_start, parsed.text.index(byline))
+
+    def test_prelims_closing_byline_cues_the_body_after_the_block(self) -> None:
+        for closing, footnote, expected in (
+            ("EXAMPLE, Circuit Judge.", False, ("majority", "line")),
+            ("EXAMPLE, Circuit Judge, dissenting.", False, ("dissent", "line")),
+            ("Fictional introductory prose.", False, ("unknown", "none")),
+            ("EXAMPLE, Circuit Judge.", True, ("majority", "line")),
+        ):
+            with self.subTest(closing=closing, footnote=footnote):
+                raw = (
+                    '<div class="prelims">'
+                    '<p>Before: EXAMPLE, SAMPLE, and FICTION, Circuit Judges.</p>'
+                    f'<p>{closing}</p></div>'
+                )
+                expected_kinds = [("headmatter", "markup")]
+                if footnote:
+                    raw += '<div class="footnote"><p>[1] A fictional footnote.</p></div>'
+                    expected_kinds.append(("footnote", "markup"))
+                raw += '<p>Fictional body reasoning.</p>'
+                parsed, result = self.parsed_sections("html", raw)
+                self.assertEqual(self.kinds(result), [*expected_kinds, expected])
+                self.assertEqual(result[-1].char_start, parsed.text.index("Fictional body reasoning."))
+                self.assertIn(closing, parsed.text[result[0].char_start:result[0].char_end])
+
+    def test_prelims_closing_participation_line_cues_nothing(self) -> None:
+        byline = "SAMPLE, J."
+        raw = (
+            '<div class="prelims">'
+            '<p>Before: EXAMPLE, SAMPLE, and FICTION, Circuit Judges.</p>'
+            '<p>SAMPLE, J., with whom EXAMPLE, J., joined.</p></div>'
+            f'<p>{byline}</p><p>Fictional body reasoning.</p>'
+        )
+        parsed, result = self.parsed_sections("html", raw)
+        self.assertEqual(self.kinds(result)[0], ("headmatter", "markup"))
+        self.assertEqual(self.kinds(result)[-1], ("majority", "line"))
+        self.assertEqual(result[-1].char_start, parsed.text.index(byline + "\n"))
+
+    def test_a_head_matter_block_after_the_body_is_unknown(self) -> None:
+        raw = (
+            '<opinion type="majority"><headnotes><p>Fictional headnote.</p></headnotes>'
+            '<author>EXAMPLE, J.</author><p>Fictional reasoning.</p>'
+            "<headnotes><p>Fictional reporter's note.</p><p>SAMPLE, J., dissenting.</p></headnotes>"
+            '<p>Affirmed.</p></opinion>'
+        )
+        parsed, result = self.parsed_sections("xml_harvard", raw)
+        self.assertEqual(self.kinds(result), [
+            ("headmatter", "markup"), ("majority", "element"),
+            ("unknown", "none"), ("majority", "element"),
+        ])
+        self.assertEqual(result[1].char_start, parsed.text.index("EXAMPLE, J."))
+        self.assertEqual(result[2].char_start, parsed.text.index("Fictional reporter's note."))
+        self.assertEqual(result[3].char_start, parsed.text.index("Affirmed."))
+
     def test_cues_and_bare_bylines_under_each_base(self) -> None:
         for row_type, base, typed_by in (
             ("010combined", "unknown", "none"),
@@ -219,6 +559,34 @@ class Segment(unittest.TestCase):
             "plain_text", "Fictional text.\n\nOPINION\n\nMore text.", per_curiam=True,
         )
         self.assertEqual(self.kinds(flagged_heading)[-1], ("per_curiam", "flag"))
+
+    def test_qualified_opinion_headings_against_running_bases(self) -> None:
+        for heading in ("AMENDED OPINION", "SUPPLEMENTAL OPINION", "CORRECTED OPINION"):
+            for row_type, base, expected in (
+                ("010combined", ("unknown", "none"), ("majority", "line")),
+                ("040dissent", ("dissent", "row"), ("unknown", "none")),
+                ("020lead", ("majority", "row"), ("majority", "row")),
+            ):
+                with self.subTest(heading=heading, row_type=row_type):
+                    parsed, result = self.parsed_sections(
+                        "plain_text", f"Fictional opening text.\n\n{heading}\n\nMore fictional reasoning.",
+                        opinion_type=row_type,
+                    )
+                    self.assertEqual(self.kinds(result), [base, expected])
+                    self.assertEqual(result[1].char_start, parsed.text.index(heading))
+
+    def test_longer_qualified_opinion_heading_is_unmatched(self) -> None:
+        for row_type, expected in (
+            ("010combined", ("unknown", "none")),
+            ("040dissent", ("dissent", "row")),
+            ("020lead", ("majority", "row")),
+        ):
+            with self.subTest(row_type=row_type):
+                _, result = self.parsed_sections(
+                    "plain_text", "Fictional opening text.\n\nAMENDED OPINION ON REHEARING"
+                    "\n\nMore fictional reasoning.", opinion_type=row_type,
+                )
+                self.assertEqual(self.kinds(result), [expected])
 
     def test_heading_cues_against_running_bases(self) -> None:
         separate = (
@@ -274,6 +642,11 @@ class Segment(unittest.TestCase):
             "Justice Example, as Justice Sample noted, dissenting from the remand would be wrong.",
             "Justice Example, after making a long and fictional statement of the facts of this "
             "case at some length, delivered the opinion of the court.",
+            "Justice Example and Justice Sample concurred in the judgment of the court only "
+            "on the ground first stated.",
+            "Justices Example, Sample, and Fiction dissented.",
+            "Justice Example dissented in Fiction, arguing the search was unreasonable.",
+            "Justice Example, Jr., wrote separately.",
         ):
             for column in ("plain_text", "html"):
                 with self.subTest(prose=prose, column=column):
@@ -294,6 +667,56 @@ class Segment(unittest.TestCase):
                 _, result = self.parsed_sections(column, raw)
                 self.assertEqual(self.kinds(result), [
                     ("unknown", "none"), ("majority", "line"), ("dissent", "line"),
+                ])
+
+    def test_separate_opinion_byline_shapes_open_at_their_paragraph(self) -> None:
+        first = "JUSTICE FICTION delivered the opinion of the Court."
+        for line, kind in (
+            ("JUSTICE EXAMPLE dissented.", "dissent"),
+            ("JUSTICE EXAMPLE dissents.", "dissent"),
+            ("JUSTICE EXAMPLE concurred.", "concurrence"),
+            ("JUSTICE EXAMPLE, with whom concurred the CHIEF JUSTICE and Mr. Justice SAMPLE, "
+             "dissenting.", "dissent"),
+            ("MR. CHIEF JUSTICE EXAMPLE, with whom concurred MR. JUSTICE SAMPLE, dissenting.",
+             "dissent"),
+            ("MR. JUSTICE EXAMPLE, concurring specially:", "concurrence"),
+            ("Mr. Justice EXAMPLE and Mr. Justice SAMPLE dissenting. "
+             "For dissenting opinion, see 000 U.S. 000.", "dissent"),
+            ("R. GUY EXAMPLE, JR., Circuit Judge, dissenting.", "dissent"),
+            ("EXAMPLE, Sr., Circuit Judge, concurring.", "concurrence"),
+            ("EXAMPLE, Circuit Judge (dissenting).", "dissent"),
+            ("SAMPLE, Circuit Judge (concurring).", "concurrence"),
+        ):
+            for column in ("plain_text", "html"):
+                with self.subTest(line=line, column=column):
+                    raw = (f"{first}\n\nFictional court reasoning.\n\n{line}\n\n"
+                           "Fictional separate reasoning." if column == "plain_text" else
+                           f"<p>{first}</p><p>Fictional court reasoning.</p><p>{line}</p>"
+                           "<p>Fictional separate reasoning.</p>")
+                    parsed, result = self.parsed_sections(column, raw)
+                    self.assertEqual(self.kinds(result), [("majority", "line"), (kind, "line")])
+                    self.assertEqual(result[1].char_start, parsed.text.index(line))
+
+    def test_parenthesised_dispositions_follow_a_panel_and_bare_court_byline(self) -> None:
+        panel = "Before EXAMPLE, SAMPLE, and FICTION, Circuit Judges."
+        court = "SAMPLE, Circuit Judge."
+        concurrence = "FICTION, Circuit Judge (concurring)."
+        dissent = "EXAMPLE, Circuit Judge (dissenting)."
+        for column in ("plain_text", "html"):
+            with self.subTest(column=column):
+                raw = (f"{panel}\n\n{court}\n\nFictional court reasoning.\n\n{concurrence}\n\n"
+                       f"Fictional concurrence.\n\n{dissent}\n\nFictional dissent."
+                       if column == "plain_text" else
+                       f"<p>{panel}</p><p>{court}</p><p>Fictional court reasoning.</p>"
+                       f"<p>{concurrence}</p><p>Fictional concurrence.</p>"
+                       f"<p>{dissent}</p><p>Fictional dissent.</p>")
+                parsed, result = self.parsed_sections(column, raw)
+                self.assertEqual(self.kinds(result), [
+                    ("unknown", "none"), ("majority", "line"),
+                    ("concurrence", "line"), ("dissent", "line"),
+                ])
+                self.assertEqual([section.char_start for section in result], [
+                    0, parsed.text.index(court), parsed.text.index(concurrence), parsed.text.index(dissent),
                 ])
 
     def test_a_typed_court_opinion_resumes_its_type_after_a_syllabus(self) -> None:

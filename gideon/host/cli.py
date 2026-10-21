@@ -25,7 +25,7 @@ from gideon.host import (
 )
 from gideon.host.corpus import cut, watch
 from gideon.host.corpus import install as corpus_install
-from gideon.host.index import build, inventory, promote
+from gideon.host.index import build, gc, inventory, promote
 from gideon.host.render import command as render_command
 from gideon.host.report import refusal
 
@@ -145,3 +145,7 @@ def run_index_promote(args: argparse.Namespace, *, run_gates: Callable[..., int]
 
 def run_index_report(args: argparse.Namespace) -> int:
     return _guarded("index report", inventory.run_index_report, args)
+
+
+def run_index_gc(args: argparse.Namespace) -> int:
+    return _guarded("index gc", gc.run_index_gc, args)

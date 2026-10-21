@@ -391,8 +391,7 @@ def _collections(
             return _refuse(
                 "collections", f"{row.gen_id}: generation is retired",
                 "A retired generation is not rebuilt in place: make a new lockfile with "
-                f"{report.command('corpus cut')} and build it with {report.command(COMMAND_PATH)}, "
-                f"or remove the retired generation with {report.command('index gc')} once its hold ends.",
+                f"{report.command('corpus cut')} and build it with {report.command(COMMAND_PATH)}.",
             )
         needs_build = row is None or row.state in {"building", "failed"}
         # A built generation's stages after built leave no mark but the report row they end in;

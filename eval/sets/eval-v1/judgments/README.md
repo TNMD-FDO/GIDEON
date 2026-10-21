@@ -58,7 +58,7 @@ A grader who already graded a query against one pool takes the rest of a fuller 
 python3 -m tools.judgments.topup <full pool> <seen pool> --query <id> [--query <id> …] --out <file>
 ```
 
-For each named query, active and present in both pools, it writes the full pool's passages whose coordinates the seen pool lacks, in the full pool's order with their `provenance`, as one pool-file line; a query with nothing new gets no line. The output is an absent file outside the checkout, and the packet builder reads it as any pool file.
+For each named query, active and present in both pools, it writes the full pool's passages whose coordinates the seen pool lacks, in the full pool's order with their `provenance`, as one pool-file line; a query with nothing new gets no line. The output is an absent file outside the checkout, and the packet builder reads it as any pool file. A top-up's packets are built with an `--assign` per query, naming the grader who graded it before, so the deal never hands it to someone else.
 
 The file is checked whole, every finding reported at once, each located by
 line, query id, and passage ordinal alone: the query id is a known active id
@@ -108,6 +108,18 @@ split evenly, `chu-written` queries dealt first to the CHU attorneys, and
 then the queries with and without a pool, the packets per grader, and the
 double-graded query ids — ids and counts only, never a question or a passage.
 
+Three optional, repeatable flags shape the deal:
+
+- `--skip <query id>` leaves a pooled query out of every packet and the manifest, for a query already graded elsewhere.
+- `--assign <query id>=<role id>` gives a query to a named grader, outside the even split and the second-reader draw.
+- `--second <query id>=<role id>` names a second reader for an assigned query; the second reader must be someone other than the assigned grader.
+
+When any of them is given, the summary adds the skipped ids and the assigned primaries and seconds. A top-up run names every query and its grader, for example:
+
+```text
+python3 -m tools.judgments.packets <top-up file> --out <dir> --grader CHU-attorney-1 --grader CHU-attorney-2 --grader TRAD-attorney-1 --grader TRAD-attorney-2 --assign judgments-008=CHU-attorney-1 --second judgments-008=TRAD-attorney-1
+```
+
 The refusals, each printed with its fix:
 
 - **the pool file is inside the checkout**, **cannot be read**, or **is not UTF-8** — move it outside and save it as UTF-8.
@@ -115,6 +127,8 @@ The refusals, each printed with its fix:
 - **a grader role id is malformed**, **repeated**, or **not an attorney role id** — give unique CHU and TRAD attorney role ids.
 - **the grader roster lacks a CHU attorney** or **lacks a TRAD attorney** — add one of the missing unit.
 - **the pool has findings** — every finding is printed above the refusal with its line, query id, and passage ordinal; correct the pool file and run again.
+- **a `--skip`, `--assign`, or `--second` is malformed, repeated, names a grader not in the roster, or conflicts with another** (a skipped query assigned, a second without an assignment, a second the same as the primary) — give each query at most one skip, one assignment, and one other second reader.
+- **a named query has no pool line**, or **no pooled query remains after `--skip`** — name only queries the pool holds, and leave at least one to build.
 
 Give each grader their own folder and the instruction page with it. Keep the manifest: the intake cannot join grades without it.
 

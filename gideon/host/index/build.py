@@ -964,8 +964,7 @@ def run_index_build(
             return _refuse(active_stage[0], Problem(
                 f"{outcome.name}: generation is retired",
                 "A retired generation is not rebuilt in place: make a new lockfile with "
-                f"{report.command('corpus cut')} and build it with {report.command(retry)}, "
-                f"or remove the retired generation with {report.command('index gc')} once its hold ends.",
+                f"{report.command('corpus cut')} and build it with {report.command(retry)}.",
             ))
         inputs = replace(inputs, name=outcome.name)
         if sample is not None:

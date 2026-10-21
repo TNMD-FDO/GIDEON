@@ -59,6 +59,7 @@ HEADING_CUES: Final = {
 _SEPARATE: Final = frozenset({"concurrence", "dissent", "concurrence_dissent"})
 _COURT: Final = frozenset({"majority", "plurality", "per_curiam"})
 _APPENDIX_HEADING: Final = re.compile(r"appendix (?:[a-z]|[0-9])\Z")
+_QUALIFIED_OPINION: Final = re.compile(r"(?:amended|supplemental|corrected) opinion")
 _HEADING_PUNCT: Final = re.compile(r"[^\w\s]|_")
 _SPACES: Final = re.compile(r"\s+")
 
@@ -70,6 +71,7 @@ _ROLE: Final = (
     r"(?:C\.\s*J\.|JJ\.|J\.|Chief Judge|Circuit Judge|District Judge|"
     r"Senior (?:Circuit |District )?Judge|Judge|Chief Justice|Justice)"
 )
+_BEFORE: Final = re.compile(rf"(?:Before|BEFORE)\b:?[\s\S]*?\b(?i:{_ROLE})")
 # A byline is a paragraph's prefix: a name and role followed by nothing, a
 # joiners' clause (which may wrap), or a disposition, ending at the paragraph's
 # end or at the first period after it that whitespace follows, a role's own
@@ -78,21 +80,31 @@ _ROLE: Final = (
 # clause naming no judge may stand before a disposition, never before a bare
 # end, and is tried last, so a disposition's own comma never opens one; the
 # disposition is read from the words after the joiners' clause, whose verb
-# may be a concurrence's.
+# may be a concurrence's. The joiners' clause passes an honorific's or a
+# role's period, as a delivery's tail does. A disposition's verb may be tensed
+# ("dissented", "concurs"), may stand in parentheses, and may end in the adverb
+# "specially". Two judges may share one byline, joined by "and", the first
+# being its judge, and a name before its role may carry a generational suffix.
 _DISPOSITION_WORDS: Final = (
     r"(?:in|part|and|the|judgment|result|concurring|dissenting|from|denial|of|"
-    r"certiorari|per|curiam)\b"
+    r"certiorari|per|curiam|specially)\b"
 )
 _BYLINE_END: Final = r"(?:[\s.,:;]*$|\.[*†‡]?(?=\s)|(?<=\.)(?=\s))"
+_JUDGE: Final = re.compile(
+    rf"(?:({_NAME})(?:,\s*(?i:Jr|Sr|II|III|IV)\.?)?,\s*(?i:{_ROLE})"
+    rf"|(?i:(?:Mr\.\s+)?(?:Chief\s+)?Justice)\s+({_NAME}))"
+)
 _BYLINE_START: Final = (
-    rf"(?:{_NAME},\s*(?i:{_ROLE})|(?i:(?:Mr\.\s+)?(?:Chief\s+)?Justice)\s+{_NAME})"
+    rf"{_JUDGE.pattern}(?:,?\s+(?i:and)\s+{_JUDGE.pattern})?"
 )
 _BYLINE_JOINERS: Final = (
-    rf"(?:(?:with\s+)?whom\b[\s\S]{{0,200}}?{_JOINDER_VERBS}[^.]{{0,80}}?[\s,:;]*)?"
+    rf"(?:(?:with\s+)?whom\b[\s\S]{{0,200}}?{_JOINDER_VERBS}"
+    rf"(?:Mr\.|{_ROLE}|[^.]){{0,80}}?[\s,:;]*)?"
 )
 _BYLINE_TAIL: Final = (
     rf"(?:(?:delivered|announced|for\s+the\s+court)\b(?:{_ROLE}|[^.])*?{_BYLINE_END}"
-    rf"|(?:concurring|dissenting)\b(?:[\s,]+{_DISPOSITION_WORDS})*{_BYLINE_END}"
+    rf"|\(?(?:concurring|dissenting|concurred|concurs|dissented|dissents)\b"
+    rf"(?:[\s,]+{_DISPOSITION_WORDS})*\)?{_BYLINE_END}"
     r")"
 )
 _BYLINE_PREAMBLE: Final = (
@@ -226,11 +238,17 @@ def _heading(line: str) -> str | None:
     normalized = _SPACES.sub(" ", _HEADING_PUNCT.sub(" ", line.casefold())).strip()
     if _APPENDIX_HEADING.fullmatch(normalized):
         return "appendix"
+    if _QUALIFIED_OPINION.fullmatch(normalized):
+        return "majority"
     return HEADING_CUES.get(normalized)
 
 
 def _unbroken(line: str) -> str:
     return _LINE_BREAK_HYPHEN.sub("", line)
+
+
+def _before(line: str) -> bool:
+    return _BEFORE.match(_unbroken(line)[:LINE_MAX_CHARS]) is not None
 
 
 def _after_closing(line: str) -> int:
@@ -249,6 +267,15 @@ def _byline(line: str) -> str | None:
     if match and _eligible(bounded[:match.end()]):
         return bounded[:match.end()]
     return None
+
+
+def _judge(prefix: str) -> str | None:
+    # The full byline fixes the name's end; the first start's two branches
+    # are the pattern's first two groups, so a second judge is never the one read.
+    match = _AUTHOR.match(prefix, _after_closing(prefix))
+    if match is None:
+        return None
+    return _SPACES.sub(" ", (match.group(1) or match.group(2)).casefold()).strip()
 
 
 def _disposition(line: str) -> str | None:
@@ -482,6 +509,36 @@ def _cued(cue: str | None, running: tuple[str, str], base: tuple[str, str]) -> t
     return cue, "line"
 
 
+def _bare(
+    running: tuple[str, str], base: tuple[str, str], armed: bool, bare_opened: bool,
+    judge: str | None, opener: str | None,
+) -> tuple[tuple[str, str], bool, bool, str | None]:
+    # In an untyped document the first bare author line after the panel's line
+    # opens the court's opinion, and a second under that opening is not guessed.
+    if base == running == ("unknown", "none") and armed:
+        return ("majority", "line"), False, True, None
+    if bare_opened:
+        return ("unknown", "none"), armed, False, None
+    # Another judge's bare line under a court's opinion an author line opened
+    # is not the court's; the document is typed by line, so the panel's arming is spent.
+    if running[0] in _COURT and running[1] == "line" and opener is not None and judge != opener:
+        return ("unknown", "none"), False, False, None
+    return running, armed, bare_opened, opener
+
+
+def _read_byline(
+    prefix: str, running: tuple[str, str], base: tuple[str, str], armed: bool, bare_opened: bool,
+    opener: str | None,
+) -> tuple[tuple[str, str], bool, bool, str | None]:
+    disposition = _disposition(prefix)
+    judge = _judge(prefix)
+    if disposition is None:
+        return _bare(running, base, armed, bare_opened, judge, opener)
+    resolved = _cued(disposition, running, base)
+    opener = judge if resolved[0] in _COURT and resolved[1] == "line" else None
+    return resolved, armed, False, opener
+
+
 def _label(text: str, start: int, end: int, block_label: str | None, parsed: Parsed) -> str | None:
     if block_label:
         return block_label
@@ -537,6 +594,17 @@ def _structural(parsed: Parsed, column: str, paragraphs: list[_Paragraph]) -> li
                 label = match.group(1)
         if first is not None:
             spans.append(_Span(first, len(text), "footnote", "markup", label))
+
+    # Head matter is what precedes the opinion, so a head-matter block that
+    # begins after the first paragraph outside every block is a reporter's
+    # note the vocabulary lacks.
+    block_starts, block_ends = _merged_exclusions([(span.start, span.end) for span in spans])
+    body = next((paragraph.start for paragraph in paragraphs
+                 if not _overlaps(paragraph.start, paragraph.end, block_starts, block_ends)), None)
+    if body is not None:
+        spans = [replace(span, section_type="unknown", typed_by="none")
+                 if span.section_type == "headmatter" and span.start > body else span
+                 for span in spans]
 
     starts, ends = _merged_exclusions([
         (span.start, span.end) for span in spans
@@ -647,6 +715,9 @@ def segment(
     openings: list[tuple[int, str, str, str | None]] = []
     base: tuple[str, str] = ("unknown", "none")
     running: tuple[str, str] | None = None
+    armed = bare_opened = False
+    opener: str | None = None
+    pending: str | None = None
     current_opinion: int | None = None
     page = _PageState() if column == "plain_text" else None
     for run in _runs(text, spans, opinions):
@@ -656,6 +727,15 @@ def segment(
             if start < run.end:
                 label = _label(text, run.start, run.end, span.label, parsed) if span.section_type == "footnote" else None
                 openings.append((start, span.section_type, span.typed_by, label))
+            if span.section_type == "headmatter" and span.typed_by == "markup":
+                # An author line closing the block cues the body after it;
+                # the block keeps its markup type.
+                block_paragraphs = paragraphs(text, run.start, run.end)
+                for paragraph in block_paragraphs:
+                    if _before(paragraph.line):
+                        armed = True
+                closing = block_paragraphs[-1].line if block_paragraphs else ""
+                pending = None if not closing or _participation(closing) else _byline(closing)
             continue
         content = text[run.start:run.end]
         if not content.strip():
@@ -663,7 +743,14 @@ def segment(
         if run.opinion != current_opinion or running is None:
             element = opinions[run.opinion].label if run.opinion is not None else None
             base = running = _base(opinion_type, per_curiam, element)
+            bare_opened = False
+            opener = None
             current_opinion = run.opinion
+        if pending is not None:
+            running, armed, bare_opened, opener = _read_byline(
+                pending, running, base, armed, bare_opened, opener,
+            )
+            pending = None
         start = run.start + len(content) - len(content.lstrip())
         openings.append((start, *running, None))
         for paragraph_index in range(bisect_left(paragraph_starts, run.start), len(paragraph_rows)):
@@ -679,6 +766,9 @@ def segment(
                 if opening is not None:
                     openings.append((opening.start, opening.section_type, opening.typed_by, opening.label))
                     if not skip:
+                        if opening.section_type != running[0]:
+                            bare_opened = False
+                            opener = None
                         running = opening.section_type, opening.typed_by
                 if skip:
                     continue
@@ -686,9 +776,16 @@ def segment(
             if heading == "notes":
                 continue
             if heading is not None:
+                bare_opened = False
+                opener = None
                 running = _cued(heading, running, base)
+            elif _before(paragraph.line):
+                armed = True
+                continue
             elif (prefix := _byline(paragraph.line)) is not None:
-                running = _cued(_disposition(prefix), running, base)
+                running, armed, bare_opened, opener = _read_byline(
+                    prefix, running, base, armed, bare_opened, opener,
+                )
             else:
                 continue
             openings.append((paragraph.start, *running, None))

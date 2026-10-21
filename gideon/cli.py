@@ -78,7 +78,6 @@ def start_screen(tree_root: Path | None = None) -> str:
 
 _LANDING: Final = {
     "host gpu": "the escape hatch, pulled only on eval evidence of reranker latency during bulk embedding",
-    "index gc": "lands in slice 3 (v0.4.0)",
     "registry gc": "in the recorded command surface, no slice scheduled",
     "audit query": "in the recorded command surface, no slice scheduled",
     "retention sweep": "lands in slice 6 (v0.7.0)",
@@ -398,7 +397,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     promote.add_argument("gen", help="generation to promote")
     promote.set_defaults(handler=_index_promote, command_path="index promote")
-    _stub_parser(index_sub, "gc", "index gc", "drop retired generations past their hold")
+    gc = index_sub.add_parser("gc", help="drop retired generations past their seven-day hold")
+    gc.add_argument(
+        "--stack", choices=STACKS, default=PRODUCTION_STACK,
+        help="sweep the standing CI sibling's stores instead of production's",
+    )
+    gc.set_defaults(handler=host_cli.run_index_gc, command_path="index gc")
     index_report = index_sub.add_parser(
         "report", help="print the corpus inventory from the record",
         description=(

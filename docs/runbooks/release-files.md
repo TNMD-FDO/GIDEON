@@ -201,7 +201,7 @@ The install's refusals and their fixes:
 - **The lockfile pins no `citation-map` file**: the label was cut before the map was pinned. Run `corpus cut` to pin it, then install the new label.
 - **The agreement's `citation-map` input is missing or off the pin**: remove the named snapshot file and its `.fetch.json` record, then run the command again, which fetches and verifies it.
 - **An agreement job fails as `invalid` or `malformed`**: the staged map directory disagrees with the stage, or a staged file or the map's record is damaged. Read the worker's logs the refusal names; removing `/data/work/<label>/caselaw/citation-map/` lets the next run stage the map again.
-- **The matching generation is retired**: make a new lockfile with `gideon corpus cut` and install it, or remove the retired generation with `gideon index gc` once its hold ends. It is never rebuilt in place.
+- **The matching generation is retired**: make a new lockfile with `gideon corpus cut` and install it. It is never rebuilt in place: `gideon index gc` drops its stores after the hold and keeps its record, so the generation stays retired.
 - **A lexical or dense build fails**: follow its reason's fix and the named worker or store logs, then run `gideon corpus install <label>` again to resume. The label remains installing.
 - **A generation is missing or not built or live at the installed move**: run `gideon corpus install <label>` again; the label stays installing until all its generations finish.
 - **The installed move finds the label missing or still cut**: run `gideon corpus install <label>` again to record it before the move. A superseded label requires the newest committed label instead.

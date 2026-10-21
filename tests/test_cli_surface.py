@@ -33,7 +33,6 @@ TOP_LEVEL = [
 # lands in, or the command's own words.
 STUBS = [
     (["host", "gpu"], "escape hatch"),
-    (["index", "gc"], "slice 3"),
     (["registry", "gc"], "no slice scheduled"),
     (["audit", "query"], "no slice scheduled"),
     (["retention", "sweep"], "slice 6"),
@@ -100,6 +99,13 @@ class Start(unittest.TestCase):
 
 
 class Help(unittest.TestCase):
+    def test_index_gc_help_names_the_hold(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["index", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn("drop retired generations past their seven-day hold", collapsed(out.getvalue()))
+
     def test_index_promote_help_names_the_built_generation(self) -> None:
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:

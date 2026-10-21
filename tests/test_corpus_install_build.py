@@ -476,12 +476,11 @@ class InstallBuild(unittest.TestCase):
                 self.assertIsNone(fixture.host.generations[row.gen_id].failure_reason)
                 self._assert_released(fixture.host)
 
-    def test_retired_generation_refuses_with_both_ways_out_and_builds_nothing(self) -> None:
+    def test_retired_generation_refuses_with_a_new_cut_and_builds_nothing(self) -> None:
         row = self._seed_generation(self.fixture, "retired")
         out = self._assert_refusal(self.fixture.run_install(), "collections", "generation is retired")
         self.assertIn(report.command("corpus cut"), out)
-        self.assertIn(report.command("index gc"), out)
-        self.assertIn("once its hold ends", out)
+        self.assertNotIn("index gc", out)
         self.assertEqual(self.host.deferred, [])
         self.assertEqual(self.host.generations[row.gen_id], row)
         self.assertNotIn("generation:", out)
