@@ -547,6 +547,38 @@ class BackupRun(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(host.locks[backuplock.BACKUP_LOCK.path], stored)
 
+    def test_supplied_clock_before_the_backup_stop_never_becomes_the_boundary(self) -> None:
+        supplied = NOW
+        stop = NOW + timedelta(hours=1)
+        host = _host()
+        info_argv = tuple(pgbackrest.exec_argv(RENDERED, "info", "--output=json"))
+        fresh = {"backup": [{"label": "new-full", "type": "full", "timestamp": {"stop": stop.timestamp()}}]}
+        host.commands[info_argv] = [
+            result(info_argv, stdout=json.dumps(BACKUP_INFO)),
+            result(info_argv, stdout=json.dumps(fresh)),
+        ]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = backup.run_backup_run(
+                argparse.Namespace(full=True, label=None),
+                host=host,
+                root=CHECKOUT,
+                now=supplied,
+            )
+        self.assertEqual(code, 0, out.getvalue())
+        label = backupset.nightly_label(supplied)
+        manifest_path = os.path.join(backupset.set_dir(label), backupset.MANIFEST_NAME)
+        parsed = backupset.parse_manifest(host.files[manifest_path])
+        assert isinstance(parsed, backupset.Manifest)
+        self.assertEqual(parsed.label, label)
+        self.assertEqual(parsed.started, supplied)
+        self.assertGreater(parsed.archive_through, stop)
+        self.assertGreater(parsed.finished, stop)
+        self.assertIn(
+            f"postgres: ok — pgBackRest full backup new-full; archive through {parsed.archive_through.isoformat()}\n",
+            out.getvalue(),
+        )
+
     def test_full_run_orders_stages_and_writes_manifest(self) -> None:
         host = _host()
         out = io.StringIO()
@@ -586,7 +618,9 @@ class BackupRun(unittest.TestCase):
         parsed = backupset.parse_manifest(host.files[manifest_path])
         self.assertIsInstance(parsed, backupset.Manifest)
         assert isinstance(parsed, backupset.Manifest)
-        self.assertEqual(parsed.archive_through, NOW)
+        self.assertGreater(parsed.archive_through, NOW)
+        self.assertGreaterEqual(parsed.finished, parsed.archive_through)
+        self.assertEqual(parsed.started, NOW)
         self.assertEqual(parsed.commit, "new-commit")
         self.assertEqual(parsed.recipients, (RECIPIENT, "age1" + "c" * 58))
         self.assertEqual(parsed.gideon_ids, GIDEON_IDS)
@@ -1020,8 +1054,6 @@ class BackupRun(unittest.TestCase):
             RENDERED,
             backup_type="full",
             kind=backupset.Kind.LABELLED,
-            now=NOW,
-            now_was_supplied=True,
         )
         self.assertTrue(stage.ok)
         self.assertIsNotNone(backup_stage)
@@ -1050,8 +1082,6 @@ class BackupRun(unittest.TestCase):
                     RENDERED,
                     backup_type=backup_type,
                     kind=kind,
-                    now=NOW,
-                    now_was_supplied=True,
                 )
                 self.assertTrue(stage.ok, stage.detail)
                 self.assertIsNotNone(backup_stage)
@@ -1082,8 +1112,6 @@ class BackupRun(unittest.TestCase):
             RENDERED,
             backup_type="full",
             kind=backupset.Kind.NIGHTLY,
-            now=NOW,
-            now_was_supplied=True,
         )
         self.assertFalse(stage.ok)
         self.assertEqual(stage.name, "postgres")

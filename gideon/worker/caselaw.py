@@ -1,4 +1,4 @@
-"""Turn staged case-law opinions into durable document and opinion rows."""
+"""Turn staged case-law opinions into durable rows and walks under one pipeline."""
 
 import fcntl
 import hashlib
@@ -47,7 +47,7 @@ CASELAW_FAILURE_REASONS: Final = frozenset({
     "citations", "treatment", "tokenizer", "chunker", "pipeline",
 })
 DOCUMENT_FAILURE_REASONS: Final = frozenset({
-    "no-text", "unparseable", "empty", "interrupted",
+    "no-text", "unparseable", "empty", "illegible", "interrupted",
 })
 PRECEDENTIAL_VALUES: Final = ("published", "unpublished", "unknown")
 # exempt: two attempts are a starting value; only a stopped parse spends one.
@@ -70,12 +70,12 @@ _ISO_DATE: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 PRESENT_SQL: Final = (
     "SELECT o.opinion_id, d.doc_id, d.status, d.attempts, d.text_source, "
     "d.sha256, d.canonical_text_sha256, "
-    "EXISTS (SELECT 1 FROM sections WHERE doc_id = d.doc_id) AS sectioned, "
+    "EXISTS (SELECT 1 FROM sections WHERE doc_id = d.doc_id AND pipeline = %s) AS sectioned, "
     "d.anchored_at IS NOT NULL AS anchored, "
     "d.citations_parsed_at IS NOT NULL AS cited, "
-    "d.treatment_pattern_set AS treated_under, "
+    "d.treatment_pattern_set AS treated_under, d.treated_pipeline, "
     "EXISTS (SELECT 1 FROM chunks WHERE doc_id = d.doc_id AND pipeline = %s) AS chunked, "
-    "o.case_name IS NOT NULL AS named "
+    "o.case_name IS NOT NULL AS named, o.per_curiam IS NOT NULL AS flagged "
     "FROM opinions AS o JOIN documents AS d ON d.doc_id = o.doc_id "
     "WHERE d.source = %s AND d.source_snapshot = %s AND o.court = %s"
 )
@@ -86,9 +86,11 @@ BEGIN_DOCUMENT_SQL: Final = (
 BEGIN_OPINION_SQL: Final = (
     "INSERT INTO opinions (opinion_id, doc_id, court, cluster_id, docket, decided_date, "
     "decided_date_is_approximate, precedential, precedential_raw, reporter_cites, "
-    "opinion_type, case_name) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    "opinion_type, case_name, per_curiam) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 NAME_SQL: Final = "UPDATE opinions SET case_name = %s WHERE doc_id = %s"
+FLAG_SQL: Final = "UPDATE opinions SET per_curiam = %s WHERE doc_id = %s"
 RETRY_SQL: Final = "UPDATE documents SET attempts = attempts + 1 WHERE doc_id = %s"
 GIVE_BACK_SQL: Final = (
     "UPDATE documents SET attempts = GREATEST(attempts - 1, 0) WHERE doc_id = %s"
@@ -96,32 +98,32 @@ GIVE_BACK_SQL: Final = (
 FINISH_READY_SQL: Final = (
     "UPDATE documents SET status = 'ready', sha256 = %s, canonical_text_sha256 = %s, "
     "ingested_at = %s, anchored_at = %s, citations_parsed_at = %s, "
-    "treatment_pattern_set = %s, treated_at = %s WHERE doc_id = %s"
+    "treatment_pattern_set = %s, treated_at = %s, treated_pipeline = %s WHERE doc_id = %s"
 )
 FINISH_FAILED_SQL: Final = (
     "UPDATE documents SET status = 'failed', failure_reason = %s, sha256 = %s, "
     "ingested_at = %s WHERE doc_id = %s"
 )
 SECTION_SQL: Final = (
-    "INSERT INTO sections (section_id, doc_id, ordinal, section_type, typed_by, "
+    "INSERT INTO sections (section_id, doc_id, pipeline, ordinal, section_type, typed_by, "
     "char_start, char_end, label, ref_offset, parent_section_id) "
-    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 ANCHOR_SQL: Final = (
-    "INSERT INTO anchors (anchor_id, doc_id, kind, label, char_start, char_end, attrs) "
-    "VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)"
+    "INSERT INTO anchors (anchor_id, doc_id, pipeline, kind, label, char_start, char_end, attrs) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)"
 )
 ANCHORED_SQL: Final = "UPDATE documents SET anchored_at = %s WHERE doc_id = %s"
 READ_SECTIONS_SQL: Final = (
     "SELECT section_id, doc_id, ordinal, section_type, typed_by, char_start, "
     "char_end, label, ref_offset, parent_section_id FROM sections "
-    "WHERE doc_id = %s ORDER BY ordinal"
+    "WHERE doc_id = %s AND pipeline = %s ORDER BY ordinal"
 )
 CITATION_SQL: Final = (
-    "INSERT INTO citations (citation_id, doc_id, ordinal, char_start, char_end, "
+    "INSERT INTO citations (citation_id, doc_id, pipeline, ordinal, char_start, char_end, "
     "section_id, section_type, cite_type, cite_form, raw_cite, reporter_cite, "
     "pincite, key, to_cluster, pattern_id) "
-    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 MARK_CITED_SQL: Final = (
     "UPDATE documents SET citations_parsed_at = %s WHERE doc_id = %s"
@@ -129,13 +131,14 @@ MARK_CITED_SQL: Final = (
 READ_CITATIONS_SQL: Final = (
     "SELECT citation_id, doc_id, ordinal, char_start, char_end, section_id, "
     "section_type, cite_type, cite_form, raw_cite, reporter_cite, pincite, "
-    "key, to_cluster, pattern_id FROM citations WHERE doc_id = %s ORDER BY ordinal"
+    "key, to_cluster, pattern_id FROM citations WHERE doc_id = %s AND pipeline = %s ORDER BY ordinal"
 )
 SIGNAL_SQL: Final = (
-    "INSERT INTO citation_signals (signal_id, citation_id, doc_id, signal_source, "
+    "INSERT INTO citation_signals (signal_id, citation_id, doc_id, pipeline, signal_source, "
     "pattern_set, treatment_signal, qualifier, effective_section, state, "
     "no_state_reason, char_start, char_end, found_at) "
-    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+    "ON CONFLICT (citation_id, signal_source, pattern_set) DO NOTHING"
 )
 CHUNK_SQL: Final = (
     "INSERT INTO chunks (chunk_id, doc_id, pipeline, ordinal, section_id, "
@@ -143,7 +146,8 @@ CHUNK_SQL: Final = (
     "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 MARK_TREATED_SQL: Final = (
-    "UPDATE documents SET treatment_pattern_set = %s, treated_at = %s WHERE doc_id = %s"
+    "UPDATE documents SET treatment_pattern_set = %s, treated_at = %s, "
+    "treated_pipeline = %s WHERE doc_id = %s"
 )
 
 logger = logging.getLogger(__name__)
@@ -194,14 +198,16 @@ class PresentRow:
     anchored: bool
     cited: bool
     treated_under: str | None
+    treated_pipeline: str | None
     chunked: bool
     named: bool
+    flagged: bool
 
-    @property
-    def treated(self) -> bool:
-        """Whether the current pattern set completed for this document."""
+    def treated_at(self, pipeline: str) -> bool:
+        """Whether the current pattern set completed under this pipeline."""
 
-        return self.treated_under == treatment.PATTERN_SET_ID
+        return (self.treated_under == treatment.PATTERN_SET_ID
+                and self.treated_pipeline == pipeline)
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +238,7 @@ class NewOpinion:
     reporter_cites: tuple[str, ...]
     opinion_type: str
     case_name: str | None
+    per_curiam: bool | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +289,7 @@ class IngestCounts:
     signalled: int
     chunked: int
     named: int
+    flagged: int
 
 
 class DocumentRecord(Protocol):
@@ -292,26 +300,35 @@ class DocumentRecord(Protocol):
     ) -> dict[int, PresentRow]: ...
     def begin(self, document: NewDocument, opinion: NewOpinion) -> None: ...
     def write_name(self, doc_id: str, case_name: str) -> None: ...
+    def write_flag(self, doc_id: str, per_curiam: bool) -> None: ...
     def retry(self, doc_id: str) -> None: ...
     def give_back(self, doc_id: str) -> None: ...
     def finish_ready(
-        self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime,
+        self, doc_id: str, pipeline: str, sha256: str, canonical_sha256: str, at: datetime,
         sections: tuple[NewSection, ...], anchors: tuple[NewAnchor, ...],
         citation_rows: tuple[citations.NewCitation, ...],
         signal_rows: tuple[treatment.NewSignal, ...],
         chunk_rows: tuple[chunker.NewChunk, ...],
     ) -> None: ...
-    def write_sections(self, doc_id: str, sections: tuple[NewSection, ...]) -> None: ...
+    def write_walk(
+        self, doc_id: str, pipeline: str,
+        sections: tuple[NewSection, ...], anchors: tuple[NewAnchor, ...],
+        citation_rows: tuple[citations.NewCitation, ...],
+        signal_rows: tuple[treatment.NewSignal, ...],
+        chunk_rows: tuple[chunker.NewChunk, ...], at: datetime,
+    ) -> None: ...
     def write_anchors(
-        self, doc_id: str, anchors: tuple[NewAnchor, ...], at: datetime,
+        self, doc_id: str, pipeline: str, anchors: tuple[NewAnchor, ...], at: datetime,
     ) -> None: ...
-    def read_sections(self, doc_id: str) -> tuple[NewSection, ...]: ...
+    def read_sections(self, doc_id: str, pipeline: str) -> tuple[NewSection, ...]: ...
     def write_citations(
-        self, doc_id: str, citation_rows: tuple[citations.NewCitation, ...], at: datetime,
+        self, doc_id: str, pipeline: str,
+        citation_rows: tuple[citations.NewCitation, ...], at: datetime,
     ) -> None: ...
-    def read_citations(self, doc_id: str) -> tuple[citations.NewCitation, ...]: ...
+    def read_citations(self, doc_id: str, pipeline: str) -> tuple[citations.NewCitation, ...]: ...
     def write_signals(
-        self, doc_id: str, signal_rows: tuple[treatment.NewSignal, ...], at: datetime,
+        self, doc_id: str, pipeline: str,
+        signal_rows: tuple[treatment.NewSignal, ...], at: datetime,
     ) -> None: ...
     def write_chunks(self, doc_id: str, chunk_rows: tuple[chunker.NewChunk, ...]) -> None: ...
     def finish_failed(
@@ -321,12 +338,12 @@ class DocumentRecord(Protocol):
 
 
 def _section_statements(
-    doc_id: str, rows: tuple[NewSection, ...],
+    doc_id: str, pipeline: str, rows: tuple[NewSection, ...],
 ) -> tuple[tuple[str, tuple[object, ...]], ...]:
     # The parent key is checked per row, and a footnote's parent may follow it.
     return tuple(
         (SECTION_SQL, (
-            row.section_id, doc_id, row.ordinal, row.section_type, row.typed_by,
+            row.section_id, doc_id, pipeline, row.ordinal, row.section_type, row.typed_by,
             row.char_start, row.char_end, row.label, row.ref_offset,
             row.parent_section_id,
         ))
@@ -335,11 +352,11 @@ def _section_statements(
 
 
 def _anchor_statements(
-    doc_id: str, rows: tuple[NewAnchor, ...],
+    doc_id: str, pipeline: str, rows: tuple[NewAnchor, ...],
 ) -> tuple[tuple[str, tuple[object, ...]], ...]:
     return tuple(
         (ANCHOR_SQL, (
-            row.anchor_id, doc_id, row.kind, row.label, row.char_start, row.char_end,
+            row.anchor_id, doc_id, pipeline, row.kind, row.label, row.char_start, row.char_end,
             json.dumps(dict(row.attrs), sort_keys=True),
         ))
         for row in rows
@@ -347,11 +364,11 @@ def _anchor_statements(
 
 
 def _citation_statements(
-    doc_id: str, rows: tuple[citations.NewCitation, ...],
+    doc_id: str, pipeline: str, rows: tuple[citations.NewCitation, ...],
 ) -> tuple[tuple[str, tuple[object, ...]], ...]:
     return tuple(
         (CITATION_SQL, (
-            row.citation_id, doc_id, row.ordinal, row.char_start, row.char_end,
+            row.citation_id, doc_id, pipeline, row.ordinal, row.char_start, row.char_end,
             row.section_id, row.section_type, row.cite_type, row.cite_form,
             row.raw_cite, row.reporter_cite, row.pincite, row.key,
             row.to_cluster, row.pattern_id,
@@ -361,11 +378,11 @@ def _citation_statements(
 
 
 def _signal_statements(
-    doc_id: str, rows: tuple[treatment.NewSignal, ...], at: datetime,
+    doc_id: str, pipeline: str, rows: tuple[treatment.NewSignal, ...], at: datetime,
 ) -> tuple[tuple[str, tuple[object, ...]], ...]:
     return tuple(
         (SIGNAL_SQL, (
-            row.signal_id, row.citation_id, doc_id, row.signal_source,
+            row.signal_id, row.citation_id, doc_id, pipeline, row.signal_source,
             row.pattern_set, row.treatment_signal, row.qualifier,
             row.effective_section, row.state, row.no_state_reason,
             row.char_start, row.char_end, at,
@@ -388,7 +405,7 @@ def _chunk_statements(
 
 
 class PsycopgRecord:
-    """Write document transitions as one committed transaction per operation."""
+    """Write document transitions and versioned walks in committed transactions."""
 
     def __init__(
         self, *, connect: Callable[..., Any] = psycopg.connect,
@@ -433,7 +450,7 @@ class PsycopgRecord:
     ) -> dict[int, PresentRow]:
         """Read existing opinion states for one source, snapshot, and court."""
 
-        rows = self._run(((PRESENT_SQL, (pipeline, source, snapshot_date, court)),), read=True)
+        rows = self._run(((PRESENT_SQL, (pipeline, pipeline, source, snapshot_date, court)),), read=True)
         return {
             int(opinion_id): PresentRow(
                 str(doc_id), str(status), int(attempts),
@@ -442,10 +459,12 @@ class PsycopgRecord:
                 str(canonical_sha256) if canonical_sha256 is not None else None,
                 bool(sectioned), bool(anchored), bool(cited),
                 str(treated_under) if treated_under is not None else None,
-                bool(chunked), bool(named),
+                str(treated_pipeline) if treated_pipeline is not None else None,
+                bool(chunked), bool(named), bool(flagged),
             )
             for opinion_id, doc_id, status, attempts, text_source, sha256,
-            canonical_sha256, sectioned, anchored, cited, treated_under, chunked, named in rows
+            canonical_sha256, sectioned, anchored, cited, treated_under,
+            treated_pipeline, chunked, named, flagged in rows
         }
 
     def begin(self, document: NewDocument, opinion: NewOpinion) -> None:
@@ -461,6 +480,7 @@ class PsycopgRecord:
                 opinion.docket, opinion.decided_date, opinion.decided_date_is_approximate,
                 opinion.precedential, opinion.precedential_raw,
                 list(opinion.reporter_cites), opinion.opinion_type, opinion.case_name,
+                opinion.per_curiam,
             )),
         ))
 
@@ -468,6 +488,11 @@ class PsycopgRecord:
         """Commit the case name for an already ready opinion."""
 
         self._run(((NAME_SQL, (case_name, doc_id)),))
+
+    def write_flag(self, doc_id: str, per_curiam: bool) -> None:
+        """Commit the source flag for an already ready opinion."""
+
+        self._run(((FLAG_SQL, (per_curiam, doc_id)),))
 
     def retry(self, doc_id: str) -> None:
         """Count one more parse attempt for a processing document."""
@@ -480,7 +505,7 @@ class PsycopgRecord:
         self._run(((GIVE_BACK_SQL, (doc_id,)),))
 
     def finish_ready(
-        self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime,
+        self, doc_id: str, pipeline: str, sha256: str, canonical_sha256: str, at: datetime,
         sections: tuple[NewSection, ...], anchors: tuple[NewAnchor, ...],
         citation_rows: tuple[citations.NewCitation, ...],
         signal_rows: tuple[treatment.NewSignal, ...],
@@ -490,54 +515,69 @@ class PsycopgRecord:
 
         self._run(((FINISH_READY_SQL, (
                        sha256, canonical_sha256, at, at, at,
-                       treatment.PATTERN_SET_ID, at, doc_id,
+                       treatment.PATTERN_SET_ID, at, pipeline, doc_id,
                    )),
-                   *_section_statements(doc_id, sections),
-                   *_anchor_statements(doc_id, anchors),
-                   *_citation_statements(doc_id, citation_rows),
-                   *_signal_statements(doc_id, signal_rows, at),
+                   *_section_statements(doc_id, pipeline, sections),
+                   *_anchor_statements(doc_id, pipeline, anchors),
+                   *_citation_statements(doc_id, pipeline, citation_rows),
+                   *_signal_statements(doc_id, pipeline, signal_rows, at),
                    *_chunk_statements(doc_id, chunk_rows)))
 
-    def write_sections(self, doc_id: str, sections: tuple[NewSection, ...]) -> None:
-        """Commit sections for an already ready document."""
+    def write_walk(
+        self, doc_id: str, pipeline: str,
+        sections: tuple[NewSection, ...], anchors: tuple[NewAnchor, ...],
+        citation_rows: tuple[citations.NewCitation, ...],
+        signal_rows: tuple[treatment.NewSignal, ...],
+        chunk_rows: tuple[chunker.NewChunk, ...], at: datetime,
+    ) -> None:
+        """Commit one pipeline's whole walk and its completed marks together."""
 
-        self._run(_section_statements(doc_id, sections))
+        self._run((*_section_statements(doc_id, pipeline, sections),
+                   *_anchor_statements(doc_id, pipeline, anchors),
+                   *_citation_statements(doc_id, pipeline, citation_rows),
+                   *_signal_statements(doc_id, pipeline, signal_rows, at),
+                   *_chunk_statements(doc_id, chunk_rows),
+                   (ANCHORED_SQL, (at, doc_id)),
+                   (MARK_CITED_SQL, (at, doc_id)),
+                   (MARK_TREATED_SQL, (treatment.PATTERN_SET_ID, at, pipeline, doc_id))))
 
     def write_anchors(
-        self, doc_id: str, anchors: tuple[NewAnchor, ...], at: datetime,
+        self, doc_id: str, pipeline: str, anchors: tuple[NewAnchor, ...], at: datetime,
     ) -> None:
         """Commit anchors and the anchoring mark for an already ready document."""
 
-        self._run((*_anchor_statements(doc_id, anchors),
+        self._run((*_anchor_statements(doc_id, pipeline, anchors),
                    (ANCHORED_SQL, (at, doc_id))))
 
-    def read_sections(self, doc_id: str) -> tuple[NewSection, ...]:
+    def read_sections(self, doc_id: str, pipeline: str) -> tuple[NewSection, ...]:
         """Read a ready document's recorded sections in ordinal order."""
 
-        rows = self._run(((READ_SECTIONS_SQL, (doc_id,)),), read=True)
+        rows = self._run(((READ_SECTIONS_SQL, (doc_id, pipeline)),), read=True)
         return tuple(NewSection(*row) for row in rows)
 
     def write_citations(
-        self, doc_id: str, citation_rows: tuple[citations.NewCitation, ...], at: datetime,
+        self, doc_id: str, pipeline: str,
+        citation_rows: tuple[citations.NewCitation, ...], at: datetime,
     ) -> None:
         """Commit a ready document's citations and completed mark together."""
 
-        self._run((*_citation_statements(doc_id, citation_rows),
+        self._run((*_citation_statements(doc_id, pipeline, citation_rows),
                    (MARK_CITED_SQL, (at, doc_id))))
 
-    def read_citations(self, doc_id: str) -> tuple[citations.NewCitation, ...]:
+    def read_citations(self, doc_id: str, pipeline: str) -> tuple[citations.NewCitation, ...]:
         """Read recorded citation edges in ordinal order."""
 
-        rows = self._run(((READ_CITATIONS_SQL, (doc_id,)),), read=True)
+        rows = self._run(((READ_CITATIONS_SQL, (doc_id, pipeline)),), read=True)
         return tuple(citations.NewCitation(*row) for row in rows)
 
     def write_signals(
-        self, doc_id: str, signal_rows: tuple[treatment.NewSignal, ...], at: datetime,
+        self, doc_id: str, pipeline: str,
+        signal_rows: tuple[treatment.NewSignal, ...], at: datetime,
     ) -> None:
-        """Commit treatment findings and the pattern-set mark together."""
+        """Commit treatment findings and the pattern-set and pipeline mark together."""
 
-        self._run((*_signal_statements(doc_id, signal_rows, at),
-                   (MARK_TREATED_SQL, (treatment.PATTERN_SET_ID, at, doc_id))))
+        self._run((*_signal_statements(doc_id, pipeline, signal_rows, at),
+                   (MARK_TREATED_SQL, (treatment.PATTERN_SET_ID, at, pipeline, doc_id))))
 
     def write_chunks(self, doc_id: str, chunk_rows: tuple[chunker.NewChunk, ...]) -> None:
         """Commit a ready document's chunks under their pipeline."""
@@ -603,6 +643,7 @@ class _Progress:
     signalled: int = 0
     chunked: int = 0
     named: int = 0
+    flagged: int = 0
     ambiguous: int = 0
     error: str = "-"
 
@@ -611,7 +652,7 @@ class _Progress:
             self.seen, self.present, self.ready, self.failed,
             self.retried, self.interrupted, self.sectioned, self.anchored,
             self.pgmap_checked, self.pgmap_disagreeing, self.cited,
-            self.treated, self.signalled, self.chunked, self.named,
+            self.treated, self.signalled, self.chunked, self.named, self.flagged,
         )
 
 
@@ -620,13 +661,13 @@ def _log(progress: _Progress, action: str) -> None:
         "action=caselaw_%s job_id=%d label=%s court=%s seen=%d present=%d "
         "ready=%d failed=%d retried=%d interrupted=%d sectioned=%d anchored=%d "
         "pgmap_checked=%d pgmap_disagreeing=%d cited=%d treated=%d "
-        "signalled=%d chunked=%d named=%d ambiguous=%d seconds=%.3f error=%s",
+        "signalled=%d chunked=%d named=%d flagged=%d ambiguous=%d seconds=%.3f error=%s",
         action, progress.job, progress.label, progress.court, progress.seen,
         progress.present, progress.ready, progress.failed, progress.retried,
         progress.interrupted, progress.sectioned, progress.anchored,
         progress.pgmap_checked, progress.pgmap_disagreeing, progress.cited,
         progress.treated, progress.signalled, progress.chunked, progress.named,
-        progress.ambiguous,
+        progress.flagged, progress.ambiguous,
         max(0.0, progress.monotonic() - progress.started),
         progress.error,
     )
@@ -797,23 +838,23 @@ def _document_id(opinion_id: int, snapshot_date: date) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _section_id(doc_id: str, start: int, end: int) -> str:
-    return hashlib.sha256(f"{doc_id}\n{start}\n{end}".encode()).hexdigest()
+def _section_id(doc_id: str, pipeline: str, start: int, end: int) -> str:
+    return hashlib.sha256(f"{doc_id}\n{pipeline}\n{start}\n{end}".encode()).hexdigest()
 
 
-def _anchor_id(doc_id: str, kind: str, scheme: str, start: int, end: int) -> str:
-    return hashlib.sha256(f"{doc_id}\n{kind}\n{scheme}\n{start}\n{end}".encode()).hexdigest()
+def _anchor_id(doc_id: str, pipeline: str, kind: str, scheme: str, start: int, end: int) -> str:
+    return hashlib.sha256(f"{doc_id}\n{pipeline}\n{kind}\n{scheme}\n{start}\n{end}".encode()).hexdigest()
 
 
 def _section_rows(
-    doc_id: str, parsed: opiniontext.Parsed, *, opinion_type: str,
+    doc_id: str, pipeline: str, parsed: opiniontext.Parsed, *, opinion_type: str,
     per_curiam: bool, column: str,
 ) -> tuple[tuple[NewSection, ...], tuple[sections.Section, ...]]:
     try:
         result = sections.segment(
             parsed, opinion_type=opinion_type, per_curiam=per_curiam, column=column,
         )
-        ids = tuple(_section_id(doc_id, section.char_start, section.char_end)
+        ids = tuple(_section_id(doc_id, pipeline, section.char_start, section.char_end)
                     for section in result)
         rows = tuple(
             NewSection(
@@ -830,13 +871,14 @@ def _section_rows(
 
 
 def _anchor_rows(
-    doc_id: str, parsed: opiniontext.Parsed, section_result: tuple[sections.Section, ...],
+    doc_id: str, pipeline: str, parsed: opiniontext.Parsed,
+    section_result: tuple[sections.Section, ...],
 ) -> tuple[tuple[NewAnchor, ...], int, int]:
     try:
         result = anchors.anchor(parsed, section_result)
         rows = tuple(
             NewAnchor(
-                _anchor_id(doc_id, item.kind, dict(item.attrs)["scheme"],
+                _anchor_id(doc_id, pipeline, item.kind, dict(item.attrs)["scheme"],
                            item.char_start, item.char_end),
                 doc_id, item.kind, item.label, item.char_start, item.char_end,
                 dict(item.attrs),
@@ -862,13 +904,13 @@ def _put(host: RealHost, root: Path, text: str) -> str:
 
 
 def _citation_rows(
-    doc_id: str, text: str, section_rows: tuple[NewSection, ...],
+    doc_id: str, pipeline: str, text: str, section_rows: tuple[NewSection, ...],
     find: Callable[[str], tuple[FoundCitation, ...]],
     resolve: citations.Resolver,
 ) -> tuple[citations.NewCitation, ...]:
     try:
         return citations.edges(
-            doc_id, text, section_rows, find(text), grammar.extract(text), resolve,
+            doc_id, pipeline, text, section_rows, find(text), grammar.extract(text), resolve,
         )
     except Exception as exc:  # a citation defect fails the job.
         raise CaselawFailure("citations", error=type(exc).__name__) from exc
@@ -930,11 +972,11 @@ def _parse_opinion(
         progress.failed += 1
         return
     section_rows, section_result = _section_rows(
-        doc_id, parsed, opinion_type=opinion_type,
+        doc_id, pipeline.version, parsed, opinion_type=opinion_type,
         per_curiam=per_curiam, column=column,
     )
-    anchor_rows, checked, disagreeing = _anchor_rows(doc_id, parsed, section_result)
-    citation_rows = _citation_rows(doc_id, parsed.text, section_rows, find, resolve)
+    anchor_rows, checked, disagreeing = _anchor_rows(doc_id, pipeline.version, parsed, section_result)
+    citation_rows = _citation_rows(doc_id, pipeline.version, parsed.text, section_rows, find, resolve)
     signal_rows = _signal_rows(
         doc_id, parsed.text, section_rows, citation_rows,
         citing, cluster_court, geography,
@@ -944,7 +986,7 @@ def _parse_opinion(
     )
     canonical = _put(host, store_root, parsed.text)
     record.finish_ready(
-        doc_id, original, canonical, clock(), section_rows, anchor_rows, citation_rows,
+        doc_id, pipeline.version, original, canonical, clock(), section_rows, anchor_rows, citation_rows,
         signal_rows, chunk_rows,
     )
     progress.ready += 1
@@ -955,6 +997,23 @@ def _parse_opinion(
     progress.treated += 1
     progress.signalled += len(signal_rows)
     progress.chunked += 1
+
+
+def _read_original(
+    host: RealHost, store_root: Path, present: PresentRow,
+) -> tuple[str, opiniontext.Parsed]:
+    if present.sha256 is None or present.text_source is None:
+        raise CaselawFailure("text-mismatch")
+    original = gideon.host.cas.get(host, present.sha256, root=store_root)
+    if isinstance(original, Problem):
+        raise CaselawFailure("store")
+    try:
+        parsed = opiniontext.walk(present.text_source, original.decode("utf-8"))
+    except Exception as exc:  # a walk that no longer reads its original is a corpus event.
+        raise CaselawFailure("text-mismatch", error=type(exc).__name__) from exc
+    if hashlib.sha256(parsed.text.encode("utf-8")).hexdigest() != present.canonical_text_sha256:
+        raise CaselawFailure("text-mismatch")
+    return present.text_source, parsed
 
 
 def _backfill(
@@ -969,6 +1028,38 @@ def _backfill(
 ) -> None:
     if present.canonical_text_sha256 is None:
         raise CaselawFailure("text-mismatch")
+    if not present.sectioned:
+        column, parsed = _read_original(host, store_root, present)
+        section_rows, section_result = _section_rows(
+            present.doc_id, pipeline.version, parsed, opinion_type=opinion_type,
+            per_curiam=per_curiam, column=column,
+        )
+        anchor_rows, checked, disagreeing = _anchor_rows(
+            present.doc_id, pipeline.version, parsed, section_result,
+        )
+        citation_rows = _citation_rows(
+            present.doc_id, pipeline.version, parsed.text, section_rows, find, resolve,
+        )
+        signal_rows = _signal_rows(
+            present.doc_id, parsed.text, section_rows, citation_rows,
+            citing, cluster_court, geography,
+        )
+        chunk_rows = _chunk_rows(
+            present.doc_id, pipeline, parsed.text, section_rows, citation_rows, count,
+        )
+        record.write_walk(
+            present.doc_id, pipeline.version, section_rows, anchor_rows,
+            citation_rows, signal_rows, chunk_rows, clock(),
+        )
+        progress.sectioned += 1
+        progress.anchored += 1
+        progress.pgmap_checked += checked
+        progress.pgmap_disagreeing += disagreeing
+        progress.cited += 1
+        progress.treated += 1
+        progress.signalled += len(signal_rows)
+        progress.chunked += 1
+        return
     if present.sectioned and present.anchored:
         canonical = gideon.host.cas.get(
             host, present.canonical_text_sha256, root=store_root,
@@ -981,12 +1072,12 @@ def _backfill(
             text = canonical.decode("utf-8")
         except UnicodeError as exc:
             raise CaselawFailure("text-mismatch", error=type(exc).__name__) from exc
-        section_rows = record.read_sections(present.doc_id)
+        section_rows = record.read_sections(present.doc_id, pipeline.version)
         citation_rows = (
-            record.read_citations(present.doc_id) if present.cited else
-            _citation_rows(present.doc_id, text, section_rows, find, resolve)
+            record.read_citations(present.doc_id, pipeline.version) if present.cited else
+            _citation_rows(present.doc_id, pipeline.version, text, section_rows, find, resolve)
         )
-        signal_rows = () if present.treated else _signal_rows(
+        signal_rows = () if present.treated_at(pipeline.version) else _signal_rows(
             present.doc_id, text, section_rows, citation_rows,
             citing, cluster_court, geography,
         )
@@ -994,57 +1085,46 @@ def _backfill(
             present.doc_id, pipeline, text, section_rows, citation_rows, count,
         )
         if not present.cited:
-            record.write_citations(present.doc_id, citation_rows, clock())
+            record.write_citations(present.doc_id, pipeline.version, citation_rows, clock())
             progress.cited += 1
-        if not present.treated:
-            record.write_signals(present.doc_id, signal_rows, clock())
+        if not present.treated_at(pipeline.version):
+            record.write_signals(present.doc_id, pipeline.version, signal_rows, clock())
             progress.treated += 1
             progress.signalled += len(signal_rows)
         if not present.chunked:
             record.write_chunks(present.doc_id, chunk_rows)
             progress.chunked += 1
         return
-    if present.sha256 is None or present.text_source is None:
-        raise CaselawFailure("text-mismatch")
-    original = gideon.host.cas.get(host, present.sha256, root=store_root)
-    if isinstance(original, Problem):
-        raise CaselawFailure("store")
-    try:
-        parsed = opiniontext.canonical_text(present.text_source, original.decode("utf-8"))
-    except Exception as exc:  # a walk that no longer reads its original is a corpus event.
-        raise CaselawFailure("text-mismatch", error=type(exc).__name__) from exc
-    if hashlib.sha256(parsed.text.encode("utf-8")).hexdigest() != present.canonical_text_sha256:
-        raise CaselawFailure("text-mismatch")
+    column, parsed = _read_original(host, store_root, present)
     section_rows, section_result = _section_rows(
-        present.doc_id, parsed, opinion_type=opinion_type,
-        per_curiam=per_curiam, column=present.text_source,
+        present.doc_id, pipeline.version, parsed, opinion_type=opinion_type,
+        per_curiam=per_curiam, column=column,
     )
-    anchor_rows, checked, disagreeing = _anchor_rows(present.doc_id, parsed, section_result)
-    recorded_sections = record.read_sections(present.doc_id) if present.sectioned else section_rows
+    anchor_rows, checked, disagreeing = _anchor_rows(
+        present.doc_id, pipeline.version, parsed, section_result,
+    )
+    recorded_sections = record.read_sections(present.doc_id, pipeline.version)
     citation_rows = (
-        record.read_citations(present.doc_id) if present.cited else
-        _citation_rows(present.doc_id, parsed.text, recorded_sections, find, resolve)
+        record.read_citations(present.doc_id, pipeline.version) if present.cited else
+        _citation_rows(present.doc_id, pipeline.version, parsed.text, recorded_sections, find, resolve)
     )
-    signal_rows = () if present.treated else _signal_rows(
+    signal_rows = () if present.treated_at(pipeline.version) else _signal_rows(
         present.doc_id, parsed.text, recorded_sections, citation_rows,
         citing, cluster_court, geography,
     )
     chunk_rows = () if present.chunked else _chunk_rows(
         present.doc_id, pipeline, parsed.text, recorded_sections, citation_rows, count,
     )
-    if not present.sectioned:
-        record.write_sections(present.doc_id, section_rows)
-        progress.sectioned += 1
     if not present.anchored:
-        record.write_anchors(present.doc_id, anchor_rows, clock())
+        record.write_anchors(present.doc_id, pipeline.version, anchor_rows, clock())
         progress.anchored += 1
     progress.pgmap_checked += checked
     progress.pgmap_disagreeing += disagreeing
     if not present.cited:
-        record.write_citations(present.doc_id, citation_rows, clock())
+        record.write_citations(present.doc_id, pipeline.version, citation_rows, clock())
         progress.cited += 1
-    if not present.treated:
-        record.write_signals(present.doc_id, signal_rows, clock())
+    if not present.treated_at(pipeline.version):
+        record.write_signals(present.doc_id, pipeline.version, signal_rows, clock())
         progress.treated += 1
         progress.signalled += len(signal_rows)
     if not present.chunked:
@@ -1149,9 +1229,12 @@ def ingest(
                                 raise CaselawFailure("stage-mismatch", table="opinions")
                             record.write_name(previous.doc_id, cluster.case_name)
                             progress.named += 1
+                        if previous is not None and previous.status == "ready" and not previous.flagged:
+                            record.write_flag(previous.doc_id, per_curiam)
+                            progress.flagged += 1
                         if (previous is not None and previous.status == "ready"
                                 and not (previous.sectioned and previous.anchored
-                                         and previous.cited and previous.treated
+                                         and previous.cited and previous.treated_at(pipeline)
                                          and previous.chunked)):
                             _backfill(
                                 record, host, store_root, previous,
@@ -1195,7 +1278,7 @@ def ingest(
                                         _precedential(cluster.precedential_raw),
                                         cluster.precedential_raw,
                                         tuple(reporter_cites.get(cluster_id, ())),
-                                        opinion_type, cluster.case_name,
+                                        opinion_type, cluster.case_name, per_curiam,
                                     ),
                                 )
                                 active_doc = doc_id

@@ -124,7 +124,7 @@ def caselaw(
 
 def agreement(
     context: procrastinate.JobContext, label: str, snapshot: str,
-    court: str, input: dict[str, str],
+    court: str, input: dict[str, str], pipeline: str,
 ) -> None:
     """Measure one staged court outside the worker's event loop."""
 
@@ -135,6 +135,7 @@ def agreement(
         citation_agreement.agreement(
             SNAPSHOTS_ROOT, staging.WORK_ROOT, label, snapshot, court,
             input, job_id, citation_agreement.PsycopgEdges(),
+            pipeline=pipeline,
         )
     except citation_agreement.AgreementFailure as failure:
         citation_agreement.write_job_failure(

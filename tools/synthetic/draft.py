@@ -25,6 +25,7 @@ from gideon.host.render.worker import (
     CITE_TYPES,
     NO_STATE_REASONS,
     PATTERN_SET_ID,
+    PIPELINE_VERSION,
     PRECEDENTIAL_VALUES,
     QUALIFIERS,
     SECTION_TYPES,
@@ -78,7 +79,7 @@ FROM (
         (SELECT CASE WHEN bool_or(risk.state = 'negative') THEN 'negative'
                      WHEN bool_or(risk.state = 'caution') THEN 'caution' END
          FROM citation_signals risk
-         JOIN citations resolved ON resolved.citation_id = risk.citation_id
+         JOIN citations resolved ON resolved.citation_id = risk.citation_id AND resolved.pipeline = :'pipeline'
          WHERE resolved.to_cluster = c.to_cluster
              AND risk.signal_source = 'pattern' AND risk.pattern_set = :'pattern_set'
         ) AS cluster_state,
@@ -93,7 +94,7 @@ FROM (
          ORDER BY cited.decided_date, cited.opinion_id LIMIT 1
         ) AS cited
     FROM citation_signals s
-    JOIN citations c ON c.citation_id = s.citation_id
+    JOIN citations c ON c.citation_id = s.citation_id AND c.pipeline = :'pipeline'
     JOIN opinions o ON o.doc_id = c.doc_id
     WHERE s.signal_source = 'pattern' AND s.pattern_set = :'pattern_set'
         AND o.opinion_id IN (
@@ -105,14 +106,14 @@ FROM (
 SECTIONS_SQL: Final[str] = """SELECT COALESCE(jsonb_agg(to_jsonb(section_rows)), '[]'::jsonb)::text
 FROM (
     SELECT section_id, section_type, char_start, char_end FROM sections
-    WHERE doc_id = :'doc_id' ORDER BY ordinal
+    WHERE doc_id = :'doc_id' AND pipeline = :'pipeline' ORDER BY ordinal
 ) AS section_rows;
 """
 SECTION_SUMMARY_SQL: Final[str] = """SELECT COALESCE(jsonb_agg(to_jsonb(section_summaries)), '[]'::jsonb)::text
 FROM (
     SELECT o.opinion_id, COALESCE((
         SELECT jsonb_agg(jsonb_build_array(s.section_type, s.char_end - s.char_start) ORDER BY s.ordinal)
-        FROM sections s WHERE s.doc_id = o.doc_id AND s.section_type <> 'footnote'
+        FROM sections s WHERE s.doc_id = o.doc_id AND s.pipeline = :'pipeline' AND s.section_type <> 'footnote'
     ), '[]'::jsonb) AS sections
     FROM opinions o WHERE o.opinion_id IN (
         SELECT value::bigint FROM jsonb_array_elements_text(:'opinion_ids'::jsonb) AS value
@@ -123,7 +124,7 @@ CITATIONS_SQL: Final[str] = """SELECT COALESCE(jsonb_agg(to_jsonb(citation_rows)
 FROM (
     SELECT citation_id, doc_id, ordinal, char_start, char_end, section_id, section_type,
         cite_type, cite_form, raw_cite, reporter_cite, pincite, key, to_cluster, pattern_id
-    FROM citations WHERE doc_id = :'doc_id' ORDER BY ordinal
+    FROM citations WHERE doc_id = :'doc_id' AND pipeline = :'pipeline' ORDER BY ordinal
 ) AS citation_rows;
 """
 COURTS_SQL: Final[str] = """SELECT COALESCE(jsonb_agg(court ORDER BY court), '[]'::jsonb)::text
@@ -330,7 +331,7 @@ def _edges(
 ) -> tuple[Edge, ...]:
     sql = "\n".join((
         bind("opinion_ids", json.dumps(sorted(document.opinion_id for document in documents))),
-        bind("pattern_set", PATTERN_SET_ID), EDGES_SQL,
+        bind("pattern_set", PATTERN_SET_ID), bind("pipeline", PIPELINE_VERSION), EDGES_SQL,
     ))
     rows = _record_rows(io, rendered_dir, "treatment", sql)
     fix = _record_fix(rendered_dir)
@@ -391,7 +392,8 @@ def _section_summaries(
     io: DraftHost, rendered_dir: PathLike, documents: Sequence[synthetic.DrawDocument],
 ) -> Mapping[int, SectionSummary]:
     allowed = {document.opinion_id for document in documents}
-    sql = bind("opinion_ids", json.dumps(sorted(allowed))) + "\n" + SECTION_SUMMARY_SQL
+    sql = "\n".join((bind("opinion_ids", json.dumps(sorted(allowed))),
+                     bind("pipeline", PIPELINE_VERSION), SECTION_SUMMARY_SQL))
     summaries: dict[int, SectionSummary] = {}
     fix = _record_fix(rendered_dir)
     for row in _record_rows(io, rendered_dir, "sections", sql):
@@ -444,7 +446,7 @@ def _premises_in_record(
 def _sections(
     io: DraftHost, rendered_dir: PathLike, document: synthetic.DrawDocument, text: str,
 ) -> tuple[SectionRow, ...]:
-    prefix = bind("doc_id", document.doc_id) + "\n"
+    prefix = bind("doc_id", document.doc_id) + "\n" + bind("pipeline", PIPELINE_VERSION) + "\n"
     fix = _record_fix(rendered_dir)
     sections: list[SectionRow] = []
     section_ids: set[str] = set()
@@ -465,7 +467,7 @@ def _document_rows(
     io: DraftHost, rendered_dir: PathLike, document: synthetic.DrawDocument, text: str,
 ) -> tuple[tuple[SectionRow, ...], tuple[NewCitation, ...]]:
     sections = _sections(io, rendered_dir, document, text)
-    prefix = bind("doc_id", document.doc_id) + "\n"
+    prefix = bind("doc_id", document.doc_id) + "\n" + bind("pipeline", PIPELINE_VERSION) + "\n"
     fix = _record_fix(rendered_dir)
     citations: list[NewCitation] = []
     citation_ids: set[str] = set()

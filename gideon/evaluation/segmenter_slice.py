@@ -18,7 +18,7 @@ from gideon.evaluation import bound, record, segmenter_leg
 from gideon.evaluation.evalset import SEGMENTER_TEXT_SOURCES, LoadedSet, select_cases
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
 from gideon.host import cas, report, stack
-from gideon.host.render.worker import SECTION_TYPED_BY, SECTION_TYPES
+from gideon.host.render.worker import PIPELINE_VERSION, SECTION_TYPED_BY, SECTION_TYPES
 from gideon.host.report import Problem, failure_lines
 from gideon.host.sysio import BytesHost
 
@@ -42,10 +42,11 @@ DOCUMENTS_SQL: Final[str] = """SELECT COALESCE(jsonb_agg(jsonb_build_object(
     'sha256', d.sha256,
     'canonical_sha256', d.canonical_text_sha256,
     'opinion_type', o.opinion_type,
+    'per_curiam', o.per_curiam,
     'sections', (SELECT COALESCE(jsonb_agg(
         jsonb_build_array(s.char_start, s.char_end, s.section_type, s.typed_by)
         ORDER BY s.ordinal), '[]'::jsonb)
-        FROM sections s WHERE s.doc_id = d.doc_id)
+        FROM sections s WHERE s.doc_id = d.doc_id AND s.pipeline = :'pipeline')
 )), '[]'::jsonb)::text
 FROM opinions o
 JOIN documents d ON d.doc_id = o.doc_id AND d.status = 'ready'
@@ -126,6 +127,7 @@ class RecordDocument:
     sha256: str
     canonical_sha256: str
     opinion_type: str
+    per_curiam: bool | None
     sections: tuple[RecordSection, ...]
 
 
@@ -241,7 +243,7 @@ def _valid_hash(value: object) -> bool:
 def _decode_document(value: object) -> RecordDocument | None:
     if not isinstance(value, dict) or set(value) != {
         "opinion_id", "doc_id", "text_source", "sha256", "canonical_sha256",
-        "opinion_type", "sections",
+        "opinion_type", "per_curiam", "sections",
     }:
         return None
     opinion_id = value["opinion_id"]
@@ -252,6 +254,7 @@ def _decode_document(value: object) -> RecordDocument | None:
         or not _valid_hash(value["sha256"])
         or not _valid_hash(value["canonical_sha256"])
         or not isinstance(value["opinion_type"], str)
+        or (value["per_curiam"] is not None and type(value["per_curiam"]) is not bool)
         or not isinstance(value["sections"], list)
     ):
         return None
@@ -268,7 +271,7 @@ def _decode_document(value: object) -> RecordDocument | None:
         sections.append(RecordSection(item[0], item[1], item[2], item[3]))
     return RecordDocument(
         opinion_id, value["doc_id"], value["text_source"], value["sha256"],
-        value["canonical_sha256"], value["opinion_type"], tuple(sections),
+        value["canonical_sha256"], value["opinion_type"], value["per_curiam"], tuple(sections),
     )
 
 
@@ -282,7 +285,7 @@ def _read_documents(
     """
 
     values = json.dumps(sorted(set(opinion_ids)))
-    sql = f"\\set opinion_ids '{values}'\n{DOCUMENTS_SQL}"
+    sql = f"\\set opinion_ids '{values}'\n\\set pipeline '{PIPELINE_VERSION}'\n{DOCUMENTS_SQL}"
     fix = _record_fix(context)
     try:
         result = context.host.run(record.reader_argv(context.production_dir), input=sql)
@@ -335,7 +338,7 @@ def _report(
     """Render ids, counts, and vocabulary words alone."""
 
     figures = case_figures(matrix)
-    lines = [f"image leg elapsed {elapsed:.3f} s"]
+    lines = [f"record pipeline {PIPELINE_VERSION}", f"image leg elapsed {elapsed:.3f} s"]
     for section_type in SECTION_TYPES:
         row = matrix.get(section_type, {})
         typed = sum(row.values())
@@ -455,6 +458,7 @@ def run_segmenter(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
         leg_inputs = tuple(
             segmenter_leg.LegInput(
                 case_id, document.text_source, document.opinion_type,
+                document.per_curiam if document.per_curiam is not None else
                 any(section.typed_by == "flag" for section in document.sections),
             )
             for case_id, document in available.items()

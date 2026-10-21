@@ -73,6 +73,7 @@ WITH payload AS (
     JOIN ready_documents AS d ON d.doc_id = s.doc_id
     CROSS JOIN payload AS p
     WHERE s.pattern_set = p.value->>'pattern_set'
+      AND c.pipeline = p.value->>'pipeline'
       AND s.signal_source = 'pattern'
 ), pattern AS (
     SELECT s.to_cluster AS cluster_id, s.state, 1 AS arm,
@@ -365,6 +366,7 @@ def materialize(
     payload: dict[str, object] = {
         "source": inputs.snapshot[:-staging.DATE_SUFFIX_LENGTH],
         "snapshot_date": inputs.snapshot[-10:], "courts": list(inputs.courts),
+        "pipeline": inputs.pipeline,
         "doc_ids": None if documents is None else list(documents), **release,
     }
     corpus_dir = rendered_dir if corpus_dir is None else corpus_dir

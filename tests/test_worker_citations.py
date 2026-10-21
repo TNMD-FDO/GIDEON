@@ -3,7 +3,7 @@
 import hashlib
 import importlib
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from gideon.casecite.found import EDGE_PATTERN_ID, CiteForm, CiteKind, FoundCitation
 from gideon.extraction.contract import (
@@ -14,6 +14,7 @@ from gideon.extraction.contract import (
     combine_extractions,
 )
 from gideon.worker.citations import CITE_TYPES, NewCitation, edges
+from gideon.worker.pipeline import PIPELINE_VERSION
 
 FIXTURE_TEXT = (
     "[FICTIONAL TEST OPINION] 18 U.S.C. § 922(g)(1). "
@@ -75,7 +76,7 @@ class Builder(unittest.TestCase):
             )
             for fragment, kind in zip(fragments, OBJECT_TYPES, strict=True)
         )
-        rows = edges(DOC_ID, text, whole(text), (), objects, lambda _key: None)
+        rows = edges(DOC_ID, PIPELINE_VERSION, text, whole(text), (), objects, lambda _key: None)
         self.assertEqual(tuple(row.cite_type for row in rows), tuple(
             kind for kind in OBJECT_TYPES if kind in grammar_types
         ))
@@ -106,7 +107,7 @@ class Builder(unittest.TestCase):
                     ExactObject("case_cite", cite.start, cite.end,
                                 text[cite.start:cite.end]) for cite in found
                 ))
-                rows = edges(DOC_ID, text, whole(text), found, grammar,
+                rows = edges(DOC_ID, PIPELINE_VERSION, text, whole(text), found, grammar,
                              lambda _key: None)
                 self.assertEqual(
                     tuple((row.char_start, row.char_end) for row in rows),
@@ -146,7 +147,7 @@ class Builder(unittest.TestCase):
             seen.append(key)
             return 77
 
-        rows = edges(DOC_ID, text, whole(text), found, (), resolve)
+        rows = edges(DOC_ID, PIPELINE_VERSION, text, whole(text), found, (), resolve)
         self.assertTrue(all(isinstance(row, NewCitation) for row in rows))
         self.assertEqual(tuple(row.cite_type for row in rows), (
             "case_cite", "case_cite", "case_cite", "case_cite", "case_cite",
@@ -176,7 +177,7 @@ class Builder(unittest.TestCase):
             seen.append(key)
             return {("466", "U.S.", "690"): 88}.get(key)
 
-        rows = edges(DOC_ID, text, whole(text), found, (), resolve)
+        rows = edges(DOC_ID, PIPELINE_VERSION, text, whole(text), found, (), resolve)
         self.assertEqual(tuple(row.to_cluster for row in rows), (None, None, None))
         self.assertEqual(seen, [])
         self.assertEqual(tuple(row.raw_cite for row in rows),
@@ -203,7 +204,7 @@ class Builder(unittest.TestCase):
             seen.append(key)
             return {("1", "U.S.", "2"): 12, ("2", "U.S.", "3"): 13}[key]
 
-        rows = edges(DOC_ID, text, whole(text), found, (rule,), resolve)
+        rows = edges(DOC_ID, PIPELINE_VERSION, text, whole(text), found, (rule,), resolve)
         self.assertEqual(tuple(row.cite_type for row in rows), (
             "case_cite", "court_rule", "court_rule", "court_rule",
             "case_cite", "case_cite",
@@ -221,7 +222,7 @@ class Builder(unittest.TestCase):
             found_at(text, "18 U.S.C. § 922(g)(1)", "full", "law", 0),
             found_at(text, "Id.", "id", "law", 0),
         )
-        rows = edges(DOC_ID, text, whole(text), found, (statute,),
+        rows = edges(DOC_ID, PIPELINE_VERSION, text, whole(text), found, (statute,),
                      lambda _key: self.fail("non-case row queried the resolver"))
         self.assertEqual(tuple(row.cite_type for row in rows), ("statute", "statute"))
         self.assertEqual(tuple(row.key for row in rows), (STATUTE_KEY, STATUTE_KEY))
@@ -234,7 +235,7 @@ class Builder(unittest.TestCase):
             statute = object_at(text, "18 U.S.C. § 922(g)(1)", "statute", STATUTE_KEY)
             bare = object_at(text, "§ 924(e)(1)", "bare_section")
             found = (found_at(text, "Id.", "id", "law", 0),)
-            rows = edges(DOC_ID, text, whole(text), found, (statute, bare),
+            rows = edges(DOC_ID, PIPELINE_VERSION, text, whole(text), found, (statute, bare),
                          lambda _key: None)
             with self.subTest(gap=gap):
                 self.assertEqual(tuple(row.cite_type for row in rows),
@@ -246,7 +247,7 @@ class Builder(unittest.TestCase):
         statute = object_at(text, "18 U.S.C. § 922(g)(1)", "statute", STATUTE_KEY)
         bare = object_at(text, "§ 924(e)(1)", "bare_section")
         folded = found_at(text, "Id. § 924(e)(1)", "id", "law", 0)
-        rows = edges(DOC_ID, text, whole(text), (folded,), (statute, bare),
+        rows = edges(DOC_ID, PIPELINE_VERSION, text, whole(text), (folded,), (statute, bare),
                      lambda _key: None)
         self.assertEqual(tuple(row.cite_type for row in rows),
                          ("statute", "bare_section"))
@@ -254,7 +255,7 @@ class Builder(unittest.TestCase):
         text = "18 U.S.C. § 922(g)(1). Id. at 3"
         statute = object_at(text, "18 U.S.C. § 922(g)(1)", "statute", STATUTE_KEY)
         pinned = found_at(text, "Id. at 3", "id", "law", 0, pincite="at 3")
-        rows = edges(DOC_ID, text, whole(text), (pinned,), (statute,),
+        rows = edges(DOC_ID, PIPELINE_VERSION, text, whole(text), (pinned,), (statute,),
                      lambda _key: None)
         self.assertEqual((rows[1].cite_type, rows[1].key, rows[1].pincite),
                          ("statute", None, "at 3"))
@@ -270,7 +271,7 @@ class Builder(unittest.TestCase):
                          first_page="2", reporter_cite="1 U.S. 2")
         second = found_at(text, "2 U.S. 3", "full", "case", 1,
                           first_page="3", reporter_cite="2 U.S. 3")
-        rows = edges(DOC_ID, text, sections, (second, first), (), lambda _key: None)
+        rows = edges(DOC_ID, PIPELINE_VERSION, text, sections, (second, first), (), lambda _key: None)
         self.assertEqual(tuple(row.section_id for row in rows), ("body", "body"))
         self.assertEqual(tuple(row.to_cluster for row in rows), (None, None))
         self.assertEqual(tuple(row.ordinal for row in rows), (0, 1))
@@ -278,20 +279,39 @@ class Builder(unittest.TestCase):
                          tuple(text[row.char_start:row.char_end] for row in rows))
         self.assertEqual(tuple(row.citation_id for row in rows), tuple(
             hashlib.sha256(
-                f"{DOC_ID}\n{row.char_start}\n{row.char_end}".encode()
+                f"{DOC_ID}\n{PIPELINE_VERSION}\n{row.char_start}\n{row.char_end}".encode()
             ).hexdigest() for row in rows
         ))
-        other = edges("another-document", text, sections, (first,), (),
+        other = edges("another-document", PIPELINE_VERSION, text, sections, (first,), (),
                       lambda _key: None)
         self.assertNotEqual(rows[0].citation_id, other[0].citation_id)
 
         footnote = found_at(text, "3.", "reference", "unknown")
-        footnote_rows = edges(DOC_ID, text, sections, (footnote,), (),
+        footnote_rows = edges(DOC_ID, PIPELINE_VERSION, text, sections, (footnote,), (),
                               lambda _key: None)
         self.assertEqual((footnote_rows[0].section_id, footnote_rows[0].section_type),
                          ("note", "footnote"))
         with self.assertRaises(ValueError):
-            edges(DOC_ID, text, (), (), (), lambda _key: None)
+            edges(DOC_ID, PIPELINE_VERSION, text, (), (), (), lambda _key: None)
+
+    def test_edge_identity_binds_pipeline_for_the_same_document_and_span(self) -> None:
+        """Equal citation spans under different pipelines have distinct ids."""
+
+        text = "Fictitious 1 Example 2 citation."
+        found = (found_at(text, "1 Example 2", "full", "case", 0,
+                          first_page="2", reporter_cite="1 Example 2"),)
+        versions = (PIPELINE_VERSION, "1000.0.0")
+        walks = tuple(edges(DOC_ID, version, text, whole(text), found, (), lambda _key: 77)
+                      for version in versions)
+        self.assertEqual(tuple(len(walk) for walk in walks), (1, 1))
+        first, second = (walk[0] for walk in walks)
+        self.assertNotEqual(first.citation_id, second.citation_id)
+        self.assertEqual(replace(first, citation_id=second.citation_id), second)
+        for version, row in zip(versions, (first, second), strict=True):
+            with self.subTest(pipeline=version):
+                self.assertEqual(row.citation_id, hashlib.sha256(
+                    f"{DOC_ID}\n{version}\n{found[0].start}\n{found[0].end}".encode()
+                ).hexdigest())
 
     def test_same_fixture_with_hand_built_findings(self) -> None:
         text = FIXTURE_TEXT
@@ -305,7 +325,7 @@ class Builder(unittest.TestCase):
             found_at(text, "Id.", "id", "case", 2,
                      first_page="668", reporter_cite="466 U.S. 668", occurrence=1),
         )
-        rows = edges(DOC_ID, text, whole(text), found, (statute, bare),
+        rows = edges(DOC_ID, PIPELINE_VERSION, text, whole(text), found, (statute, bare),
                      lambda key: 77 if key == ("466", "U.S.", "668") else None)
         self.assertEqual(tuple(row.cite_type for row in rows), (
             "statute", "statute", "bare_section", "case_cite", "case_cite",
@@ -331,7 +351,7 @@ class EyeciteBuilder(unittest.TestCase):
         statute = object_at(text, "18 U.S.C. § 922(g)(1)", "statute", STATUTE_KEY)
         bare = object_at(text, "§ 924(e)(1)", "bare_section")
         found = find_citations(text)
-        rows = edges(DOC_ID, text, whole(text), found, (statute, bare),
+        rows = edges(DOC_ID, PIPELINE_VERSION, text, whole(text), found, (statute, bare),
                      lambda key: 77 if key == ("466", "U.S.", "668") else None)
 
         def overlapping(fragment: str, occurrence: int = 0) -> tuple[NewCitation, ...]:

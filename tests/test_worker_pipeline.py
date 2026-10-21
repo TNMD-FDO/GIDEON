@@ -1,6 +1,7 @@
 """The worker pipeline registry stays coupled to the release locks."""
 
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from gideon.host.images import BuiltImagePin, load_image_lock
@@ -51,6 +52,10 @@ class PipelineRegistry(unittest.TestCase):
 
     def test_versions_and_sizes(self) -> None:
         self.assertIn(PIPELINE_VERSION, PIPELINES)
+        self.assertEqual(
+            PIPELINE_VERSION,
+            max(PIPELINES, key=lambda version: tuple(map(int, version.split(".")))),
+        )
         for version, entry in PIPELINES.items():
             with self.subTest(version=version):
                 self.assertIsNotNone(VERSION_PATTERN.fullmatch(version))
@@ -59,6 +64,11 @@ class PipelineRegistry(unittest.TestCase):
                 self.assertLessEqual(entry.chunk_minimum, entry.chunk_target)
                 self.assertLessEqual(entry.chunk_target, entry.chunk_maximum)
         self.assertIsNone(VERSION_PATTERN.fullmatch("next"))
+
+    def test_segmenter_bump_keeps_pins_and_sizes(self) -> None:
+        previous = PIPELINES["1.0.0"]
+        bumped = PIPELINES["1.1.0"]
+        self.assertEqual(bumped, replace(previous, version=bumped.version))
 
     def test_tokenizer_paths_match_the_weights_layout(self) -> None:
         root = Path("/fictitious/weights")

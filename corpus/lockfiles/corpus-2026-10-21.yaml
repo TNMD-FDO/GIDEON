@@ -1,0 +1,34 @@
+# Written by the corpus cut command; edit mirror_url alone.
+schema: 1
+label: corpus-2026-10-21
+pipeline: 1.1.0
+cut_at: '2026-10-21T14:56:42Z'
+reason: pipeline
+sources:
+  caselaw:
+    snapshot_date: '2026-09-30'
+    base_url: https://com-courtlistener-storage.s3-us-west-2.amazonaws.com/bulk-data/
+    mirror_url: null
+    sidecar_sha256: 53812f85ca1cfbe6c7b604d2b1c63c8caf87f0472039f40e6ecbf33dd9dcf42d
+    files: 8
+    bytes: 63525502503
+    index:
+    - name: listing.xml
+      url: https://com-courtlistener-storage.s3-us-west-2.amazonaws.com/?list-type=2&prefix=bulk-data/opinions-
+      sha256: b847a671868a0769df522c9b59822c6b5dc78066cd673711b4b4a465c6033eba
+      size: 12880
+    courts:
+    - ca6
+    - scotus
+  treatment:
+    snapshot_date: '2026-10-13'
+    base_url: https://constitution.congress.gov/resources/decisions-overruled/
+    mirror_url: null
+    sidecar_sha256: 23d36212e7ed56f4e4126936faf43b8177f8aa16d87f7089c242d54540260957
+    files: 1
+    bytes: 198779
+    index:
+    - name: decisions-overruled.html
+      url: https://constitution.congress.gov/resources/decisions-overruled/
+      sha256: 8fbfa3af4a4d5af1fbed19e59903c0a86a775b35945c626de2174641c877d27d
+      size: 198779

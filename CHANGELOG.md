@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.181](docs/release-notes/v0.3.181.md) — 2026-10-21 — pipeline 1.1.0, illegible ciphers, one current spec
 - [v0.3.180](docs/release-notes/v0.3.180.md) — 2026-10-21 — index gc, segmenter grammar, grading packets built
 - [v0.3.179](docs/release-notes/v0.3.179.md) — 2026-10-19 — index promote, stage counts kept, code catches apart
 - [v0.3.178](docs/release-notes/v0.3.178.md) — 2026-10-19 — signed tags, the Docker key pinned, bylines

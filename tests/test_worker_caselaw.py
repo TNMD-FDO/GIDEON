@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import psycopg
+from test_opinion_text import FICTIONAL_OPINION, cipher_text
 
 from gideon.casecite.found import FoundCitation
 from gideon.host import cas
@@ -89,6 +90,15 @@ def _doc_id(opinion_id: int, snapshot: date) -> str:
     return hashlib.sha256(f"caselaw\n{opinion_id}\n{snapshot.isoformat()}".encode()).hexdigest()
 
 
+def _walk_citations(text: str) -> tuple[FoundCitation, ...]:
+    fragment = "1 Example 2"
+    start = text.index(fragment)
+    return (FoundCitation(
+        start, start + len(fragment), "full", "case", 0,
+        "1", "Example", "2", fragment, None,
+    ),)
+
+
 @dataclass
 class _Row:
     opinion_id: int
@@ -102,15 +112,17 @@ class _Row:
     failure_reason: str | None = None
     ingested_at: datetime | None = None
     anchored_at: datetime | None = None
-    sections: tuple[caselaw.NewSection, ...] = field(default_factory=tuple)
-    anchors: tuple[caselaw.NewAnchor, ...] = field(default_factory=tuple)
-    citations: tuple[citations.NewCitation, ...] = field(default_factory=tuple)
+    sections: dict[str, tuple[caselaw.NewSection, ...]] = field(default_factory=dict)
+    anchors: dict[str, tuple[caselaw.NewAnchor, ...]] = field(default_factory=dict)
+    citations: dict[str, tuple[citations.NewCitation, ...]] = field(default_factory=dict)
     cited_at: datetime | None = None
     treatment_pattern_set: str | None = None
     treated_at: datetime | None = None
-    signals: tuple[treatment.NewSignal, ...] = field(default_factory=tuple)
+    treated_pipeline: str | None = None
+    signals: dict[str, tuple[treatment.NewSignal, ...]] = field(default_factory=dict)
     chunks: tuple[chunker.NewChunk, ...] = field(default_factory=tuple)
     case_name: str | None = None
+    per_curiam: bool | None = None
 
 
 class _Record:
@@ -125,6 +137,19 @@ class _Record:
 
     def _row(self, doc_id: str) -> _Row:
         return next(row for row in self.rows.values() if row.document.doc_id == doc_id)
+
+    def _insert_signals(
+        self, row: _Row, pipeline: str, signal_rows: tuple[treatment.NewSignal, ...],
+    ) -> None:
+        keys = {(signal.citation_id, signal.signal_source, signal.pattern_set)
+                for rows in row.signals.values() for signal in rows}
+        inserted = []
+        for signal in signal_rows:
+            key = signal.citation_id, signal.signal_source, signal.pattern_set
+            if key not in keys:
+                inserted.append(signal)
+                keys.add(key)
+        row.signals[pipeline] = row.signals.get(pipeline, ()) + tuple(inserted)
 
     def _check(self, row: _Row) -> None:
         assert 0 <= row.attempts <= caselaw.MAX_ATTEMPTS
@@ -146,11 +171,16 @@ class _Record:
         assert row.anchored_at is None or row.status == "ready"
         assert row.cited_at is None or row.status == "ready"
         assert (row.treatment_pattern_set is None) == (row.treated_at is None)
+        assert (row.treatment_pattern_set is None) == (row.treated_pipeline is None)
         assert row.treated_at is None or row.cited_at is not None
-        assert all(section.doc_id == row.document.doc_id for section in row.sections)
-        assert all(anchor.doc_id == row.document.doc_id for anchor in row.anchors)
-        assert all(citation.doc_id == row.document.doc_id for citation in row.citations)
-        assert all(signal.doc_id == row.document.doc_id for signal in row.signals)
+        assert all(section.doc_id == row.document.doc_id
+                   for rows in row.sections.values() for section in rows)
+        assert all(anchor.doc_id == row.document.doc_id
+                   for rows in row.anchors.values() for anchor in rows)
+        assert all(citation.doc_id == row.document.doc_id
+                   for rows in row.citations.values() for citation in rows)
+        assert all(signal.doc_id == row.document.doc_id
+                   for rows in row.signals.values() for signal in rows)
         assert all(chunk.doc_id == row.document.doc_id for chunk in row.chunks)
 
     def seed(
@@ -173,6 +203,7 @@ class _Record:
             ingested_at=None if status == "processing" else now,
             anchored_at=now if (status == "ready" and anchored is not False) else None,
             case_name="" if named else None,
+            per_curiam=False if status == "ready" else None,
         )
         if sectioned is None:
             sectioned = status == "ready"
@@ -182,8 +213,9 @@ class _Record:
             row.cited_at = now
             row.treatment_pattern_set = treatment.PATTERN_SET_ID
             row.treated_at = now
+            row.treated_pipeline = pipeline.PIPELINE_VERSION
         if sectioned:
-            row.sections = (caselaw.NewSection(
+            row.sections[pipeline.PIPELINE_VERSION] = (caselaw.NewSection(
                 "c" * 64, document.doc_id, 0, "unknown", "none", 0, 1,
                 None, None, None,
             ),)
@@ -192,7 +224,8 @@ class _Record:
         if chunked:
             row.chunks = (chunker.NewChunk(
                 "d" * 64, document.doc_id, pipeline.PIPELINE_VERSION, 0,
-                row.sections[0].section_id, row.sections[0].section_type,
+                row.sections[pipeline.PIPELINE_VERSION][0].section_id,
+                row.sections[pipeline.PIPELINE_VERSION][0].section_type,
                 0, 1, hashlib.sha256(b"x").hexdigest(), 1,
             ),)
         self._check(row)
@@ -208,11 +241,12 @@ class _Record:
         return {
             opinion_id: caselaw.PresentRow(
                 row.document.doc_id, row.status, row.attempts, row.document.text_source,
-                row.sha256, row.canonical_text_sha256, bool(row.sections),
+                row.sha256, row.canonical_text_sha256, bool(row.sections.get(pipeline_version)),
                 row.anchored_at is not None, row.cited_at is not None,
-                row.treatment_pattern_set,
+                row.treatment_pattern_set, row.treated_pipeline,
                 any(chunk.pipeline == pipeline_version for chunk in row.chunks),
                 row.case_name is not None,
+                row.per_curiam is not None,
             )
             for opinion_id, row in self.rows.items()
             if row.document.source == source
@@ -223,7 +257,7 @@ class _Record:
         assert opinion.opinion_id not in self.rows
         row = _Row(
             opinion.opinion_id, opinion.court, document, opinion, "processing", 1,
-            case_name=opinion.case_name,
+            case_name=opinion.case_name, per_curiam=opinion.per_curiam,
         )
         self._check(row)
         self.rows[opinion.opinion_id] = row
@@ -236,6 +270,13 @@ class _Record:
         row.case_name = case_name
         self._check(row)
         self.events.append(("named", doc_id))
+
+    def write_flag(self, doc_id: str, per_curiam: bool) -> None:
+        row = self._row(doc_id)
+        assert row.status == "ready" and row.per_curiam is None
+        row.per_curiam = per_curiam
+        self._check(row)
+        self.events.append(("flagged", doc_id))
 
     def retry(self, doc_id: str) -> None:
         row = self._row(doc_id)
@@ -252,7 +293,7 @@ class _Record:
         self.events.append(("give_back", doc_id))
 
     def finish_ready(
-        self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime,
+        self, doc_id: str, pipeline: str, sha256: str, canonical_sha256: str, at: datetime,
         sections: tuple[caselaw.NewSection, ...], anchor_rows: tuple[caselaw.NewAnchor, ...],
         citation_rows: tuple[citations.NewCitation, ...],
         signal_rows: tuple[treatment.NewSignal, ...],
@@ -266,67 +307,84 @@ class _Record:
         row.ingested_at = at
         row.anchored_at = at
         row.cited_at = at
-        row.sections = sections
-        row.anchors = anchor_rows
-        row.citations = citation_rows
-        row.signals = signal_rows
-        row.chunks = chunk_rows
+        row.sections[pipeline] = sections
+        row.anchors[pipeline] = anchor_rows
+        row.citations[pipeline] = citation_rows
+        self._insert_signals(row, pipeline, signal_rows)
+        row.chunks += chunk_rows
         row.treatment_pattern_set = treatment.PATTERN_SET_ID
         row.treated_at = at
+        row.treated_pipeline = pipeline
         self._check(row)
         self.events.append(("ready", doc_id))
 
-    def write_sections(
-        self, doc_id: str, sections: tuple[caselaw.NewSection, ...],
+    def write_walk(
+        self, doc_id: str, pipeline: str,
+        sections: tuple[caselaw.NewSection, ...], anchors: tuple[caselaw.NewAnchor, ...],
+        citation_rows: tuple[citations.NewCitation, ...],
+        signal_rows: tuple[treatment.NewSignal, ...],
+        chunk_rows: tuple[chunker.NewChunk, ...], at: datetime,
     ) -> None:
         row = self._row(doc_id)
-        assert row.status == "ready" and not row.sections
-        row.sections = sections
+        assert row.status == "ready" and not row.sections.get(pipeline)
+        row.sections[pipeline] = sections
+        row.anchors[pipeline] = anchors
+        row.citations[pipeline] = citation_rows
+        self._insert_signals(row, pipeline, signal_rows)
+        row.chunks += chunk_rows
+        row.anchored_at = at
+        row.cited_at = at
+        row.treatment_pattern_set = treatment.PATTERN_SET_ID
+        row.treated_at = at
+        row.treated_pipeline = pipeline
         self._check(row)
-        self.events.append(("sectioned", doc_id))
+        self.events.append(("walked", doc_id))
 
     def write_anchors(
-        self, doc_id: str, anchor_rows: tuple[caselaw.NewAnchor, ...], at: datetime,
+        self, doc_id: str, pipeline: str, anchor_rows: tuple[caselaw.NewAnchor, ...], at: datetime,
     ) -> None:
         row = self._row(doc_id)
-        assert row.status == "ready" and row.anchored_at is None and not row.anchors
-        row.anchors = anchor_rows
+        assert row.status == "ready" and row.anchored_at is None and not row.anchors.get(pipeline)
+        row.anchors[pipeline] = anchor_rows
         row.anchored_at = at
         self._check(row)
         self.events.append(("anchored", doc_id))
 
-    def read_sections(self, doc_id: str) -> tuple[caselaw.NewSection, ...]:
-        return self._row(doc_id).sections
+    def read_sections(self, doc_id: str, pipeline: str) -> tuple[caselaw.NewSection, ...]:
+        return self._row(doc_id).sections.get(pipeline, ())
 
     def write_citations(
-        self, doc_id: str, citation_rows: tuple[citations.NewCitation, ...], at: datetime,
+        self, doc_id: str, pipeline: str,
+        citation_rows: tuple[citations.NewCitation, ...], at: datetime,
     ) -> None:
         row = self._row(doc_id)
-        assert row.status == "ready" and row.sections and row.cited_at is None
-        row.citations = citation_rows
+        assert row.status == "ready" and row.sections.get(pipeline) and row.cited_at is None
+        row.citations[pipeline] = citation_rows
         row.cited_at = at
         self._check(row)
         self.events.append(("cited", doc_id))
 
-    def read_citations(self, doc_id: str) -> tuple[citations.NewCitation, ...]:
-        return self._row(doc_id).citations
+    def read_citations(self, doc_id: str, pipeline: str) -> tuple[citations.NewCitation, ...]:
+        return self._row(doc_id).citations.get(pipeline, ())
 
     def write_signals(
-        self, doc_id: str, signal_rows: tuple[treatment.NewSignal, ...], at: datetime,
+        self, doc_id: str, pipeline: str,
+        signal_rows: tuple[treatment.NewSignal, ...], at: datetime,
     ) -> None:
         row = self._row(doc_id)
         assert row.status == "ready" and row.cited_at is not None
-        assert row.treatment_pattern_set != treatment.PATTERN_SET_ID
-        row.signals += signal_rows
+        self._insert_signals(row, pipeline, signal_rows)
         row.treatment_pattern_set = treatment.PATTERN_SET_ID
         row.treated_at = at
+        row.treated_pipeline = pipeline
         self._check(row)
         self.events.append(("treated", doc_id))
 
     def write_chunks(self, doc_id: str, chunk_rows: tuple[chunker.NewChunk, ...]) -> None:
         row = self._row(doc_id)
-        assert row.status == "ready" and not row.chunks
-        row.chunks = chunk_rows
+        assert row.status == "ready"
+        assert not {chunk.pipeline for chunk in row.chunks} & {chunk.pipeline for chunk in chunk_rows}
+        row.chunks += chunk_rows
         self._check(row)
         self.events.append(("chunked", doc_id))
 
@@ -486,7 +544,7 @@ class WorkerCaselaw(unittest.TestCase):
         original = cas.put(RealHost(), raw.encode(), root=self.store_root)
         assert isinstance(original, str)
         row.sha256 = original
-        parsed = opiniontext.canonical_text(column, raw)
+        parsed = opiniontext.walk(column, raw)
         row.canonical_text_sha256 = hashlib.sha256(parsed.text.encode()).hexdigest()
         self.record._check(row)
         return row
@@ -500,12 +558,207 @@ class WorkerCaselaw(unittest.TestCase):
         canonical = cas.put(RealHost(), text.encode(), root=self.store_root)
         assert isinstance(canonical, str)
         row.canonical_text_sha256 = canonical
-        row.sections = (caselaw.NewSection(
+        row.sections[self.pipeline] = (caselaw.NewSection(
             "c" * 64, row.document.doc_id, 0, "majority", "line", 0, len(text),
             None, None, None,
         ),)
         self.record._check(row)
         return row
+
+    def _stage_two_pipelines(self) -> tuple[str, str]:
+        current = caselaw.PIPELINES[self.pipeline]
+        other = replace(current, version="1000.0.0")
+        registry = patch.object(caselaw, "PIPELINES", {**caselaw.PIPELINES, other.version: other})
+        registry.start()
+        self.addCleanup(registry.stop)
+        self.stage(opinions=[_opinion(
+            "1", "100", type="020lead", xml_harvard=(
+                '<opinion><p><page-number>*8</page-number>'
+                'We overruled 1 Example 2<footnotemark>1</footnotemark>.</p>'
+                '<footnote label="1"><p>Fictitious note.</p></footnote></opinion>'
+            ),
+        )])
+        return current.version, other.version
+
+    def test_two_pipeline_walks_are_whole_isolated_and_have_distinct_ids(self) -> None:
+        """Each pipeline owns a complete immutable walk."""
+
+        first, second = self._stage_two_pipelines()
+        self.assertEqual(self.run_ingest(find=_walk_citations).ready, 1)
+        row = self.record.rows[1]
+        first_walk = (row.sections[first], row.anchors[first], row.citations[first],
+                      row.signals[first], tuple(row.chunks))
+        before = row.status, row.attempts, row.sha256, row.canonical_text_sha256
+        present = self.record.present(self.source, self.snapshot_date, self.court, second)[1]
+        self.assertFalse(present.sectioned)
+        self.assertFalse(present.chunked)
+        self.assertFalse(present.treated_at(second))
+        self.assertEqual(self.record.read_sections(row.document.doc_id, second), ())
+        self.assertEqual(self.record.read_citations(row.document.doc_id, second), ())
+        events = list(self.record.events)
+        with patch.object(self.record, "write_walk", wraps=self.record.write_walk) as write_walk:
+            counts = self.run_ingest(pipeline_version=second, find=_walk_citations)
+        second_chunks = tuple(chunk for chunk in row.chunks if chunk.pipeline == second)
+        write_walk.assert_called_once_with(
+            row.document.doc_id, second, row.sections[second], row.anchors[second],
+            row.citations[second], row.signals[second], second_chunks, self.now,
+        )
+        self.assertEqual((counts.ready, counts.retried, counts.sectioned, counts.anchored,
+                          counts.cited, counts.treated, counts.chunked), (0, 0, 1, 1, 1, 1, 1))
+        self.assertEqual(self.record.events, [*events, ("walked", row.document.doc_id)])
+        self.assertEqual((row.status, row.attempts, row.sha256, row.canonical_text_sha256), before)
+        self.assertEqual((row.sections[first], row.anchors[first], row.citations[first],
+                          row.signals[first], tuple(chunk for chunk in row.chunks
+                                                   if chunk.pipeline == first)), first_walk)
+        self.assertEqual(set(row.sections), {first, second})
+        self.assertEqual(set(row.anchors), {first, second})
+        self.assertEqual(set(row.citations), {first, second})
+        for version, other in ((first, second), (second, first)):
+            with self.subTest(pipeline=version):
+                present = self.record.present(self.source, self.snapshot_date, self.court, version)[1]
+                self.assertTrue(present.sectioned and present.anchored and present.cited
+                                and present.chunked and present.named and present.flagged)
+                self.assertEqual(present.treated_at(version), version == second)
+                section_rows = self.record.read_sections(row.document.doc_id, version)
+                citation_rows = self.record.read_citations(row.document.doc_id, version)
+                self.assertEqual(section_rows, row.sections[version])
+                self.assertEqual(citation_rows, row.citations[version])
+                self.assertEqual(len(section_rows), 2)
+                self.assertEqual(len(citation_rows), 1)
+                section_ids = {section.section_id for section in section_rows}
+                self.assertTrue(section_ids.isdisjoint(
+                    section.section_id for section in row.sections[other]
+                ))
+                self.assertTrue({cite.citation_id for cite in citation_rows}.isdisjoint(
+                    cite.citation_id for cite in row.citations[other]
+                ))
+                self.assertTrue(row.anchors[version])
+                self.assertTrue({anchor.anchor_id for anchor in row.anchors[version]}.isdisjoint(
+                    anchor.anchor_id for anchor in row.anchors[other]
+                ))
+                self.assertEqual([(section.char_start, section.char_end) for section in section_rows],
+                                 [(section.char_start, section.char_end) for section in row.sections[other]])
+                self.assertEqual([(cite.char_start, cite.char_end) for cite in citation_rows],
+                                 [(cite.char_start, cite.char_end) for cite in row.citations[other]])
+                self.assertEqual([(anchor.char_start, anchor.char_end) for anchor in row.anchors[version]],
+                                 [(anchor.char_start, anchor.char_end) for anchor in row.anchors[other]])
+                self.assertTrue(all(section.parent_section_id in section_ids
+                                    for section in section_rows if section.parent_section_id is not None))
+                self.assertTrue(all(cite.section_id in section_ids for cite in citation_rows))
+                chunks = tuple(chunk for chunk in row.chunks if chunk.pipeline == version)
+                self.assertEqual({chunk.section_id for chunk in chunks}, section_ids)
+                self.assertTrue(all(chunk.section_id in section_ids for chunk in chunks))
+
+    def test_second_pipeline_text_mismatch_refuses_before_any_walk_write(self) -> None:
+        """A new walk must reproduce the recorded canonical text."""
+
+        first, second = self._stage_two_pipelines()
+        self.run_ingest(find=_walk_citations)
+        row = self.record.rows[1]
+        changed = cas.put(RealHost(), b"Fictitious changed original.", root=self.store_root)
+        assert isinstance(changed, str)
+        row.sha256 = changed
+        before = astuple(row)
+        self.record.events.clear()
+        with (patch.object(self.record, "write_walk", wraps=self.record.write_walk) as write_walk,
+              self.assertRaises(caselaw.CaselawFailure) as raised):
+            self.run_ingest(pipeline_version=second, find=_walk_citations)
+        self.assertEqual(raised.exception.reason, "text-mismatch")
+        write_walk.assert_not_called()
+        self.assertEqual(self.record.events, [])
+        self.assertEqual(astuple(row), before)
+        self.assertEqual(set(row.sections), {first})
+        present = self.record.present(self.source, self.snapshot_date, self.court, second)[1]
+        self.assertFalse(present.sectioned)
+        self.assertFalse(present.chunked)
+
+    def test_new_pattern_set_covers_both_versions_and_replay_inserts_no_signals(self) -> None:
+        """Treatment completion belongs to both a set and a pipeline."""
+
+        versions = self._stage_two_pipelines()
+        for version in versions:
+            self.run_ingest(pipeline_version=version, find=_walk_citations)
+        row = self.record.rows[1]
+        original_signals = dict(row.signals)
+        self.assertTrue(all(original_signals.values()))
+        new_set = "fictional-treatment-patterns@1000"
+        self.record.events.clear()
+        with (patch.object(treatment, "PATTERN_SET_ID", new_set),
+              patch.object(opiniontext, "canonical_text", side_effect=AssertionError("rewalk")),
+              patch.object(self.record, "write_signals", wraps=self.record.write_signals) as write_signals):
+            for version in versions:
+                with self.subTest(pipeline=version):
+                    present = self.record.present(self.source, self.snapshot_date, self.court, version)[1]
+                    self.assertFalse(present.treated_at(version))
+                    counts = self.run_ingest(
+                        pipeline_version=version, find=lambda _text: self.fail("adapter used"),
+                    )
+                    self.assertEqual((counts.treated, counts.signalled, counts.sectioned), (1, 1, 0))
+                    self.assertEqual(row.treated_pipeline, version)
+                    self.assertEqual(row.treatment_pattern_set, new_set)
+                    self.assertEqual(row.signals[version][:-1], original_signals[version])
+                    self.assertEqual(row.signals[version][-1].pattern_set, new_set)
+                    self.assertEqual(row.signals[version][-1].citation_id,
+                                     row.citations[version][0].citation_id)
+            before_replay = dict(row.signals)
+            self.assertFalse(self.record.present(
+                self.source, self.snapshot_date, self.court, versions[0],
+            )[1].treated_at(versions[0]))
+            self.assertEqual(self.run_ingest(pipeline_version=versions[0]).treated, 1)
+            self.assertEqual(row.signals, before_replay)
+            self.assertEqual(write_signals.call_count, 3)
+            self.assertEqual(self.run_ingest(pipeline_version=versions[0]).treated, 0)
+            self.assertEqual(write_signals.call_count, 3)
+        self.assertEqual(self.record.events, [("treated", row.document.doc_id)] * 3)
+        keys = [(signal.citation_id, signal.signal_source, signal.pattern_set)
+                for signals in row.signals.values() for signal in signals]
+        self.assertEqual(len(keys), len(set(keys)))
+
+    def test_ready_null_flag_is_carried_from_dump_once_and_counted(self) -> None:
+        """A carried false flag is distinct from an uncarried flag."""
+
+        for value in ("t", "f"):
+            with self.subTest(per_curiam=value):
+                self.record = _Record()
+                self.stage(opinions=[_opinion("1", "100", per_curiam=value)])
+                row = self.record.seed(
+                    1, "ready", 1, court=self.court, source=self.source,
+                    snapshot=self.snapshot_date, now=self.now,
+                )
+                row.per_curiam = None
+                self.assertFalse(self.record.present(
+                    self.source, self.snapshot_date, self.court, self.pipeline,
+                )[1].flagged)
+                with (patch.object(self.record, "write_flag", wraps=self.record.write_flag) as write_flag,
+                      self.assertLogs(caselaw.logger, level="INFO") as logged):
+                    counts = self.run_ingest()
+                    self.assertEqual((counts.flagged, counts.present, counts.ready), (1, 1, 0))
+                    self.assertIs(row.per_curiam, value == "t")
+                    self.assertEqual(self.run_ingest().flagged, 0)
+                write_flag.assert_called_once_with(row.document.doc_id, value == "t")
+                self.assertEqual(self.record.events, [("flagged", row.document.doc_id)])
+                self.assertIn("flagged=1", logged.output[0])
+                self.assertTrue(self.record.present(
+                    self.source, self.snapshot_date, self.court, self.pipeline,
+                )[1].flagged)
+
+    def test_begun_opinion_carries_the_dump_flag(self) -> None:
+        """The source flag is committed with a newly begun opinion."""
+
+        for value in ("t", "f"):
+            with self.subTest(per_curiam=value):
+                self.record = _Record()
+                self.stage(opinions=[_opinion(
+                    "1", "100", per_curiam=value, plain_text="Fictitious opinion body.",
+                )])
+                with patch.object(self.record, "begin", wraps=self.record.begin) as begin:
+                    counts = self.run_ingest()
+                self.assertEqual((counts.ready, counts.flagged), (1, 0))
+                begin.assert_called_once()
+                self.assertIs(begin.call_args.args[1].per_curiam, value == "t")
+                row = self.record.rows[1]
+                assert row.opinion is not None
+                self.assertIs(row.opinion.per_curiam, value == "t")
 
     def test_new_document_citations_finish_with_the_mark_and_failed_has_none(self) -> None:
         text = "We overruled 1 Example 2."
@@ -527,20 +780,20 @@ class WorkerCaselaw(unittest.TestCase):
                           counts.treated, counts.signalled), (1, 1, 1, 1, 1))
         ready, failed = self.record.rows[1], self.record.rows[2]
         self.assertEqual(ready.cited_at, self.now)
-        self.assertEqual(len(ready.citations), 1)
-        edge = ready.citations[0]
+        self.assertEqual(len(ready.citations[self.pipeline]), 1)
+        edge = ready.citations[self.pipeline][0]
         self.assertEqual((edge.raw_cite, edge.to_cluster, edge.doc_id),
                          ("1 Example 2", 100, ready.document.doc_id))
-        self.assertEqual(edge.section_id, ready.sections[0].section_id)
+        self.assertEqual(edge.section_id, ready.sections[self.pipeline][0].section_id)
         self.assertEqual(ready.treatment_pattern_set, treatment.PATTERN_SET_ID)
         self.assertEqual(ready.treated_at, self.now)
-        self.assertEqual(len(ready.signals), 1)
-        self.assertEqual((ready.signals[0].citation_id, ready.signals[0].state),
+        self.assertEqual(len(ready.signals[self.pipeline]), 1)
+        self.assertEqual((ready.signals[self.pipeline][0].citation_id, ready.signals[self.pipeline][0].state),
                          (edge.citation_id, "negative"))
-        self.assertEqual(text[ready.signals[0].char_start:ready.signals[0].char_end],
+        self.assertEqual(text[ready.signals[self.pipeline][0].char_start:ready.signals[self.pipeline][0].char_end],
                          "overruled")
         self.assertIsNone(failed.cited_at)
-        self.assertEqual(failed.citations, ())
+        self.assertEqual(failed.citations.get(self.pipeline, ()), ())
         self.assertIsNone(failed.treated_at)
 
     def test_label_wide_map_resolves_other_court_and_counts_ambiguous_keys(self) -> None:
@@ -578,9 +831,9 @@ class WorkerCaselaw(unittest.TestCase):
                 "court2": {"level": "circuit", "circuit": "ca5", "state": None},
             })
         row = self.record.rows[1]
-        self.assertEqual(tuple(edge.to_cluster for edge in row.citations), (200, None))
+        self.assertEqual(tuple(edge.to_cluster for edge in row.citations.get(self.pipeline, ())), (200, None))
         self.assertEqual(tuple((signal.state, signal.no_state_reason)
-                               for signal in row.signals),
+                               for signal in row.signals.get(self.pipeline, ())),
                          (("caution", None), (None, "unresolved")))
         self.assertEqual(row.opinion.reporter_cites if row.opinion else None,
                          ("7 Shared 8",))
@@ -612,9 +865,9 @@ class WorkerCaselaw(unittest.TestCase):
             ("chunked", row.document.doc_id),
         ])
         self.assertEqual(row.cited_at, self.now)
-        self.assertEqual(row.citations[0].to_cluster, 100)
+        self.assertEqual(row.citations[self.pipeline][0].to_cluster, 100)
         self.assertEqual((counts.treated, counts.signalled), (1, 1))
-        self.assertEqual(row.signals[0].citation_id, row.citations[0].citation_id)
+        self.assertEqual(row.signals[self.pipeline][0].citation_id, row.citations[self.pipeline][0].citation_id)
         self.assertEqual(self.run_ingest(find=find).present, 1)
         self.assertEqual(self.record.events, [
             ("cited", row.document.doc_id), ("treated", row.document.doc_id),
@@ -637,19 +890,20 @@ class WorkerCaselaw(unittest.TestCase):
         canonical = cas.put(RealHost(), text.encode(), root=self.store_root)
         assert isinstance(canonical, str)
         row.canonical_text_sha256 = canonical
-        row.sections = (caselaw.NewSection(
+        row.sections[self.pipeline] = (caselaw.NewSection(
             "d" * 64, row.document.doc_id, 0, "majority", "line", 0, len(text),
             None, None, None,
         ),)
         start = text.index("1 Example 2")
-        row.citations = (citations.NewCitation(
+        row.citations[self.pipeline] = (citations.NewCitation(
             "e" * 64, row.document.doc_id, 0, start, start + len("1 Example 2"),
-            row.sections[0].section_id, "majority", "case_cite", "full",
+            row.sections[self.pipeline][0].section_id, "majority", "case_cite", "full",
             "1 Example 2", "1 Example 2", None, None, 100,
             "fictional-edges",
         ),)
         row.treatment_pattern_set = None
         row.treated_at = None
+        row.treated_pipeline = None
         before = (row.status, row.attempts, row.sha256, row.canonical_text_sha256)
         with patch.object(opiniontext, "canonical_text", side_effect=AssertionError("rewalk")):
             counts = self.run_ingest(find=lambda _text: self.fail("adapter used"))
@@ -657,14 +911,14 @@ class WorkerCaselaw(unittest.TestCase):
         self.assertEqual((row.status, row.attempts, row.sha256,
                           row.canonical_text_sha256), before)
         self.assertEqual(self.record.events, [("treated", row.document.doc_id)])
-        self.assertEqual((row.signals[0].citation_id, row.signals[0].state),
-                         (row.citations[0].citation_id, "negative"))
+        self.assertEqual((row.signals[self.pipeline][0].citation_id, row.signals[self.pipeline][0].state),
+                         (row.citations[self.pipeline][0].citation_id, "negative"))
         self.assertEqual(self.run_ingest().present, 1)
         self.assertEqual(self.record.events, [("treated", row.document.doc_id)])
 
         row.treatment_pattern_set = "fictional-older-pattern"
         row.treated_at = self.now
-        row.signals = ()
+        row.signals[self.pipeline] = ()
         self.assertEqual(self.run_ingest().treated, 1)
         self.assertEqual(row.treatment_pattern_set, treatment.PATTERN_SET_ID)
 
@@ -674,11 +928,11 @@ class WorkerCaselaw(unittest.TestCase):
         canonical = cas.put(RealHost(), text.encode(), root=self.store_root)
         assert isinstance(canonical, str)
         row.canonical_text_sha256 = canonical
-        row.sections = (replace(row.sections[0], char_end=len(text)),)
+        row.sections[self.pipeline] = (replace(row.sections[self.pipeline][0], char_end=len(text)),)
         start = text.index("1 Example 2")
-        row.citations = (citations.NewCitation(
+        row.citations[self.pipeline] = (citations.NewCitation(
             "e" * 64, row.document.doc_id, 0, start, start + len("1 Example 2"),
-            row.sections[0].section_id, row.sections[0].section_type, "case_cite",
+            row.sections[self.pipeline][0].section_id, row.sections[self.pipeline][0].section_type, "case_cite",
             "full", "1 Example 2", "1 Example 2", None, None, 100,
             "fictional-edges",
         ),)
@@ -689,8 +943,8 @@ class WorkerCaselaw(unittest.TestCase):
             patch.object(self.record, "read_citations", wraps=self.record.read_citations) as read_citations,
         ):
             counts = self.run_ingest(find=lambda _text: self.fail("adapter used"))
-        read_sections.assert_called_once_with(row.document.doc_id)
-        read_citations.assert_called_once_with(row.document.doc_id)
+        read_sections.assert_called_once_with(row.document.doc_id, self.pipeline)
+        read_citations.assert_called_once_with(row.document.doc_id, self.pipeline)
         self.assertEqual((counts.chunked, counts.ready, counts.retried, row.attempts),
                          (1, 0, 0, 1))
         self.assertEqual(self.record.events, [("chunked", row.document.doc_id)])
@@ -758,7 +1012,7 @@ class WorkerCaselaw(unittest.TestCase):
         for row in self.record.rows.values():
             self.assertEqual({chunk.pipeline for chunk in row.chunks}, {self.pipeline})
             self.assertEqual({chunk.section_id for chunk in row.chunks},
-                             {section.section_id for section in row.sections})
+                             {section.section_id for section in row.sections.get(self.pipeline, ())})
 
     def test_treatment_defect_gives_back_and_files_only_its_class(self) -> None:
         sentinel = "PRIVATE_TREATMENT_SENTINEL"
@@ -783,11 +1037,12 @@ class WorkerCaselaw(unittest.TestCase):
         row.cited_at = None
         row.treatment_pattern_set = None
         row.treated_at = None
+        row.treated_pipeline = None
         recorded = (caselaw.NewSection(
             "9" * 64, row.document.doc_id, 0, "majority", "line", 0, len(text),
             None, None, None,
         ),)
-        row.sections = recorded
+        row.sections[self.pipeline] = recorded
 
         def find(source: str) -> tuple[FoundCitation, ...]:
             fragment = "1 Example 2"
@@ -804,10 +1059,10 @@ class WorkerCaselaw(unittest.TestCase):
             ("anchored", row.document.doc_id), ("cited", row.document.doc_id),
             ("treated", row.document.doc_id), ("chunked", row.document.doc_id),
         ])
-        self.assertEqual(row.sections, recorded)
-        self.assertEqual(row.citations[0].section_id, recorded[0].section_id)
-        self.assertEqual(row.citations[0].to_cluster, 100)
-        self.assertEqual(row.signals[0].state, "negative")
+        self.assertEqual(row.sections.get(self.pipeline, ()), recorded)
+        self.assertEqual(row.citations[self.pipeline][0].section_id, recorded[0].section_id)
+        self.assertEqual(row.citations[self.pipeline][0].to_cluster, 100)
+        self.assertEqual(row.signals[self.pipeline][0].state, "negative")
 
     def test_citation_defect_gives_back_and_missing_adapter_refuses_before_rows(self) -> None:
         sentinel = "PRIVATE_CITE_SENTINEL"
@@ -846,15 +1101,17 @@ class WorkerCaselaw(unittest.TestCase):
         no_text = _opinion("2", "100", html_with_citations="<p>derived only</p>")
         unparseable = "<"
         empty = "<opinion><page-number>*3</page-number></opinion>"
+        cipher = cipher_text(FICTIONAL_OPINION)
         self.stage(opinions=[
             _opinion("1", "100", xml_harvard=raw), no_text,
             _opinion("3", "100", xml_harvard=unparseable),
             _opinion("4", "100", xml_harvard=empty),
+            _opinion("5", "100", plain_text=cipher),
         ])
         self.assertEqual(stat.S_IMODE(self.store_root.stat().st_mode), cas.DIRECTORY_MODE)
         counts = self.run_ingest()
         self.assertEqual(counts, caselaw.IngestCounts(
-            4, 0, 1, 3, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0,
+            5, 0, 1, 4, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 0,
         ))
         self.assertEqual(self.record.present_calls, [(self.source, self.snapshot_date, self.court, self.pipeline)])
         self.assertEqual(self.record.closed, 1)
@@ -876,12 +1133,12 @@ class WorkerCaselaw(unittest.TestCase):
             opiniontext.canonical_text("xml_harvard", raw),
             opinion_type="020", per_curiam=False, column="xml_harvard",
         )
-        self.assertEqual(len(ready.sections), len(expected))
-        for index, (written, section) in enumerate(zip(ready.sections, expected, strict=True)):
+        self.assertEqual(len(ready.sections[self.pipeline]), len(expected))
+        for index, (written, section) in enumerate(zip(ready.sections[self.pipeline], expected, strict=True)):
             self.assertEqual(written.ordinal, index)
             self.assertEqual(written.doc_id, ready.document.doc_id)
             self.assertEqual(written.section_id, hashlib.sha256(
-                f"{ready.document.doc_id}\n{section.char_start}\n{section.char_end}".encode()
+                f"{ready.document.doc_id}\n{self.pipeline}\n{section.char_start}\n{section.char_end}".encode()
             ).hexdigest())
             self.assertEqual(
                 (written.section_type, written.typed_by, written.char_start,
@@ -889,16 +1146,16 @@ class WorkerCaselaw(unittest.TestCase):
                  written.parent_section_id),
                 (section.section_type, section.typed_by, section.char_start,
                  section.char_end, section.label, section.ref_offset,
-                 ready.sections[section.parent].section_id
+                 ready.sections[self.pipeline][section.parent].section_id
                  if section.parent is not None else None),
             )
         parsed = opiniontext.canonical_text("xml_harvard", raw)
         derived = anchors.anchor(parsed, expected)
-        self.assertEqual(len(ready.anchors), len(derived.anchors))
-        for written_anchor, derived_anchor in zip(ready.anchors, derived.anchors, strict=True):
+        self.assertEqual(len(ready.anchors[self.pipeline]), len(derived.anchors))
+        for written_anchor, derived_anchor in zip(ready.anchors[self.pipeline], derived.anchors, strict=True):
             scheme = dict(derived_anchor.attrs)["scheme"]
             self.assertEqual(written_anchor.anchor_id, hashlib.sha256(
-                f"{ready.document.doc_id}\n{derived_anchor.kind}\n{scheme}\n"
+                f"{ready.document.doc_id}\n{self.pipeline}\n{derived_anchor.kind}\n{scheme}\n"
                 f"{derived_anchor.char_start}\n{derived_anchor.char_end}".encode()
             ).hexdigest())
             self.assertEqual((written_anchor.doc_id, written_anchor.kind, written_anchor.label,
@@ -911,19 +1168,27 @@ class WorkerCaselaw(unittest.TestCase):
         blank = self.record.rows[2]
         self.assertEqual((blank.status, blank.failure_reason, blank.document.text_source,
                           blank.sha256, blank.canonical_text_sha256, blank.anchored_at,
-                          blank.anchors),
+                          blank.anchors.get(self.pipeline, ())),
                          ("failed", "no-text", None, None, None, None, ()))
-        for opinion_id, original, reason in (
-            (3, unparseable, "unparseable"), (4, empty, "empty"),
+        for opinion_id, original, column, reason in (
+            (3, unparseable, "xml_harvard", "unparseable"),
+            (4, empty, "xml_harvard", "empty"),
+            (5, cipher, "plain_text", "illegible"),
         ):
             with self.subTest(opinion_id=opinion_id):
                 row = self.record.rows[opinion_id]
-                self.assertEqual((row.status, row.failure_reason, row.canonical_text_sha256),
-                                 ("failed", reason, None))
+                self.assertEqual((row.status, row.failure_reason, row.document.text_source,
+                                  row.canonical_text_sha256),
+                                 ("failed", reason, column, None))
                 self.assertEqual(row.sha256, hashlib.sha256(original.encode()).hexdigest())
                 self.assertEqual(cas.get(RealHost(), row.sha256 or "", root=self.store_root),
                                  original.encode())
-                self.assertEqual((row.sections, row.anchors, row.anchored_at), ((), (), None))
+                self.assertEqual((row.sections.get(self.pipeline, ()),
+                                  row.anchors.get(self.pipeline, ()),
+                                  row.citations.get(self.pipeline, ()),
+                                  row.signals.get(self.pipeline, ()), row.chunks,
+                                  row.anchored_at, row.cited_at, row.treated_at),
+                                 ((), (), (), (), (), None, None, None))
 
     def test_each_text_source_becomes_a_ready_document(self) -> None:
         examples = {
@@ -951,10 +1216,10 @@ class WorkerCaselaw(unittest.TestCase):
                                  hashlib.sha256(canonical).hexdigest())
                 self.assertEqual(cas.get(RealHost(), row.canonical_text_sha256 or "",
                                          root=self.store_root), canonical)
-                self.assertEqual((row.anchored_at, row.anchors), (self.now, ()))
+                self.assertEqual((row.anchored_at, row.anchors.get(self.pipeline, ())), (self.now, ()))
         events = list(self.record.events)
         self.assertEqual(self.run_ingest(), caselaw.IngestCounts(
-            6, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            6, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ))
         self.assertEqual(self.record.events, events)
 
@@ -964,7 +1229,7 @@ class WorkerCaselaw(unittest.TestCase):
         with patch.object(opiniontext, "canonical_text", side_effect=RecursionError("private text")):
             counts = self.run_ingest()
         self.assertEqual(counts, caselaw.IngestCounts(
-            1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ))
         row = self.record.rows[1]
         self.assertEqual((row.status, row.failure_reason, row.canonical_text_sha256),
@@ -1054,13 +1319,13 @@ class WorkerCaselaw(unittest.TestCase):
         ):
             counts = self.run_ingest()
             self.assertEqual(counts, caselaw.IngestCounts(
-                1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+                1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,
             ))
             self.assertEqual(row.case_name, "Fictitious Case")
             self.assertEqual(self.record.events, [("named", row.document.doc_id)])
             self.record.events.clear()
             self.assertEqual(self.run_ingest(), caselaw.IngestCounts(
-                1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             ))
         self.assertEqual(self.record.events, [])
         self.assertEqual((row.status, row.attempts, row.sha256, row.canonical_text_sha256),
@@ -1127,7 +1392,7 @@ class WorkerCaselaw(unittest.TestCase):
                              snapshot=self.snapshot_date, now=self.now)
         counts = self.run_ingest()
         self.assertEqual(counts, caselaw.IngestCounts(
-            3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ))
         self.assertEqual(self.record.events, [])
         self.assertEqual(self._objects(), set())
@@ -1142,11 +1407,11 @@ class WorkerCaselaw(unittest.TestCase):
         first, second = self.record.rows[1], self.record.rows[2]
         self.assertEqual(first.canonical_text_sha256, second.canonical_text_sha256)
         self.assertEqual(
-            [(s.char_start, s.char_end) for s in first.sections],
-            [(s.char_start, s.char_end) for s in second.sections],
+            [(s.char_start, s.char_end) for s in first.sections[self.pipeline]],
+            [(s.char_start, s.char_end) for s in second.sections[self.pipeline]],
         )
-        self.assertTrue(first.sections)
-        self.assertNotEqual(first.sections[0].section_id, second.sections[0].section_id)
+        self.assertTrue(first.sections[self.pipeline])
+        self.assertNotEqual(first.sections[self.pipeline][0].section_id, second.sections[self.pipeline][0].section_id)
 
     def test_anchor_ids_bind_document_and_scheme_for_equal_text(self) -> None:
         raw = (
@@ -1160,9 +1425,11 @@ class WorkerCaselaw(unittest.TestCase):
         self.assertEqual(self.run_ingest().anchored, 2)
         first, second = self.record.rows[1], self.record.rows[2]
         self.assertEqual(first.canonical_text_sha256, second.canonical_text_sha256)
-        self.assertEqual([dict(row.attrs)["scheme"] for row in first.anchors], ["1", "2"])
-        self.assertEqual([row.char_start for row in first.anchors], [1, 1])
-        self.assertEqual(len({row.anchor_id for row in (*first.anchors, *second.anchors)}), 4)
+        self.assertEqual([dict(row.attrs)["scheme"] for row in first.anchors[self.pipeline]], ["1", "2"])
+        self.assertEqual([row.char_start for row in first.anchors[self.pipeline]], [1, 1])
+        self.assertEqual(len({row.anchor_id for row in (
+            *first.anchors[self.pipeline], *second.anchors[self.pipeline],
+        )}), 4)
 
     def test_footnote_section_writes_the_parent_id(self) -> None:
         raw = (
@@ -1171,7 +1438,7 @@ class WorkerCaselaw(unittest.TestCase):
         )
         self.stage(opinions=[_opinion("1", "100", xml_harvard=raw)])
         self.assertEqual(self.run_ingest().ready, 1)
-        written = self.record.rows[1].sections
+        written = self.record.rows[1].sections.get(self.pipeline, ())
         footnote = next(section for section in written if section.section_type == "footnote")
         self.assertEqual(footnote.label, "1")
         self.assertEqual(footnote.parent_section_id, written[0].section_id)
@@ -1182,19 +1449,18 @@ class WorkerCaselaw(unittest.TestCase):
         row = self._ready_from_original("Fictitious recovered opinion.")
         original_state = (row.status, row.attempts, row.sha256, row.canonical_text_sha256)
         self.assertEqual(self.run_ingest(), caselaw.IngestCounts(
-            1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0,
+            1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0,
         ))
         self.assertEqual(
             (row.status, row.attempts, row.sha256, row.canonical_text_sha256),
             original_state,
         )
-        self.assertTrue(row.sections)
-        self.assertEqual((row.cited_at, row.citations), (self.now, ()))
-        events = [("sectioned", row.document.doc_id), ("cited", row.document.doc_id),
-                  ("treated", row.document.doc_id), ("chunked", row.document.doc_id)]
+        self.assertTrue(row.sections.get(self.pipeline, ()))
+        self.assertEqual((row.cited_at, row.citations.get(self.pipeline, ())), (self.now, ()))
+        events = [("walked", row.document.doc_id)]
         self.assertEqual(self.record.events, events)
         self.assertEqual(self.run_ingest(), caselaw.IngestCounts(
-            1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ))
         self.assertEqual(self.record.events, events)
 
@@ -1203,46 +1469,84 @@ class WorkerCaselaw(unittest.TestCase):
         row = self._ready_from_original(raw, column="xml_harvard", sectioned=True,
                                         anchored=False)
         original_state = (row.status, row.attempts, row.sha256, row.canonical_text_sha256,
-                          row.sections)
+                          row.sections.get(self.pipeline, ()))
         with self.assertLogs(caselaw.logger, level="INFO") as logged:
             counts = self.run_ingest()
         self.assertEqual(counts, caselaw.IngestCounts(
-            1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0,
+            1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0,
         ))
         for token in ("anchored=1", "pgmap_checked=1", "pgmap_disagreeing=1"):
             self.assertIn(token, logged.output[-1])
         self.assertEqual((row.status, row.attempts, row.sha256, row.canonical_text_sha256,
-                          row.sections), original_state)
+                          row.sections.get(self.pipeline, ())), original_state)
         self.assertEqual(row.anchored_at, self.now)
         self.assertEqual([(anchor.label, dict(anchor.attrs)["scheme"])
-                          for anchor in row.anchors], [("8", "1")])
+                          for anchor in row.anchors.get(self.pipeline, ())], [("8", "1")])
         self.assertEqual(self.record.events, [("anchored", row.document.doc_id),
                                               ("chunked", row.document.doc_id)])
         self.assertEqual(self.run_ingest(), caselaw.IngestCounts(
-            1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ))
         self.assertEqual(self.record.events, [("anchored", row.document.doc_id),
                                               ("chunked", row.document.doc_id)])
+
+    def test_ready_cipher_backfill_completes_walk_without_changing_document(self) -> None:
+        cipher = cipher_text(FICTIONAL_OPINION)
+        parsed = opiniontext.walk("plain_text", cipher)
+        row = self._ready_from_original(cipher, anchored=False)
+        self.assertEqual(row.sha256, hashlib.sha256(cipher.encode()).hexdigest())
+        self.assertEqual(row.canonical_text_sha256, hashlib.sha256(parsed.text.encode()).hexdigest())
+        self.assertNotIn(self.pipeline, row.sections)
+        self.assertEqual((row.anchors, row.citations, row.signals, row.chunks), ({}, {}, {}, ()))
+        original_state = (row.status, row.attempts, row.sha256, row.canonical_text_sha256)
+
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(
+            1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0,
+        ))
+        self.assertEqual((row.status, row.attempts, row.sha256, row.canonical_text_sha256),
+                         original_state)
+        self.assertIsNone(row.failure_reason)
+        self.assertFalse(self.failure_path.exists())
+        self.assertEqual(
+            [(section.char_start, section.char_end, section.section_type, section.typed_by)
+             for section in row.sections[self.pipeline]],
+            [(0, len(parsed.text), "unknown", "none")],
+        )
+        self.assertEqual((row.anchors[self.pipeline], row.citations[self.pipeline],
+                          row.signals[self.pipeline]), ((), (), ()))
+        self.assertEqual((row.anchored_at, row.cited_at, row.treated_at),
+                         (self.now, self.now, self.now))
+        self.assertEqual((row.treatment_pattern_set, row.treated_pipeline),
+                         (treatment.PATTERN_SET_ID, self.pipeline))
+        self.assertTrue(row.chunks)
+        self.assertEqual("".join(parsed.text[chunk.char_start:chunk.char_end]
+                                 for chunk in row.chunks), parsed.text)
+        self.assertEqual({chunk.pipeline for chunk in row.chunks}, {self.pipeline})
+        self.assertEqual(self.record.events, [("walked", row.document.doc_id)])
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(
+            1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ))
+        self.assertEqual(self.record.events, [("walked", row.document.doc_id)])
 
     def test_ready_backfill_writes_sections_and_anchors_from_one_parse(self) -> None:
         raw = '<opinion><p>A<page-number>*8</page-number>B</p></opinion>'
         row = self._ready_from_original(raw, column="xml_harvard", anchored=False)
         original_state = (row.status, row.attempts, row.sha256, row.canonical_text_sha256)
-        with patch.object(opiniontext, "canonical_text", wraps=opiniontext.canonical_text) as walk:
+        with patch.object(opiniontext, "walk", wraps=opiniontext.walk) as walk:
             counts = self.run_ingest()
         self.assertEqual(walk.call_count, 1)
         self.assertEqual(counts, caselaw.IngestCounts(
-            1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0,
+            1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0,
         ))
         self.assertEqual((row.status, row.attempts, row.sha256, row.canonical_text_sha256),
                          original_state)
-        self.assertTrue(row.sections)
-        self.assertTrue(row.anchors)
+        self.assertTrue(row.sections.get(self.pipeline, ()))
+        self.assertTrue(row.anchors.get(self.pipeline, ()))
         self.assertEqual(row.anchored_at, self.now)
-        events = ["sectioned", "anchored", "cited", "treated", "chunked"]
+        events = ["walked"]
         self.assertEqual([event for event, _ in self.record.events], events)
         self.assertEqual(self.run_ingest(), caselaw.IngestCounts(
-            1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ))
         self.assertEqual([event for event, _ in self.record.events], events)
 
@@ -1257,7 +1561,7 @@ class WorkerCaselaw(unittest.TestCase):
             self.run_ingest()
         self.assertEqual(raised.exception.reason, "text-mismatch")
         self.assert_failure(raised.exception)
-        self.assertEqual((row.status, row.attempts, row.sections), ("ready", 1, ()))
+        self.assertEqual((row.status, row.attempts, row.sections.get(self.pipeline, ())), ("ready", 1, ()))
 
         row.document = replace(row.document, text_source="bad-column")
         with self.assertRaises(caselaw.CaselawFailure) as refused:
@@ -1282,7 +1586,7 @@ class WorkerCaselaw(unittest.TestCase):
                          ("segmenter", "RuntimeError"))
         self.assert_failure(raised.exception)
         row = self.record.rows[1]
-        self.assertEqual((row.status, row.attempts, row.sections), ("processing", 0, ()))
+        self.assertEqual((row.status, row.attempts, row.sections.get(self.pipeline, ())), ("processing", 0, ()))
         self.assertEqual([event for event, _ in self.record.events], ["begin", "give_back"])
 
         second = _Record()
@@ -1294,7 +1598,7 @@ class WorkerCaselaw(unittest.TestCase):
         self.assertEqual((refused.exception.reason, refused.exception.error),
                          ("segmenter", "RuntimeError"))
         self.assert_failure(refused.exception)
-        self.assertEqual((backfill.status, backfill.attempts, backfill.sections),
+        self.assertEqual((backfill.status, backfill.attempts, backfill.sections.get(self.pipeline, ())),
                          ("ready", 1, ()))
         self.assertEqual(self.record.events, [])
 
@@ -1310,7 +1614,8 @@ class WorkerCaselaw(unittest.TestCase):
                          ("anchors", "RuntimeError"))
         self.assert_failure(raised.exception)
         row = self.record.rows[1]
-        self.assertEqual((row.status, row.attempts, row.sections, row.anchors, row.anchored_at),
+        self.assertEqual((row.status, row.attempts, row.sections.get(self.pipeline, ()),
+                          row.anchors.get(self.pipeline, ()), row.anchored_at),
                          ("processing", 0, (), (), None))
         self.assertEqual([event for event, _ in self.record.events], ["begin", "give_back"])
         self.assertIn("action=caselaw_failed", logged.output[-1])
@@ -1325,8 +1630,8 @@ class WorkerCaselaw(unittest.TestCase):
             self.run_ingest()
         self.assertEqual((refused.exception.reason, refused.exception.error),
                          ("anchors", "RuntimeError"))
-        self.assertEqual((backfill.status, backfill.attempts, backfill.sections,
-                          backfill.anchors, backfill.anchored_at),
+        self.assertEqual((backfill.status, backfill.attempts, backfill.sections.get(self.pipeline, ()),
+                          backfill.anchors.get(self.pipeline, ()), backfill.anchored_at),
                          ("ready", 1, (), (), None))
         self.assertEqual(self.record.events, [])
 
@@ -1335,7 +1640,7 @@ class WorkerCaselaw(unittest.TestCase):
             "1", "100", per_curiam="t", plain_text="Fictitious body.",
         )])
         self.assertEqual(self.run_ingest().ready, 1)
-        self.assertEqual(self.record.rows[1].sections[0].section_type, "per_curiam")
+        self.assertEqual(self.record.rows[1].sections[self.pipeline][0].section_type, "per_curiam")
         self.stage(opinions=[_opinion(
             "2", "100", per_curiam="maybe", plain_text="Fictitious body.",
         )])
@@ -1354,7 +1659,7 @@ class WorkerCaselaw(unittest.TestCase):
                              source=self.source, snapshot=self.snapshot_date, now=self.now)
         counts = self.run_ingest()
         self.assertEqual(counts, caselaw.IngestCounts(
-            3, 0, 2, 1, 2, 1, 0, 2, 0, 0, 2, 2, 0, 2, 0,
+            3, 0, 2, 1, 2, 1, 0, 2, 0, 0, 2, 2, 0, 2, 0, 0,
         ))
         self.assertEqual([(self.record.rows[index].status, self.record.rows[index].attempts)
                           for index in (1, 2)], [("ready", 1), ("ready", 2)])
@@ -1381,7 +1686,7 @@ class WorkerCaselaw(unittest.TestCase):
         self.store_root.mkdir(mode=cas.DIRECTORY_MODE)
         self.store_root.chmod(cas.DIRECTORY_MODE)
         self.assertEqual(self.run_ingest(), caselaw.IngestCounts(
-            1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0,
+            1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 0,
         ))
         self.assertEqual((first.status, first.attempts), ("ready", 1))
         self.assertEqual([event for event, _ in self.record.events],
@@ -1392,12 +1697,12 @@ class WorkerCaselaw(unittest.TestCase):
         self.stage(opinions=[_opinion(str(index), "100", plain_text=f"Fiction {index}.")
                              for index in range(1, 4)])
         self.assertEqual(self.run_ingest(limit=2), caselaw.IngestCounts(
-            2, 0, 2, 0, 0, 0, 0, 2, 0, 0, 2, 2, 0, 2, 0,
+            2, 0, 2, 0, 0, 0, 0, 2, 0, 0, 2, 2, 0, 2, 0, 0,
         ))
         names = self._objects()
         events = list(self.record.events)
         self.assertEqual(self.run_ingest(limit=2), caselaw.IngestCounts(
-            2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ))
         self.assertEqual(self._objects(), names)
         self.assertEqual(self.record.events, events)
@@ -1602,7 +1907,7 @@ class WorkerCaselaw(unittest.TestCase):
             self.assertIn("signalled=", line)
             self.assertIn("named=", line)
             self.assertIn("ambiguous=", line)
-        self.assertEqual(self.record.rows[1].citations[0].raw_cite, sentinel)
+        self.assertEqual(self.record.rows[1].citations[self.pipeline][0].raw_cite, sentinel)
         self.assertEqual(self.record.rows[1].case_name, sentinel)
 
 
@@ -1675,17 +1980,18 @@ class PsycopgDocumentRecord(unittest.TestCase):
     def test_statements_bind_only_record_fields_and_commit_once_per_method(self) -> None:
         now = datetime(2099, 1, 2, 12, 34, tzinfo=UTC)
         snapshot = now.date()
+        version = "1000.0.0"
         document = caselaw.NewDocument(
             "a" * 64, "caselaw", "fictional-dump", snapshot, "plain_text", now,
         )
         opinion = caselaw.NewOpinion(
             91, document.doc_id, "court1", 100, "23-A", snapshot, False,
             "published", "Published", ("1 Example 2", "3 Example 4"), "020",
-            "PRIVATE_CASELAW_SENTINEL",
+            "PRIVATE_CASELAW_SENTINEL", False,
         )
         self.connection.rows = [(
             91, document.doc_id, "processing", 0, "plain_text", None, None, False, False,
-            False, None, False, True,
+            False, None, None, False, True, True,
         )]
         section = caselaw.NewSection(
             "d" * 64, document.doc_id, 0, "footnote", "markup", 4, 9,
@@ -1714,7 +2020,7 @@ class PsycopgDocumentRecord(unittest.TestCase):
             signal, signal_id="4" * 64, citation_id=backfilled_citation.citation_id,
         )
         chunk = chunker.NewChunk(
-            "5" * 64, document.doc_id, pipeline.PIPELINE_VERSION, 0,
+            "5" * 64, document.doc_id, version, 0,
             section.section_id, section.section_type, 4, 9,
             hashlib.sha256(b"text!").hexdigest(), 2,
         )
@@ -1722,40 +2028,46 @@ class PsycopgDocumentRecord(unittest.TestCase):
                                    section_id=backfilled.section_id)
         record = caselaw.PsycopgRecord(connect=self.connect, worker_settings=self.configuration)
         self.assertEqual(record.present(document.source, snapshot, opinion.court,
-                                        pipeline.PIPELINE_VERSION), {
+                                        version), {
             91: caselaw.PresentRow(
                 document.doc_id, "processing", 0, "plain_text", None, None, False, False,
-                False, None, False, True,
+                False, None, None, False, True, True,
             ),
         })
         record.begin(document, opinion)
         assert opinion.case_name is not None
         record.write_name(document.doc_id, opinion.case_name)
+        record.write_flag(document.doc_id, opinion.per_curiam is True)
         record.retry(document.doc_id)
         record.give_back(document.doc_id)
         record.finish_ready(
-            document.doc_id, "b" * 64, "c" * 64, now, (section,), (anchor,), (citation,),
+            document.doc_id, version, "b" * 64, "c" * 64, now, (section,), (anchor,), (citation,),
             (signal,), (chunk,),
         )
-        record.write_sections(document.doc_id, (backfilled,))
-        record.write_anchors(document.doc_id, (backfilled_anchor,), now)
+        commits = self.connection.commits
+        record.write_walk(
+            document.doc_id, version, (backfilled,), (backfilled_anchor,),
+            (backfilled_citation,), (backfilled_signal,), (backfilled_chunk,), now,
+        )
+        self.assertEqual(self.connection.commits, commits + 1)
+        record.write_anchors(document.doc_id, version, (backfilled_anchor,), now)
         self.connection.rows = [astuple(section)]
-        self.assertEqual(record.read_sections(document.doc_id), (section,))
-        record.write_citations(document.doc_id, (backfilled_citation,), now)
+        self.assertEqual(record.read_sections(document.doc_id, version), (section,))
+        record.write_citations(document.doc_id, version, (backfilled_citation,), now)
         self.connection.rows = [astuple(citation)]
-        self.assertEqual(record.read_citations(document.doc_id), (citation,))
-        record.write_signals(document.doc_id, (backfilled_signal,), now)
+        self.assertEqual(record.read_citations(document.doc_id, version), (citation,))
+        record.write_signals(document.doc_id, version, (backfilled_signal,), now)
         record.write_chunks(document.doc_id, (backfilled_chunk,))
         record.finish_failed(document.doc_id, "unparseable", now, "b" * 64)
         record.close()
         self.assertTrue(self.connection.closed)
-        self.assertEqual(self.connection.commits, 14)
+        self.assertEqual(self.connection.commits, 15)
         self.assertEqual(self.connection.rollbacks, 0)
         self.assertEqual(self.connection_kwargs, {
             **settings.connection_kwargs(self.configuration), "autocommit": False,
         })
         self.assertEqual(self.connection.statements, [
-            (caselaw.PRESENT_SQL, (pipeline.PIPELINE_VERSION,
+            (caselaw.PRESENT_SQL, (version, version,
                                    document.source, snapshot, opinion.court)),
             (caselaw.BEGIN_DOCUMENT_SQL, (
                 document.doc_id, document.profile, document.source, snapshot,
@@ -1766,31 +2078,33 @@ class PsycopgDocumentRecord(unittest.TestCase):
                 opinion.docket, opinion.decided_date, opinion.decided_date_is_approximate,
                 opinion.precedential, opinion.precedential_raw,
                 ["1 Example 2", "3 Example 4"], opinion.opinion_type, opinion.case_name,
+                opinion.per_curiam,
             )),
             (caselaw.NAME_SQL, (opinion.case_name, document.doc_id)),
+            (caselaw.FLAG_SQL, (opinion.per_curiam, document.doc_id)),
             (caselaw.RETRY_SQL, (document.doc_id,)),
             (caselaw.GIVE_BACK_SQL, (document.doc_id,)),
             (caselaw.FINISH_READY_SQL, (
                 "b" * 64, "c" * 64, now, now, now,
-                treatment.PATTERN_SET_ID, now, document.doc_id,
+                treatment.PATTERN_SET_ID, now, version, document.doc_id,
             )),
             (caselaw.SECTION_SQL, (
-                section.section_id, document.doc_id, 0, "footnote", "markup",
+                section.section_id, document.doc_id, version, 0, "footnote", "markup",
                 4, 9, "1", 2, None,
             )),
             (caselaw.ANCHOR_SQL, (
-                anchor.anchor_id, document.doc_id, "reporter_page", "72", 4, 9,
+                anchor.anchor_id, document.doc_id, version, "reporter_page", "72", 4, 9,
                 '{"scheme": "2", "stars": "2"}',
             )),
             (caselaw.CITATION_SQL, (
-                citation.citation_id, document.doc_id, citation.ordinal,
+                citation.citation_id, document.doc_id, version, citation.ordinal,
                 citation.char_start, citation.char_end, citation.section_id,
                 citation.section_type, citation.cite_type, citation.cite_form,
                 citation.raw_cite, citation.reporter_cite, citation.pincite,
                 citation.key, citation.to_cluster, citation.pattern_id,
             )),
             (caselaw.SIGNAL_SQL, (
-                signal.signal_id, signal.citation_id, document.doc_id,
+                signal.signal_id, signal.citation_id, document.doc_id, version,
                 signal.signal_source, signal.pattern_set, signal.treatment_signal,
                 signal.qualifier, signal.effective_section, signal.state,
                 signal.no_state_reason, signal.char_start, signal.char_end, now,
@@ -1801,17 +2115,50 @@ class PsycopgDocumentRecord(unittest.TestCase):
                 chunk.content_hash, chunk.token_count,
             )),
             (caselaw.SECTION_SQL, (
-                backfilled.section_id, document.doc_id, 0, "footnote", "markup",
+                backfilled.section_id, document.doc_id, version, 0, "footnote", "markup",
                 4, 9, "1", 2, None,
             )),
             (caselaw.ANCHOR_SQL, (
-                backfilled_anchor.anchor_id, document.doc_id, "reporter_page", "72", 4, 9,
+                backfilled_anchor.anchor_id, document.doc_id, version,
+                "reporter_page", "72", 4, 9, '{"scheme": "2", "stars": "2"}',
+            )),
+            (caselaw.CITATION_SQL, (
+                backfilled_citation.citation_id, document.doc_id, version,
+                backfilled_citation.ordinal, backfilled_citation.char_start,
+                backfilled_citation.char_end, backfilled_citation.section_id,
+                backfilled_citation.section_type, backfilled_citation.cite_type,
+                backfilled_citation.cite_form, backfilled_citation.raw_cite,
+                backfilled_citation.reporter_cite, backfilled_citation.pincite,
+                backfilled_citation.key, backfilled_citation.to_cluster,
+                backfilled_citation.pattern_id,
+            )),
+            (caselaw.SIGNAL_SQL, (
+                backfilled_signal.signal_id, backfilled_signal.citation_id,
+                document.doc_id, version, backfilled_signal.signal_source,
+                backfilled_signal.pattern_set, backfilled_signal.treatment_signal,
+                backfilled_signal.qualifier, backfilled_signal.effective_section,
+                backfilled_signal.state, backfilled_signal.no_state_reason,
+                backfilled_signal.char_start, backfilled_signal.char_end, now,
+            )),
+            (caselaw.CHUNK_SQL, (
+                backfilled_chunk.chunk_id, document.doc_id, backfilled_chunk.pipeline,
+                backfilled_chunk.ordinal, backfilled_chunk.section_id,
+                backfilled_chunk.section_type, backfilled_chunk.char_start,
+                backfilled_chunk.char_end, backfilled_chunk.content_hash,
+                backfilled_chunk.token_count,
+            )),
+            (caselaw.ANCHORED_SQL, (now, document.doc_id)),
+            (caselaw.MARK_CITED_SQL, (now, document.doc_id)),
+            (caselaw.MARK_TREATED_SQL, (treatment.PATTERN_SET_ID, now, version, document.doc_id)),
+            (caselaw.ANCHOR_SQL, (
+                backfilled_anchor.anchor_id, document.doc_id, version,
+                "reporter_page", "72", 4, 9,
                 '{"scheme": "2", "stars": "2"}',
             )),
             (caselaw.ANCHORED_SQL, (now, document.doc_id)),
-            (caselaw.READ_SECTIONS_SQL, (document.doc_id,)),
+            (caselaw.READ_SECTIONS_SQL, (document.doc_id, version)),
             (caselaw.CITATION_SQL, (
-                backfilled_citation.citation_id, document.doc_id,
+                backfilled_citation.citation_id, document.doc_id, version,
                 backfilled_citation.ordinal, backfilled_citation.char_start,
                 backfilled_citation.char_end, backfilled_citation.section_id,
                 backfilled_citation.section_type, backfilled_citation.cite_type,
@@ -1821,16 +2168,16 @@ class PsycopgDocumentRecord(unittest.TestCase):
                 backfilled_citation.pattern_id,
             )),
             (caselaw.MARK_CITED_SQL, (now, document.doc_id)),
-            (caselaw.READ_CITATIONS_SQL, (document.doc_id,)),
+            (caselaw.READ_CITATIONS_SQL, (document.doc_id, version)),
             (caselaw.SIGNAL_SQL, (
                 backfilled_signal.signal_id, backfilled_signal.citation_id,
-                document.doc_id, backfilled_signal.signal_source,
+                document.doc_id, version, backfilled_signal.signal_source,
                 backfilled_signal.pattern_set, backfilled_signal.treatment_signal,
                 backfilled_signal.qualifier, backfilled_signal.effective_section,
                 backfilled_signal.state, backfilled_signal.no_state_reason,
                 backfilled_signal.char_start, backfilled_signal.char_end, now,
             )),
-            (caselaw.MARK_TREATED_SQL, (treatment.PATTERN_SET_ID, now, document.doc_id)),
+            (caselaw.MARK_TREATED_SQL, (treatment.PATTERN_SET_ID, now, version, document.doc_id)),
             (caselaw.CHUNK_SQL, (
                 backfilled_chunk.chunk_id, document.doc_id, backfilled_chunk.pipeline,
                 backfilled_chunk.ordinal, backfilled_chunk.section_id,
@@ -1844,7 +2191,43 @@ class PsycopgDocumentRecord(unittest.TestCase):
             self.assertNotIn("PRIVATE_CASELAW_SENTINEL", statement)
             self.assertIn("%s", statement)
             self.assertIsInstance(parameters, tuple)
+            self.assertEqual(statement.count("%s"), len(parameters))
         self.assertIn("%s::jsonb", caselaw.ANCHOR_SQL)
+        self.assertEqual(caselaw.FLAG_SQL, "UPDATE opinions SET per_curiam = %s WHERE doc_id = %s")
+        self.assertIn("o.per_curiam IS NOT NULL AS flagged", caselaw.PRESENT_SQL)
+        self.assertEqual(caselaw.PRESENT_SQL.count("AND pipeline = %s"), 2)
+        for statement in (caselaw.READ_SECTIONS_SQL, caselaw.READ_CITATIONS_SQL):
+            self.assertIn("WHERE doc_id = %s AND pipeline = %s", statement)
+        for statement in (caselaw.MARK_TREATED_SQL, caselaw.FINISH_READY_SQL):
+            self.assertIn("treated_pipeline = %s", statement)
+        self.assertIn("ON CONFLICT (citation_id, signal_source, pattern_set) DO NOTHING",
+                      caselaw.SIGNAL_SQL)
+        for statement, position in (
+            (caselaw.SECTION_SQL, 2), (caselaw.ANCHOR_SQL, 2), (caselaw.CITATION_SQL, 2),
+            (caselaw.SIGNAL_SQL, 3), (caselaw.CHUNK_SQL, 2),
+        ):
+            with self.subTest(statement=statement):
+                columns = statement.split("(", 1)[1].split(")", 1)[0].split(", ")
+                self.assertEqual(columns[position], "pipeline")
+
+    def test_presence_decodes_the_treatment_pipeline_and_flag(self) -> None:
+        """The stored set, pipeline, and carried flag survive reads."""
+
+        version = pipeline.PIPELINE_VERSION
+        record = caselaw.PsycopgRecord(connect=self.connect, worker_settings=self.configuration)
+        self.addCleanup(record.close)
+        for flagged in (False, True):
+            with self.subTest(flagged=flagged):
+                self.connection.rows = [(
+                    91, "a" * 64, "ready", 1, "plain_text", "b" * 64, "c" * 64,
+                    True, True, True, treatment.PATTERN_SET_ID, version, True, True, flagged,
+                )]
+                present = record.present("fictional-dump", date(2099, 1, 2), "court1", version)[91]
+                self.assertEqual(present.treated_pipeline, version)
+                self.assertTrue(present.treated_at(version))
+                self.assertFalse(present.treated_at("1000.0.0"))
+                self.assertIs(present.flagged, flagged)
+                self.assertFalse(replace(present, treated_under="fictional-older-set").treated_at(version))
 
     def test_footnote_parent_with_higher_ordinal_is_written_first(self) -> None:
         now = datetime(2099, 1, 2, 12, 34, tzinfo=UTC)
@@ -1859,8 +2242,13 @@ class PsycopgDocumentRecord(unittest.TestCase):
             "f" * 64, doc_id, 2, "concurrence", "line", 8, 12, None, None, None,
         )
         record = caselaw.PsycopgRecord(connect=self.connect, worker_settings=self.configuration)
-        record.finish_ready(doc_id, "b" * 64, "c" * 64, now, (footnote, middle, parent), (), (), (), ())
-        record.write_sections(doc_id, (footnote, middle, parent))
+        record.finish_ready(
+            doc_id, pipeline.PIPELINE_VERSION, "b" * 64, "c" * 64, now,
+            (footnote, middle, parent), (), (), (), (),
+        )
+        record.write_walk(
+            doc_id, pipeline.PIPELINE_VERSION, (footnote, middle, parent), (), (), (), (), now,
+        )
         written = [parameters[0] for statement, parameters in self.connection.statements
                    if statement == caselaw.SECTION_SQL]
         self.assertEqual(written, [middle.section_id, parent.section_id, footnote.section_id] * 2)

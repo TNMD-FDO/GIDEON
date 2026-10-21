@@ -153,6 +153,13 @@ nothing older is recoverable, and there is no monthly tier.
 `gideon restore --from staging` restores the newest local set;
 `--from target` fetches a snapshot from the target first (into a side
 directory, verified and re-owned before anything live is touched).
+Without `--at`, `--from target` means the newest *complete* snapshot, chosen
+before the restore's own safety push, so it is older than the newest push
+whenever that push never finished (a box that died mid-push): the `select:`
+row names the chosen snapshot's `archive_through` and then every newer
+unfinished snapshot, `N newer unfinished snapshot(s): <label>, ...`, so read
+it before anything stops. To hold a bound, pass `--at`, which refuses a time
+past the newest complete snapshot's boundary rather than going back further.
 `--at <ISO time>` restores Postgres to that instant and the files to the newest
 set finished by then; a naive time is office-local. Every point-in-time bound
 is a recorded archive boundary, never a clock: a time the sets cannot reach
@@ -303,6 +310,12 @@ rotated since the set was made (the install runbook's rotation step, `v0.1.40`).
    directory's `sets/<set>/files/data-registry/` into `/data/registry` by hand,
    restart `gideon-registry`, run the restore again, and remove the side
    directory after recovery.
+   A `pre-restore-<ts>` set an earlier release took records an
+   `archive_through` before its own backup's stop, and a restore of it ends
+   recovery before consistency: restore it only after its manifest's
+   `archive_through` is corrected by hand to an instant after that backup's
+   stop, as `pgbackrest info` prints it, and before the set's boundary commit,
+   the original manifest kept beside it.
 5. Decrypt the set's tarball over the fresh secrets with the **old** identity
    from the password manager (the restored databases carry the old role
    passwords, so the old secrets must be back before anything connects).

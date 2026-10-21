@@ -106,7 +106,7 @@ def input_problem(value: object, command_path: str) -> Problem | None:
 
 def defer_agreement(
     host: Host, rendered_dir: PathLike, *, label: str, snapshot: str,
-    court: str, input: dict[str, str], command_path: str = COMMAND_PATH,
+    court: str, input: dict[str, str], pipeline: str, command_path: str = COMMAND_PATH,
 ) -> int | Problem:
     """Validate and defer one court's agreement job under its queue lock."""
 
@@ -115,12 +115,13 @@ def defer_agreement(
         staging.snapshot_problem(snapshot, command_path, subject="agreement"),
         caselaw.court_problem(court, command_path, subject="agreement"),
         input_problem(input, command_path),
+        caselaw.pipeline_problem(pipeline, command_path, subject="agreement"),
     ):
         if problem is not None:
             return problem
     return worker.defer(
         host, rendered_dir, task=AGREEMENT_TASK, queue=AGREEMENT_QUEUE,
-        args={"label": label, "snapshot": snapshot, "court": court, "input": input},
+        args={"label": label, "snapshot": snapshot, "court": court, "input": input, "pipeline": pipeline},
         lock=f"agreement-{label}-{court}",
     )
 

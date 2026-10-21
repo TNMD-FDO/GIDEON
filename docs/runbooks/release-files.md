@@ -102,10 +102,10 @@ The maintaining office reviews the open pin-watch and Dependabot pull requests o
 
 | The pull request | What you do on GitHub |
 | --- | --- |
-| Dependabot: `ruff`, `mypy`, `pytest`, a GitHub Action | Merge when green. An Action needing a newer runner waits for `host.gh_runner`. A `requirements-dev.txt` bump makes open cycles rebase onto `main` before their gate can pass. |
+| Dependabot: the `toolchain` group (`ruff`, `mypy`, `pytest`, `pytest-xdist`), a GitHub Action | Merge when green. An Action needing a newer runner waits for `host.gh_runner`. A `requirements-dev.txt` bump makes open cycles rebase onto `main` before their gate can pass. |
 | Dependabot: `playwright`, `PyYAML` | Leave open for a cycle; each needs a companion change before its checks pass. |
 | `images.prometheus`, `grafana`, `node-exporter`, `dcgm-exporter`, `postgres-exporter`, `cadvisor`, `blackbox-exporter` | Merge when green. The observability services move at the next release's upgrade. |
-| `images.caddy`, `images.searxng`, `images.vllm-openai`, `images.open-webui`, `models.*` | Leave open for a release cycle. These recreate a service a user's turn uses. A hand merge changes the recreate set of every open cycle; open a bump cycle to move one sooner. A frontend bump goes to the developer; a model bump follows `model-upgrade.md` §2. |
+| `images.caddy`, `images.searxng`, `images.qdrant`, `images.vllm-openai`, `images.open-webui`, `models.*` | Leave open for a release cycle. These recreate a service a user's turn uses. A hand merge changes the recreate set of every open cycle; open a bump cycle to move one sooner. A frontend bump goes to the developer; a model bump follows `model-upgrade.md` §2. |
 | `images.postgres`, `images.gideon`, and their build arguments | Leave open for a cycle. Checks stay red until the image is rebuilt on the box (`built-images.md` §2). Postgres is user-facing. |
 | `images.opensearch` | A new base digest under the same tag merges after the box rebuild (`docs/runbooks/built-images.md §2`). A version move waits for the matching plugin release; the hosted checks stay red until both plugin arguments are typed from that release's page and the image is rebuilt on the box. |
 | `host.registry_image`, `host.acceptance_vm_image` | Merge when green. The registry moves at the next provision; the VM image at the next acceptance run. |

@@ -40,7 +40,7 @@ from gideon.evaluation.segmenter_slice import (
     slice_gate,
 )
 from gideon.host import cas
-from gideon.host.render.worker import SECTION_TYPES
+from gideon.host.render.worker import PIPELINE_VERSION, SECTION_TYPES
 from gideon.host.sysio import Host, PathLike
 
 TEXT = "Fictional majority text" + "Dissent"
@@ -65,11 +65,15 @@ def _case(case_id: str, opinion_id: int) -> dict[str, object]:
     }
 
 
-def _record_document(opinion_id: int, *, sections: list[list[object]] | None = None, canonical: str = TEXT_HASH) -> dict[str, object]:
+def _record_document(
+    opinion_id: int, *, sections: list[list[object]] | None = None,
+    canonical: str = TEXT_HASH, per_curiam: bool | None = None,
+) -> dict[str, object]:
     return {
         "opinion_id": opinion_id, "doc_id": "b" * 64,
         "text_source": "plain_text", "sha256": TEXT_HASH,
         "canonical_sha256": canonical, "opinion_type": "010combined",
+        "per_curiam": per_curiam,
         "sections": DEFAULT_SECTIONS if sections is None else sections,
     }
 
@@ -362,6 +366,8 @@ class Runner(unittest.TestCase):
         result = run_segmenter(_loaded(), "segmenter-300", _context(host))
         self.assertTrue(result.verdict, result.report)
         self.assertEqual(result.gated_cases, len(select_cases(_loaded(), "segmenter-300").counted))
+        self.assertEqual(result.report.splitlines()[0], f"record pipeline {PIPELINE_VERSION}")
+        self.assertTrue(result.report.splitlines()[1].startswith("image leg elapsed "))
         self.assertIn(
             "counted 1, unsigned 0, measured 1, failed-by-code none; "
             "1 case, true failure rate ≤ 100.0 % (3/n at 95 %)\n",
@@ -387,6 +393,11 @@ class Runner(unittest.TestCase):
         self.assertEqual(list(argv), record.reader_argv("/tmp/segmenter-rendered"))
         assert sql is not None
         self.assertEqual(sql.count("\\set opinion_ids "), 1)
+        self.assertEqual(sql.count("\\set pipeline "), 1)
+        self.assertIn(f"\\set pipeline '{PIPELINE_VERSION}'\n", sql)
+        self.assertNotIn(PIPELINE_VERSION, " ".join(argv))
+        self.assertIn("s.pipeline = :'pipeline'", sql)
+        self.assertIn("'per_curiam', o.per_curiam", sql)
         self.assertIn("jsonb_array_elements_text(:'opinion_ids'::jsonb)", sql)
         self.assertIn("d.status = 'ready'", sql)
         self.assertIn("s.char_start", sql)
@@ -589,6 +600,33 @@ class Runner(unittest.TestCase):
             "1 case, true failure rate ≤ 100.0 % (3/n at 95 %)\n",
             result.report,
         )
+
+    def test_carried_flag_overrides_section_inference_and_null_uses_it(self) -> None:
+        for flag in (None, False, True):
+            for inferred in (False, True):
+                with self.subTest(per_curiam=flag, inferred=inferred):
+                    host = SegmenterHost()
+                    sections = [list(section) for section in DEFAULT_SECTIONS]
+                    sections[0][3] = "flag" if inferred else "row"
+                    host.documents = [_record_document(101, sections=sections, per_curiam=flag)]
+                    host.leg_sections = sections
+                    result = run_segmenter(_loaded(), "segmenter-300", _context(host))
+                    self.assertTrue(result.verdict, result.report)
+                    assert host.leg_input is not None
+                    self.assertIs(json.loads(host.leg_input)["per_curiam"],
+                                  inferred if flag is None else flag)
+
+    def test_record_flag_rejects_nonboolean_values(self) -> None:
+        invalid_flags: tuple[object, ...] = (0, 1, "true", [], {})
+        for flag in invalid_flags:
+            with self.subTest(per_curiam=flag):
+                host = SegmenterHost()
+                host.documents[0]["per_curiam"] = flag
+                result = run_segmenter(_loaded(), "segmenter-300", _context(host))
+                self.assertFalse(result.verdict)
+                self.assertEqual(result.results[0].metrics["problem"], "record-unreachable")
+                self.assertIsNone(host.leg_input)
+                self.assertEqual(result.report.splitlines()[0], f"record pipeline {PIPELINE_VERSION}")
 
     def test_flag_from_record_and_planted_mislabel_by_id(self) -> None:
         host = SegmenterHost()

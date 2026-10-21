@@ -390,7 +390,7 @@ def gather(
             return counts
         anchors = caselaw.read_anchor_counts(
             host, corpus_dir, source=source, snapshot_date=inputs.snapshot[-10:],
-            court=court, command_path=command_path,
+            court=court, pipeline=inputs.pipeline, command_path=command_path,
         )
         if isinstance(anchors, Problem):
             return anchors

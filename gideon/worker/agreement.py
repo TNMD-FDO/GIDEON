@@ -18,6 +18,7 @@ from typing import Any, Final, Protocol
 import psycopg
 
 from . import fetch, settings, staging
+from .pipeline import PIPELINES
 
 AGREEMENT_TASK: Final = "gideon.worker.tasks.agreement"
 AGREEMENT_QUEUE: Final = "caselaw"
@@ -41,7 +42,7 @@ _POSITIVE_INTEGER: Final = re.compile(r"[0-9]+")
 READY_EDGES_SQL: Final = (
     "SELECT o.opinion_id, c.to_cluster "
     "FROM opinions AS o JOIN documents AS d ON d.doc_id = o.doc_id "
-    "LEFT JOIN citations AS c ON c.doc_id = d.doc_id "
+    "LEFT JOIN citations AS c ON c.doc_id = d.doc_id AND c.pipeline = %s "
     "AND c.cite_type = 'case_cite' AND c.to_cluster IS NOT NULL "
     "WHERE d.source = %s AND d.source_snapshot = %s AND o.court = %s "
     "AND d.status = 'ready'"
@@ -52,7 +53,7 @@ UNRESOLVED_CITES_SQL: Final = (
     "JOIN citations AS c ON c.doc_id = d.doc_id "
     "WHERE d.source = %s AND d.source_snapshot = %s AND o.court = %s "
     "AND d.status = 'ready' AND c.cite_type = 'case_cite' "
-    "AND c.to_cluster IS NULL AND c.reporter_cite IS NOT NULL"
+    "AND c.to_cluster IS NULL AND c.reporter_cite IS NOT NULL AND c.pipeline = %s"
 )
 
 logger = logging.getLogger(__name__)
@@ -147,8 +148,8 @@ class AgreementRecord:
 class EdgeRecord(Protocol):
     """The ready and unresolved case edges used by the comparison."""
 
-    def ready_edges(self, source: str, snapshot_date: date, court: str) -> dict[int, set[int]]: ...
-    def unresolved_cites(self, source: str, snapshot_date: date, court: str) -> dict[int, set[str]]: ...
+    def ready_edges(self, source: str, snapshot_date: date, court: str, pipeline: str) -> dict[int, set[int]]: ...
+    def unresolved_cites(self, source: str, snapshot_date: date, court: str, pipeline: str) -> dict[int, set[str]]: ...
     def close(self) -> None: ...
 
 
@@ -176,11 +177,11 @@ class PsycopgEdges:
                 raise AgreementFailure("local", error=type(exc).__name__) from exc
         return self._connection
 
-    def _read(self, statement: str, source: str, snapshot_date: date, court: str) -> list[tuple[Any, ...]]:
+    def _read(self, statement: str, parameters: tuple[object, ...]) -> list[tuple[Any, ...]]:
         connection = self._get_connection()
         try:
             with connection.cursor() as cursor:
-                cursor.execute(statement, (source, snapshot_date, court))
+                cursor.execute(statement, parameters)
                 rows: list[tuple[Any, ...]] = cursor.fetchall()
             connection.commit()
             return rows
@@ -189,22 +190,22 @@ class PsycopgEdges:
                 connection.rollback()
             raise AgreementFailure("database", error=type(exc).__name__) from exc
 
-    def ready_edges(self, source: str, snapshot_date: date, court: str) -> dict[int, set[int]]:
+    def ready_edges(self, source: str, snapshot_date: date, court: str, pipeline: str) -> dict[int, set[int]]:
         """Include each ready opinion, including one with no resolved pair."""
 
         edges: dict[int, set[int]] = {}
-        for opinion_id, cluster_id in self._read(READY_EDGES_SQL, source, snapshot_date, court):
+        for opinion_id, cluster_id in self._read(READY_EDGES_SQL, (pipeline, source, snapshot_date, court)):
             targets = edges.setdefault(int(opinion_id), set())
             if cluster_id is not None:
                 targets.add(int(cluster_id))
         return edges
 
-    def unresolved_cites(self, source: str, snapshot_date: date, court: str) -> dict[int, set[str]]:
+    def unresolved_cites(self, source: str, snapshot_date: date, court: str, pipeline: str) -> dict[int, set[str]]:
         """Return each ready opinion's unresolved reporter-cite strings."""
 
         cites: dict[int, set[str]] = {}
         for opinion_id, reporter_cite in self._read(
-            UNRESOLVED_CITES_SQL, source, snapshot_date, court,
+            UNRESOLVED_CITES_SQL, (source, snapshot_date, court, pipeline),
         ):
             cites.setdefault(int(opinion_id), set()).add(str(reporter_cite))
         return cites
@@ -246,7 +247,7 @@ class _Progress:
             self.last_progress = now
 
 
-def validate_arguments(label: object, snapshot: object, court: object, input: object) -> None:
+def validate_arguments(label: object, snapshot: object, court: object, input: object, pipeline: object) -> None:
     """Refuse queue arguments outside the staged-corpus and input grammars."""
 
     if (
@@ -255,6 +256,8 @@ def validate_arguments(label: object, snapshot: object, court: object, input: ob
         or not isinstance(court, str)
         or re.fullmatch(staging.COURT_PATTERN, court) is None
         or not staging.valid_input(input)
+        or not isinstance(pipeline, str)
+        or pipeline not in PIPELINES
     ):
         raise AgreementFailure("invalid")
 
@@ -501,7 +504,7 @@ def compare(
 def agreement(
     snapshots_root: Path, work_root: Path, label: str, snapshot: str,
     court: str, input: dict[str, str], job: int, record: EdgeRecord,
-    *, clock: Callable[[], datetime] = _clock,
+    *, pipeline: str, clock: Callable[[], datetime] = _clock,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> AgreementRecord:
     """Measure one court's resolved edges against its staged citation map."""
@@ -509,7 +512,7 @@ def agreement(
     started = monotonic()
     progress = _Progress(job, label, monotonic, started, started, {})
     try:
-        validate_arguments(label, snapshot, court, input)
+        validate_arguments(label, snapshot, court, input, pipeline)
         try:
             work_dir = staging.work_path(work_root, label, snapshot)
             staged = staging.read_record(work_dir / staging.STAGE_RECORD_NAME)
@@ -539,8 +542,8 @@ def agreement(
             cluster_cites = _load_cluster_cites(work_dir, staged, progress)
             snapshot_date = date.fromisoformat(snapshot[-10:])
             try:
-                gideon_edges = record.ready_edges(staged.source, snapshot_date, court)
-                unresolved = record.unresolved_cites(staged.source, snapshot_date, court)
+                gideon_edges = record.ready_edges(staged.source, snapshot_date, court, pipeline)
+                unresolved = record.unresolved_cites(staged.source, snapshot_date, court, pipeline)
                 map_path = work_dir / AGREEMENT_MAP_DIRECTORY / f"{court}.csv"
                 try:
                     with staging.staged_rows(

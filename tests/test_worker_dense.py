@@ -384,7 +384,7 @@ class RecordAdapter(unittest.TestCase):
         opinion = opinion_for()
         for value, operation, expected in (
             (chunk, lambda: self.record.chunks(chunk.doc_id, chunk.pipeline), (chunk,)),
-            (citation, lambda: self.record.citations(citation.doc_id), (citation,)),
+            (citation, lambda: self.record.citations(citation.doc_id, chunk.pipeline), (citation,)),
             (opinion, lambda: self.record.opinion(opinion.doc_id), opinion),
         ):
             with self.subTest(row=type(value).__name__):

@@ -9,7 +9,7 @@ import shutil
 import tempfile
 import threading
 import unittest
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +17,7 @@ import test_worker_caselaw
 import test_worker_staging
 
 from gideon.worker import agreement, fetch, settings
+from gideon.worker.pipeline import PIPELINE_VERSION
 
 
 class FakeEdges:
@@ -24,13 +25,14 @@ class FakeEdges:
         self.resolved: dict[int, set[int]] = {10: {200}, 11: set()}
         self.unresolved: dict[int, set[str]] = {11: {"1 Fiction 2"}}
         self.closed = 0
+        self.reads: list[tuple[str, str, datetime.date, str, str]] = []
 
-    def ready_edges(self, source: str, snapshot_date: datetime.date, court: str) -> dict[int, set[int]]:
-        del source, snapshot_date, court
+    def ready_edges(self, source: str, snapshot_date: datetime.date, court: str, pipeline: str) -> dict[int, set[int]]:
+        self.reads.append(("ready", source, snapshot_date, court, pipeline))
         return self.resolved
 
-    def unresolved_cites(self, source: str, snapshot_date: datetime.date, court: str) -> dict[int, set[str]]:
-        del source, snapshot_date, court
+    def unresolved_cites(self, source: str, snapshot_date: datetime.date, court: str, pipeline: str) -> dict[int, set[str]]:
+        self.reads.append(("unresolved", source, snapshot_date, court, pipeline))
         return self.unresolved
 
     def close(self) -> None:
@@ -84,13 +86,13 @@ class WorkerAgreement(unittest.TestCase):
 
     def run_agreement(
         self, edges: FakeEdges | None = None,
-        *, clock: datetime.datetime | None = None,
+        *, clock: datetime.datetime | None = None, pipeline_version: str = PIPELINE_VERSION,
     ) -> agreement.AgreementRecord:
         return agreement.agreement(
             self.fixture.snapshots_root, self.fixture.work_root,
             self.fixture.label, self.fixture.snapshot, self.fixture.courts[0],
             self.input, 42, edges or FakeEdges(),
-            clock=lambda: clock or self.fixture.instant,
+            pipeline=pipeline_version, clock=lambda: clock or self.fixture.instant,
             monotonic=lambda: 10.0,
         )
 
@@ -121,7 +123,7 @@ class WorkerAgreement(unittest.TestCase):
 
     def test_argument_grammar_and_closed_failure_reasons(self) -> None:
         agreement.validate_arguments(
-            self.fixture.label, self.fixture.snapshot, self.fixture.courts[0], self.input,
+            self.fixture.label, self.fixture.snapshot, self.fixture.courts[0], self.input, PIPELINE_VERSION,
         )
         for label, snapshot, court, input in (
             ("bad-label", self.fixture.snapshot, self.fixture.courts[0], self.input),
@@ -132,10 +134,43 @@ class WorkerAgreement(unittest.TestCase):
         ):
             with self.subTest(label=label, snapshot=snapshot, court=court, input=input):
                 with self.assertRaises(agreement.AgreementFailure) as raised:
-                    agreement.validate_arguments(label, snapshot, court, input)
+                    agreement.validate_arguments(label, snapshot, court, input, PIPELINE_VERSION)
                 self.assertEqual(raised.exception.reason, "invalid")
         with self.assertRaises(ValueError):
             agreement.AgreementFailure("unknown")
+
+    def test_unregistered_pipeline_is_invalid_before_record_reads_or_file_writes(self) -> None:
+        before = set(self.fixture.whole.rglob("*"))
+        for version in ("bad", "1000.0.0"):
+            with self.subTest(pipeline=version):
+                edges = FakeEdges()
+                with self.assertRaises(agreement.AgreementFailure) as raised:
+                    self.run_agreement(edges, pipeline_version=version)
+                self.assertEqual(raised.exception.reason, "invalid")
+                self.assertEqual(edges.reads, [])
+                self.assertEqual(set(self.fixture.whole.rglob("*")), before)
+        invalid_pipelines: tuple[object, ...] = (None, True, {})
+        for value in invalid_pipelines:
+            with self.subTest(pipeline=value):
+                with self.assertRaises(agreement.AgreementFailure) as raised:
+                    agreement.validate_arguments(
+                        self.fixture.label, self.fixture.snapshot, self.fixture.courts[0],
+                        self.input, value,
+                    )
+                self.assertEqual(raised.exception.reason, "invalid")
+
+    def test_job_reads_both_edge_shapes_under_the_requested_pipeline(self) -> None:
+        current = agreement.PIPELINES[PIPELINE_VERSION]
+        other = replace(current, version="1000.0.0")
+        edges = FakeEdges()
+        with patch.object(agreement, "PIPELINES", {other.version: other}):
+            result = self.run_agreement(edges, pipeline_version=other.version)
+        self.assertEqual(result.documents, len(edges.resolved))
+        self.assertEqual(edges.reads, [
+            (kind, self.staged.source, datetime.date.fromisoformat(self.fixture.snapshot[-10:]),
+             self.fixture.courts[0], other.version)
+            for kind in ("ready", "unresolved")
+        ])
 
     def test_opinions_index_and_map_files_keep_selected_input_bytes(self) -> None:
         progress = self.progress()
@@ -289,7 +324,7 @@ class WorkerAgreement(unittest.TestCase):
                 results.append(agreement.agreement(
                     self.fixture.snapshots_root, self.fixture.work_root,
                     self.fixture.label, self.fixture.snapshot, self.fixture.courts[1],
-                    self.input, 43, FakeEdges(),
+                    self.input, 43, FakeEdges(), pipeline=PIPELINE_VERSION,
                     clock=lambda: self.fixture.instant, monotonic=lambda: 10.0,
                 ))
             except (agreement.AgreementFailure, OSError) as exc:
@@ -362,7 +397,7 @@ class WorkerAgreement(unittest.TestCase):
                 with self.assertRaises(agreement.AgreementFailure) as raised:
                     agreement.agreement(
                         self.fixture.snapshots_root, self.fixture.work_root,
-                        label, snapshot, court, input, 42, FakeEdges(),
+                        label, snapshot, court, input, 42, FakeEdges(), pipeline=PIPELINE_VERSION,
                     )
                 self.assertEqual(raised.exception.reason, "invalid")
                 self.assertEqual(set(self.fixture.whole.rglob("*")), before)
@@ -425,7 +460,7 @@ class WorkerAgreement(unittest.TestCase):
 
 
 class PsycopgEdgeRecord(unittest.TestCase):
-    def test_two_statements_bind_only_source_date_and_court(self) -> None:
+    def test_statements_bind_the_pipeline_and_preserve_uncited_opinions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             password = Path(temporary) / "password"
             password.write_text("fictional secret")
@@ -441,16 +476,26 @@ class PsycopgEdgeRecord(unittest.TestCase):
                 connect=lambda **_kwargs: connection, worker_settings=configuration,
             )
             snapshot_date = datetime.date(2099, 1, 1)
+            version = "1000.0.0"
             connection.rows = [(10, 100), (10, 100), (11, None)]
-            self.assertEqual(record.ready_edges("fictional-dump", snapshot_date, "court1"),
-                             {10: {100}, 11: set()})
+            ready = record.ready_edges("fictional-dump", snapshot_date, "court1", version)
+            self.assertEqual(ready, {10: {100}, 11: set()})
             connection.rows = [(11, "1 Fiction 2"), (11, "1 Fiction 2")]
-            self.assertEqual(record.unresolved_cites("fictional-dump", snapshot_date, "court1"),
+            self.assertEqual(record.unresolved_cites("fictional-dump", snapshot_date, "court1", version),
                              {11: {"1 Fiction 2"}})
             self.assertEqual(connection.statements, [
-                (agreement.READY_EDGES_SQL, ("fictional-dump", snapshot_date, "court1")),
-                (agreement.UNRESOLVED_CITES_SQL, ("fictional-dump", snapshot_date, "court1")),
+                (agreement.READY_EDGES_SQL, (version, "fictional-dump", snapshot_date, "court1")),
+                (agreement.UNRESOLVED_CITES_SQL, ("fictional-dump", snapshot_date, "court1", version)),
             ])
+            join, separator, where = agreement.READY_EDGES_SQL.partition("WHERE")
+            self.assertTrue(separator)
+            self.assertIn("LEFT JOIN citations AS c ON c.doc_id = d.doc_id AND c.pipeline = %s", join)
+            self.assertNotIn("c.pipeline", where)
+            self.assertIn("c.pipeline = %s", agreement.UNRESOLVED_CITES_SQL.partition("WHERE")[2])
+            comparison = agreement.compare(set(ready), ready, {}, {}, {20: (1, 200)}, [(11, 20)])
+            self.assertEqual((comparison.documents, comparison.map_only_missed), (2, 1))
+            for statement, parameters in connection.statements:
+                self.assertEqual(statement.count("%s"), len(parameters))
             self.assertIn("LEFT JOIN citations", agreement.READY_EDGES_SQL)
             self.assertIn("c.to_cluster IS NOT NULL", agreement.READY_EDGES_SQL)
             self.assertIn("d.status = 'ready'", agreement.READY_EDGES_SQL)
@@ -477,7 +522,7 @@ class PsycopgEdgeRecord(unittest.TestCase):
                 connect=lambda **_kwargs: connection, worker_settings=configuration,
             )
             with self.assertRaises(agreement.AgreementFailure) as raised:
-                record.ready_edges("fictional-dump", datetime.date(2099, 1, 1), "court1")
+                record.ready_edges("fictional-dump", datetime.date(2099, 1, 1), "court1", PIPELINE_VERSION)
             self.assertEqual((raised.exception.reason, raised.exception.error),
                              ("database", "OperationalError"))
             self.assertNotIn("private database detail", str(raised.exception))

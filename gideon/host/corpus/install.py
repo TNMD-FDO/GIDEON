@@ -730,7 +730,7 @@ def _ingest(
             f"failed {counts.by_status.get('failed', 0)} ("
             + ", ".join(
                 f"{reason} {counts.by_failure_reason.get(reason, 0)}"
-                for reason in ("no-text", "unparseable", "empty", "interrupted")
+                for reason in ("no-text", "unparseable", "empty", "illegible", "interrupted")
             ) + "); "
             + ", ".join(
                 f"{source_name} {counts.by_text_source.get(source_name, 0)}"
@@ -750,14 +750,14 @@ def _ingest(
             )
         section_counts = caselaw.read_section_counts(
             host, rendered_dir, source=source, snapshot_date=snapshot_date,
-            court=court, command_path=COMMAND_PATH,
+            court=court, pipeline=lockfile.pipeline, command_path=COMMAND_PATH,
         )
         if isinstance(section_counts, Problem):
             return _refuse("ingest", f"{court}: {section_counts.problem}", section_counts.fix)
         if section_counts.sectioned < section_counts.ready:
             return _refuse(
                 "ingest",
-                f"{court}: {section_counts.sectioned} of {section_counts.ready} ready documents have sections",
+                f"{court}: {section_counts.sectioned} of {section_counts.ready} ready documents have sections under {lockfile.pipeline}",
                 f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, then run "
                 f"{report.command(COMMAND_PATH)} again.",
             )
@@ -771,11 +771,11 @@ def _ingest(
         report.print_stage(StageResult(
             "ingest", True,
             f"{court} sections: {section_counts.sectioned} of {section_counts.ready} "
-            f"ready documents; {section_detail}", "",
+            f"ready documents have sections under {lockfile.pipeline}; {section_detail}", "",
         ))
         anchor_counts = caselaw.read_anchor_counts(
             host, rendered_dir, source=source, snapshot_date=snapshot_date,
-            court=court, command_path=COMMAND_PATH,
+            court=court, pipeline=lockfile.pipeline, command_path=COMMAND_PATH,
         )
         if isinstance(anchor_counts, Problem):
             return _refuse("ingest", f"{court}: {anchor_counts.problem}", anchor_counts.fix)
@@ -800,7 +800,7 @@ def _ingest(
         ))
         citation_counts = caselaw.read_citation_counts(
             host, rendered_dir, source=source, snapshot_date=snapshot_date,
-            court=court, command_path=COMMAND_PATH,
+            court=court, pipeline=lockfile.pipeline, command_path=COMMAND_PATH,
         )
         if isinstance(citation_counts, Problem):
             return _refuse("ingest", f"{court}: {citation_counts.problem}", citation_counts.fix)
@@ -829,7 +829,7 @@ def _ingest(
         ))
         treatment_counts = caselaw.read_treatment_counts(
             host, rendered_dir, source=source, snapshot_date=snapshot_date,
-            court=court, command_path=COMMAND_PATH,
+            court=court, pipeline=lockfile.pipeline, command_path=COMMAND_PATH,
         )
         if isinstance(treatment_counts, Problem):
             return _refuse("ingest", f"{court}: {treatment_counts.problem}", treatment_counts.fix)
@@ -1048,7 +1048,7 @@ def _agreement(
             job = agreement.defer_agreement(
                 host, rendered_dir, label=lockfile.label, snapshot=snapshot,
                 court=court, input={"path": path, "sha256": entry.sha256},
-                command_path=COMMAND_PATH,
+                pipeline=lockfile.pipeline, command_path=COMMAND_PATH,
             )
             if isinstance(job, Problem):
                 return _refuse("agreement", f"{court}: {job.problem}", job.fix)
@@ -1084,7 +1084,7 @@ def _agreement(
         figure = records[job]
         report.print_stage(StageResult(
             "agreement", True,
-            f"{court} agreement: {figure.documents} documents; "
+            f"{court} agreement: {figure.documents} documents under {lockfile.pipeline}; "
             f"{figure.gideon_pairs} GIDEON pairs, {figure.map_pairs} map pairs, "
             f"{figure.map_outside} map rows beyond the label; agreed {figure.agreed} "
             f"({figure.gideon_share()} % of GIDEON's, {figure.map_share()} % of the map's); "

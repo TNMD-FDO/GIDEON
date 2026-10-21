@@ -513,12 +513,12 @@ class RecoveryTask(unittest.TestCase):
 
             def exercise() -> None:
                 try:
-                    tasks.agreement(context, label, snapshot, court, input)
+                    tasks.agreement(context, label, snapshot, court, input, worker.PIPELINE_VERSION)
                 except agreement.AgreementFailure as failure:
                     failures.append(failure)
 
             with (
-                patch.object(agreement, "agreement", side_effect=fail),
+                patch.object(agreement, "agreement", side_effect=fail) as measure,
                 patch.object(agreement, "PsycopgEdges"),
                 patch.object(staging, "WORK_ROOT", work_root),
             ):
@@ -528,6 +528,7 @@ class RecoveryTask(unittest.TestCase):
             self.assertFalse(thread.is_alive())
             self.assertEqual([failure.reason for failure in failures], ["malformed"])
             self.assertEqual(threads, [False])
+            self.assertEqual(measure.call_args.kwargs["pipeline"], worker.PIPELINE_VERSION)
             failure_path = (
                 work_root / label / "fictional-dump"
                 / f"{court}.{agreement.AGREEMENT_FAILURE_NAME}"

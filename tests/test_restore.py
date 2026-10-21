@@ -1745,6 +1745,85 @@ class RestoreContracts(RenderedRestoreCase):
         self.assertIn("newest remote archive boundary", out.getvalue())
         self.assertIn(SELECT_FIX, out.getvalue())
 
+    def test_target_select_row_names_the_boundary_and_newer_unfinished_snapshots(self) -> None:
+        boundary = manifest().archive_through.isoformat()
+        listings = {
+            "unfinished": (
+                f"{REMOTE_SNAPSHOT}\t1\n20260902T130000Z\t0\n"
+                "20260902T140000Z.partial\t1\n20260901T120000Z.partial\t0\n"
+            ),
+            "complete": f"{REMOTE_SNAPSHOT}\t1\n",
+        }
+        for name, listing in listings.items():
+            with self.subTest(listing=name):
+                fake = make_host(
+                    source="target",
+                    remote_listing=listing,
+                    side_names=(LOCAL_SET,),
+                )
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = restore.run_restore(
+                        argparse.Namespace(source="target", at=None),
+                        host=fake,
+                        now=NOW,
+                    )
+                self.assertEqual(code, 0)
+                row = next(
+                    line for line in out.getvalue().splitlines() if line.startswith("select:")
+                )
+                expected = (
+                    f"source=target; snapshot={REMOTE_SNAPSHOT}; set=chosen after fetch; "
+                    f"at=latest; archive_through={boundary}"
+                )
+                if name == "unfinished":
+                    expected += (
+                        "; 2 newer unfinished snapshot(s): "
+                        "20260902T130000Z, 20260902T140000Z.partial"
+                    )
+                self.assertTrue(row.endswith(expected), row)
+
+    def test_target_select_runs_before_pre_restore_and_never_takes_its_push(self) -> None:
+        fake = make_host(
+            running=True,
+            source="target",
+            remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+            side_names=(LOCAL_SET,),
+        )
+        listings_at_push: list[int] = []
+
+        def listings() -> int:
+            return sum(
+                1
+                for call in fake.calls
+                if call[0][0] == "ssh" and "for directory in */" in call[0][-1]
+            )
+
+        def push(*args: object, **kwargs: object) -> int:
+            del args, kwargs
+            listings_at_push.append(listings())
+            fake.remote_listing += "20260902T121000Z\t1\n"
+            return 0
+
+        out = io.StringIO()
+        with (
+            patch.object(restore.backup, "run_backup_run", return_value=0),
+            patch.object(restore.backup, "run_backup_push", side_effect=push),
+            contextlib.redirect_stdout(out),
+        ):
+            code = restore.run_restore(
+                argparse.Namespace(source="target", at=None),
+                host=fake,
+                now=NOW,
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(listings_at_push, [1])
+        self.assertEqual(listings(), 1)
+        rows = [line.split(":", 1)[0] for line in out.getvalue().splitlines()]
+        self.assertLess(rows.index("select"), rows.index("pre-restore"))
+        fetch = next(call[0] for call in fake.calls if call[0][0] == "rsync")
+        self.assertIn(f"/backup/snapshots/{REMOTE_SNAPSHOT}/", fetch[-2])
+
     def test_verify_skips_the_repository_info_files_and_names_the_root(self) -> None:
         fake = make_host()
         with contextlib.redirect_stdout(io.StringIO()):

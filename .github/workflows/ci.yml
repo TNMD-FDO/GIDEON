@@ -109,6 +109,10 @@ jobs:
     # a frontend sample disagreeing, or a case regressed against its committed
     # reference. It takes the engine lock first, so a busy engine is a skip
     # (exit 0, the sibling untouched), never a red push or a disrupted run.
+    # The Skipped on a busy engine step marks a skip: it concludes success on a
+    # skip and skipped otherwise, so the run's jobs tell a skip from an
+    # evaluated smoke without reading its log, and a reader of the run takes
+    # its verdict from the newest evaluated one. The run still concludes success.
     # The provision-owned wrapper is pinned to this instance's checkout and
     # carries -B, keeping root's bytecode out of it, which its next clean
     # could not remove; the transcript sits in the runner's temporary
@@ -121,8 +125,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Smoke on the sibling
+        id: smoke
         shell: bash
-        run: sudo /usr/local/sbin/gideon-ci-smoke 2>&1 | tee "$RUNNER_TEMP/smoke.txt"
+        run: |
+          sudo /usr/local/sbin/gideon-ci-smoke 2>&1 | tee "$RUNNER_TEMP/smoke.txt"
+          if grep -q '^skipped: ok' "$RUNNER_TEMP/smoke.txt"; then
+            echo 'skipped=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Skipped on a busy engine
+        if: steps.smoke.outputs.skipped == 'true'
+        shell: bash
+        run: echo 'Smoke skipped; the verdict stands on the newest evaluated run.'
       - name: Job summary
         if: always()
         shell: bash

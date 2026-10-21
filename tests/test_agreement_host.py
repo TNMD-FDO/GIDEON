@@ -83,7 +83,7 @@ class AgreementHost(unittest.TestCase):
     def test_defer_binds_arguments_and_lock_on_stdin(self) -> None:
         result = agreement.defer_agreement(
             self.host, RENDERED, label=LABEL, snapshot=SNAPSHOT, court=COURT,
-            input=INPUT,
+            input=INPUT, pipeline=identity.PIPELINE_VERSION,
         )
         self.assertEqual(result, JOB)
         self.assertEqual(len(self.host.calls), 1)
@@ -91,17 +91,18 @@ class AgreementHost(unittest.TestCase):
         self.assertEqual(argv, worker.psql_argv(RENDERED))
         assert sql is not None
         for value in (LABEL, SNAPSHOT, COURT, identity.AGREEMENT_TASK,
-                      identity.AGREEMENT_QUEUE, INPUT["path"], INPUT["sha256"]):
+                      identity.AGREEMENT_QUEUE, identity.PIPELINE_VERSION, INPUT["path"], INPUT["sha256"]):
             self.assertNotIn(value, " ".join(argv))
             self.assertIn(value, sql)
         self.assertIn(f"\\set v_lock 'agreement-{LABEL}-{COURT}'", sql)
         self.assertIn("ROW(:'v_queue', :'v_task', 0, :'v_lock', NULL, :'v_args'::jsonb, NULL)", sql)
         args = json.loads(sql.split("\\set v_args '", 1)[1].split("'\n", 1)[0])
-        self.assertEqual(args, {"label": LABEL, "snapshot": SNAPSHOT, "court": COURT, "input": INPUT})
+        self.assertEqual(args, {"label": LABEL, "snapshot": SNAPSHOT, "court": COURT,
+                                "input": INPUT, "pipeline": identity.PIPELINE_VERSION})
 
     def test_defer_refuses_each_grammar_before_psql(self) -> None:
         base: dict[str, object] = {
-            "label": LABEL, "snapshot": SNAPSHOT, "court": COURT, "input": INPUT,
+            "label": LABEL, "snapshot": SNAPSHOT, "court": COURT, "input": INPUT, "pipeline": identity.PIPELINE_VERSION,
         }
         cases: tuple[tuple[str, object, str], ...] = (
             ("label", "../other", "corpus-YYYY-MM-DD"),
@@ -114,6 +115,8 @@ class AgreementHost(unittest.TestCase):
             ("input", {"path": "../map", "sha256": INPUT["sha256"]}, "one-segment"),
             ("input", {"path": "map.partial", "sha256": INPUT["sha256"]}, "reserved suffix"),
             ("input", {"path": INPUT["path"], "sha256": "A" * 64}, "lowercase sha256"),
+            ("pipeline", "bad", "registered pipeline"),
+            ("pipeline", "1000.0.0", "registered pipeline"),
         )
         for field, bad, grammar in cases:
             with self.subTest(field=field, bad=bad):

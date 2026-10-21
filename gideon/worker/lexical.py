@@ -199,7 +199,7 @@ class GenerationRecord(Protocol):
     def fail(self, name: str, reason: str) -> None: ...
     def documents(self, collection: str, source: str, snapshot: date, courts: Sequence[str]) -> Iterator[Document]: ...
     def chunks(self, doc_id: str, pipeline: str) -> tuple[chunker.NewChunk, ...]: ...
-    def citations(self, doc_id: str) -> tuple[citations.NewCitation, ...]: ...
+    def citations(self, doc_id: str, pipeline: str) -> tuple[citations.NewCitation, ...]: ...
     def opinion(self, doc_id: str) -> caselaw.NewOpinion: ...
     def keys_for(self, name: str, hashes: Sequence[str]) -> dict[str, TextKeys]: ...
     def close(self) -> None: ...
@@ -293,7 +293,8 @@ CHUNKS_SQL: Final = (
 )
 OPINION_SQL: Final = (
     "SELECT opinion_id, doc_id, court, cluster_id, docket, decided_date, decided_date_is_approximate, "
-    "precedential, precedential_raw, reporter_cites, opinion_type, case_name FROM opinions WHERE doc_id = %s"
+    "precedential, precedential_raw, reporter_cites, opinion_type, case_name, per_curiam "
+    "FROM opinions WHERE doc_id = %s"
 )
 KEYS_SQL: Final = (
     "SELECT h.content_hash, COALESCE(m.cluster_id, h.content_hash), COALESCE(k.boilerplate, false) "
@@ -381,14 +382,14 @@ class PsycopgGenerations:
     def chunks(self, doc_id: str, pipeline: str) -> tuple[chunker.NewChunk, ...]:
         return tuple(chunker.NewChunk(*row) for row in self._run(CHUNKS_SQL, (doc_id, pipeline), read=True, corpus=True))
 
-    def citations(self, doc_id: str) -> tuple[citations.NewCitation, ...]:
-        return tuple(citations.NewCitation(*row) for row in self._run(caselaw.READ_CITATIONS_SQL, (doc_id,), read=True, corpus=True))
+    def citations(self, doc_id: str, pipeline: str) -> tuple[citations.NewCitation, ...]:
+        return tuple(citations.NewCitation(*row) for row in self._run(caselaw.READ_CITATIONS_SQL, (doc_id, pipeline), read=True, corpus=True))
 
     def opinion(self, doc_id: str) -> caselaw.NewOpinion:
         rows = self._run(OPINION_SQL, (doc_id,), read=True, corpus=True)
         if len(rows) != 1:
             raise LexicalFailure("database")
-        return caselaw.NewOpinion(*(*rows[0][:9], tuple(rows[0][9]), rows[0][10], rows[0][11]))
+        return caselaw.NewOpinion(*(*rows[0][:9], tuple(rows[0][9]), rows[0][10], rows[0][11], rows[0][12]))
 
     def keys_for(self, name: str, hashes: Sequence[str]) -> dict[str, TextKeys]:
         rows = self._run(KEYS_SQL, (list(hashes), name, name), read=True)
@@ -768,7 +769,7 @@ def _fill(
                 if not missing:
                     continue
                 text = canonical_text(document, store_root, host)
-                opinion, citation_rows = record.opinion(document.doc_id), record.citations(document.doc_id)
+                opinion, citation_rows = record.opinion(document.doc_id), record.citations(document.doc_id, inputs.pipeline)
                 for chunk in missing:
                     serving.append((chunk.chunk_id, serving_document(chunk, slice_for(text, chunk), opinion, citation_rows, inputs.courts,
                                                                     keys[chunk.content_hash])))

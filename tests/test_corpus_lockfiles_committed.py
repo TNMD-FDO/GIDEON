@@ -11,12 +11,21 @@ from gideon.host.corpus.lockfile import (
 )
 from gideon.host.courts import load_court_map
 from gideon.host.egress import load_egress_allowlist
+from gideon.host.render.worker import PIPELINE_VERSION
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 class CommittedLockfiles(unittest.TestCase):
     """Every shipped pin resolves through the shipped court map and allowlist."""
+
+    def test_newest_lockfile_names_the_release_pipeline(self) -> None:
+        directory = read_lockfile_directory(ROOT / "corpus/lockfiles")
+        self.assertFalse(directory.errors, render_errors(directory.errors))
+        newest = directory.newest
+        self.assertIsNotNone(newest, "The release must ship a corpus lockfile.")
+        assert newest is not None
+        self.assertEqual(newest.pipeline, PIPELINE_VERSION)
 
     def test_all_committed_lockfiles(self) -> None:
         courts = load_court_map(ROOT / "courts.yaml")

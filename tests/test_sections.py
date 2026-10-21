@@ -19,7 +19,7 @@ class Segment(unittest.TestCase):
         self, column: str, raw: str, *, opinion_type: str = "010combined",
         per_curiam: bool = False,
     ) -> tuple[opiniontext.Parsed, tuple[sections.Section, ...]]:
-        parsed = opiniontext.canonical_text(column, raw)
+        parsed = opiniontext.walk(column, raw)
         result = sections.segment(
             parsed, opinion_type=opinion_type, per_curiam=per_curiam, column=column,
         )

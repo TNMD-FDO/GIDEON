@@ -40,6 +40,8 @@ tests/test_trip.py export-ignore
 tests/test_dispatch.py export-ignore
 tests/test_release_export.py export-ignore
 tests/test_codex_rounds.py export-ignore
+tests/test_codex_detached.py export-ignore
+tests/test_wait_for.py export-ignore
 eval/seed/prototype-qa/ export-ignore
 eval/sets/eval-v1/judgments/queries.jsonl export-ignore
 eval/sets/eval-v1/research-qa/harvest.jsonl export-ignore
@@ -74,3 +76,4 @@ docs/adr/ export-ignore
 docs/research/ export-ignore
 tests/test_archi_budget.py export-ignore
 tests/test_research_notes.py export-ignore
+tests/test_spec_current.py export-ignore

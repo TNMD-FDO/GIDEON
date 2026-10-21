@@ -117,10 +117,10 @@ CASELAW_FAILURE_REASONS: Final = frozenset({
     "database", "local", "busy", "segmenter", "anchors", "text-mismatch",
     "citations", "treatment", "tokenizer", "chunker", "pipeline",
 })
-PIPELINE_VERSION: Final[str] = "1.0.0"
-PIPELINE_CHUNK_SIZES: Final = {"1.0.0": (512, 1024, 64)}
+PIPELINE_VERSION: Final[str] = "1.1.0"
+PIPELINE_CHUNK_SIZES: Final = {"1.0.0": (512, 1024, 64), "1.1.0": (512, 1024, 64)}
 DOCUMENT_FAILURE_REASONS: Final = frozenset({
-    "no-text", "unparseable", "empty", "interrupted",
+    "no-text", "unparseable", "empty", "illegible", "interrupted",
 })
 TEXT_SOURCES: Final = (
     "xml_harvard", "html_columbia", "html_lawbox", "html_anon_2020",

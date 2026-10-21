@@ -88,6 +88,7 @@ SECTION_COUNTS_SQL = """WITH ready_documents AS (
     SELECT s.section_type, count(*) AS sections, sum(s.char_end - s.char_start) AS chars
     FROM public.sections AS s
     JOIN ready_documents AS d ON d.doc_id = s.doc_id
+    WHERE s.pipeline = :'v_pipeline'
     GROUP BY s.section_type
 )
 SELECT jsonb_build_object(
@@ -96,6 +97,7 @@ SELECT jsonb_build_object(
         SELECT count(DISTINCT s.doc_id)
         FROM public.sections AS s
         JOIN ready_documents AS d ON d.doc_id = s.doc_id
+        WHERE s.pipeline = :'v_pipeline'
     ),
     'sections_by_type', COALESCE((
         SELECT jsonb_object_agg(section_type, sections) FROM typed
@@ -118,13 +120,14 @@ ANCHOR_COUNTS_SQL = """WITH ready_documents AS (
     SELECT s.doc_id, sum(s.char_end - s.char_start) AS chars
     FROM public.sections AS s
     JOIN ready_documents AS d ON d.doc_id = s.doc_id
+    WHERE s.pipeline = :'v_pipeline'
     GROUP BY s.doc_id
 ), scheme_chars AS (
     SELECT a.doc_id, a.attrs ->> 'scheme' AS scheme,
            sum(a.char_end - a.char_start) AS chars
     FROM public.anchors AS a
     JOIN ready_documents AS d ON d.doc_id = a.doc_id
-    WHERE a.kind = 'reporter_page'
+    WHERE a.kind = 'reporter_page' AND a.pipeline = :'v_pipeline'
     GROUP BY a.doc_id, a.attrs ->> 'scheme'
 ), anchor_chars AS (
     SELECT doc_id, max(chars) AS chars
@@ -163,6 +166,7 @@ CITATION_COUNTS_SQL = """WITH ready_documents AS (
     SELECT c.cite_type, c.cite_form, c.to_cluster
     FROM public.citations AS c
     JOIN ready_documents AS d ON d.doc_id = c.doc_id
+    WHERE c.pipeline = :'v_pipeline'
 )
 SELECT jsonb_build_object(
     'ready', (SELECT count(*) FROM ready_documents),
@@ -186,7 +190,7 @@ SELECT jsonb_build_object(
 """
 
 TREATMENT_COUNTS_SQL = """WITH ready_documents AS (
-    SELECT d.doc_id, d.treatment_pattern_set
+    SELECT d.doc_id, d.treatment_pattern_set, d.treated_pipeline
     FROM public.documents AS d
     JOIN public.opinions AS o ON o.doc_id = d.doc_id
     WHERE d.source = :'v_source'
@@ -198,12 +202,14 @@ TREATMENT_COUNTS_SQL = """WITH ready_documents AS (
            COALESCE(s.state, s.no_state_reason) AS outcome
     FROM public.citation_signals AS s
     JOIN ready_documents AS d ON d.doc_id = s.doc_id
-    WHERE s.pattern_set = :'v_pattern_set'
+    WHERE s.pipeline = :'v_pipeline'
+      AND s.pattern_set = :'v_pattern_set'
 )
 SELECT jsonb_build_object(
     'ready', (SELECT count(*) FROM ready_documents),
     'treated', (SELECT count(*) FROM ready_documents
-                WHERE treatment_pattern_set = :'v_pattern_set'),
+                WHERE treatment_pattern_set = :'v_pattern_set'
+                  AND treated_pipeline = :'v_pipeline'),
     'signalled', (SELECT count(*) FROM signals),
     'by_signal', COALESCE((
         SELECT jsonb_object_agg(treatment_signal, n) FROM (
@@ -749,13 +755,17 @@ def _section_counts_from_json(value: object) -> SectionCounts | None:
 
 def read_section_counts(
     host: Host, rendered_dir: PathLike, *, source: str, snapshot_date: str,
-    court: str, command_path: str = COMMAND_PATH,
+    court: str, pipeline: str, command_path: str = COMMAND_PATH,
 ) -> SectionCounts | Problem:
     """Read ready document coverage and section totals for one court."""
 
+    problem = pipeline_problem(pipeline, command_path)
+    if problem is not None:
+        return problem
     value = _read_court_row(
         host, rendered_dir, SECTION_COUNTS_SQL, "sections", source=source,
         snapshot_date=snapshot_date, court=court, command_path=command_path,
+        pipeline=pipeline,
     )
     if isinstance(value, Problem):
         return value
@@ -795,13 +805,17 @@ def _anchor_counts_from_json(value: object) -> AnchorCounts | None:
 
 def read_anchor_counts(
     host: Host, rendered_dir: PathLike, *, source: str, snapshot_date: str,
-    court: str, command_path: str = COMMAND_PATH,
+    court: str, pipeline: str, command_path: str = COMMAND_PATH,
 ) -> AnchorCounts | Problem:
     """Read ready document anchoring and reporter-page coverage for one court."""
 
+    problem = pipeline_problem(pipeline, command_path)
+    if problem is not None:
+        return problem
     value = _read_court_row(
         host, rendered_dir, ANCHOR_COUNTS_SQL, "anchors", source=source,
         snapshot_date=snapshot_date, court=court, command_path=command_path,
+        pipeline=pipeline,
     )
     if isinstance(value, Problem):
         return value
@@ -834,13 +848,17 @@ def _citation_counts_from_json(value: object) -> CitationCounts | None:
 
 def read_citation_counts(
     host: Host, rendered_dir: PathLike, *, source: str, snapshot_date: str,
-    court: str, command_path: str = COMMAND_PATH,
+    court: str, pipeline: str, command_path: str = COMMAND_PATH,
 ) -> CitationCounts | Problem:
     """Read ready document coverage and citation totals for one court."""
 
+    problem = pipeline_problem(pipeline, command_path)
+    if problem is not None:
+        return problem
     value = _read_court_row(
         host, rendered_dir, CITATION_COUNTS_SQL, "citations", source=source,
         snapshot_date=snapshot_date, court=court, command_path=command_path,
+        pipeline=pipeline,
     )
     if isinstance(value, Problem):
         return value
@@ -884,13 +902,17 @@ def _treatment_counts_from_json(value: object) -> TreatmentCounts | None:
 
 def read_treatment_counts(
     host: Host, rendered_dir: PathLike, *, source: str, snapshot_date: str,
-    court: str, command_path: str = COMMAND_PATH,
+    court: str, pipeline: str, command_path: str = COMMAND_PATH,
 ) -> TreatmentCounts | Problem:
     """Read current pattern set coverage and signal totals for one court."""
 
+    problem = pipeline_problem(pipeline, command_path)
+    if problem is not None:
+        return problem
     value = _read_court_row(
         host, rendered_dir, TREATMENT_COUNTS_SQL, "treatment", source=source,
         snapshot_date=snapshot_date, court=court, command_path=command_path,
+        pipeline=pipeline,
         pattern_set=PATTERN_SET_ID,
     )
     if isinstance(value, Problem):

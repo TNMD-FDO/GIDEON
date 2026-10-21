@@ -1888,7 +1888,7 @@ class Install(unittest.TestCase):
         ))
         self.assertEqual([args["court"] for args in self.host.agreement_deferred], ["ca6", "scotus"])
         self.assertTrue(all(
-            set(args) == {"label", "snapshot", "court", "input"}
+            set(args) == {"label", "snapshot", "court", "input", "pipeline"}
             for args in self.host.agreement_deferred
         ))
         map_name = data_file(worker_identity.AGREEMENT_TABLE, "2099-01-02")
@@ -1998,6 +1998,41 @@ class Install(unittest.TestCase):
              ("read", "ca6"), ("read", "scotus")],
         )
 
+    def test_install_reads_and_defers_under_the_lockfile_pipeline(self) -> None:
+        self._enable_stage()
+        lockfile = self._lockfile()
+        version = "1000.0.0"
+        lockfile = replace(lockfile, pipeline=version)
+        path = self.checkout / "corpus/lockfiles" / f"{lockfile.label}.yaml"
+        path.write_text(render_lockfile(lockfile))
+        self._seed_complete_stage()
+        sizes = worker_identity.PIPELINE_CHUNK_SIZES[worker_identity.PIPELINE_VERSION]
+        with patch.dict(worker_identity.PIPELINE_CHUNK_SIZES, {version: sizes}):
+            code, out, err = self.run_install()
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(err, "")
+        expected_courts = set(lockfile.sources[self.source.name].courts or ())
+        for statement in (
+            install.caselaw.SECTION_COUNTS_SQL, install.caselaw.ANCHOR_COUNTS_SQL,
+            install.caselaw.CITATION_COUNTS_SQL, install.caselaw.TREATMENT_COUNTS_SQL,
+        ):
+            with self.subTest(statement=statement):
+                reads = [sql for _argv, sql, _holder in self.host.executions
+                         if sql is not None and sql.endswith(statement)]
+                self.assertTrue(reads)
+                self.assertEqual({self.host._bound(sql, "v_court") for sql in reads}, expected_courts)
+                self.assertTrue(all(self.host._bound(sql, "v_pipeline") == version for sql in reads))
+        self.assertEqual({args["court"] for args in self.host.agreement_deferred}, expected_courts)
+        self.assertTrue(all(args["pipeline"] == version for args in self.host.agreement_deferred))
+        section_rows = [line for line in out.splitlines() if " sections: " in line]
+        agreement_rows = [line for line in out.splitlines() if " agreement: " in line]
+        self.assertEqual(len(section_rows), len(expected_courts))
+        self.assertEqual(len(agreement_rows), len(expected_courts))
+        for line in section_rows:
+            self.assertIn(f"have sections under {version};", line)
+        for line in agreement_rows:
+            self.assertIn(f"documents under {version};", line)
+
     def test_agreement_prints_exact_court_rows_and_summary_without_count_gate(self) -> None:
         self._enable_stage()
         self._seed_complete_stage()
@@ -2012,11 +2047,11 @@ class Install(unittest.TestCase):
         self.assertEqual(
             [line for line in out.splitlines() if line.startswith("agreement: ok — ")],
             [
-                "agreement: ok — ca6 agreement: 1 documents; 4 GIDEON pairs, "
+                f"agreement: ok — ca6 agreement: 1 documents under {worker_identity.PIPELINE_VERSION}; 4 GIDEON pairs, "
                 "3 map pairs, 1 map rows beyond the label; agreed 2 "
                 "(50 % of GIDEON's, 67 % of the map's); "
                 "map-only 1 seen unresolved, 0 missed",
-                "agreement: ok — scotus agreement: 0 documents; 0 GIDEON pairs, "
+                f"agreement: ok — scotus agreement: 0 documents under {worker_identity.PIPELINE_VERSION}; 0 GIDEON pairs, "
                 "0 map pairs, 7 map rows beyond the label; agreed 0 "
                 "(0 % of GIDEON's, 0 % of the map's); "
                 "map-only 0 seen unresolved, 0 missed",
@@ -2213,10 +2248,10 @@ class Install(unittest.TestCase):
         rows = [line for line in out.splitlines() if line.startswith("ingest: ok — ")]
         self.assertEqual(rows, [
             "ingest: ok — ca6: 1 opinions; ready 0, failed 1 "
-            "(no-text 1, unparseable 0, empty 0, interrupted 0); "
+            "(no-text 1, unparseable 0, empty 0, illegible 0, interrupted 0); "
             "xml_harvard 0, html_columbia 0, html_lawbox 0, html_anon_2020 0, "
             "html 0, plain_text 0; published 0, unpublished 0, unknown 1",
-            "ingest: ok — ca6 sections: 0 of 0 ready documents; "
+            f"ingest: ok — ca6 sections: 0 of 0 ready documents have sections under {worker_identity.PIPELINE_VERSION}; "
             + ", ".join(f"{kind} 0 % (0)" for kind in worker_identity.SECTION_TYPES),
             "ingest: ok — ca6 anchors: 0 of 0 ready documents anchored",
             "ingest: ok — ca6 citations: 0 of 0 ready documents; "
@@ -2238,10 +2273,10 @@ class Install(unittest.TestCase):
             "under minimum 0; "
             + ", ".join(f"{kind} 0" for kind in worker_identity.SECTION_TYPES),
             "ingest: ok — scotus: 2 opinions; ready 2, failed 0 "
-            "(no-text 0, unparseable 0, empty 0, interrupted 0); "
+            "(no-text 0, unparseable 0, empty 0, illegible 0, interrupted 0); "
             "xml_harvard 1, html_columbia 1, html_lawbox 0, html_anon_2020 0, "
             "html 0, plain_text 0; published 1, unpublished 1, unknown 0",
-            "ingest: ok — scotus sections: 2 of 2 ready documents; "
+            f"ingest: ok — scotus sections: 2 of 2 ready documents have sections under {worker_identity.PIPELINE_VERSION}; "
             + ", ".join(
                 f"{kind} {section_shares.get(kind, '0 % (0)')}"
                 for kind in worker_identity.SECTION_TYPES
@@ -2329,7 +2364,7 @@ class Install(unittest.TestCase):
         self.assertNotIn("retain: ok", out)
         read.assert_called_once_with(
             self.host, RENDERED, source="example", snapshot_date="2099-01-02",
-            court="ca6", command_path=install.COMMAND_PATH,
+            court="ca6", pipeline=worker_identity.PIPELINE_VERSION, command_path=install.COMMAND_PATH,
         )
 
     def test_ingest_refuses_ready_documents_without_anchoring(self) -> None:
@@ -2359,7 +2394,7 @@ class Install(unittest.TestCase):
         self.assertNotIn("retain: ok", out)
         read.assert_called_once_with(
             self.host, RENDERED, source="example", snapshot_date="2099-01-02",
-            court="ca6", command_path=install.COMMAND_PATH,
+            court="ca6", pipeline=worker_identity.PIPELINE_VERSION, command_path=install.COMMAND_PATH,
         )
 
     def test_ingest_refuses_ready_documents_without_treatment_pass(self) -> None:
@@ -2451,7 +2486,7 @@ class Install(unittest.TestCase):
         self.assertNotIn("retain: ok", out)
         read.assert_called_once_with(
             self.host, RENDERED, source="example", snapshot_date="2099-01-02",
-            court="ca6", command_path=install.COMMAND_PATH,
+            court="ca6", pipeline=worker_identity.PIPELINE_VERSION, command_path=install.COMMAND_PATH,
         )
 
     def test_failed_ingest_job_refuses_with_its_court_and_fix(self) -> None:

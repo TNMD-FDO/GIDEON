@@ -24,7 +24,7 @@ from gideon.host.corpus.lockfile import (
 from gideon.host.corpus.sources import SourceDefinition
 from gideon.host.courts import default_courts_path, load_court_map
 from gideon.host.egress import default_egress_path, load_egress_allowlist
-from gideon.host.render.worker import PIPELINE_VERSION
+from gideon.host.render.worker import PIPELINE_CHUNK_SIZES
 from gideon.host.report import Problem
 
 FIXTURES = Path(__file__).parent / "fixtures/corpus"
@@ -54,7 +54,7 @@ class Fixture(unittest.TestCase):
         lockfile = result.lockfile
         self.assertEqual(lockfile.schema, SCHEMA_VERSION)
         self.assertIn(lockfile.schema, READABLE_SCHEMAS)
-        self.assertEqual(lockfile.pipeline, PIPELINE_VERSION)
+        self.assertIn(lockfile.pipeline, PIPELINE_CHUNK_SIZES)
         self.assertEqual(render_lockfile(lockfile), VALID.read_text())
         for name, pin in lockfile.sources.items():
             sidecar = VALID.with_suffix("") / f"{name}.sha256"
@@ -67,8 +67,8 @@ class Fixture(unittest.TestCase):
         self.assertTrue(base.ok, render_errors(base.errors))
         self.assertTrue(derived.ok, render_errors(derived.errors))
         assert base.lockfile is not None and derived.lockfile is not None
-        self.assertEqual(base.lockfile.pipeline, PIPELINE_VERSION)
-        self.assertEqual(derived.lockfile.pipeline, PIPELINE_VERSION)
+        self.assertIn(base.lockfile.pipeline, PIPELINE_CHUNK_SIZES)
+        self.assertEqual(derived.lockfile.pipeline, base.lockfile.pipeline)
         self.assertEqual(derived.lockfile.base, base.lockfile.label)
         self.assertEqual(render_lockfile(derived.lockfile), DERIVED.read_text())
         for name, pin in derived.lockfile.sources.items():

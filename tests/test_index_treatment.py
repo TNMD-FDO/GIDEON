@@ -258,6 +258,7 @@ class Materialize(unittest.TestCase):
         self.row = treatment_for()
 
     def test_two_payloads_bind_scope_rows_and_switches_on_stdin_alone(self) -> None:
+        self.inputs = replace(self.inputs, pipeline="1000.0.0")
         for signal_pattern in (True, False):
             for signal_list in (True, False):
                 with self.subTest(signal_pattern=signal_pattern, signal_list=signal_list):
@@ -276,6 +277,7 @@ class Materialize(unittest.TestCase):
                         "doc_ids": None,
                         "source": self.inputs.snapshot[:-staging.DATE_SUFFIX_LENGTH],
                         "snapshot_date": self.inputs.snapshot[-10:], "courts": list(self.inputs.courts),
+                        "pipeline": self.inputs.pipeline,
                         "pattern_set": identity.PATTERN_SET_ID,
                         "signal_pattern": signal_pattern, "signal_list": signal_list,
                         "treatment_source": TREATMENT_SNAPSHOT[:-staging.DATE_SUFFIX_LENGTH],
@@ -472,6 +474,9 @@ class Materialize(unittest.TestCase):
         self.assertIn("p.value->'doc_ids' = 'null'::jsonb", sql)
         self.assertIn("d.doc_id IN (", sql)
         self.assertIn("jsonb_array_elements_text(NULLIF(p.value->'doc_ids', 'null'::jsonb))", sql)
+        selected = sql.split("selected_signals AS (", 1)[1].split("), pattern AS (", 1)[0]
+        self.assertIn("JOIN public.citations AS c ON c.citation_id = s.citation_id", selected)
+        self.assertIn("AND c.pipeline = p.value->>'pipeline'", selected)
         self.assertIn("jsonb_agg(k.element ORDER BY k.arm, k.element_id)", sql)
         self.assertIn("jsonb_agg(to_jsonb(g) ORDER BY g.cluster_id)", sql)
         self.assertNotIn("public.documents", treatment.WRITE_SQL)

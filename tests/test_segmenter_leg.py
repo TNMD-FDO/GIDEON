@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
+from test_opinion_text import FICTIONAL_OPINION, cipher_text
+
 from gideon.evaluation import evalset, segmenter_leg
 from gideon.evaluation.results import ImageAccess, RunContext
 from gideon.host.report import Problem
@@ -87,7 +89,7 @@ class Entry(unittest.TestCase):
                 self.assertEqual((code, stderr.getvalue()), (0, ""))
                 self.assertNotIn(SENTINEL, stdout.getvalue())
                 answer = json.loads(stdout.getvalue())
-                parsed = opiniontext.canonical_text(column, raw)
+                parsed = opiniontext.walk(column, raw)
                 self.assertEqual(answer["sha256"], hashlib.sha256(parsed.text.encode("utf-8")).hexdigest())
                 self.assertEqual(answer["length"], len(parsed.text))
                 self.assertEqual(answer["sections"][0][0], 0)
@@ -116,6 +118,29 @@ class Entry(unittest.TestCase):
                     (result[case.case_id].pgmap_checked, result[case.case_id].pgmap_disagreeing),
                     (anchored.pgmap_checked, anchored.pgmap_disagreeing),
                 )
+
+    def test_cipher_original_returns_unknown_sections(self) -> None:
+        cipher = cipher_text(FICTIONAL_OPINION)
+        request = json.dumps({
+            "id": "segmenter-001", "column": "plain_text",
+            "opinion_type": "010combined", "per_curiam": False,
+            "original": cipher,
+        }) + "\n"
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch("sys.stdin", io.StringIO(request)), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = segmenter_leg.main()
+        self.assertEqual((code, stderr.getvalue()), (0, ""))
+        parsed = opiniontext.walk("plain_text", cipher)
+        self.assertEqual(json.loads(stdout.getvalue()), {
+            "id": "segmenter-001",
+            "sha256": hashlib.sha256(parsed.text.encode()).hexdigest(),
+            "length": len(parsed.text),
+            "sections": [[0, len(parsed.text), "unknown", "none"]],
+            "markers": [],
+            "pgmap_checked": 0,
+            "pgmap_disagreeing": 0,
+        })
+        self.assertNotIn(cipher, stdout.getvalue())
 
     def test_malformed_input_refuses_without_echoing_opinion(self) -> None:
         requests = (

@@ -5,6 +5,7 @@ import subprocess
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
+from unittest.mock import patch
 
 from gideon.host import caselaw, courts, report, stack, staging, worker
 from gideon.host.render import worker as identity
@@ -166,25 +167,25 @@ class CaselawHost(unittest.TestCase):
     def read_section_counts(self) -> caselaw.SectionCounts | report.Problem:
         return caselaw.read_section_counts(
             self.host, RENDERED, source=SOURCE,
-            snapshot_date="2099-01-02", court=COURT,
+            snapshot_date="2099-01-02", court=COURT, pipeline=identity.PIPELINE_VERSION,
         )
 
     def read_anchor_counts(self) -> caselaw.AnchorCounts | report.Problem:
         return caselaw.read_anchor_counts(
             self.host, RENDERED, source=SOURCE,
-            snapshot_date="2099-01-02", court=COURT,
+            snapshot_date="2099-01-02", court=COURT, pipeline=identity.PIPELINE_VERSION,
         )
 
     def read_citation_counts(self) -> caselaw.CitationCounts | report.Problem:
         return caselaw.read_citation_counts(
             self.host, RENDERED, source=SOURCE,
-            snapshot_date="2099-01-02", court=COURT,
+            snapshot_date="2099-01-02", court=COURT, pipeline=identity.PIPELINE_VERSION,
         )
 
     def read_treatment_counts(self) -> caselaw.TreatmentCounts | report.Problem:
         return caselaw.read_treatment_counts(
             self.host, RENDERED, source=SOURCE,
-            snapshot_date="2099-01-02", court=COURT,
+            snapshot_date="2099-01-02", court=COURT, pipeline=identity.PIPELINE_VERSION,
         )
 
     def read_chunk_counts(self) -> caselaw.ChunkCounts | report.Problem:
@@ -430,6 +431,58 @@ class CaselawHost(unittest.TestCase):
         self.assertIn("FileNotFoundError", result.problem)
         self.assertNotIn("private executable path", result.problem)
 
+    def test_walk_counts_bind_the_requested_pipeline_and_filter_each_table(self) -> None:
+        version = "1000.0.0"
+        sizes = identity.PIPELINE_CHUNK_SIZES[identity.PIPELINE_VERSION]
+        cases = (
+            (caselaw.read_section_counts, section_counts_for(),
+             (("s.pipeline = :'v_pipeline'", 2),)),
+            (caselaw.read_anchor_counts, anchor_counts_for(),
+             (("s.pipeline = :'v_pipeline'", 1), ("a.pipeline = :'v_pipeline'", 1))),
+            (caselaw.read_citation_counts, citation_counts_for(),
+             (("c.pipeline = :'v_pipeline'", 1),)),
+            (caselaw.read_treatment_counts, treatment_counts_for(),
+             (("s.pipeline = :'v_pipeline'", 1), ("treated_pipeline = :'v_pipeline'", 1))),
+        )
+        with patch.object(caselaw, "PIPELINE_CHUNK_SIZES", {version: sizes}):
+            for read, counts, filters in cases:
+                with self.subTest(reader=read.__name__):
+                    self.host.calls.clear()
+                    self.host.counts_output = json.dumps(counts)
+                    result = read(
+                        self.host, RENDERED, source=SOURCE, snapshot_date="2099-01-02",
+                        court=COURT, pipeline=version,
+                    )
+                    self.assertNotIsInstance(result, report.Problem)
+                    self.assertEqual(len(self.host.calls), 1)
+                    argv, sql = self.host.calls[0]
+                    assert sql is not None
+                    self.assertIn(worker.bind("v_pipeline", version), sql)
+                    self.assertNotIn(version, " ".join(argv))
+                    for condition, occurrences in filters:
+                        self.assertEqual(sql.count(condition), occurrences)
+                    if read is caselaw.read_treatment_counts:
+                        self.assertIn("d.treated_pipeline", sql)
+                        self.assertIn("treatment_pattern_set = :'v_pattern_set'", sql)
+
+    def test_walk_counts_refuse_unregistered_pipelines_before_psql(self) -> None:
+        for read in (caselaw.read_section_counts, caselaw.read_anchor_counts,
+                     caselaw.read_citation_counts, caselaw.read_treatment_counts):
+            for version in ("bad", "1000.0.0"):
+                with self.subTest(reader=read.__name__, pipeline=version):
+                    self.host.calls.clear()
+                    result = read(
+                        self.host, RENDERED, source=SOURCE, snapshot_date="2099-01-02",
+                        court=COURT, pipeline=version,
+                    )
+                    assert isinstance(result, report.Problem)
+                    self.assertIn("not registered", result.problem)
+                    self.assertIn(report.command("corpus cut"), result.fix)
+                    self.assertIn(report.command("corpus install"), result.fix)
+                    for registered in identity.PIPELINE_CHUNK_SIZES:
+                        self.assertIn(registered, result.fix)
+                    self.assertEqual(self.host.calls, [])
+
     def test_read_section_counts_binds_values_and_parses_one_json_row(self) -> None:
         self.host.counts_output = json.dumps(section_counts_for()) + "\n"
         self.assertEqual(self.read_section_counts(), caselaw.SectionCounts(
@@ -484,7 +537,7 @@ class CaselawHost(unittest.TestCase):
                 args[field] = bad
                 self.host.calls.clear()
                 self.assertIsInstance(
-                    caselaw.read_section_counts(self.host, RENDERED, **args), report.Problem,
+                    caselaw.read_section_counts(self.host, RENDERED, pipeline=identity.PIPELINE_VERSION, **args), report.Problem,
                 )
                 self.assertEqual(self.host.calls, [])
         self.host.code = 127
@@ -587,7 +640,7 @@ class CaselawHost(unittest.TestCase):
                 args[field] = bad
                 self.host.calls.clear()
                 self.assertIsInstance(
-                    caselaw.read_anchor_counts(self.host, RENDERED, **args), report.Problem,
+                    caselaw.read_anchor_counts(self.host, RENDERED, pipeline=identity.PIPELINE_VERSION, **args), report.Problem,
                 )
                 self.assertEqual(self.host.calls, [])
         self.host.code = 127
@@ -666,7 +719,7 @@ class CaselawHost(unittest.TestCase):
                 args[field] = bad
                 self.host.calls.clear()
                 self.assertIsInstance(
-                    caselaw.read_citation_counts(self.host, RENDERED, **args), report.Problem,
+                    caselaw.read_citation_counts(self.host, RENDERED, pipeline=identity.PIPELINE_VERSION, **args), report.Problem,
                 )
                 self.assertEqual(self.host.calls, [])
         self.host.code = 127
@@ -772,7 +825,7 @@ class CaselawHost(unittest.TestCase):
                 args[field] = invalid_argument
                 self.host.calls.clear()
                 self.assertIsInstance(
-                    caselaw.read_treatment_counts(self.host, RENDERED, **args), report.Problem,
+                    caselaw.read_treatment_counts(self.host, RENDERED, pipeline=identity.PIPELINE_VERSION, **args), report.Problem,
                 )
                 self.assertEqual(self.host.calls, [])
         self.host.code = 127

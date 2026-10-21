@@ -29,7 +29,11 @@ from gideon.evaluation import evalset, record, synthetic
 from gideon.host import backuplock, courts, engine, site, worker
 from gideon.host.index import sample as indexsample
 from gideon.host.render.ci import CI_ROOT
-from gideon.host.render.worker import PATTERN_SET_ID, PRECEDENTIAL_VALUES
+from gideon.host.render.worker import (
+    PATTERN_SET_ID,
+    PIPELINE_VERSION,
+    PRECEDENTIAL_VALUES,
+)
 from gideon.host.report import Problem
 from gideon.host.sysio import PathLike
 from gideon.worker import treatment
@@ -251,6 +255,8 @@ class TreatmentHost(SyntheticHost):
         if input is not None and any(token in input for token in ("AS treatment_edges", "AS section_rows", "AS citation_rows")):
             self.calls.append((tuple(argv), input))
             assert list(argv) == record.reader_argv(RENDERED)
+            pipeline_line = next(line for line in input.splitlines() if line.startswith("\\set pipeline "))
+            assert read_psql_set(pipeline_line, "pipeline") == PIPELINE_VERSION
             if "AS treatment_edges" in input:
                 kind = "edges"
                 lines = input.splitlines()
@@ -328,6 +334,8 @@ class AttributionHost(SyntheticHost):
         if input is not None and any(token in input for token in ("AS section_summaries", "AS section_rows")):
             self.calls.append((tuple(argv), input))
             assert list(argv) == record.reader_argv(RENDERED)
+            pipeline_line = next(line for line in input.splitlines() if line.startswith("\\set pipeline "))
+            assert read_psql_set(pipeline_line, "pipeline") == PIPELINE_VERSION
             if "AS section_summaries" in input:
                 kind = "summary"
                 requested = json.loads(read_psql_set(input.splitlines()[0], "opinion_ids"))
@@ -1478,6 +1486,24 @@ class TreatmentDraft(unittest.TestCase):
             sql = next(sql for _, sql in host.calls if sql is not None and "AS treatment_edges" in sql)
             risk = sql.split("FROM citation_signals risk", 1)[1].split(") AS cluster_state", 1)[0]
             self.assertIn("resolved.to_cluster = c.to_cluster", risk)
+            self.assertIn("JOIN citations resolved ON resolved.citation_id = risk.citation_id "
+                          "AND resolved.pipeline = :'pipeline'", risk)
+            self.assertIn("JOIN citations c ON c.citation_id = s.citation_id "
+                          "AND c.pipeline = :'pipeline'", sql)
+            for marker, condition in (
+                ("AS treatment_edges", "c.pipeline = :'pipeline'"),
+                ("AS section_rows", "doc_id = :'doc_id' AND pipeline = :'pipeline'"),
+                ("AS citation_rows", "doc_id = :'doc_id' AND pipeline = :'pipeline'"),
+            ):
+                reads = [(argv, statement) for argv, statement in host.calls
+                         if statement is not None and marker in statement]
+                self.assertTrue(reads)
+                for argv, statement in reads:
+                    assert statement is not None
+                    self.assertEqual(statement.count("\\set pipeline "), 1)
+                    self.assertIn(worker.bind("pipeline", PIPELINE_VERSION), statement)
+                    self.assertNotIn(PIPELINE_VERSION, " ".join(argv))
+                    self.assertIn(condition, statement)
             self.assertNotIn("opinion_ids", risk)
             self.assertIn("ready.status = 'ready'", sql)
             self.assertIn("ORDER BY cited.decided_date, cited.opinion_id LIMIT 1", sql)
@@ -1791,6 +1817,14 @@ class AttributionDraft(unittest.TestCase):
                 self.assertEqual(sum("AS section_rows" in sql for sql in reads), 1)
                 self.assertFalse(any("AS citation_rows" in sql for sql in reads))
                 self.assertIn("s.section_type <> 'footnote'", next(sql for sql in reads if "AS section_summaries" in sql))
+                for marker, condition in (
+                    ("AS section_summaries", "s.pipeline = :'pipeline'"),
+                    ("AS section_rows", "doc_id = :'doc_id' AND pipeline = :'pipeline'"),
+                ):
+                    sql = next(sql for sql in reads if marker in sql)
+                    self.assertEqual(sql.count("\\set pipeline "), 1)
+                    self.assertIn(worker.bind("pipeline", PIPELINE_VERSION), sql)
+                    self.assertIn(condition, sql)
                 doc_id = cast(str, host.documents[0]["doc_id"])
                 target = next(section for section in host.section_rows[doc_id] if section["section_type"] == section_type)
                 start, end = cast(int, target["char_start"]), cast(int, target["char_end"])

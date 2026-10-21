@@ -79,7 +79,7 @@ def opinion_for() -> caselaw.NewOpinion:
     return caselaw.NewOpinion(
         31, "a" * 64, "court1", 41, "FICTITIOUS_CAPTION_SENTINEL\n99-A", NOW.date(),
         False, "published", "Published", ("7 Fiction 11", "8 Fiction 12"), "020",
-        "FICTITIOUS_CASE_NAME_SENTINEL v. Example",
+        "FICTITIOUS_CASE_NAME_SENTINEL v. Example", None,
     )
 
 
@@ -217,7 +217,8 @@ class FakeRecord:
         self.chunk_reads.append(doc_id)
         return self.chunk_rows[doc_id]
 
-    def citations(self, doc_id: str) -> tuple[citations.NewCitation, ...]:
+    def citations(self, doc_id: str, pipeline: str) -> tuple[citations.NewCitation, ...]:
+        assert pipeline == PIPELINE_VERSION
         return (citation_for(10, 20, "FICTITIOUS_CITE_SENTINEL", None),)
 
     def opinion(self, doc_id: str) -> caselaw.NewOpinion:
@@ -693,19 +694,19 @@ class RecordAdapter(unittest.TestCase):
     def test_chunk_citation_and_opinion_projections_and_scope_are_bound(self) -> None:
         chunk, citation, opinion = chunk_for(), citation_for(10, 20, "7 Fiction 11", None), opinion_for()
         for value, operation in ((chunk, lambda: self.record.chunks(chunk.doc_id, chunk.pipeline)),
-                                 (citation, lambda: self.record.citations(citation.doc_id))):
+                                 (citation, lambda: self.record.citations(citation.doc_id, chunk.pipeline))):
             self.stream.rows = [astuple(value)]
             self.assertEqual(operation(), (value,))
         self.stream.rows = [astuple(opinion)]
-        self.assertEqual(len(astuple(opinion)), 12)
+        self.assertEqual(len(astuple(opinion)), 13)
         self.assertEqual(lexical.OPINION_SQL, (
             "SELECT opinion_id, doc_id, court, cluster_id, docket, decided_date, "
             "decided_date_is_approximate, precedential, precedential_raw, reporter_cites, "
-            "opinion_type, case_name FROM opinions WHERE doc_id = %s"
+            "opinion_type, case_name, per_curiam FROM opinions WHERE doc_id = %s"
         ))
         self.assertEqual(self.record.opinion(opinion.doc_id), opinion)
         self.assertEqual(self.stream.statements[0], (lexical.CHUNKS_SQL, (chunk.doc_id, chunk.pipeline)))
-        self.assertEqual(self.stream.statements[1], (caselaw.READ_CITATIONS_SQL, (citation.doc_id,)))
+        self.assertEqual(self.stream.statements[1], (caselaw.READ_CITATIONS_SQL, (citation.doc_id, chunk.pipeline)))
         self.assertEqual(self.stream.statements[2], (lexical.OPINION_SQL, (opinion.doc_id,)))
 
     def test_corpus_lookups_and_record_commits_leave_the_document_stream_readable(self) -> None:
@@ -727,7 +728,7 @@ class RecordAdapter(unittest.TestCase):
         opinion = opinion_for()
         for value, operation, expected in (
             (chunk, lambda: self.record.chunks(chunk.doc_id, chunk.pipeline), (chunk,)),
-            (citation, lambda: self.record.citations(citation.doc_id), (citation,)),
+            (citation, lambda: self.record.citations(citation.doc_id, chunk.pipeline), (citation,)),
             (opinion, lambda: self.record.opinion(opinion.doc_id), opinion),
         ):
             with self.subTest(row=type(value).__name__):

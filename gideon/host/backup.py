@@ -612,8 +612,6 @@ def _postgres_stage(
     *,
     backup_type: str,
     kind: backupset.Kind,
-    now: datetime,
-    now_was_supplied: bool,
 ) -> tuple[StageResult, _PostgresStage | None]:
     try:
         backup_result = io.run(
@@ -635,7 +633,9 @@ def _postgres_stage(
             None,
         )
 
-    archive_start = now if now_was_supplied else datetime.now(UTC)
+    # The boundary is this instant on every run, a supplied clock included:
+    # one taken before the backup's stop ends recovery before consistency.
+    archive_start = datetime.now(UTC)
     # Recovery to a time target needs an archived commit stamped past it, or
     # Postgres ends fatally; check switches and archives this segment next.
     try:
@@ -1110,8 +1110,6 @@ def _backup_run_body(
             rendered_dir,
             backup_type=backup_type,
             kind=kind,
-            now=started,
-            now_was_supplied=now_was_supplied,
         )
     print_stage(postgres_result)
     if not postgres_result.ok or pg is None:
@@ -1129,7 +1127,7 @@ def _backup_run_body(
     if not counts_result.ok or row_counts is None:
         return 1
 
-    finished = started if now_was_supplied else datetime.now(UTC)
+    finished = datetime.now(UTC)
     with _timed(stage_seconds, "manifest", measured=measured, clock=clock):
         manifest_result, manifest, set_bytes = _manifest_stage(
             io,
@@ -1158,7 +1156,7 @@ def _backup_run_body(
     with _timed(stage_seconds, "prune", measured=measured, clock=clock):
         prune_result, pruned = _prune_stage(
             io,
-            now=finished,
+            now=started,
             local_days=config.backup.local_days,
             final=final,
         )

@@ -53,6 +53,8 @@ EXCLUDED_PREFIXES = (
     "tests/test_dispatch.py",  # bin/dispatch's tests
     "tests/test_release_export.py",  # bin/release-export's tests
     "tests/test_codex_rounds.py",  # the Codex rounds record's tests
+    "tests/test_codex_detached.py",  # bin/codex-detached's tests
+    "tests/test_wait_for.py",  # bin/wait-for's tests
     "eval/seed/prototype-qa",  # harvested QA data pending a CSA ruling
     "eval/sets/eval-v1/judgments/queries.jsonl",  # harvest-derived judgment queries pending a CSA ruling
     "eval/sets/eval-v1/research-qa/harvest.jsonl",  # harvest-derived research questions pending the same ruling
@@ -87,6 +89,7 @@ EXCLUDED_PREFIXES = (
     "docs/research",  # the research notes
     "tests/test_archi_budget.py",  # the map and leaves' contract
     "tests/test_research_notes.py",  # the research notes' contract
+    "tests/test_spec_current.py",  # the build spec's in-place form, reading .scratch
 )
 
 

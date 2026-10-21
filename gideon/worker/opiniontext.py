@@ -1,4 +1,4 @@
-"""Choose an opinion's source text and extract canonical text with locators."""
+"""Choose and walk opinion source text with locators, and check its legibility."""
 
 import re
 import unicodedata
@@ -14,11 +14,30 @@ TEXT_SOURCES: Final = (
     "html", "plain_text",
 )
 
+# exempt: the word floor is a starting value, corrected by later snapshots' failure counts.
+LEGIBILITY_WORD_FLOOR: Final = 100
+# exempt: the share floor is a starting value, corrected by later snapshots' failure counts.
+LEGIBILITY_SHARE_FLOOR: Final = 0.05
+_LETTER_RUN: Final = re.compile(r"[A-Za-z]+")
+FUNCTION_WORDS: Final = frozenset({
+    "the", "a", "an", "this", "that", "these", "those",
+    "of", "to", "in", "for", "on", "by", "with", "at", "from", "as", "into",
+    "under", "over", "between", "after", "before", "against", "upon", "within",
+    "without", "and", "or", "but", "nor", "because", "if", "whether", "while",
+    "although", "than", "so", "it", "its", "he", "his", "she", "her", "they",
+    "their", "them", "we", "our", "you", "your", "who", "whom", "whose", "which",
+    "what", "there", "here", "is", "are", "was", "were", "be", "been", "being",
+    "has", "have", "had", "do", "does", "did", "will", "would", "shall", "should",
+    "may", "might", "must", "can", "could", "not", "no", "only", "also", "thus",
+    "therefore", "however", "any", "all", "such", "other", "both", "each", "same",
+    "then", "when", "where", "whereby",
+})
+
 MarkerKind = Literal["page", "footnote-mark", "editorial"]
 BlockKind = Literal[
     "opinion", "author", "headmatter", "footnote", "heading", "quote", "pagemap",
 ]
-FailureReason = Literal["empty", "unparseable"]
+FailureReason = Literal["empty", "unparseable", "illegible"]
 Attrs = tuple[tuple[str, str], ...]
 
 _XML_BLOCKS: Final = frozenset({
@@ -65,7 +84,7 @@ class Parsed:
 
 
 class OpinionTextFailure(Exception):
-    """A markup read failed with a reason suitable for a document row."""
+    """An opinion text read or check failed with a reason for a document row."""
 
     def __init__(self, reason: FailureReason) -> None:
         self.reason = reason
@@ -80,6 +99,21 @@ def choose(row: Mapping[str, str | None]) -> tuple[str, str] | None:
         if value is not None and value.strip():
             return column, value
     return None
+
+
+def legibility(text: str) -> float | None:
+    """Return the function-word share of ASCII letter runs, or None below the floor."""
+
+    words = _LETTER_RUN.findall(text)
+    if len(words) < LEGIBILITY_WORD_FLOOR:
+        return None
+    return sum(word.casefold() in FUNCTION_WORDS for word in words) / len(words)
+
+
+def _check_legible(text: str) -> None:
+    share = legibility(text)
+    if share is not None and share < LEGIBILITY_SHARE_FLOOR:
+        raise OpinionTextFailure("illegible")
 
 
 def _normalized_segment(
@@ -418,8 +452,11 @@ def _walk(
     builder.preserve = previous_preserve
 
 
-def canonical_text(column: str, raw: str) -> Parsed:
-    """Parse one source column without adding text for dropped locators."""
+def walk(column: str, raw: str) -> Parsed:
+    """Walk a source column without judging legibility, for every stored-original reader.
+
+    Dropped locators add no text; empty and unparseable sources still fail.
+    """
 
     if column not in TEXT_SOURCES:
         raise ValueError("unknown opinion text source")
@@ -449,3 +486,11 @@ def canonical_text(column: str, raw: str) -> Parsed:
     header = _lawbox_header(root) if column == "html_lawbox" else None
     _walk(root, column, builder, header)
     return builder.finish()
+
+
+def canonical_text(column: str, raw: str) -> Parsed:
+    """Walk and check legibility for the ingest of a new opinion alone."""
+
+    parsed = walk(column, raw)
+    _check_legible(parsed.text)
+    return parsed

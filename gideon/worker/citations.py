@@ -64,6 +64,7 @@ def _designator_gap(gap: str) -> bool:
 
 def edges(
     doc_id: str,
+    pipeline: str,
     text: str,
     sections: Sequence[SectionSpan],
     found: Sequence[FoundCitation],
@@ -138,7 +139,7 @@ def edges(
         if pattern_id is None:
             raise ValueError("citation pattern is missing")
         citation_id = hashlib.sha256(
-            f"{doc_id}\n{candidate.start}\n{candidate.end}".encode()
+            f"{doc_id}\n{pipeline}\n{candidate.start}\n{candidate.end}".encode()
         ).hexdigest()
         rows.append(NewCitation(
             citation_id, doc_id, ordinal, candidate.start, candidate.end,

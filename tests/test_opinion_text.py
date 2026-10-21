@@ -1,8 +1,44 @@
 """Canonical opinion text over fictitious examples of each source column."""
 
+import re
+import unicodedata
 import unittest
+from string import ascii_lowercase, ascii_uppercase, digits
 
 from gideon.worker import opiniontext
+
+FICTIONAL_OPINION = (
+    "The defendant in this fictional appeal asks us to set aside an order about "
+    "a search of a locked cabinet in the town library. The officer had a warrant "
+    "for the front desk, but the cabinet was in another room and belonged to "
+    "a visitor. No witness said that the visitor had given permission to open "
+    "it. The town argues that the key was on the desk and therefore the cabinet "
+    "was within the warrant. We disagree because the location of a key does "
+    "not change the place that a warrant describes. The photograph marked "
+    "exhibit7 shows the separate room beside the library cafe\u0301. It does not "
+    "show any connection between the cabinet and the desk. We return the "
+    "matter to the fictional trial court so that it may consider whether "
+    "the remaining evidence supports the charge without the papers taken "
+    "from the cabinet. The parties may address that question on remand."
+)
+
+
+def cipher_text(text: str) -> str:
+    """Shift ASCII letters three places within each alphabet and remove digits."""
+
+    return text.translate(str.maketrans(
+        ascii_lowercase + ascii_uppercase,
+        ascii_lowercase[3:] + ascii_lowercase[:3] + ascii_uppercase[3:] + ascii_uppercase[:3],
+        digits,
+    ))
+
+
+def _source(column: str, text: str) -> str:
+    if column == "plain_text":
+        return text
+    if column == "xml_harvard":
+        return f"<opinion><p>{text}</p></opinion>"
+    return f"<p>{text}</p>"
 
 
 class OpinionText(unittest.TestCase):
@@ -235,11 +271,84 @@ class OpinionText(unittest.TestCase):
             ("plain_text", " \r\n\f ", "empty"),
             ("xml_harvard", "<opinion><page-number>*1</page-number></opinion>", "empty"),
             ("html", "<p><script>only script</script></p>", "empty"),
+            ("html", "<p> \n\t </p>", "empty"),
             ("xml_harvard", "<", "unparseable"),
+            ("plain_text", cipher_text(FICTIONAL_OPINION), "illegible"),
         ):
             with self.subTest(column=column, raw=raw):
                 with self.assertRaises(opiniontext.OpinionTextFailure) as raised:
                     opiniontext.canonical_text(column, raw)
+                self.assertEqual(raised.exception.reason, reason)
+
+
+class Legibility(unittest.TestCase):
+    def test_plain_opinion_passes_and_its_cipher_fails_in_every_source(self) -> None:
+        cipher = cipher_text(FICTIONAL_OPINION)
+        self.assertEqual(
+            len(re.findall(r"[A-Za-z]+", cipher)),
+            len(re.findall(r"[A-Za-z]+", FICTIONAL_OPINION)),
+        )
+        self.assertGreaterEqual(len(re.findall(r"[A-Za-z]+", cipher)),
+                                opiniontext.LEGIBILITY_WORD_FLOOR)
+        self.assertNotEqual(cipher, FICTIONAL_OPINION)
+        self.assertNotRegex(cipher, r"[0-9]")
+        for column in opiniontext.TEXT_SOURCES:
+            with self.subTest(column=column):
+                parsed = opiniontext.canonical_text(column, _source(column, FICTIONAL_OPINION))
+                self.assertEqual(parsed.text, unicodedata.normalize("NFC", FICTIONAL_OPINION))
+                share = opiniontext.legibility(parsed.text)
+                self.assertIsNotNone(share)
+                assert share is not None
+                self.assertGreaterEqual(share, opiniontext.LEGIBILITY_SHARE_FLOOR)
+                with self.assertRaises(opiniontext.OpinionTextFailure) as raised:
+                    opiniontext.canonical_text(column, _source(column, cipher))
+                self.assertEqual(raised.exception.reason, "illegible")
+
+    def test_cipher_below_word_floor_is_unjudged_in_every_source(self) -> None:
+        words = re.findall(r"[A-Za-z]+", cipher_text(FICTIONAL_OPINION))
+        short = " ".join(words[:opiniontext.LEGIBILITY_WORD_FLOOR - 1])
+        self.assertEqual(len(short.split()), opiniontext.LEGIBILITY_WORD_FLOOR - 1)
+        for column in opiniontext.TEXT_SOURCES:
+            with self.subTest(column=column):
+                parsed = opiniontext.canonical_text(column, _source(column, short))
+                self.assertEqual(parsed.text, short)
+                self.assertIsNone(opiniontext.legibility(parsed.text))
+
+    def test_capitals_heading_and_latin_pass_at_word_floor(self) -> None:
+        heading = "OPINION"
+        latin = "res ipsa loquitur"
+        prose = FICTIONAL_OPINION.split()[:
+            opiniontext.LEGIBILITY_WORD_FLOOR - len(heading.split()) - len(latin.split())
+        ]
+        raw = f"{heading}\n\n{' '.join(prose)} {latin}."
+        self.assertEqual(len(re.findall(r"[A-Za-z]+", raw)), opiniontext.LEGIBILITY_WORD_FLOOR)
+        parsed = opiniontext.canonical_text("plain_text", raw)
+        share = opiniontext.legibility(parsed.text)
+        self.assertIsNotNone(share)
+        assert share is not None
+        self.assertGreaterEqual(share, opiniontext.LEGIBILITY_SHARE_FLOOR)
+        self.assertEqual(opiniontext.legibility(parsed.text.upper()), share)
+
+    def test_walk_keeps_cipher_text_and_structure_in_every_source(self) -> None:
+        cipher = cipher_text(FICTIONAL_OPINION)
+        expected = unicodedata.normalize("NFC", cipher)
+        for column in opiniontext.TEXT_SOURCES:
+            with self.subTest(column=column):
+                parsed = opiniontext.walk(column, _source(column, cipher))
+                blocks = ((opiniontext.Block("opinion", "", 0, len(expected)),)
+                          if column == "xml_harvard" else ())
+                self.assertEqual(parsed, opiniontext.Parsed(expected, (), blocks))
+
+    def test_walk_still_rejects_empty_and_unparseable_sources(self) -> None:
+        for column, raw, reason in (
+            ("plain_text", " \r\n\f ", "empty"),
+            ("xml_harvard", "<opinion><p> </p></opinion>", "empty"),
+            ("html", "<p> \n\t </p>", "empty"),
+            ("xml_harvard", "<", "unparseable"),
+        ):
+            with self.subTest(column=column, reason=reason):
+                with self.assertRaises(opiniontext.OpinionTextFailure) as raised:
+                    opiniontext.walk(column, raw)
                 self.assertEqual(raised.exception.reason, reason)
 
 

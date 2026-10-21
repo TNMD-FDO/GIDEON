@@ -227,7 +227,7 @@ def _preconditions(
     return config, source, at, gideon_ids
 
 
-def _selection_detail(selection: _Selection) -> str:
+def _selection_detail(selection: _Selection, unfinished: Sequence[str] = ()) -> str:
     snapshot = selection.snapshot.label if selection.snapshot is not None else "-"
     set_label = (
         selection.set_ref.label
@@ -235,10 +235,35 @@ def _selection_detail(selection: _Selection) -> str:
         else "chosen after fetch"
     )
     target_time = selection.at.isoformat() if selection.at is not None else "latest"
-    return (
+    detail = (
         f"source={selection.source}; snapshot={snapshot}; set={set_label}; "
         f"at={target_time}"
     )
+    if selection.record is not None:
+        detail += f"; archive_through={selection.record.archive_through.isoformat()}"
+    if unfinished:
+        detail += (
+            f"; {len(unfinished)} newer unfinished snapshot(s): "
+            + ", ".join(unfinished)
+        )
+    return detail
+
+
+def _newer_unfinished(
+    listed: Sequence[backupset.RemoteSnapshot], selected: str
+) -> tuple[str, ...]:
+    # A newer push left unfinished is never selectable, so a target restore
+    # can go back further than the newest push; the row names that gap.
+    newer: list[str] = []
+    for snapshot in listed:
+        label = snapshot.label.removesuffix(backupset.PARTIAL_SUFFIX)
+        if (
+            not snapshot.complete
+            and backupset.LABEL.fullmatch(label) is not None
+            and label > selected
+        ):
+            newer.append(snapshot.label)
+    return tuple(sorted(newer))
 
 
 def _select_staging(
@@ -327,7 +352,8 @@ def _select_target(
             )
         snapshot, record = min(eligible, key=lambda pair: pair[0].label)
     selected = _Selection("target", at, snapshot, record, None)
-    return StageResult("select", True, _selection_detail(selected), ""), selected
+    detail = _selection_detail(selected, _newer_unfinished(listed, snapshot.label))
+    return StageResult("select", True, detail, ""), selected
 
 
 def _postgres_answers(io: Host, rendered_dir: PathLike) -> bool:

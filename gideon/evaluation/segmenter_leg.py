@@ -230,7 +230,7 @@ def main() -> int:
                 or not isinstance(value["original"], str)
             ):
                 raise ValueError("invalid input fields")
-            parsed = opiniontext.canonical_text(column, value["original"])
+            parsed = opiniontext.walk(column, value["original"])
             segmented = sections.segment(
                 parsed, opinion_type=opinion_type,
                 per_curiam=value["per_curiam"], column=column,

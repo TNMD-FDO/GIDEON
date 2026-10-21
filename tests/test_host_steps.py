@@ -6329,7 +6329,7 @@ class ServiceStepTests(unittest.TestCase):
 
         workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
         smoke = next(step for step in workflow["jobs"]["smoke"]["steps"] if step.get("name") == "Smoke on the sibling")
-        self.assertEqual(smoke["run"], f'sudo {SMOKE_WRAPPER_PATH} 2>&1 | tee "$RUNNER_TEMP/smoke.txt"')
+        self.assertEqual(smoke["run"].splitlines()[0], f'sudo {SMOKE_WRAPPER_PATH} 2>&1 | tee "$RUNNER_TEMP/smoke.txt"')
 
     def test_mask_wrapper_is_admitted_by_runner_sudoers(self) -> None:
         wrapped = wrap(
