@@ -26,6 +26,7 @@ from gideon.host import install as host_install
 from gideon.host import restore as host_restore
 from gideon.host import site as host_site
 from gideon.host.apply import PRINT_ONCE_SUFFIX
+from gideon.host.index import level
 from gideon.host.lock import load_host_lock
 from gideon.host.render.engine import MODEL_SERVERS
 from gideon.host.report import Problem, StageResult, stage_line
@@ -1151,6 +1152,7 @@ class FullRestoreContracts(unittest.TestCase):
             f"pre-restore: ok — {host_restore.FRESH_STACK_SKIPPED_DETAIL}\n"
             f"fetch: ok — selected set {manifest.label}\n"
             f"files: ok — {host_restore.REOWN_MAPPED_DETAIL}\n"
+            f"stores: ok — {level.level_clauses(level.LevelReport((), (), ()))[0]}\n"
             "next: ok — restored\n"
             "Secrets: a rebuilt box\n"
         )
@@ -1219,14 +1221,58 @@ class FullRestoreContracts(unittest.TestCase):
                 selected = replace(manifest, inventory=inventory)
                 assert ctx.restore_set is not None
                 ctx.restore_set = replace(ctx.restore_set, manifest=selected)
-                stores_row = (
-                    f"stores: ok — {'; '.join(row_clauses)}\n" if row_clauses else ""
-                )
+                stores_row = "stores: ok — " + "; ".join((
+                    *row_clauses, *level.level_clauses(level.LevelReport((), (), ())),
+                )) + "\n"
                 host.commands[command] = completed(command, stdout=base + stores_row + ending)
                 result = fullrestore.restore_target(ctx)
                 self.assertEqual(result.ok, expected, result.detail)
                 if missing:
                     self.assertIn(missing, result.detail)
+
+    def test_restore_requires_every_level_clause_to_match_and_at_least_one_present(self) -> None:
+        host, ctx, manifest = restore_context()
+        ctx.snapshot_label = "20260917T020000Z"
+        command = vm_product_argv(
+            ctx, ["python3", "-m", "gideon", "restore", "--from", "target"],
+            "restore.txt", forwards=(fullrestore.REGISTRY_FORWARD,),
+        )
+        base = (
+            f"select: ok — snapshot={ctx.snapshot_label}\n"
+            f"pre-restore: ok — {host_restore.FRESH_STACK_SKIPPED_DETAIL}\n"
+            f"fetch: ok — selected set {manifest.label}\n"
+            f"files: ok — {host_restore.REOWN_MAPPED_DETAIL}\n"
+        )
+        ending = "next: ok — restored\nSecrets: a rebuilt box\n"
+        outcome = level.LevelOutcome(
+            "fictitious-generation", "caselaw", "built", "whole",
+            7, 7, 11, 11, None, None, "corpus-2099-01-03",
+        )
+        outcomes = (
+            outcome,
+            replace(outcome, name="fictitious-short-generation", outcome="demoted", dense_count=0),
+        )
+        valid = level.level_clauses(level.LevelReport(outcomes, (), ()))
+        empty = level.level_clauses(level.LevelReport((), (), ()))
+        invalid = "level fictitious-generation: unrecognised outcome"
+        cases = (
+            (valid, True, ""), (empty, True, ""),
+            ((), False, "level clause"),
+            (("the store tier running",), False, "level clause"),
+            ((*valid, invalid), False, invalid),
+            ((valid[0] + " extra",), False, valid[0] + " extra"),
+            (("levelled without a recorded outcome",), False, "levelled without a recorded outcome"),
+        )
+        for clauses, expected, issue in cases:
+            with self.subTest(clauses=clauses):
+                stores_row = f"stores: ok — {'; '.join(clauses)}\n" if clauses else ""
+                host.commands[command] = completed(command, stdout=base + stores_row + ending)
+                result = fullrestore.restore_target(ctx)
+                self.assertEqual(result.ok, expected, result.detail)
+                if not expected:
+                    self.assertIn(issue, result.detail)
+                    self.assertIn("restore.txt", result.detail)
+                    self.assertEqual(result.fix, fullrestore.FULL_RESTORE_FIX)
 
     def test_restore_requires_the_pinned_store_clause_ending_with_nothing_left_out(self) -> None:
         host, ctx, value, _name = restore_context_with_store()
@@ -1236,7 +1282,10 @@ class FullRestoreContracts(unittest.TestCase):
             f"pre-restore: ok — {host_restore.FRESH_STACK_SKIPPED_DETAIL}\n"
             f"fetch: ok — selected set {value.label}\n"
         )
-        ending = "next: ok — restored\nSecrets: a rebuilt box\n"
+        ending = (
+            f"stores: ok — {level.level_clauses(level.LevelReport((), (), ()))[0]}\n"
+            "next: ok — restored\nSecrets: a rebuilt box\n"
+        )
         command = vm_product_argv(
             ctx, ["python3", "-m", "gideon", "restore", "--from", "target"],
             "restore.txt", forwards=(fullrestore.REGISTRY_FORWARD,),
@@ -1349,6 +1398,7 @@ class FullRestoreContracts(unittest.TestCase):
                 secrets_line = line if line.startswith("Secrets:") else "Secrets: a rebuilt box"
                 transcript = (
                     f"{select_line}\n{pre_restore_line}\n{fetch_line}\n{files_line}\n"
+                    f"stores: ok — {level.level_clauses(level.LevelReport((), (), ()))[0]}\n"
                     f"next: ok — restored\n{secrets_line}\n"
                 )
                 command = vm_product_argv(

@@ -14,6 +14,7 @@ FIXTURE = ROOT / "tests" / "fixtures" / "pinwatch" / "pypi" / "starlette.json"
 DATEUTIL_FIXTURE = (
     ROOT / "tests" / "fixtures" / "pinwatch" / "pypi" / "python-dateutil.json"
 )
+REGEX_FIXTURE = ROOT / "tests" / "fixtures" / "pinwatch" / "pypi" / "regex.json"
 PROJECT = "fictitious-project"
 
 
@@ -117,6 +118,80 @@ class StableVersionContracts(unittest.TestCase):
         ):
             with self.subTest(version=text):
                 self.assertIsNone(pypi.StableVersion.parse(text))
+
+
+class VersionOrderContracts(unittest.TestCase):
+    def test_pep_440_order_and_stable_version_agreement(self) -> None:
+        """PEP 440's suffix-order summary defines the full version order."""
+
+        example = (
+            "1.dev0",
+            "1.0.dev456",
+            "1.0a1",
+            "1.0a2.dev456",
+            "1.0a12.dev456",
+            "1.0a12",
+            "1.0b1.dev456",
+            "1.0b2",
+            "1.0b2.post345.dev456",
+            "1.0b2.post345",
+            "1.0rc1.dev456",
+            "1.0rc1",
+            "1.0",
+            "1.0+abc.5",
+            "1.0+abc.7",
+            "1.0+5",
+            "1.0.post456.dev34",
+            "1.0.post456",
+            "1.0.15",
+            "1.1.dev1",
+            "1!0.0",
+        )
+        local_parts = (
+            "9000.0",
+            "9000.0+abc",
+            "9000.0+abc.a",
+            "9000.0+abc.b",
+            "9000.0+abc.2",
+            "9000.0+abc.10",
+            "9000.0+def",
+            "9000.0+2",
+            "9000.0+10",
+        )
+        for texts in (example, local_parts):
+            with self.subTest(versions=texts):
+                for text in texts:
+                    self.assertIsNotNone(pypi.version_order(text))
+                self.assertEqual(
+                    sorted(
+                        texts[::2] + texts[1::2],
+                        key=lambda text: cast(tuple, pypi.version_order(text)),
+                    ),
+                    list(texts),
+                )
+                for lower, upper in zip(texts[:-1], texts[1:], strict=True):
+                    lower_order = pypi.version_order(lower)
+                    upper_order = pypi.version_order(upper)
+                    assert lower_order is not None
+                    assert upper_order is not None
+                    self.assertLess(lower_order, upper_order)
+
+        for text in ("1.0.0", "v1.0"):
+            with self.subTest(equal=text):
+                self.assertEqual(pypi.version_order(text), pypi.version_order("1.0"))
+        self.assertIsNone(pypi.version_order("not-a-version"))
+
+        stable_texts = ("2.0", "1!0.0", "1.0.post1", "1.0")
+        self.assertEqual(
+            sorted(
+                stable_texts,
+                key=lambda text: cast(tuple, pypi.version_order(text)),
+            ),
+            sorted(
+                stable_texts,
+                key=lambda text: cast(pypi.StableVersion, pypi.StableVersion.parse(text)),
+            ),
+        )
 
 
 class AttributionContracts(unittest.TestCase):
@@ -285,6 +360,119 @@ class IndexReaderContracts(unittest.TestCase):
             [(url, {"Accept": pypi.PYPI_ACCEPT}, "GET")] * (len(listed) + 1),
         )
 
+    def test_regex_fixture_replay_derives_the_unlisted_threshold(self) -> None:
+        """Replay the reply read 2026-10-22 UTC with its Accept header and kept keys.
+
+        The header is ``application/vnd.pypi.simple.v1+json``; the kept keys
+        are ``meta``, ``name``, ``project-status``, ``versions``, and
+        ``files`` with ``filename``, ``yanked``, and ``upload-time``.
+        The window keeps versions ``2015.10.29``, ``2015.11.05``, and
+        ``2018.06.20`` and the newest two listed releases, and the files of
+        those five versions and of the legacy spellings ``2015.11.05b`` and
+        ``2018.06.20a``.
+        """
+
+        document = cast(dict[str, object], json.loads(REGEX_FIXTURE.read_text()))
+        project = cast(str, document["name"])
+        versions = cast(list[str], document["versions"])
+        files = cast(list[dict[str, object]], document["files"])
+        listed: dict[str, pypi.StableVersion] = {}
+        listed_orders: dict[str, tuple[tuple[object, ...], ...]] = {}
+        for listed_text in versions:
+            listed_order = pypi.version_order(listed_text)
+            if listed_order is not None:
+                listed_orders[listed_text] = listed_order
+            listed_stable = pypi.StableVersion.parse(listed_text)
+            if listed_stable is not None:
+                listed[listed_text] = listed_stable
+        self.assertTrue(listed)
+        newest_text = max(listed, key=lambda candidate_text: listed[candidate_text])
+        newest_order = listed_orders[newest_text]
+
+        file_versions: list[
+            tuple[str, str, tuple[tuple[object, ...], ...], bool]
+        ] = []
+        for item in files:
+            filename = cast(str, item["filename"])
+            file_text = pypi.version_from_filename(filename, project)
+            assert file_text is not None, filename
+            file_order = pypi.version_order(file_text)
+            assert file_order is not None, filename
+            file_versions.append((filename, file_text, file_order, bool(item["yanked"])))
+
+        legacy_versions = {
+            observed_text
+            for _, observed_text, observed_order, _yanked in file_versions
+            if observed_order not in listed_orders.values()
+        }
+        self.assertTrue(legacy_versions)
+        for legacy_text in legacy_versions:
+            with self.subTest(legacy=legacy_text):
+                self.assertIsNone(pypi.StableVersion.parse(legacy_text))
+                legacy_order = pypi.version_order(legacy_text)
+                assert legacy_order is not None
+                self.assertLess(legacy_order, newest_order)
+        legacy_files = [
+            (filename, observed_order)
+            for filename, observed_text, observed_order, _yanked in file_versions
+            if observed_text in legacy_versions
+        ]
+        installable = [
+            candidate_text
+            for candidate_text in listed
+            if any(
+                observed_order == listed_orders[candidate_text] and not yanked
+                for _, _text, observed_order, yanked in file_versions
+            )
+        ]
+
+        url = f"{pypi.PYPI_INDEX_ROOT}/{project}/"
+        fetcher = DictFetcher({url: response(document)})
+        refused = 0
+        answered = 0
+        for current_text, current_stable in listed.items():
+            with self.subTest(current=current_text):
+                current_order = listed_orders[current_text]
+                first_above = next(
+                    (
+                        filename
+                        for filename, observed_order in legacy_files
+                        if observed_order > current_order
+                    ),
+                    None,
+                )
+                if first_above is not None:
+                    with self.assertRaises(FetchError) as caught:
+                        pypi.pypi_version(fetcher, project, current_text)
+                    self.assertIn(first_above, caught.exception.reason)
+                    for filename, _order in legacy_files:
+                        if filename != first_above:
+                            self.assertNotIn(filename, caught.exception.reason)
+                    refused += 1
+                else:
+                    candidates = [
+                        candidate_text
+                        for candidate_text in installable
+                        if listed[candidate_text] > current_stable
+                    ]
+                    expected = (
+                        max(candidates, key=lambda candidate_text: listed[candidate_text])
+                        if candidates
+                        else None
+                    )
+                    answer = pypi.pypi_version(fetcher, project, current_text)
+                    self.assertEqual(answer, expected)
+                    if answer is not None:
+                        self.assertIn(answer, listed)
+                    answered += 1
+
+        self.assertTrue(refused and answered)
+        self.assertIsNone(pypi.pypi_version(fetcher, project, newest_text))
+        self.assertEqual(
+            fetcher.calls,
+            [(url, {"Accept": pypi.PYPI_ACCEPT}, "GET")] * (len(listed) + 1),
+        )
+
     def test_newest_prerelease_is_ignored(self) -> None:
         reply = index_reply(
             ["9000.0", "9001.0rc1"],
@@ -386,6 +574,32 @@ class IndexReaderContracts(unittest.TestCase):
         self.assertNotIn(below_current["filename"], caught.exception.reason)
 
         result, _fetcher = self._resolve(reply, current="9000.1")
+        self.assertIsNone(result)
+
+    def test_non_stable_files_at_or_below_current_are_set_aside(self) -> None:
+        """PEP 440's full order sets aside old pre/dev files before attribution."""
+
+        below_current = file_entry("9000.0b1")
+        current_dev = file_entry("9000.1.dev1")
+        files: list[object] = [
+            file_entry("9000.1"),
+            below_current,
+            current_dev,
+            file_entry("9000.2"),
+        ]
+        reply = index_reply(["9000.1", "9000.2"], files)
+        result, _fetcher = self._resolve(reply, current="9000.1")
+        self.assertEqual(result, "9000.2")
+
+        above_current = file_entry("9000.2rc1")
+        upper_reply = index_reply(["9000.1", "9000.2"], [*files, above_current])
+        with self.assertRaises(FetchError) as caught:
+            self._resolve(upper_reply, current="9000.1")
+        self.assertIn(above_current["filename"], caught.exception.reason)
+        self.assertNotIn(below_current["filename"], caught.exception.reason)
+        self.assertNotIn(current_dev["filename"], caught.exception.reason)
+
+        result, _fetcher = self._resolve(upper_reply, current="9000.2")
         self.assertIsNone(result)
 
     def test_quarantine_and_api_version_rules(self) -> None:

@@ -29,6 +29,13 @@ MANIFEST_SQL: Final[str] = """SELECT row_to_json(manifest) FROM (
     ORDER BY source_id
 ) AS manifest;
 """
+GIVEN_SQL: Final[str] = """SELECT row_to_json(given) FROM (
+    SELECT source_id FROM public.generation_gold
+    WHERE gen_id = :'v_name' AND source_id IN
+        (SELECT jsonb_array_elements_text(:'v_source_ids'::jsonb))
+    ORDER BY source_id
+) AS given;
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +116,42 @@ def _read_manifest(
     return hashes
 
 
+def _read_given(
+    name: str, source_ids: tuple[str, ...], context: RunContext,
+) -> frozenset[str] | Problem:
+    """Read requested given gold in one metrics-role statement on the selected stack."""
+
+    sql = (
+        bind("v_name", name) + "\n"
+        + bind("v_source_ids", json.dumps(source_ids, separators=(",", ":")))
+        + "\n" + GIVEN_SQL
+    )
+    fix = f"Run {stack.logs_fix(context.turns_dir, record.POSTGRES_SERVICE)}, then retry."
+    try:
+        result = context.host.run(record.reader_argv(context.turns_dir), input=sql)
+    except (OSError, subprocess.SubprocessError):
+        return Problem("generation gold read could not run", fix)
+    if result.returncode != 0:
+        return Problem(f"generation gold read failed (exit {result.returncode})", fix)
+    requested = frozenset(source_ids)
+    given: set[str] = set()
+    for line in result.stdout.splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            return Problem("generation gold row is invalid", fix)
+        if (
+            not isinstance(value, dict) or set(value) != {"source_id"}
+            or not isinstance(value["source_id"], str)
+            or not 1 <= len(value["source_id"]) <= SOURCE_ID_MAX_LENGTH
+            or re.fullmatch(SOURCE_ID_PATTERN, value["source_id"]) is None
+            or value["source_id"] not in requested or value["source_id"] in given
+        ):
+            return Problem("generation gold row is invalid", fix)
+        given.add(value["source_id"])
+    return frozenset(given)
+
+
 def _failed(
     counted: tuple[str, ...], unsigned: int, code: str, problem: Problem,
 ) -> SliceResult:
@@ -140,11 +183,17 @@ def run_gold_drop(loaded: LoadedSet, slice_name: str, context: RunContext) -> Sl
     if isinstance(manifest, Problem):
         return _failed(selection.counted, len(selection.unsigned), "record-unreachable", manifest)
 
-    # A sample holds the gold its build was given; gold landed since is unbuilt, not dropped.
     sampled = generation.name.endswith(f"__{SAMPLE_SUFFIX}")
-    unbuilt = tuple(identifier for identifier in gold if identifier not in manifest) if sampled else ()
-    if unbuilt:
-        gold = {identifier: hashes for identifier, hashes in gold.items() if identifier in manifest}
+    unbuilt: tuple[str, ...] = ()
+    if sampled:
+        given = _read_given(generation.name, tuple(gold), context)
+        if isinstance(given, Problem):
+            return _failed(selection.counted, len(selection.unsigned), "record-unreachable", given)
+        # The recorded given list decides which absent gold was never built; with none recorded,
+        # every absent id is dropped until the sample is refilled.
+        if given:
+            unbuilt = tuple(identifier for identifier in gold if identifier not in manifest and identifier not in given)
+            gold = {identifier: hashes for identifier, hashes in gold.items() if identifier in manifest or identifier in given}
     drops = dropped_documents(gold, manifest)
     dropped = set(drops.absent) | set(drops.changed)
     signoffs = {signoff.case_id: signoff for signoff in loaded.signoffs}
@@ -179,7 +228,7 @@ def run_gold_drop(loaded: LoadedSet, slice_name: str, context: RunContext) -> Sl
     lines = [
         f"generation {generation.name} ({generation.corpus_lockfile})",
         f"{len(selection.counted)} counted, {len(selection.unsigned)} unsigned excluded",
-        *((f"unbuilt gold documents {len(unbuilt)} (absent from the sample, not counted): "
+        *((f"unbuilt gold documents {len(unbuilt)} (not given to the sample's build, not counted): "
            + (" ".join(unbuilt) or "none"),) if sampled else ()),
         f"gold documents {len(gold)}: dropped {len(dropped)} "
         f"(absent {len(drops.absent)}, hash changed {len(drops.changed)}), "

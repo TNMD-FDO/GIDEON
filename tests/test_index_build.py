@@ -1,4 +1,16 @@
-"""The index build command over fictitious lockfiles and a recorded queue."""
+"""The index build command over fictitious lockfiles and a recorded queue.
+
+test_corpus_install's FakeHost answers the stage counts' write and read. Production
+runs cover profile and scope; guard and reserve figures, skips, and refusals before
+any job or report; service checks, defers and rejoins, clustering, leveled counts,
+heartbeats, limits, treatment, failures, locks, and interrupts; footprint measure,
+write, and recovery; report gates, whole-build cases, failures, and re-run append; and
+the smoke row's place, refusal, and absence from a sample build. Sample runs cover the
+stage order, each statement's directory, the counts read against production's, the
+given gold recorded before any job and a refill's union, the failed write's refusal,
+the guard refusal, the reserve skip and judgment, reported and unreported refusals,
+and interrupts.
+"""
 
 import argparse
 import contextlib
@@ -13,17 +25,30 @@ import unittest
 from collections.abc import Callable
 from dataclasses import asdict, replace
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
+from unittest.mock import Mock, patch
 
 import test_corpus_install
 import yaml  # type: ignore[import-untyped]
 from test_corpus_install import NOW, RENDERED, ROOT, SITE_PATH, FakeHost
 from test_engine_verify import models_text
+from test_index_record import row_for
 from test_models_lock import VALID, VALID_WITH_SPACE
 
 from gideon.cli import build_parser
-from gideon.host import backuplock, caselaw, models, report, stack, staging, worker
+from gideon.host import (
+    backuplock,
+    caselaw,
+    models,
+    report,
+    secrets,
+    stack,
+    staging,
+    worker,
+)
 from gideon.host.corpus.lockfile import load_lockfile, render_lockfile
+from gideon.host.corpus.record import database_fix
 from gideon.host.corpus.sources import SOURCES, SourceDefinition
 from gideon.host.index import (
     build,
@@ -31,17 +56,22 @@ from gideon.host.index import (
     dense,
     generations,
     guards,
+    lexical,
     reserve,
     sample,
     smoke,
     treatment,
 )
-from gideon.host.index.record import PromotedRow
+from gideon.host.index.record import GenerationRow, PromotedRow
 from gideon.host.index.sample import GoldDocument, SampleInputs
-from gideon.host.render.ci import CI_QDRANT_DATA_ROOT, CI_ROOT
+from gideon.host.render.ci import CI_QDRANT_DATA_ROOT, CI_ROOT, CI_SECRETS_DIR
 from gideon.host.render.engine import EMBED
 from gideon.host.render.opensearch import OPENSEARCH_SERVICE_NAME
-from gideon.host.render.qdrant import QDRANT_DATA_ROOT, QDRANT_SERVICE_NAME
+from gideon.host.render.qdrant import (
+    QDRANT_DATA_ROOT,
+    QDRANT_SECRET_NAME,
+    QDRANT_SERVICE_NAME,
+)
 from gideon.host.render.worker import (
     AGREEMENT_RECORD_NAME,
     CLUSTER_BUDGET_SECONDS,
@@ -290,7 +320,7 @@ class Build(unittest.TestCase):
                 continue
             self.assertNotIn(name, " ".join(argv))
         self.assertEqual(len(self.host.statement_directories),
-                         sum(sql is not None for _, sql, _ in self.host.executions))
+                         sum(sql is not None and "psql" in argv for argv, sql, _ in self.host.executions))
         for directory, sql in self.host.statement_directories:
             production_read = (
                 "ORDER BY c.label" in sql or "WITH RECURSIVE chain AS" in sql
@@ -307,6 +337,100 @@ class Build(unittest.TestCase):
         self.assertEqual(reads[0][0], RENDERED)
         self.assertIn(worker.bind("v_label", label), reads[0][1])
 
+    def test_sample_records_sorted_gold_before_jobs_and_a_larger_refill_adds_to_it(self) -> None:
+        label = self.fixture.labels[0]
+        name = sample.sample_name(self.inputs(label).name)
+        gold = tuple(GoldDocument(sample.source_id("example", number), None) for number in (90, 10))
+        selections = (
+            self.sample_inputs(gold),
+            self.sample_inputs((*gold, GoldDocument(sample.source_id("example", 20), "b" * 64))),
+        )
+        given: set[str] = set()
+        for selection in selections:
+            with self.subTest(gold=selection.gold):
+                execution_count = len(self.host.executions)
+                statement_count = len(self.host.statement_directories)
+                deferred_count = len(self.host.deferred)
+                code, out, err = self.run_build(label, sample=selection)
+                self.assertEqual((code, err), (0, ""), out)
+                identifiers = sorted(document.source_id for document in selection.gold)
+                given.update(identifiers)
+                self.assertEqual(self.host.given_gold, {name: given})
+                writes = [(directory, sql) for directory, sql in self.host.statement_directories[statement_count:]
+                          if "public.generation_gold" in sql]
+                self.assertEqual(len(writes), 1)
+                directory, sql = writes[0]
+                self.assertEqual(directory, str(CI_ROOT))
+                self.assertEqual(self.host._bound(sql, "v_name"), name)
+                self.assertEqual(json.loads(self.host._bound(sql, "v_source_ids")), identifiers)
+                executions = self.host.executions[execution_count:]
+                write = next(index for index, (_, statement, _) in enumerate(executions) if statement == sql)
+                argv = executions[write][0]
+                self.assertEqual(argv, worker.psql_argv(CI_ROOT))
+                for value in (name, *identifiers, "INSERT", "v_source_ids"):
+                    self.assertNotIn(value, " ".join(argv))
+                first_job = next(index for index, (_, statement, _) in enumerate(executions)
+                                 if statement and "procrastinate_defer_jobs_v1" in statement)
+                self.assertLess(write, first_job)
+                generation = next(index for index, (_, statement, _) in enumerate(executions)
+                                  if statement and "DO $generation$" in statement)
+                self.assertLess(generation, write)
+                self.assertEqual(len(self.host.deferred[deferred_count:]), 3)
+                lines = [line for line in out.splitlines() if line.startswith("generation:")]
+                self.assertEqual(len(lines), 1)
+                self.assertTrue(lines[0].endswith(f"; gold {len(selection.gold)} recorded"), lines[0])
+
+    def test_sample_gold_write_failure_refuses_generation_without_jobs_or_report_and_recovers(self) -> None:
+        label = self.fixture.labels[0]
+        name = sample.sample_name(self.inputs(label).name)
+        selection = self.sample_inputs((GoldDocument(sample.source_id("example", 17), None),))
+        self.host.fail_phase = "gold-write"
+        code, out, err = self.run_build(label, sample=selection)
+        self.assertEqual((code, err), (1, ""), out)
+        command_path = f"index build caselaw --sample --lockfile {label}"
+        self.assertEqual(out.splitlines()[-1], report.stage_line(report.StageResult(
+            "generation", False, "generation gold write failed (exit 3)", database_fix(CI_ROOT, command_path),
+        )))
+        self.assertEqual([line.split(":", 1)[0] for line in out.splitlines()],
+                         ["preconditions", "lockfile", "generation"])
+        self.assertNotIn("generation: ok", out)
+        self.assertNotIn("report:", out)
+        self.assertEqual((self.host.given_gold, self.host.deferred, self.host.jobs, self.host.reports), ({}, [], {}, []))
+        self.assertEqual(self.host.generations[name].state, "building")
+        self.assertIsNone(self.host.engine_holder)
+        self.assertEqual(self.host.engine_releases, 1)
+        self.assert_sample_fix(out, label)
+
+        self.host.fail_phase = None
+        code, out, err = self.run_build(label, sample=selection)
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(self.host.given_gold[name], {document.source_id for document in selection.gold})
+        self.assertEqual(len(self.host.deferred), 3)
+        self.assertEqual(len(self.host.reports), 1)
+        self.assertEqual(self.host.generations[name].state, "built")
+        self.assertIn("report: ok", out)
+        self.assertIsNone(self.host.engine_holder)
+        self.assertEqual(self.host.engine_releases, 2)
+
+    def test_sample_refill_interrupted_at_cluster_keeps_the_union_of_given_gold(self) -> None:
+        label = self.fixture.labels[0]
+        name = sample.sample_name(self.inputs(label).name)
+        earlier = self.sample_inputs((GoldDocument(sample.source_id("example", 90), None),))
+        self.assertEqual(self.run_build(label, sample=earlier)[0], 0)
+        reports = copy.deepcopy(self.host.reports)
+        selection = self.sample_inputs((GoldDocument(sample.source_id("example", 20), "b" * 64),))
+        self.host.interrupt_phase = "cluster"
+        code, out, err = self.run_build(label, sample=selection)
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn("cluster: refuse — interrupted; the clustering continues in the worker", out)
+        self.assertIn(f"generation: ok — {name}: built, found; gold {len(selection.gold)} recorded", out)
+        self.assertEqual(self.host.given_gold[name], {document.source_id for document in (*earlier.gold, *selection.gold)})
+        self.assertIsNotNone(self.host.cluster_live_id)
+        self.assertEqual(self.host.reports, reports)
+        self.assertNotIn("report:", out)
+        self.assertIsNone(self.host.engine_holder)
+        self.assertEqual(self.host.engine_releases, 2)
+
     def test_sample_guard_refuses_the_whole_scope_before_any_job_or_report(self) -> None:
         label = self.fixture.labels[0]
         inputs = self.inputs(label)
@@ -319,6 +443,7 @@ class Build(unittest.TestCase):
         self.assertIn(f"guard: refuse — {sample.sample_name(inputs.name)}", out)
         self.assertIn(f"projected chunks {chunks}", out)
         self.assertIn(f"build refusal {profile_guards.build_refusal_chunks}", out)
+        self.assertIn("counted none = 0", out)
         self.assertEqual((self.host.deferred, self.host.jobs, self.host.reports), ([], {}, []))
         self.assertNotIn("reserve:", out)
         self.assertNotIn("report:", out)
@@ -464,6 +589,8 @@ class Build(unittest.TestCase):
             self.assertEqual(set(directories), {RENDERED})
         self.assertIsNone(self.host.treatment_reads[0]["doc_ids"])
         self.assertFalse(any("public.generation_documents" in sql for _, sql in self.host.statement_directories))
+        self.assertFalse(any("public.generation_gold" in sql for _, sql in self.host.statement_directories))
+        self.assertEqual(self.host.given_gold, {})
 
     def test_sample_rejoins_then_runs_all_three_jobs_with_the_current_selection(self) -> None:
         """Rejoined jobs may carry earlier gold, so each runs again with this selection."""
@@ -477,6 +604,7 @@ class Build(unittest.TestCase):
         self.host.cluster_live_id = cluster_job
         selection = self.sample_inputs((GoldDocument(sample.source_id("example", 7), "b" * 64),))
         count = len(self.host.deferred)
+        execution_count = len(self.host.executions)
 
         code, out, err = self.run_build(label, sample=selection)
 
@@ -495,6 +623,19 @@ class Build(unittest.TestCase):
         self.assertLess(out.index(f"deferred job {new_cluster_job}"), out.index(f"rejoined job {lexical_job}"))
         self.assertLess(out.index(f"rejoined job {lexical_job}"), out.index("counts: ok"))
         self.assertLess(out.index(f"rejoined job {dense_job}"), out.index("gold: ok"))
+        writes = [sql for sql in self.host.statements if "public.generation_gold" in sql]
+        self.assertEqual(len(writes), 2)
+        self.assertEqual(json.loads(self.host._bound(writes[0], "v_source_ids")), [])
+        identifiers = sorted(document.source_id for document in selection.gold)
+        self.assertEqual(json.loads(self.host._bound(writes[1], "v_source_ids")), identifiers)
+        name = sample.sample_name(self.inputs(label).name)
+        self.assertEqual(self.host._bound(writes[1], "v_name"), name)
+        self.assertEqual(self.host.given_gold[name], set(identifiers))
+        executions = self.host.executions[execution_count:]
+        write = next(index for index, (_, sql, _) in enumerate(executions) if sql == writes[1])
+        rejoin = next(index for index, (_, sql, _) in enumerate(executions)
+                      if sql and worker.bind("v_job_id", str(cluster_job)) in sql)
+        self.assertLess(write, rejoin)
 
     def test_sample_gold_reports_present_absent_and_changed_ids_in_sorted_order(self) -> None:
         identifiers = {number: sample.source_id("example", number) for number in (90, 80, 70, 60, 20, 10)}
@@ -540,11 +681,14 @@ class Build(unittest.TestCase):
         promoted = replace(row, state="live", promoted_at=NOW.isoformat())
         self.host.generations[name] = promoted
         self.host.deferred.clear()
+        selection = self.sample_inputs((GoldDocument(sample.source_id("example", 17), None),))
         code, out, err = self.run_build(label, sample=selection)
         self.assertEqual((code, err), (0, ""), out)
         self.assertNotIn("nothing built", out)
         self.assertEqual(len(self.host.deferred), 3)
         self.assertEqual(self.host.generations[name].state, "live")
+        self.assertEqual(self.host.given_gold[name], {document.source_id for document in selection.gold})
+        self.assertIn(f"generation: ok — {name}: live, found; gold {len(selection.gold)} recorded", out)
         for attribute in ("failure_reason", "dense_failure_reason"):
             with self.subTest(job=attribute):
                 self.host.generations[name] = promoted
@@ -576,7 +720,7 @@ class Build(unittest.TestCase):
 
     def test_sample_failures_release_the_engine_and_print_parseable_sample_fixes(self) -> None:
         label = self.fixture.labels[0]
-        phases = ("copy-read", "lockfile", "generation-read", "generation",
+        phases = ("copy-read", "lockfile", "generation-read", "generation", "gold-write",
                   "cluster-live-job", "cluster-defer", "cluster", "cluster-counts", "live-job", "defer", "build", "counts",
                   "dense-live-job", "dense-defer", "dense", "dense-counts", "gold")
         for phase in phases:
@@ -597,7 +741,7 @@ class Build(unittest.TestCase):
 
     def test_sample_interrupts_release_the_engine_at_each_stage(self) -> None:
         label = self.fixture.labels[0]
-        for phase in ("preconditions", "lockfile", "generation-read", "generation", "guard", "reserve",
+        for phase in ("preconditions", "lockfile", "generation-read", "generation", "gold-write", "guard", "reserve",
                       "cluster", "build", "counts", "dense", "gold", "treatment-manifest", "treatment-read", "treatment", "report"):
             with self.subTest(phase=phase):
                 self.host.generations.clear()
@@ -676,9 +820,12 @@ class Build(unittest.TestCase):
         retired = replace(row, state="retired", promoted_at=NOW.isoformat(), retired_at=NOW.isoformat())
         self.host.generations[name] = retired
         self.host.deferred.clear()
+        writes = [sql for sql in self.host.statements if "public.generation_gold" in sql]
         code, out, err = self.run_build(label, sample=self.sample_inputs())
         self.assertEqual((code, err), (1, ""), out)
         self.assertIn("generation is retired", out)
+        self.assertNotIn("generation: ok", out)
+        self.assertEqual([sql for sql in self.host.statements if "public.generation_gold" in sql], writes)
         self.assertEqual(self.host.generations[name], retired)
         self.assertEqual(self.host.deferred, [])
         self.assertIsNone(self.host.engine_holder)
@@ -694,6 +841,7 @@ class Build(unittest.TestCase):
             self.assertIn(inputs.name, out)
             self.assertIn("building, created", out)
             self.assertIn("ready 3, chunked 2, chunks 11, projected chunks 17", out)
+            self.assertIn("counted none = 0", out)
             self.assertIn("documents ready 3, chunked 2, unchunked 1", out)
             self.assertIn("chunks indexed 7, present 4, leveled 0, total 11", out)
             self.assertIn("bytes 1024", out)
@@ -719,6 +867,174 @@ class Build(unittest.TestCase):
         self.assertEqual(len(self.host.generations), 2)
         self.assertEqual(len(self.host.treatment_payloads), len(self.fixture.labels))
         self.assertEqual(self.host.lock_releases, 2)
+
+    def seed_resident(self, state: str, *, name: str | None = None) -> GenerationRow:
+        """Seed a distinct generation with record counts deliberately unlike the store."""
+
+        inputs = self.inputs(self.fixture.labels[0])
+        completed = state in {"built", "live", "retired"}
+        row = replace(
+            row_for(), gen_id=inputs.name if name is None else name, corpus_lockfile=inputs.label,
+            lockfiles=(inputs.label,), pipeline=inputs.pipeline, embedding_space=inputs.embedding_space,
+            inputs_hash=inputs.inputs_hash, state=state, counts={"dense_points": 999999999},
+            dense_built_at=NOW.isoformat() if completed else None,
+            built_at=NOW.isoformat() if completed else None,
+            promoted_at=NOW.isoformat() if state in {"live", "retired"} else None,
+            retired_at=NOW.isoformat() if state == "retired" else None,
+            failure_reason="store" if state == "failed" else None,
+        )
+        self.host.generations[row.gen_id] = row
+        return row
+
+    def test_guard_counts_retired_built_and_unrecorded_collections_from_the_store(self) -> None:
+        """The guard reads exact counts, orders names, and skips a collection gone at count."""
+
+        retired = self.seed_resident("retired")
+        built_name = generations.generation_name("caselaw", retired.corpus_lockfile, retired.embedding_space + "-other")
+        built = self.seed_resident("built", name=built_name)
+        self.host.qdrant_points = {retired.gen_id: 7, built.gen_id: 11, "fictitious-unrecorded": 5, "gone": None}
+        code, out, err = self.run_build(self.fixture.labels[1])
+        self.assertEqual((code, err), (0, ""), out)
+        ordered = sorted(((retired.gen_id, "retired", 7), (built.gen_id, "built", 11), ("fictitious-unrecorded", "unrecorded", 5)))
+        expected = ", ".join(f"{name} ({state}) {points}" for name, state, points in ordered)
+        guard_line = next(line for line in out.splitlines() if line.startswith("guard:"))
+        self.assertIn(f"counted {expected} = 23", guard_line)
+        limits = build.chunk_guards(self.host, self.fixture.checkout, SITE_PATH, build.COMMAND_PATH)
+        assert isinstance(limits, models.ChunkGuards)
+        self.assertIn(f"23 + 17 × {limits.serving_ceiling_chunks}/{limits.build_refusal_chunks} ≤ serving ceiling {limits.serving_ceiling_chunks}", guard_line)
+        self.assertNotIn("gone", guard_line)
+        self.assertEqual(self.host.generations[retired.gen_id], retired)
+        self.assertEqual(self.host.generations[built.gen_id], built)
+        self.assertEqual(self.host.store_requests, [
+            (RENDERED, "GET", "/collections", None),
+            *((RENDERED, "POST", f"/collections/{name}/points/count", {"exact": True})
+              for name in sorted(self.host.qdrant_points)),
+        ])
+        listing = next(i for i, (_, text, _) in enumerate(self.host.executions)
+                       if text and text.startswith("GET /collections HTTP"))
+        before_listing = [text for _, text, _ in self.host.executions[:listing] if text]
+        self.assertTrue(any("ORDER BY collection, created_at, gen_id" in text for text in before_listing))
+        for row in (retired, built):
+            for prefix in lexical.JOB_SUBJECTS:
+                self.assertTrue(any(worker.bind("v_lock", prefix + row.gen_id) in text for text in before_listing))
+
+    def test_resumed_candidate_store_points_are_excluded_from_the_guard(self) -> None:
+        label = self.fixture.labels[0]
+        self.host.interrupt_phase = "dense"
+        code, out, err = self.run_build(label)
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn("interrupted; the embed continues in the worker", out)
+        name = self.inputs(label).name
+        job = self.host.dense_live_id
+        assert job is not None
+        self.host.interrupt_phase = None
+        self.host.qdrant_points[name] = 999999999
+        deferred = len(self.host.deferred)
+        code, out, err = self.run_build(label)
+        self.assertEqual((code, err), (0, ""), out)
+        guard_line = next(line for line in out.splitlines() if line.startswith("guard:"))
+        self.assertIn("counted none = 0", guard_line)
+        self.assertNotIn("999999999", guard_line)
+        self.assertIn(f"dense: ok — {name}: rejoined job {job}", out)
+        self.assertEqual(len(self.host.deferred), deferred + 2)
+        self.assertIn((RENDERED, "POST", f"/collections/{name}/points/count", {"exact": True}), self.host.store_requests)
+
+    def test_sample_guard_counts_the_sibling_store_with_its_own_key(self) -> None:
+        label = self.fixture.labels[0]
+        self.host.qdrant_points = {"production-only": 999999999}
+        self.host.sibling_qdrant_points = {"sibling-only": 13}
+        code, out, err = self.run_build(label, sample=self.sample_inputs())
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("counted sibling-only (unrecorded) 13 = 13", out)
+        self.assertNotIn("production-only", out)
+        self.assertEqual(secrets.current_directory(), Path(CI_SECRETS_DIR))
+        key_path = str(Path(CI_SECRETS_DIR) / QDRANT_SECRET_NAME)
+        self.assertEqual(self.host.secret_reads, [key_path])
+        for argv, request, _ in self.host.executions:
+            if QDRANT_SERVICE_NAME not in argv or request is None:
+                continue
+            self.assertIn(str(CI_ROOT), " ".join(argv))
+            key = self.host.secret_files[key_path].strip()
+            self.assertIn(f"api-key: {key}\r\n", request)
+            self.assertNotIn(key, " ".join(argv) + out + err)
+        self.assertIn((str(CI_ROOT), "GET", "/collections", None), self.host.store_requests)
+        projection_directory = next(directory for directory, sql in self.host.statement_directories
+                                    if guards.CHUNK_PROJECTION_SQL in sql)
+        self.assertEqual(projection_directory, RENDERED)
+        resident_directory = next(directory for directory, sql in self.host.statement_directories
+                                  if "ORDER BY collection, created_at, gen_id" in sql)
+        self.assertEqual(resident_directory, str(CI_ROOT))
+
+    def test_skipped_sample_guard_still_prints_its_counted_collections(self) -> None:
+        self.host.sibling_qdrant_points = {"fictitious-resident": 13}
+        for counts, reason in (({"ready": 0, "chunked": 0, "chunks": 0}, "no ready documents"),
+                               ({"ready": 101, "chunked": 1, "chunks": 7}, "fewer than 1 %")):
+            with self.subTest(counts=counts):
+                self.host.projection_counts = counts
+                code, out, err = self.run_build(self.fixture.labels[0], sample=self.sample_inputs())
+                self.assertEqual((code, err), (0, ""), out)
+                line = next(line for line in out.splitlines() if line.startswith("guard:"))
+                self.assertIn(f"skipped: {reason}", line)
+                self.assertIn("counted fictitious-resident (unrecorded) 13 = 13", line)
+
+    def test_store_or_resident_record_failure_refuses_before_jobs_and_reports(self) -> None:
+        for phase in ("resident-record", "qdrant-listing", "qdrant-count"):
+            with self.subTest(phase=phase):
+                self.host.fail_phase = phase
+                self.host.qdrant_points = {"fictitious-unrecorded": 7}
+                code, out, err = self.run_build(self.fixture.labels[1])
+                self.assertEqual((code, err), (1, ""), out)
+                self.assertIn("guard: refuse", out)
+                self.assertIn("exit 3", out)
+                self.assertIn("Fix:", out)
+                self.assertNotIn("private diagnostic", out)
+                self.assertEqual((self.host.deferred, self.host.jobs, self.host.reports), ([], {}, []))
+                self.assertNotIn("cluster:", out)
+                self.assertNotIn("report:", out)
+                if phase != "resident-record":
+                    self.assertIn(stack.logs_fix(RENDERED, QDRANT_SERVICE_NAME), out)
+                self.assertIsNone(self.host.lock_holder)
+
+    def test_interrupted_other_build_with_dense_job_refuses_before_the_store(self) -> None:
+        """The guard treats a worker left running after its host lock releases as growing."""
+
+        self.host.interrupt_phase = "dense"
+        code, out, err = self.run_build(self.fixture.labels[0])
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIsNone(self.host.lock_holder)
+        job = self.host.dense_live_id
+        assert job is not None
+        name = self.host.jobs[job]["name"]
+        self.host.interrupt_phase = None
+        self.host.store_requests.clear()
+        before = copy.deepcopy((self.host.deferred, self.host.jobs, self.host.reports))
+        code, out, err = self.run_build(self.fixture.labels[1])
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn(f"guard: refuse — {name}: dense job {job} is queued or running", out)
+        self.assertIn(report.command(f"index build caselaw --lockfile {self.fixture.labels[0]}"), out)
+        self.assertEqual((self.host.deferred, self.host.jobs, self.host.reports), before)
+        self.assertEqual(self.host.store_requests, [])
+        self.assertNotIn("report:", out)
+
+    def test_other_generations_jobs_refuse_even_before_a_collection_exists(self) -> None:
+        """Every recorded state and all three subjects must be idle before counting."""
+
+        for state in ("building", "built", "live", "retired", "failed"):
+            for prefix, subject in lexical.JOB_SUBJECTS.items():
+                for status in ("todo", "doing"):
+                    with self.subTest(state=state, prefix=prefix, status=status):
+                        row = self.seed_resident(state)
+                        self.host.live_jobs = {prefix + row.gen_id: (731, status)}
+                        code, out, err = self.run_build(self.fixture.labels[1])
+                        self.assertEqual((code, err), (1, ""), out)
+                        self.assertIn(f"guard: refuse — {row.gen_id}: {subject} job 731 is queued or running", out)
+                        self.assertIn(report.command(f"index build caselaw --lockfile {row.corpus_lockfile}"), out)
+                        self.assertIn(report.command(f"index build caselaw --lockfile {self.fixture.labels[1]}"), out)
+                        self.assertEqual(self.host.store_requests, [])
+                        self.assertEqual((self.host.deferred, self.host.jobs, self.host.reports), ([], {}, []))
+                        self.assertNotIn("cluster:", out)
+                        self.assertNotIn("report:", out)
+                        self.assertIsNone(self.host.lock_holder)
 
     def test_guard_and_reserve_refusals_defer_no_job_and_write_no_build_report(self) -> None:
         label = self.fixture.labels[0]
@@ -747,7 +1063,7 @@ class Build(unittest.TestCase):
                 self.assertIn(report.command(f"index build caselaw --lockfile {label}"), out)
                 if stage == "guard":
                     self.assertIn(f"{inputs.name}: ready 100, chunked 1, chunks 60000, projected chunks 6000000", out)
-                    self.assertIn(f"build refusal {profile.chunk_guards.build_refusal_chunks}, serving ceiling {profile.chunk_guards.serving_ceiling_chunks}", out)
+                    self.assertIn(f"build refusal {profile.chunk_guards.build_refusal_chunks}, serving ceiling {profile.chunk_guards.serving_ceiling_chunks}; counted none = 0", out)
                     self.assertIn(report.command("corpus cut"), out)
                     self.assertIn("hardware_profile in /etc/gideon/site.yaml", out)
                     self.assertIn("guards derive from the profile's RAM", out)
@@ -769,6 +1085,7 @@ class Build(unittest.TestCase):
                 code, out, err = self.run_build()
                 self.assertEqual((code, err), (0, ""), out)
                 self.assertIn(f"guard: ok — skipped: {reason};", out)
+                self.assertIn("counted none = 0", out)
                 self.assertIn(f"ready {counts['ready']}, chunked {counts['chunked']}, chunks {counts['chunks']}", out)
                 self.assertIn("cluster: ok", out)
 
@@ -1092,6 +1409,173 @@ class Build(unittest.TestCase):
         self.host.record_rows[label] = row
         self.assertEqual(self.run_build(label)[0], 0)
 
+    def _superseded_building(self, label: str) -> GenerationRow:
+        """Leave a former live generation in the state restored short stores require."""
+
+        code, out, err = self.run_build(label)
+        self.assertEqual((code, err), (0, ""), out)
+        built = self.host.generations[self.inputs(label).name]
+        self.host.generations[built.gen_id] = replace(built, state="live", promoted_at=NOW.isoformat())
+        self.fixture._hold_record("installed", self.fixture.labels[-1])
+        self.host.record_rows[label]["state"] = "superseded"
+        demoted = replace(built, state="building", dense_built_at=None, built_at=None, promoted_at=None)
+        self.host.generations[built.gen_id] = demoted
+        self.host.statements.clear()
+        return demoted
+
+    def test_superseded_label_resumes_its_failed_generation(self) -> None:
+        label = self.fixture.labels[0]
+        building = self._superseded_building(label)
+        row = replace(building, state="failed", failure_reason="store")
+        self.host.generations[row.gen_id] = row
+        code, out, err = self.run_build(label)
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn(f"lockfile {label} is superseded; resuming {row.gen_id}", out.splitlines()[0])
+        self.assertIn(f"generation: ok — {row.gen_id}: failed, found", out)
+        self.assertEqual(tuple(self.host.generations), (row.gen_id,))
+        self.assertEqual(self.host.generations[row.gen_id].state, "built")
+
+    def test_superseded_label_resumes_its_building_generation_under_current_inputs(self) -> None:
+        label = self.fixture.labels[0]
+        row = self._superseded_building(label)
+        order = Mock()
+        with (
+            patch.object(build, "embed_target", wraps=build.embed_target) as embed,
+            patch.object(build, "collection_inputs", wraps=build.collection_inputs) as inputs,
+            patch.object(build.indexrecord, "read_generation_by_inputs", wraps=build.indexrecord.read_generation_by_inputs) as read,
+        ):
+            order.attach_mock(embed, "embed_target")
+            order.attach_mock(inputs, "collection_inputs")
+            order.attach_mock(read, "read_generation_by_inputs")
+            code, out, err = self.run_build(label)
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual([call[0] for call in order.mock_calls], ["embed_target", "collection_inputs", "read_generation_by_inputs"])
+        read.assert_called_once_with(
+            self.host, RENDERED, row.collection, row.inputs_hash,
+            command_path=f"index build {row.collection} --lockfile {label}",
+        )
+        self.assertIn(f"lockfile {label} is superseded; resuming {row.gen_id}", out.splitlines()[0])
+        self.assertIn(f"generation: ok — {row.gen_id}: building, found", out)
+        self.assertEqual(tuple(self.host.generations), (row.gen_id,))
+        self.assertEqual(self.host.generations[row.gen_id].state, "built")
+        self.assertEqual(self.host.generations[row.gen_id].clustered_at, row.clustered_at)
+        read_sql = next(i for i, sql in enumerate(self.host.statements) if "WHERE collection = :'v_collection'" in sql)
+        write_sql = next(i for i, sql in enumerate(self.host.statements) if "DO $generation$" in sql)
+        self.assertLess(read_sql, write_sql)
+        self.assertIn(worker.bind("v_inputs_hash", row.inputs_hash), self.host.statements[read_sql])
+
+    def test_superseded_label_without_a_generation_checks_inputs_then_refuses_without_writes(self) -> None:
+        label = self.fixture.labels[0]
+        self.host.record_rows[label]["state"] = "superseded"
+        order = Mock()
+        with (
+            patch.object(build, "embed_target", wraps=build.embed_target) as embed,
+            patch.object(build, "collection_inputs", wraps=build.collection_inputs) as inputs,
+            patch.object(build.indexrecord, "read_generation_by_inputs", wraps=build.indexrecord.read_generation_by_inputs) as read,
+        ):
+            order.attach_mock(embed, "embed_target")
+            order.attach_mock(inputs, "collection_inputs")
+            order.attach_mock(read, "read_generation_by_inputs")
+            code, out, err = self.run_build(label)
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual([call[0] for call in order.mock_calls], ["embed_target", "collection_inputs", "read_generation_by_inputs"])
+        self.assertIn(f"lockfile {label} is superseded", err)
+        self.assertIn(f"Use a current lockfile with {report.command('index build caselaw')}, then retry.", err)
+        self.assertEqual((self.host.generations, self.host.deferred, self.host.reports), ({}, [], []))
+        self.assertFalse(any("DO $generation$" in sql for sql in self.host.statements))
+
+    def test_superseded_label_refuses_built_live_and_retired_generations_without_writes(self) -> None:
+        label = self.fixture.labels[0]
+        building = self._superseded_building(label)
+        for state in ("built", "live", "retired"):
+            with self.subTest(state=state):
+                row = replace(
+                    building, state=state, dense_built_at=building.lexical_built_at,
+                    built_at=building.lexical_built_at,
+                    promoted_at=NOW.isoformat() if state in ("live", "retired") else None,
+                    retired_at=NOW.isoformat() if state == "retired" else None,
+                )
+                self.host.generations[row.gen_id] = row
+                self.host.statements.clear()
+                before = copy.deepcopy((self.host.generations, self.host.record_rows, self.host.jobs, self.host.deferred, self.host.reports))
+                code, out, err = self.run_build(label)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn(f"lockfile {label} is superseded", err)
+                self.assertIn(f"Use a current lockfile with {report.command('index build caselaw')}, then retry.", err)
+                self.assertEqual((self.host.generations, self.host.record_rows, self.host.jobs, self.host.deferred, self.host.reports), before)
+                self.assertTrue(any("WHERE collection = :'v_collection'" in sql for sql in self.host.statements))
+                self.assertFalse(any("DO $generation$" in sql for sql in self.host.statements))
+
+    def test_superseded_label_refuses_a_building_row_that_does_not_name_it(self) -> None:
+        label = self.fixture.labels[0]
+        row = self._superseded_building(label)
+        other = self.fixture.labels[-1]
+        foreign = replace(
+            row, gen_id=generations.generation_name(row.collection, other, row.embedding_space),
+            corpus_lockfile=other, lockfiles=(other,),
+        )
+        self.host.generations = {foreign.gen_id: foreign}
+        before = copy.deepcopy((self.host.generations, self.host.deferred, self.host.reports))
+        code, out, err = self.run_build(label)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn(f"lockfile {label} is superseded", err)
+        self.assertIn("Use a current lockfile", err)
+        self.assertEqual((self.host.generations, self.host.deferred, self.host.reports), before)
+        self.assertFalse(any("DO $generation$" in sql for sql in self.host.statements))
+
+    def test_superseded_label_with_a_changed_embedding_profile_refuses_a_new_generation(self) -> None:
+        label = self.fixture.labels[0]
+        row = self._superseded_building(label)
+        path = self.fixture.checkout / "models.lock"
+        data = yaml.safe_load(path.read_text())
+        alternative = "1000x96v-256d"
+        data["profiles"][alternative] = copy.deepcopy(data["profiles"][data["reference"]])
+        data["profiles"][alternative]["embedding_space"]["id"] = "fictitious-resume-space"
+        path.write_text(yaml.safe_dump(data, sort_keys=False))
+        self.host.site_text = (ROOT / "config/site.example.yaml").read_text() + f"\nhardware_profile: {alternative}\n"
+        loaded_models = models.load_models_lock(path)
+        assert loaded_models.lock is not None
+        profile = models.select_profile(loaded_models.lock, alternative)
+        assert isinstance(profile, models.HardwareProfile) and profile.embedding_space is not None
+        loaded_lockfile = load_lockfile(
+            self.fixture.checkout / f"corpus/lockfiles/{label}.yaml",
+            known_sources={self.fixture.source.name: self.fixture.source},
+        )
+        assert loaded_lockfile.lockfile is not None
+        expected_hash = generations.inputs_hash(
+            loaded_lockfile.lockfile, row.collection, profile.embedding_space.id, sources=(self.fixture.source,),
+        )
+        self.assertNotEqual(expected_hash, row.inputs_hash)
+        before = copy.deepcopy((self.host.generations, self.host.deferred, self.host.reports))
+
+        code, out, err = self.run_build(label)
+
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn(f"lockfile {label} is superseded", err)
+        self.assertIn("Use a current lockfile", err)
+        self.assertEqual((self.host.generations, self.host.deferred, self.host.reports), before)
+        read_sql = next(sql for sql in self.host.statements if "WHERE collection = :'v_collection'" in sql)
+        self.assertIn(worker.bind("v_inputs_hash", expected_hash), read_sql)
+        self.assertFalse(any("DO $generation$" in sql for sql in self.host.statements))
+
+    def test_superseded_sample_refuses_before_reading_any_build_inputs(self) -> None:
+        label = self.fixture.labels[0]
+        row = self._superseded_building(label)
+        with (
+            patch.object(build, "embed_target", wraps=build.embed_target) as embed,
+            patch.object(build, "collection_inputs", wraps=build.collection_inputs) as inputs,
+            patch.object(build.indexrecord, "read_generation_by_inputs", wraps=build.indexrecord.read_generation_by_inputs) as read,
+        ):
+            code, out, err = self.run_build(label, sample=self.sample_inputs())
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn(f"lockfile {label} is superseded", err)
+        self.assertIn(f"Use a current lockfile with {report.command(f'index build caselaw --sample --lockfile {label}')}, then retry.", err)
+        embed.assert_not_called()
+        inputs.assert_not_called()
+        read.assert_not_called()
+        self.assertEqual(self.host.generations[row.gen_id], row)
+        self.assertFalse(any("DO $generation$" in sql for sql in self.host.statements))
+
     def test_missing_or_malformed_selection_and_artifacts_refuse(self) -> None:
         for label, collection, detail in (("bad-label", "caselaw", "label is invalid"),
                                          ("corpus-2099-02-30", "caselaw", "invalid date"),
@@ -1177,7 +1661,7 @@ class Build(unittest.TestCase):
         self.assertEqual(self.host.deferred[-1]["served_model"], embed_pin.serve.served_name)
         self.assertEqual(self.host.deferred[-1]["dimensions"], selected.embedding_space.dimensions)
         self.assertIn(f"embedding space {selected.embedding_space.id}; served model {embed_pin.serve.served_name}", out)
-        self.assertIn(f"build refusal {selected.chunk_guards.build_refusal_chunks}, serving ceiling {selected.chunk_guards.serving_ceiling_chunks}", out)
+        self.assertIn(f"build refusal {selected.chunk_guards.build_refusal_chunks}, serving ceiling {selected.chunk_guards.serving_ceiling_chunks}; counted none = 0", out)
         self.assertNotIn("limit", self.host.deferred[-1])
 
     def test_three_services_refuse_bad_state_reads_without_retry(self) -> None:

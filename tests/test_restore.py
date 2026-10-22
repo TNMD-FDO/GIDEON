@@ -4,18 +4,24 @@ import argparse
 import contextlib
 import hashlib
 import io
+import json
 import os
 import subprocess
 import unittest
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
-from derivedstores_fake import empty_store_secrets, recovery_store_result
+from derivedstores_fake import (
+    empty_store_secrets,
+    level_store_result,
+    recovery_store_result,
+)
+from test_index_level import generation
 
 from gideon.host import (
     apply,
@@ -30,7 +36,11 @@ from gideon.host import (
     site,
     sshtarget,
     stack,
+    worker,
 )
+from gideon.host.corpus.record import database_fix
+from gideon.host.index import level
+from gideon.host.index.record import DemotionOutcome
 from gideon.host.render import RenderedSet, RenderInputs
 from gideon.host.render.command import RenderOutcome
 from gideon.host.render.compose import STORE_SERVICES
@@ -198,6 +208,12 @@ class FakeHost:
         opensearch_snapshots: Sequence[Mapping[str, object]] = (),
         qdrant_status: int = 200,
         restore_failed: int = 0,
+        generations: Sequence[Mapping[str, Any]] = (),
+        index_counts: Mapping[str, Mapping[str, int | None]] | None = None,
+        index_aliases: Mapping[str, Mapping[str, tuple[str, ...]]] | None = None,
+        generation_read_code: int = 0,
+        generation_demotion_code: int = 0,
+        level_store_code: int = 0,
     ) -> None:
         value = manifest_value or manifest()
         self.manifest_value = value
@@ -216,6 +232,19 @@ class FakeHost:
         self.opensearch_snapshots = tuple(opensearch_snapshots)
         self.qdrant_status = qdrant_status
         self.restore_failed = restore_failed
+        self.generations = [dict(row) for row in generations]
+        self.index_counts: dict[str, dict[str, int | None]] = {
+            "opensearch": {
+                row["gen_id"]: row["counts"].get("indexed", 0) + row["counts"].get("present", 0)
+                for row in generations
+            },
+            "qdrant": {row["gen_id"]: row["counts"].get("dense_total", 0) for row in generations},
+        } if index_counts is None else {store: dict(counts) for store, counts in index_counts.items()}
+        self.index_aliases = {store: dict(targets) for store, targets in (index_aliases or {}).items()}
+        self.generation_statements: list[str] = []
+        self.generation_read_code = generation_read_code
+        self.generation_demotion_code = generation_demotion_code
+        self.level_store_code = level_store_code
         self.running = running
         self.target = target
         self.source = source
@@ -287,6 +316,30 @@ class FakeHost:
         del check, env
         command = tuple(argv)
         self.calls.append((command, input, None if cwd is None else os.fspath(cwd), timeout))
+        if command == tuple(worker.psql_argv(RENDERED)):
+            assert input is not None
+            self.generation_statements.append(input)
+            if "SELECT row_to_json(generation)" in input:
+                return completed(
+                    command, stdout="".join(json.dumps(row) + "\n" for row in self.generations),
+                    returncode=self.generation_read_code,
+                )
+            assert "DO $demotion$" in input
+            if self.generation_demotion_code != 0:
+                return completed(command, returncode=self.generation_demotion_code)
+            payload = json.loads(input.split("\n", 1)[0].removeprefix("\\set v_payload '").removesuffix("'"))
+            row = next((row for row in self.generations if row["gen_id"] == payload["name"]), None)
+            if row is None or row["state"] not in ("built", "live"):
+                return completed(command, returncode=3, stderr="generation is no longer built or live")
+            outcome = DemotionOutcome(
+                row["gen_id"], row["state"], payload["lexical_short"], payload["dense_short"],
+            )
+            row.update(state="building", built_at=None, promoted_at=None)
+            if payload["lexical_short"]:
+                row["lexical_built_at"] = None
+            if payload["dense_short"]:
+                row["dense_built_at"] = None
+            return completed(command, stdout=json.dumps(asdict(outcome)) + "\n")
         if command[:3] == ("docker", "manifest", "inspect"):
             self.events.append("registry-probe")
             return completed(command, returncode=0 if self.registry_has_image else 1)
@@ -465,6 +518,13 @@ class FakeHost:
                     '{"Service":"opensearch","State":"running","Health":"healthy"}]'
                 ),
             )
+        level_reply = level_store_result(
+            command, input, RENDERED, counts=self.index_counts, aliases=self.index_aliases,
+        )
+        if level_reply is not None:
+            if self.level_store_code != 0:
+                return completed(command, returncode=self.level_store_code)
+            return level_reply
         recovery_reply = recovery_store_result(
             command, input, RENDERED,
             qdrant_files=self.qdrant_files,
@@ -813,7 +873,7 @@ class RestoreContracts(RenderedRestoreCase):
         self.assertIn("Next: sudo python3 -m gideon host provision", out.getvalue())
         self.assertIn("stop: ok — stopped the host registry", out.getvalue())
         self.assertIn(
-            "stores: ok — frontend and ingress down; the store tier running; qdrant: no snapshot in the set; opensearch: no snapshot in the set; the host registry running",
+            "stores: ok — frontend and ingress down; the store tier running; qdrant: no snapshot in the set; opensearch: no snapshot in the set; level: no generation recorded; the host registry running",
             out.getvalue(),
         )
         self.assertIn(
@@ -907,7 +967,7 @@ class RestoreContracts(RenderedRestoreCase):
             output,
         )
         self.assertIn(
-            "stores: ok — frontend and ingress down; the store tier running; qdrant: no snapshot in the set; opensearch: no snapshot in the set; no host registry: not the build box",
+            "stores: ok — frontend and ingress down; the store tier running; qdrant: no snapshot in the set; opensearch: no snapshot in the set; level: no generation recorded; no host registry: not the build box",
             output,
         )
         self.assertIn(
@@ -936,7 +996,7 @@ class RestoreContracts(RenderedRestoreCase):
             output,
         )
         self.assertIn(
-            "stores: ok — frontend and ingress down; the store tier running; qdrant: no snapshot in the set; opensearch: no snapshot in the set; no host registry: not the build box",
+            "stores: ok — frontend and ingress down; the store tier running; qdrant: no snapshot in the set; opensearch: no snapshot in the set; level: no generation recorded; no host registry: not the build box",
             output,
         )
         self.assertIn(
@@ -2031,6 +2091,185 @@ class RestoreContracts(RenderedRestoreCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IndexRestore(RenderedRestoreCase):
+    """Recovery is levelled before staging cleanup, audit, and the next commands."""
+
+    def _run(self, fake: FakeHost) -> tuple[int, str]:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = restore.run_restore(
+                argparse.Namespace(source=fake.source, at=None), host=fake, now=NOW,
+            )
+        return code, out.getvalue()
+
+    def _detail(self, fake: FakeHost) -> Mapping[str, Any]:
+        sql = next(
+            request for _, request, _, _ in fake.calls
+            if request and "\\set v_kind 'restore'" in request
+        )
+        line = next(line for line in sql.splitlines() if line.startswith("\\set v_detail '"))
+        return json.loads(line.removeprefix("\\set v_detail '").removesuffix("'"))
+
+    def test_level_clauses_and_audit_follow_recovery_before_replaced_staging_cleanup(self) -> None:
+        live = generation("live")
+        built = generation("built", label="corpus-2099-02-03")
+        rows = (live, built)
+        lexical = {row.gen_id: row.counts["indexed"] + row.counts["present"] for row in rows}
+        dense = {row.gen_id: row.counts["dense_total"] for row in rows}
+        dense[built.gen_id] -= 1
+        fake = make_host(
+            source="target", remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+            manifest_value=manifest_with_snapshots(*DERIVED_ROOTS),
+            qdrant_files=tuple(f"{row.gen_id}/restored.snapshot" for row in rows),
+            opensearch_snapshots=({
+                "snapshot": "fictitious-snapshot", "start_time_in_millis": 100,
+                "state": "SUCCESS", "shards": {"failed": 0},
+                "indices": [row.gen_id for row in rows],
+            },),
+            generations=tuple(asdict(row) for row in rows),
+            index_counts={"opensearch": lexical, "qdrant": dense},
+            index_aliases={"opensearch": {live.collection: (built.gen_id,)}},
+        )
+        fake.files[os.fspath(nogpu.BUILD_BOX_PATH)] = "declared\n"
+        fake.files[os.path.join(RENDERED, "compose.yaml")] = POSTGRES_COMPOSE
+
+        code, output = self._run(fake)
+
+        self.assertEqual(code, 0, output)
+        stores_line = next(line for line in output.splitlines() if line.startswith("stores:"))
+        clauses = stores_line.split("; ")
+        recovery_end = next(i for i, clause in enumerate(clauses) if clause.startswith("opensearch:"))
+        level_clauses = [clause for clause in clauses if clause.startswith("level ")]
+        self.assertEqual(clauses[recovery_end + 1:-1], level_clauses)
+        self.assertEqual(len(level_clauses), len(rows))
+        self.assertTrue(level_clauses[0].startswith(f"level {live.gen_id}: live, whole"))
+        self.assertIn(f"level {built.gen_id}: built -> building", level_clauses[1])
+        self.assertIn(f"short in qdrant ({dense[built.gen_id]} of {built.counts['dense_total']})", level_clauses[1])
+        self.assertIn("alias lexical stands", level_clauses[1])
+        self.assertEqual(clauses[-1], "the host registry running")
+        for clause in level_clauses:
+            self.assertTrue(any(pattern.fullmatch(clause) for pattern in level.level_clause_patterns()), clause)
+        expected_level = {
+            row.gen_id: {
+                "state": row.state, "outcome": "aliased" if row == live else "demoted",
+                "lexical_count": lexical[row.gen_id], "lexical_expected": lexical[row.gen_id],
+                "dense_count": dense[row.gen_id], "dense_expected": row.counts["dense_total"],
+                "lexical_alias": f"{built.gen_id} -> {live.gen_id}" if row == live else "stands",
+                "dense_alias": f"none -> {live.gen_id}" if row == live else None,
+            }
+            for row in rows
+        }
+        detail = self._detail(fake)
+        self.assertEqual(detail["level"], expected_level)
+        self.assertTrue(detail["replaced_removed"])
+        self.assertEqual(fake.generations[0], asdict(live))
+        self.assertEqual(fake.generations[1]["state"], "building")
+        self.assertEqual(len(fake.generation_statements), 2)
+        calls = fake.calls
+        recovery = max(i for i, (_, request, _, _) in enumerate(calls)
+                       if request and ("/snapshots/recover?" in request or "_restore?wait_for_completion" in request))
+        read = next(i for i, (argv, request, _, _) in enumerate(calls)
+                    if argv == tuple(worker.psql_argv(RENDERED)) and request and "row_to_json" in request)
+        demotion = next(i for i, (_, request, _, _) in enumerate(calls) if request and "DO $demotion$" in request)
+        alias_write = next(i for i, (_, request, _, _) in enumerate(calls)
+                           if request and 'request = "POST"' in request and "/_aliases" in request)
+        replaced = f"{backupset.STAGING}.replaced-{REMOTE_SNAPSHOT}"
+        removed = next(i for i, (argv, _, _, _) in enumerate(calls) if argv == ("rm", "-rf", replaced))
+        audit_call = next(i for i, (_, request, _, _) in enumerate(calls) if request and "\\set v_kind 'restore'" in request)
+        self.assertLess(recovery, read)
+        self.assertLess(read, demotion)
+        self.assertLess(demotion, alias_write)
+        self.assertLess(alias_write, removed)
+        self.assertLess(removed, audit_call)
+        self.assertTrue(fake.running)
+        for argv, request, _, _ in calls:
+            if argv == tuple(worker.psql_argv(RENDERED)):
+                self.assertIsNotNone(request)
+                self.assertNotIn(live.gen_id, " ".join(argv))
+
+    def test_level_refusals_keep_the_tier_and_replaced_staging_without_restore_audit(self) -> None:
+        row = generation("live")
+        cases = (
+            ({"generation_read_code": 3}, database_fix(RENDERED, "restore")),
+            ({"generation_demotion_code": 3}, database_fix(RENDERED, "restore")),
+            ({"level_store_code": 127}, stack.logs_fix(RENDERED, "opensearch")),
+        )
+        for failures, fix in cases:
+            with self.subTest(failures=failures):
+                fake = make_host(
+                    source="target", remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+                    manifest_value=manifest_with_snapshots(DERIVED_ROOTS[0]),
+                    qdrant_files=(f"{row.gen_id}/restored.snapshot",),
+                    generations=(asdict(row),),
+                    index_counts={
+                        "opensearch": {row.gen_id: row.counts["indexed"] + row.counts["present"]},
+                        "qdrant": {row.gen_id: 0},
+                    },
+                    **failures,
+                )
+
+                code, output = self._run(fake)
+
+                self.assertEqual(code, 1, output)
+                self.assertIn("stores: refuse", output)
+                self.assertIn(f"Fix: {fix}", output)
+                self.assertNotIn("next:", output)
+                self.assertNotIn("Next:", output)
+                self.assertTrue(fake.running)
+                replaced = f"{backupset.STAGING}.replaced-{REMOTE_SNAPSHOT}"
+                commands = [argv for argv, _, _, _ in fake.calls]
+                self.assertTrue(any(argv[0] == "mv" and argv[-1] == replaced for argv in commands))
+                self.assertNotIn(("rm", "-rf", replaced), commands)
+                tier = next(i for i, argv in enumerate(commands) if argv == tuple(stack.compose_argv(RENDERED, "up", "-d", *STORE_SERVICES)))
+                self.assertFalse(any(argv[-1] == "down" for argv in commands[tier + 1:]))
+                self.assertFalse(any(request and "\\set v_kind 'restore'" in request for _, request, _, _ in fake.calls))
+
+    def test_empty_generation_listing_keeps_next_commands_and_audits_an_empty_level(self) -> None:
+        fake = make_host()
+        code, output = self._run(fake)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(len(fake.generation_statements), 1)
+        self.assertIn("SELECT row_to_json(generation)", fake.generation_statements[0])
+        self.assertIn("; level: no generation recorded; ", output)
+        self.assertEqual(self._detail(fake)["level"], {})
+        self.assertTrue(output.rstrip().endswith(
+            "then sudo python3 -m gideon apply, then sudo python3 -m gideon backup run --full"
+        ))
+
+    def test_next_commands_resume_each_label_then_promote_in_both_next_shapes(self) -> None:
+        rows = (generation("built"), generation("live", label="corpus-2099-02-03"))
+        self.addCleanup(report.set_installed_form, False)
+        report.set_installed_form(False)
+        for has_ids in (False, True):
+            with self.subTest(has_ids=has_ids):
+                value = manifest()
+                if has_ids:
+                    value = replace(value, gideon_ids=DEFAULT_GIDEON_IDS)
+                fake = make_host(
+                    manifest_value=value, generations=tuple(asdict(row) for row in rows),
+                    index_counts={
+                        "opensearch": {row.gen_id: row.counts["indexed"] + row.counts["present"] for row in rows},
+                        "qdrant": {row.gen_id: None for row in rows},
+                    },
+                )
+                code, output = self._run(fake)
+                self.assertEqual(code, 0, output)
+                commands = [
+                    "sudo python3 -m gideon apply",
+                    *(f"sudo python3 -m gideon index build {row.collection} --lockfile {row.corpus_lockfile}" for row in rows),
+                    f"sudo python3 -m gideon index promote {rows[1].gen_id}",
+                    "sudo python3 -m gideon backup run --full",
+                ]
+                prefix = "Next: " if has_ids else (
+                    "Next: sudo python3 -m gideon host provision (the first provision's mode flags), "
+                    "because this set records no gideon ids, then "
+                )
+                self.assertEqual(
+                    [line for line in output.splitlines() if line.startswith("Next:")],
+                    [prefix + ", then ".join(commands)],
+                )
 
 
 class StoreRestoreCommands(RenderedRestoreCase):

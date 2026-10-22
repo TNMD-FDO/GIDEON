@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 from collections.abc import Mapping, Sequence
 
@@ -80,7 +81,8 @@ def recovery_store_result(
     qdrant_exec = tuple(stack.exec_argv(rendered_dir, QDRANT_SERVICE_NAME))
     if argv[:len(qdrant_exec)] == qdrant_exec:
         assert request is not None
-        assert request.startswith("PUT /collections/")
+        if re.match(r"PUT /collections/[^/]+/snapshots/recover\?wait=true HTTP/1\.0\r\n", request) is None:
+            return None
         payload: object = (
             {"result": True} if qdrant_status == 200
             else {"status": {"error": "recovery refused"}}
@@ -108,4 +110,84 @@ def recovery_store_result(
             reply = json.dumps({"snapshot": {"shards": {"failed": restore_failed}}})
             return subprocess.CompletedProcess(list(argv), 0, reply + "\ngideon-status:200\n", "")
         raise AssertionError("unexpected OpenSearch recovery request")
+    return None
+
+
+def level_store_result(
+    command: Sequence[str], request: str | None, rendered_dir: str, *,
+    counts: Mapping[str, Mapping[str, int | None]],
+    aliases: dict[str, dict[str, tuple[str, ...]]],
+) -> subprocess.CompletedProcess[str] | None:
+    """Answer count and alias requests, updating the test's alias table on writes."""
+
+    argv = tuple(command)
+    for store in (OPENSEARCH_SERVICE_NAME, QDRANT_SERVICE_NAME):
+        prefix = tuple(stack.exec_argv(rendered_dir, store))
+        if argv[:len(prefix)] != prefix:
+            continue
+        assert request is not None
+        payload: object
+        status = 200
+        targets = aliases.setdefault(store, {})
+        if store == OPENSEARCH_SERVICE_NAME:
+            options = dict(line.split(" = ", 1) for line in request.splitlines())
+            method = json.loads(options["request"])
+            path = json.loads(options["url"]).removeprefix("http://127.0.0.1:9200")
+            count_match = re.fullmatch(r"/([^/]+)/_count", path)
+            if method == "GET" and count_match is not None:
+                count = counts.get(store, {}).get(count_match.group(1))
+                status = 404 if count is None else 200
+                payload = {"error": "fictitious missing index"} if count is None else {"count": count}
+            elif method == "GET" and path.startswith("/_alias/"):
+                alias = path.removeprefix("/_alias/")
+                names = targets.get(alias, ())
+                status = 200 if names else 404
+                payload = {name: {"aliases": {alias: {}}} for name in names}
+            elif method == "POST" and path == "/_aliases":
+                actions = json.loads(json.loads(options["data"]))["actions"]
+                for action in actions:
+                    if "remove" in action:
+                        entry = action["remove"]
+                        targets[entry["alias"]] = tuple(
+                            name for name in targets.get(entry["alias"], ()) if name != entry["index"]
+                        )
+                    else:
+                        entry = action["add"]
+                        current = targets.get(entry["alias"], ())
+                        targets[entry["alias"]] = tuple(dict.fromkeys((*current, entry["index"])))
+                payload = {"acknowledged": True}
+            else:
+                return None
+            reply = json.dumps(payload) + f"\ngideon-status:{status}\n"
+        else:
+            method, path, _ = request.split("\r\n", 1)[0].split(" ")
+            count_match = re.fullmatch(r"/collections/([^/]+)/points/count", path)
+            if method == "GET" and path == "/collections":
+                payload = {"result": {"collections": [
+                    {"name": name} for name in counts.get(store, {})
+                ]}}
+            elif method == "POST" and count_match is not None:
+                assert json.loads(request.partition("\r\n\r\n")[2]) == {"exact": True}
+                count = counts.get(store, {}).get(count_match.group(1))
+                status = 404 if count is None else 200
+                payload = {"status": {"error": "fictitious missing collection"}} if count is None else {"result": {"count": count}}
+            elif method == "GET" and path == "/aliases":
+                payload = {"result": {"aliases": [
+                    {"alias_name": alias, "collection_name": name}
+                    for alias, names in targets.items() for name in names
+                ]}}
+            elif method == "POST" and path == "/collections/aliases":
+                actions = json.loads(request.partition("\r\n\r\n")[2])["actions"]
+                for action in actions:
+                    if "delete_alias" in action:
+                        targets.pop(action["delete_alias"]["alias_name"], None)
+                    else:
+                        entry = action["create_alias"]
+                        targets[entry["alias_name"]] = (entry["collection_name"],)
+                payload = {"result": True}
+            else:
+                return None
+            body = json.dumps(payload)
+            reply = f"HTTP/1.0 {status} Reply\r\ncontent-length: {len(body.encode())}\r\n\r\n{body}"
+        return subprocess.CompletedProcess(list(argv), 0, reply, "")
     return None

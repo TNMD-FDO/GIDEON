@@ -1,4 +1,4 @@
-"""Snapshot clients for the two derived stores through their own containers."""
+"""Snapshot, recovery, and count clients for the two derived stores."""
 
 import json
 import re
@@ -363,6 +363,68 @@ def opensearch_request(
             )
         return _problem(rendered_dir, OPENSEARCH_SERVICE_NAME, detail)
     return reply
+
+
+def opensearch_document_count(
+    io: Host, rendered_dir: PathLike, password: str, name: str,
+) -> int | None | report.Problem:
+    """Read an index's document count, or None when the index is absent."""
+
+    checked = _plain_name(name, rendered_dir, OPENSEARCH_SERVICE_NAME)
+    if isinstance(checked, report.Problem):
+        return checked
+    reply = opensearch_request(
+        io, rendered_dir, password, "GET", f"/{checked}/_count",
+        accepted_statuses=frozenset({200, 404}),
+    )
+    if isinstance(reply, report.Problem):
+        return reply
+    if reply.status == 404:
+        return None
+    count = reply.data.get("count") if isinstance(reply.data, Mapping) else None
+    if type(count) is not int or count < 0:
+        return _problem(
+            rendered_dir, OPENSEARCH_SERVICE_NAME,
+            "opensearch returned an invalid document count",
+        )
+    return count
+
+
+def qdrant_collection_names(
+    io: Host, rendered_dir: PathLike, key: str,
+) -> tuple[str, ...] | report.Problem:
+    """Read the store's collection names in sorted order."""
+
+    reply = qdrant_request(io, rendered_dir, key, "GET", "/collections")
+    if isinstance(reply, report.Problem):
+        return reply
+    return _qdrant_collections(reply.data, rendered_dir)
+
+
+def qdrant_point_count(
+    io: Host, rendered_dir: PathLike, key: str, name: str,
+) -> int | None | report.Problem:
+    """Read a collection's exact point count, or None when it is absent."""
+
+    checked = _plain_name(name, rendered_dir, QDRANT_SERVICE_NAME)
+    if isinstance(checked, report.Problem):
+        return checked
+    reply = qdrant_request(
+        io, rendered_dir, key, "POST", f"/collections/{checked}/points/count",
+        body={"exact": True}, accepted_statuses=frozenset({200, 404}),
+    )
+    if isinstance(reply, report.Problem):
+        return reply
+    if reply.status == 404:
+        return None
+    result = reply.data.get("result") if isinstance(reply.data, Mapping) else None
+    count = result.get("count") if isinstance(result, Mapping) else None
+    if type(count) is not int or count < 0:
+        return _problem(
+            rendered_dir, QDRANT_SERVICE_NAME,
+            "qdrant returned an invalid point count",
+        )
+    return count
 
 
 def _qdrant_collections(

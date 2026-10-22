@@ -48,15 +48,16 @@ from gideon.evaluation.generation import COLLECTION, GenerationAccess
 from gideon.evaluation.judgments import Judgment
 from gideon.evaluation.results import RunContext, SliceResult
 from gideon.host import report, stack
-from gideon.host.index.sample import sample_name
+from gideon.host.index.sample import SOURCE_ID_MAX_LENGTH, sample_name
 from gideon.host.render.ci import CI_ROOT, CI_STACK
+from gideon.host.report import Problem
 
 PRIVATE = "[FICTIONAL TEST ONLY: private signed answer and question]"
 MANIFEST_HASH = "e" * 64
 
 
 class GoldDropHost(EvalHost):
-    """Serve manifest JSON lines and the command's other reads without a store."""
+    """Serve manifest and given-gold JSON lines and the command's other reads without a store."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -64,6 +65,10 @@ class GoldDropHost(EvalHost):
         self.manifest_code = 0
         self.manifest_stdout: str | None = None
         self.manifest_error: OSError | subprocess.SubprocessError | None = None
+        self.given: set[str] = set()
+        self.given_code = 0
+        self.given_stdout: str | None = None
+        self.given_error: OSError | subprocess.SubprocessError | None = None
 
     def run(
         self, argv: Sequence[str], *, check: bool = False,
@@ -71,6 +76,14 @@ class GoldDropHost(EvalHost):
         env: Mapping[str, str] | None = None, timeout: float | None = None,
         passthrough: bool = False,
     ) -> subprocess.CompletedProcess[str]:
+        if input is not None and "FROM public.generation_gold" in input:
+            self.calls.append((tuple(argv), input))
+            if self.given_error is not None:
+                raise self.given_error
+            reply = self.given_stdout
+            if reply is None:
+                reply = "".join(json.dumps({"source_id": source_id}) + "\n" for source_id in sorted(self.given))
+            return subprocess.CompletedProcess(list(argv), self.given_code, reply, PRIVATE)
         if input is not None and "FROM public.generation_documents" in input:
             self.calls.append((tuple(argv), input))
             if self.manifest_error is not None:
@@ -205,44 +218,62 @@ class GoldDropFixture(unittest.TestCase):
 
 
 class Runner(GoldDropFixture):
-    """The runner reads the record once and reports ids and hashes, never answers."""
+    """The runner reads the generation's record and reports ids and hashes, never answers."""
 
     def test_manifest_uses_the_selected_stack_reader_and_stdin_bindings_only(self) -> None:
-        context = _context(self.host)
-        checkpoints: list[int] = []
-        checkpoint = Mock(side_effect=lambda: checkpoints.append(len(self.host.calls)))
-        result = self.run_slice(context=replace(context, checkpoint=checkpoint))
-        self.assertTrue(result.verdict, result.report)
-        self.assertEqual(result.gated_cases, sum(
+        gated_cases = sum(
             SHAPE_REGISTRY[cast(
                 tuple[str, str],
                 (self.loaded.cases_by_id[case_id]["suite"], self.loaded.cases_by_id[case_id]["category"]),
             )].zero_tolerance
             for case_id in select_cases(self.loaded, "gold-drop").counted
-        ))
-        self.assertIn(
-            "zero-tolerance cases dropped 0: none\n"
-            "1 case, true failure rate ≤ 100.0 % (3/n at 95 %)\n",
-            result.report,
         )
-        self.assertGreaterEqual(checkpoint.call_count, 1)
-        self.assertEqual(checkpoints[0], 0)
-        self.assertEqual(len(self.host.calls), 1)
-        argv, sql = self.host.calls[0]
-        self.assertEqual(argv, tuple(record.reader_argv(context.turns_dir)))
-        assert context.generation is not None and sql is not None
-        for variable, expected in (
-            ("v_name", context.generation.name),
-            ("v_source_ids", json.dumps(list(sample.gold_hashes(self.loaded)), separators=(",", ":"))),
-        ):
-            line = next(line for line in sql.splitlines() if line.startswith(f"\\set {variable} "))
-            self.assertEqual(read_psql_set(line, variable), expected)
-        self.assertNotIn(context.generation.name, " ".join(argv))
-        self.assertTrue(all(source_id not in " ".join(argv) for source_id in self.host.manifest))
-        self.assertIn("public.generation_documents", sql)
-        self.assertIn("row_to_json", sql)
-        self.assertIn("generation " + context.generation.name, result.report)
-        self.assertIn(context.generation.corpus_lockfile, result.report)
+        for sampled in (False, True):
+            with self.subTest(sampled=sampled):
+                self.host.calls.clear()
+                self.host.given = set(self.host.manifest)
+                context = self.sample_context() if sampled else _context(self.host)
+                checkpoints: list[int] = []
+                checkpoint = Mock(side_effect=lambda checkpoints=checkpoints: checkpoints.append(len(self.host.calls)))
+                result = self.run_slice(context=replace(context, checkpoint=checkpoint))
+                self.assertTrue(result.verdict, result.report)
+                self.assertEqual(result.gated_cases, gated_cases)
+                self.assertGreaterEqual(checkpoint.call_count, 1)
+                self.assertEqual(checkpoints[0], 0)
+                statements = (golddrop_slice.MANIFEST_SQL, golddrop_slice.GIVEN_SQL) if sampled else (golddrop_slice.MANIFEST_SQL,)
+                self.assertEqual(len(self.host.calls), len(statements))
+                assert context.generation is not None
+                for (argv, sql), statement in zip(self.host.calls, statements, strict=True):
+                    self.assertEqual(argv, tuple(record.reader_argv(context.turns_dir)))
+                    assert sql is not None
+                    for variable, expected in (
+                        ("v_name", context.generation.name),
+                        ("v_source_ids", json.dumps(list(sample.gold_hashes(self.loaded)), separators=(",", ":"))),
+                    ):
+                        line = next(line for line in sql.splitlines() if line.startswith(f"\\set {variable} "))
+                        self.assertEqual(read_psql_set(line, variable), expected)
+                    self.assertEqual(sql.count("\\set "), 2)
+                    self.assertTrue(sql.endswith(statement))
+                    self.assertNotIn(context.generation.name, " ".join(argv))
+                    self.assertTrue(all(source_id not in " ".join(argv) for source_id in self.host.manifest))
+                    self.assertNotIn("SELECT", " ".join(argv))
+                selection = select_cases(self.loaded, "gold-drop")
+                lines = [
+                    f"generation {context.generation.name} ({context.generation.corpus_lockfile})",
+                    f"{len(selection.counted)} counted, {len(selection.unsigned)} unsigned excluded",
+                    f"gold documents {len(sample.gold_hashes(self.loaded))}: dropped 0 "
+                    f"(absent 0, hash changed 0), ceiling {golddrop_slice.GOLD_DROP_CEILING_PERCENT} %",
+                    "absent source ids: none",
+                    "hash changed source ids: none",
+                    "zero-tolerance cases dropped 0: none",
+                    "1 case, true failure rate ≤ 100.0 % (3/n at 95 %)",
+                    "cases dropped (reported) 0: none",
+                    "judged queries with dropped coordinates 0:",
+                    "gold-drop: pass",
+                ]
+                if sampled:
+                    lines.insert(2, "unbuilt gold documents 0 (not given to the sample's build, not counted): none")
+                self.assertEqual(result.report, "\n".join(lines) + "\n")
 
     def test_planted_judged_coordinate_absent_fails_gate_and_names_query_only_in_report(self) -> None:
         judged = replace(_judgment(), source_id="fictional/judged-only", sha256="b" * 64)
@@ -345,35 +376,96 @@ class Runner(GoldDropFixture):
             context.generation, name=sample_name(context.generation.name),
         ))
 
-    def test_sample_reports_gold_absent_from_it_unbuilt_and_counts_the_rest(self) -> None:
+    def test_sample_drops_a_given_absent_id_in_the_ceiling_case_and_lost_coordinates(self) -> None:
+        judged = replace(_judgment(), source_id=self.signed[0].must_cite[0], sha256="b" * 64)
+        ungiven = replace(_judgment("judgments-002"), source_id="fictional/ungiven", sha256="c" * 64)
+        loaded = self.with_judgments((judged, ungiven))
+        self.host.manifest = _manifest(loaded)
+        self.host.given = set(sample.gold_hashes(loaded)) - {ungiven.source_id}
+        del self.host.manifest[judged.source_id]
+        del self.host.manifest[ungiven.source_id]
+        result = self.run_slice(loaded, self.sample_context())
+        self.assertFalse(result.verdict)
+        self.assertIn(
+            f"unbuilt gold documents 1 (not given to the sample's build, not counted): {ungiven.source_id}\n",
+            result.report,
+        )
+        self.assertIn(
+            f"gold documents {len(sample.gold_hashes(loaded)) - 1}: dropped 1 (absent 1, hash changed 0), "
+            f"ceiling {golddrop_slice.GOLD_DROP_CEILING_PERCENT} %\n", result.report,
+        )
+        self.assertIn(f"absent source ids: {judged.source_id}\n", result.report)
+        row = next(row for row in result.results if row.case_id == self.signed[0].case_id)
+        self.assertEqual(row.verdict, "fail")
+        self.assertEqual(row.metrics, {"must_cite": 1, "dropped": [judged.source_id], "zero_tolerance": True})
+        self.assertIn(f"cases dropped (reported) 1: {row.case_id}\n", result.report)
+        self.assertIn(
+            "judged queries with dropped coordinates 1:\n"
+            f"{judged.query_id}: {judged.source_id}@{judged.sha256}\n", result.report,
+        )
+        self.assertNotIn(f"{ungiven.query_id}:", result.report)
+        self.assertIn("gate: gold documents dropped above the ceiling\n", result.report)
+
+    def test_sample_reports_ungiven_absent_gold_unbuilt_and_counts_the_rest(self) -> None:
         judged = replace(_judgment(), source_id="fictional/judged-only", sha256="b" * 64)
         loaded = self.with_judgments((judged,))
         self.host.manifest = _manifest(loaded)
         missing = self.signed[0].must_cite[0]
         del self.host.manifest[missing]
         del self.host.manifest[judged.source_id]
+        self.host.given = set(self.host.manifest)
         result = self.run_slice(loaded, self.sample_context())
         self.assertTrue(result.verdict, result.report)
         self.assertTrue(all(row.verdict == "pass" for row in result.results))
         unbuilt = " ".join(sorted((missing, judged.source_id)))
         self.assertIn(
-            f"unbuilt gold documents 2 (absent from the sample, not counted): {unbuilt}\n"
+            f"unbuilt gold documents 2 (not given to the sample's build, not counted): {unbuilt}\n"
             f"gold documents {len(sample.gold_hashes(loaded)) - 2}: dropped 0 (absent 0, hash changed 0), ",
             result.report,
         )
         self.assertIn("judged queries with dropped coordinates 0:\n", result.report)
         self.assertIn("gold-drop: pass", result.report)
-        self.assertNotIn("unbuilt", self.run_slice(loaded).report)
+        production = self.run_slice(loaded)
+        self.assertFalse(production.verdict)
+        self.assertNotIn("unbuilt", production.report)
+        self.assertIn(
+            f"gold documents {len(sample.gold_hashes(loaded))}: dropped 2 (absent 2, hash changed 0), "
+            f"ceiling {golddrop_slice.GOLD_DROP_CEILING_PERCENT} %\n", production.report,
+        )
+
+    def test_sample_with_no_recorded_ids_drops_every_absent_id(self) -> None:
+        judged = replace(_judgment(), source_id="fictional/judged-only", sha256="b" * 64)
+        loaded = self.with_judgments((judged,))
+        self.host.manifest = _manifest(loaded)
+        missing = self.signed[0].must_cite[0]
+        del self.host.manifest[missing]
+        del self.host.manifest[judged.source_id]
+        self.assertEqual(self.host.given, set())
+        result = self.run_slice(loaded, self.sample_context())
+        self.assertFalse(result.verdict)
+        self.assertEqual(result.results[0].verdict, "fail")
+        self.assertEqual(result.results[0].metrics["dropped"], [missing])
+        self.assertIn("unbuilt gold documents 0 (not given to the sample's build, not counted): none\n", result.report)
+        self.assertIn(
+            f"gold documents {len(sample.gold_hashes(loaded))}: dropped 2 (absent 2, hash changed 0), "
+            f"ceiling {golddrop_slice.GOLD_DROP_CEILING_PERCENT} %\n", result.report,
+        )
+        self.assertIn(f"absent source ids: {' '.join(sorted((missing, judged.source_id)))}\n", result.report)
+        self.assertIn(f"{judged.query_id}: {judged.source_id}@{judged.sha256}\n", result.report)
+        production = self.run_slice(loaded)
+        self.assertEqual(result.results, production.results)
+        self.assertEqual(result.report.splitlines()[3:], production.report.splitlines()[2:])
 
     def test_sample_still_drops_a_changed_hash(self) -> None:
         judged = replace(_judgment(), source_id=self.signed[0].must_cite[0])
         loaded = self.with_judgments((judged,))
         self.host.manifest = _manifest(loaded)
         self.host.manifest[judged.source_id] = "b" * 64
+        self.host.given = set(sample.gold_hashes(loaded))
         result = self.run_slice(loaded, self.sample_context())
         self.assertFalse(result.verdict)
         self.assertEqual(result.results[0].verdict, "fail")
-        self.assertIn("unbuilt gold documents 0 (absent from the sample, not counted): none\n", result.report)
+        self.assertIn("unbuilt gold documents 0 (not given to the sample's build, not counted): none\n", result.report)
         self.assertIn("dropped 1 (absent 0, hash changed 1)", result.report)
 
     def test_two_queries_two_hashes_drop_one_document_and_only_lost_coordinates(self) -> None:
@@ -433,33 +525,55 @@ class Runner(GoldDropFixture):
 
     def test_failed_unavailable_or_invalid_manifest_fails_every_counted_case_with_fix(self) -> None:
         identifier = self.signed[0].must_cite[0]
-        valid = {"source_id": identifier, "canonical_text_sha256": MANIFEST_HASH}
-        invalid: tuple[object, ...] = (
-            [], {**valid, "answer": PRIVATE}, {"source_id": identifier},
-            {**valid, "source_id": "fictional/not-requested"},
-            {**valid, "source_id": [identifier]}, {**valid, "canonical_text_sha256": "invalid"},
-        )
-        scenarios = (
-            (1, None, None), (127, None, None),
-            (0, OSError(PRIVATE), None), (0, subprocess.TimeoutExpired("fictitious psql", 1), None),
-            (0, None, "fictitious malformed JSON\n"),
-            (0, None, json.dumps(valid) + "\n" + json.dumps(valid) + "\n"),
-            *((0, None, json.dumps(value) + "\n") for value in invalid),
-        )
-        for code, error, reply in scenarios:
-            with self.subTest(code=code, error=type(error).__name__, reply=reply):
-                self.host = GoldDropHost()
-                self.host.manifest = _manifest(self.loaded)
-                self.host.manifest_code, self.host.manifest_error, self.host.manifest_stdout = code, error, reply
-                result = self.run_slice()
-                self.assertFalse(result.verdict)
-                self.assertIsNone(result.gated_cases)
-                self.assertNotIn("3/n", result.report)
-                self.assertEqual(tuple(row.case_id for row in result.results), select_cases(self.loaded, "gold-drop").counted)
-                self.assertTrue(all(row.verdict == "fail" and row.metrics == {"problem": "record-unreachable"} for row in result.results))
-                self.assertIn("record-unreachable: generation manifest", result.report)
-                self.assertIn("Fix: Run " + stack.logs_fix(_context(self.host).turns_dir, record.POSTGRES_SERVICE), result.report)
-                self.assertEqual(len(self.host.calls), 1)
+        for reader in ("manifest", "gold"):
+            valid = {"source_id": identifier}
+            if reader == "manifest":
+                valid["canonical_text_sha256"] = MANIFEST_HASH
+            invalid: tuple[object, ...] = (
+                None, [], {}, {**valid, "answer": PRIVATE},
+                {**valid, "source_id": "fictional/not-requested"},
+                {**valid, "source_id": [identifier]}, {**valid, "source_id": None},
+                {**valid, "source_id": ""}, {**valid, "source_id": "invalid identifier"},
+                {**valid, "source_id": "x" * (SOURCE_ID_MAX_LENGTH + 1)},
+                *(({"source_id": identifier}, {**valid, "canonical_text_sha256": "invalid"})
+                  if reader == "manifest" else ({**valid, "canonical_text_sha256": MANIFEST_HASH},)),
+            )
+            scenarios = (
+                (1, None, None), (127, None, None),
+                (0, OSError(PRIVATE), None), (0, subprocess.TimeoutExpired("fictitious psql", 1), None),
+                (0, None, "fictitious malformed JSON\n"),
+                (0, None, json.dumps(valid) + "\n" + json.dumps(valid) + "\n"),
+                *((0, None, json.dumps(value) + "\n") for value in invalid),
+                *((0, None, json.dumps(valid) + "\n" + json.dumps(value) + "\n") for value in invalid),
+            )
+            for code, error, reply in scenarios:
+                with self.subTest(reader=reader, code=code, error=type(error).__name__, reply=reply):
+                    self.host = GoldDropHost()
+                    self.host.manifest = _manifest(self.loaded)
+                    context = self.sample_context()
+                    if reader == "manifest":
+                        self.host.manifest_code, self.host.manifest_error, self.host.manifest_stdout = code, error, reply
+                    else:
+                        self.host.given = set(self.host.manifest)
+                        self.host.given_code, self.host.given_error, self.host.given_stdout = code, error, reply
+                    fix = f"Run {stack.logs_fix(context.turns_dir, record.POSTGRES_SERVICE)}, then retry."
+                    if error is not None:
+                        problem = Problem(f"generation {reader} read could not run", fix)
+                    elif code:
+                        problem = Problem(f"generation {reader} read failed (exit {code})", fix)
+                    else:
+                        problem = Problem(f"generation {reader} row is invalid", fix)
+                    result = self.run_slice(context=context)
+                    self.assertFalse(result.verdict)
+                    self.assertIsNone(result.gated_cases)
+                    self.assertNotIn("3/n", result.report)
+                    selection = select_cases(self.loaded, "gold-drop")
+                    self.assertEqual(tuple(row.case_id for row in result.results), selection.counted)
+                    self.assertTrue(all(row.verdict == "fail" and row.metrics == {"problem": "record-unreachable"} for row in result.results))
+                    self.assertEqual(result.report,
+                                     f"{len(selection.counted)} counted, {len(selection.unsigned)} unsigned excluded\n"
+                                     f"record-unreachable: {problem.problem}\nFix: {problem.fix}\ngold-drop: fail\n")
+                    self.assertEqual(len(self.host.calls), 1 if reader == "manifest" else 2)
 
 
 class Command(GoldDropFixture):

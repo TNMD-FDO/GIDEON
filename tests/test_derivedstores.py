@@ -1,4 +1,4 @@
-"""Derived-store snapshot requests, replies, cleanup, and refusal contracts."""
+"""Derived-store requests, replies, counts, cleanup, and refusal contracts."""
 
 import json
 import os
@@ -172,6 +172,155 @@ def q_step(method: str, path: str, data: object, status: int = 200) -> Step:
 
 def os_step(method: str, path: str, data: object, status: int = 200) -> Step:
     return Step(OPENSEARCH_SERVICE_NAME, method, path, os_reply(data, status))
+
+
+class Counts(unittest.TestCase):
+    def test_qdrant_collection_names_are_sorted_unique_and_allow_an_empty_store(self) -> None:
+        for names, expected in (([], ()), (["fictitious-z", "fictitious-a", "fictitious-z"], ("fictitious-a", "fictitious-z"))):
+            with self.subTest(names=names):
+                host = FakeHost([q_step("GET", "/collections", {"result": {"collections": [{"name": name} for name in names]}})])
+                self.assertEqual(derivedstores.qdrant_collection_names(host, RENDERED, Q_KEY), expected)
+                self.assertEqual(len(host.calls), 1)
+                argv, request, _ = host.calls[0]
+                assert request is not None
+                self.assertIn(f"api-key: {Q_KEY}\r\n", request)
+                self.assertNotIn(Q_KEY, str(argv))
+                self.assertEqual(host.steps, [])
+
+    def test_qdrant_collection_listing_refuses_off_shape_and_failed_replies(self) -> None:
+        bodies: tuple[object, ...] = (None, [], {}, {"result": {}}, {"result": {"collections": None}},
+                                     {"result": {"collections": [None]}}, {"result": {"collections": [{"name": "../unsafe"}]}})
+        for body in bodies:
+            with self.subTest(body=body):
+                host = FakeHost([q_step("GET", "/collections", body)])
+                result = derivedstores.qdrant_collection_names(host, RENDERED, Q_KEY)
+                self.assertIsInstance(result, report.Problem)
+                assert isinstance(result, report.Problem)
+                self.assertEqual(result.fix, stack.logs_fix(RENDERED, QDRANT_SERVICE_NAME))
+                self.assertEqual(len(host.calls), 1)
+        for code in (3, 127):
+            with self.subTest(code=code):
+                host = FakeHost([Step(QDRANT_SERVICE_NAME, "GET", "/collections", returncode=code)])
+                result = derivedstores.qdrant_collection_names(host, RENDERED, Q_KEY)
+                self.assertIsInstance(result, report.Problem)
+                assert isinstance(result, report.Problem)
+                self.assertIn(f"exit {code}", result.problem)
+                self.assertEqual(len(host.calls), 1)
+
+    def test_opensearch_count_request_and_password_on_stdin(self) -> None:
+        for count in (0, 7):
+            with self.subTest(count=count):
+                host = FakeHost([os_step("GET", "/fictitious-index/_count", {"count": count})])
+                self.assertEqual(derivedstores.opensearch_document_count(
+                    host, RENDERED, OS_PASSWORD, "fictitious-index",
+                ), count)
+                argv, request, _ = host.calls[0]
+                assert request is not None
+                user_line = next(line for line in request.splitlines() if line.startswith("user = "))
+                self.assertTrue(json.loads(user_line.removeprefix("user = ")).endswith(":" + OS_PASSWORD))
+                self.assertNotIn("data =", request)
+                self.assertNotIn(OS_PASSWORD, str(argv))
+                self.assertEqual(len(host.calls), 1)
+                self.assertEqual(host.steps, [])
+
+    def test_qdrant_count_is_exact_and_key_is_on_stdin(self) -> None:
+        for count in (0, 7):
+            with self.subTest(count=count):
+                host = FakeHost([q_step(
+                    "POST", "/collections/fictitious-collection/points/count",
+                    {"result": {"count": count}},
+                )])
+                self.assertEqual(derivedstores.qdrant_point_count(
+                    host, RENDERED, Q_KEY, "fictitious-collection",
+                ), count)
+                argv, request, _ = host.calls[0]
+                assert request is not None
+                headers, _, body = request.partition("\r\n\r\n")
+                self.assertEqual(json.loads(body), {"exact": True})
+                self.assertIn(f"Content-Length: {len(body.encode())}", headers)
+                self.assertIn(f"api-key: {Q_KEY}\r\n", request)
+                self.assertNotIn(Q_KEY, str(argv))
+                self.assertEqual(len(host.calls), 1)
+                self.assertEqual(host.steps, [])
+
+    def test_missing_names_are_absent_regardless_of_error_body(self) -> None:
+        bodies: tuple[object, ...] = ({"error": "fictitious missing name"}, [], None)
+        for body in bodies:
+            for read, step, secret in (
+                (derivedstores.opensearch_document_count,
+                 os_step("GET", "/fictitious/_count", body, 404), OS_PASSWORD),
+                (derivedstores.qdrant_point_count,
+                 q_step("POST", "/collections/fictitious/points/count", body, 404), Q_KEY),
+            ):
+                with self.subTest(store=step.service, body=body):
+                    host = FakeHost([step])
+                    self.assertIsNone(read(host, RENDERED, secret, "fictitious"))
+                    self.assertEqual(len(host.calls), 1)
+                    self.assertEqual(host.steps, [])
+
+    def test_malformed_counts_refuse_with_store_logs_fix(self) -> None:
+        bad_counts: tuple[object, ...] = (None, True, False, -1, 1.5, "7", [], {})
+        opensearch_bodies: tuple[object, ...] = (
+            None, [], {}, *({"count": count} for count in bad_counts),
+        )
+        qdrant_bodies: tuple[object, ...] = (
+            None, [], {}, {"result": []}, {"result": {}}, {"points_count": 7},
+            *({"result": {"count": count}} for count in bad_counts),
+        )
+        for read, step_for, secret, bodies in (
+            (derivedstores.opensearch_document_count,
+             lambda body: os_step("GET", "/fictitious/_count", body), OS_PASSWORD,
+             opensearch_bodies),
+            (derivedstores.qdrant_point_count,
+             lambda body: q_step("POST", "/collections/fictitious/points/count", body), Q_KEY,
+             qdrant_bodies),
+        ):
+            for body in bodies:
+                step = step_for(body)
+                with self.subTest(store=step.service, body=body):
+                    host = FakeHost([step])
+                    result = read(host, RENDERED, secret, "fictitious")
+                    assert isinstance(result, report.Problem)
+                    self.assertIn("invalid", result.problem)
+                    self.assertEqual(result.fix, stack.logs_fix(RENDERED, step.service))
+                    self.assertNotIn(secret, repr(result))
+                    self.assertEqual(len(host.calls), 1)
+
+    def test_unsafe_names_refuse_before_any_request(self) -> None:
+        for read, secret in (
+            (derivedstores.opensearch_document_count, OS_PASSWORD),
+            (derivedstores.qdrant_point_count, Q_KEY),
+        ):
+            for name in ("", ".", "..", "../escape", "a/b", "a?query", "a\nb"):
+                with self.subTest(read=read.__name__, name=name):
+                    host = FakeHost([])
+                    result = read(host, RENDERED, secret, name)
+                    assert isinstance(result, report.Problem)
+                    self.assertIn("unsafe name", result.problem)
+                    self.assertEqual(host.calls, [])
+
+    def test_failed_requests_refuse_without_retry_even_with_valid_count(self) -> None:
+        for read, secret, good, rejected in (
+            (derivedstores.opensearch_document_count, OS_PASSWORD,
+             os_step("GET", "/fictitious/_count", {"count": 7}),
+             os_step("GET", "/fictitious/_count", {"count": 7}, 500)),
+            (derivedstores.qdrant_point_count, Q_KEY,
+             q_step("POST", "/collections/fictitious/points/count", {"result": {"count": 7}}),
+             q_step("POST", "/collections/fictitious/points/count", {"result": {"count": 7}}, 500)),
+        ):
+            for step in (
+                rejected,
+                Step(good.service, good.method, good.path, good.stdout, returncode=7),
+                Step(good.service, good.method, good.path, good.stdout, returncode=127),
+                Step(good.service, good.method, good.path, error=FileNotFoundError()),
+            ):
+                with self.subTest(store=step.service, code=step.returncode, error=step.error):
+                    host = FakeHost([step])
+                    result = read(host, RENDERED, secret, "fictitious")
+                    assert isinstance(result, report.Problem)
+                    self.assertEqual(result.fix, stack.logs_fix(RENDERED, step.service))
+                    self.assertEqual(len(host.calls), 1)
+                    self.assertEqual(host.steps, [])
 
 
 class Clients(unittest.TestCase):

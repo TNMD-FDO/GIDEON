@@ -169,6 +169,7 @@ oldest first: the files the live root lacks are added and the newer version
 of any it holds is written, nothing is deleted, and the frontend's audit log
 is the newest copy's. The `files:` row reports it as
 `data-bulk-openwebui: added or rewrote N file(s) (with <label>, ...)`.
+What each restore reaches and costs is stated in §7's table.
 
 While the `gideon-ci` sibling stands, run `sudo python3 -m tools.cistack down`
 first: its relay holds production's Compose network, which the restore's stop
@@ -186,7 +187,9 @@ before `v0.1.79` records no ids, is re-owned by the numbers it holds, and its
 `Next:` line then names `host provision` before the apply, because provision
 re-owns the managed `/data` directories; restores Postgres; brings the store
 tier — Postgres and the two derived stores — back to prove the cluster promotes,
-puts the stores' indexes back from their snapshots, and writes its row. It ends with **the frontend
+puts the stores' indexes back from their snapshots, levels them with the record
+— an index generation short or absent in either store goes back to `building`,
+a live one held whole in both gets its aliases — and writes its row. It ends with **the frontend
 and ingress down and the store tier running, and on the build box the host
 registry**. On a host that is not the build box but whose `gideon-registry` is
 still active (a former build box), it refuses before any stage: stop and disable
@@ -197,7 +200,10 @@ prints the two next steps:
   that made the set) or *not the set's (a rebuilt box)* — then decrypt the
   tarball with the office's age identity:
   `age -d -i <identity file kept off-box> <set>/secrets.tar.age | tar -x -C /etc/gideon`
-- `Next: gideon apply, then gideon backup run --full`
+- `Next: gideon apply, then gideon backup run --full` — with
+  `gideon index build <collection> --lockfile <label>` for each generation the
+  restore sent back to `building`, and `gideon index promote <generation>` for
+  each of those that was live, between the two
 
 For the content-addressed store, restore compares the set's pinned listing
 with the live names and adds only objects the live store lacks. It hashes each
@@ -319,7 +325,8 @@ rotated since the set was made (the install runbook's rotation step, `v0.1.40`).
 5. Decrypt the set's tarball over the fresh secrets with the **old** identity
    from the password manager (the restored databases carry the old role
    passwords, so the old secrets must be back before anything connects).
-6. `gideon apply`, then `gideon backup run --full`,
+6. `gideon apply`, any `gideon index build` and `gideon index promote` the
+   restore's `Next:` line names, then `gideon backup run --full`,
    then `gideon backup drill`.
 
 For the corpus's court coverage after these steps, follow `docs/runbooks/release-files.md §11`.
@@ -350,3 +357,56 @@ prefer `--set` for anything a rollback took. It is also the by-hand rollback whe
 finds no pre-upgrade set to work from. As before a restore, `sudo python3 -m
 tools.cistack down` runs first while the `gideon-ci` sibling stands. A labelled or pre-restore set never
 expires the repository's retention on its own; only the nightly run does.
+
+## 7. What a failure costs: recovery point and recovery time
+
+**Recovery point** is the newest archive boundary a failure's recovery reaches,
+stated as the worst-case committed work lost; **recovery time** is the time
+from the first recovery command to the first answered turn.
+The figures below are what the design delivers today, each proven by a dated
+record or named unproven with its drill; a tighter target needs a separate change.
+Detection is outside every recovery time, and no outside check yet pages when
+the box stops.
+Every record names its date, size, and release, since a figure is read against
+its size.
+
+| Failure | Recovery point | Recovery time | Procedure | Proof |
+|---|---|---|---|---|
+| A database error while Postgres answers (a bad migration, a wrong delete) | The pre-restore set's boundary, taken after its own backup: a point-in-time restore to any instant before it, reached from the earlier set's backup and the archived WAL; the work after the chosen instant is discarded by choice, nothing else is lost; an instant past an earlier restore waits for that restore's full backup (below) | 2,052 s (34 min): the pre-restore set 536 s, the restore's other stages 1,202 s, the apply 309 s, the turn 4 s | §4, `gideon restore --from staging --at <instant>`, then `gideon apply` and any `gideon index build` and `gideon index promote` its `Next:` line names | A timed run on 2026-10-21 over a 69.5 GB set, `v0.3.181` |
+| A damaged cluster that does not answer | The newest complete local set's boundary, up to a day behind (the 01:00 run's); the archived WAL past it is on disk and currently unreachable | 1,506 s, derived: a stopped-stack restore of the newest set (1,193 s) plus the database-error run's apply and turn (313 s) | §4 with the stack stopped first, `gideon restore --from staging`, then `gideon apply` | Unproven as a whole; the timed restore that reaches archived WAL while Postgres is down |
+| A lost derived store's index (Qdrant, OpenSearch) | The newest full run's index snapshot, up to a week behind the record, then levelled with it | 1,685 s from the restore's start to the restored and levelled store, before the apply, over a 1,197,330-point scratch generation (2026-10-21); to a query answered through the alias, unproven | §4, the `stores:` row's put-back and level step, then the `Next:` line's `gideon index build` and `gideon index promote` | The 2026-10-21 record over a 1,197,330-point scratch generation and a 69.5 GB set, `v0.3.181`, for the store; the query's seconds unproven, read at the first restore after the first promoted generation |
+| Lost content-addressed store objects | The newest complete local set's copy; an object stored since is written again from its source (§4's listing command) | Seconds per missing object at the put-back; the whole store's put-back unproven at today's size | §4, the `files:` row's `data-bulk-cas` clause and the listing command | Unproven; the clean-VM full restore at the next minor release with the store in the set |
+| A lost box or `/data` volume (staging shares the volume) | The newest finished push: a day by design, two days observed while pushes overrun | The rebuilt-box sequence of §5, unproven at today's size; the model weights' fetch and a replacement machine's arrival stated outside the figure | §5 | Unproven; the clean-VM full restore at the next minor release, the 1,179 s run of 2026-09-17 at `v0.1.77` over a 35.9 GB set predating the store named as the last record |
+
+For a damaged cluster, stop the whole stack first so the `pre-restore` stage
+skips: a partially running stack refuses.
+The archived WAL past the newest complete set's boundary is on disk but
+unreachable until the restore can reach it while Postgres is down, so the
+recovery point stays up to a day behind.
+The recovery time is derived: two stopped-stack restores of the newest local
+set on 2026-10-21, over a 69.5 GB set at `v0.3.181`, took 1,165 s and 1,193 s,
+and the slower one plus the database-error run's apply (309 s) and turn (4 s)
+is 1,506 s; no run has yet timed this path through to an answered turn.
+
+After any restore, `--at` reaches no instant later than that restore until the
+full backup its `Next:` line names has finished, since a point-in-time restore
+replays only along the timeline the selected set's backup was taken on, and a
+restore starts a new one.
+Run `gideon backup run --full` at once after every restore's apply.
+A restore whose instant its set cannot reach stops the stack, runs to its
+`stores:` row, and refuses there with Postgres restarting; recover with a
+stopped-stack restore of the newest local set, as for a damaged cluster.
+
+A pre-restore set this release takes records its boundary after its own backup
+and restores as any other set.
+A `pre-restore-<ts>` set an earlier release took is restored only after §5's
+hand correction of its `archive_through`, with the original manifest kept
+beside it.
+
+For a lost box, the model weights' fetch and a replacement machine's arrival
+are outside the recovery time.
+Staging shares the lost volume, so only a finished off-box push supplies the
+recovery point: nightly pushes are a day apart by design, but overruns have
+left the newest finished push two days behind.
+A push that never finished does not count, and a target restore's `select:`
+row names the snapshot it takes (§4).

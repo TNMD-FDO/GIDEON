@@ -20,6 +20,7 @@ from gideon.host import (
     stages,
 )
 from gideon.host.backup import parse_rsync_stats
+from gideon.host.index import level
 from gideon.host.render.engine import MODEL_SERVERS
 from gideon.host.render.opensearch import (
     OPENSEARCH_SERVICE_NAME,
@@ -380,6 +381,13 @@ def restore_target(ctx: HarnessContext) -> StageResult:
             for clause in clauses
         ):
             return _restore_failure(ctx, f"stores row does not carry the {store_name} recovery clause")
+    level_clauses = tuple(clause for clause in clauses if clause.startswith("level"))
+    if not level_clauses:
+        return _restore_failure(ctx, "stores row does not carry a level clause")
+    level_patterns = level.level_clause_patterns()
+    for part in level_clauses:
+        if not any(pattern.fullmatch(part) for pattern in level_patterns):
+            return _restore_failure(ctx, f"stores row has an invalid level clause: {part}")
     next_row = details.get("next")
     if next_row is None or next_row[0] != "ok":
         return _restore_failure(ctx, "next row is not ok")

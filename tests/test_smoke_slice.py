@@ -188,6 +188,7 @@ class CommandDoorHost(JudgingDoorHost):
     ) -> subprocess.CompletedProcess[str]:
         if input is not None and (
             "FROM public.index_generations" in input or "FROM public.generation_documents" in input
+            or "FROM public.generation_gold" in input
         ):
             return self.stores.run(
                 list(argv), check=check, input=input, cwd=cwd, env=env,

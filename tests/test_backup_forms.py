@@ -4,7 +4,7 @@ import argparse
 import contextlib
 import io
 import os
-from dataclasses import replace
+from dataclasses import asdict, replace
 from unittest.mock import patch
 
 import test_backup
@@ -14,6 +14,7 @@ import test_backupset
 import test_derivedstores
 import test_drill
 import test_restore
+from test_index_level import generation
 
 from gideon import cli
 from gideon.host import (
@@ -307,6 +308,47 @@ class BackupForms(test_restore.RenderedRestoreCase):
                     err.getvalue(),
                     f"gideon backup drill: no complete local backup set is available. Fix: Run {command} backup run, then retry.\n",
                 )
+
+    def test_index_build_and_promote_next_lines_follow_both_forms_and_shapes(self) -> None:
+        row = generation("live")
+        for installed in (False, True):
+            report.set_installed_form(installed)
+            command = "gideon" if installed else "sudo python3 -m gideon"
+            for has_ids in (True, False):
+                with self.subTest(installed=installed, has_ids=has_ids):
+                    value = test_restore.manifest()
+                    if has_ids:
+                        value = replace(value, gideon_ids=test_restore.DEFAULT_GIDEON_IDS)
+                    fake = test_restore.make_host(
+                        manifest_value=value, generations=(asdict(row),),
+                        index_counts={
+                            "opensearch": {row.gen_id: row.counts["indexed"] + row.counts["present"]},
+                            "qdrant": {row.gen_id: None},
+                        },
+                    )
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        code = restore.run_restore(
+                            argparse.Namespace(source="staging", at=None),
+                            host=fake, now=test_restore.NOW,
+                        )
+                    self.assertEqual(code, 0, out.getvalue())
+                    commands = (
+                        f"{command} apply, then "
+                        f"{command} index build {row.collection} --lockfile {row.corpus_lockfile}, then "
+                        f"{command} index promote {row.gen_id}, then "
+                        f"{command} backup run --full"
+                    )
+                    expected = f"Next: {commands}" if has_ids else (
+                        f"Next: {command} host provision (the first provision's mode flags), "
+                        f"because this set records no gideon ids, then {commands}"
+                    )
+                    self.assertEqual(
+                        [line for line in out.getvalue().splitlines() if line.startswith("Next:")],
+                        [expected],
+                    )
+                    if installed:
+                        self.assertNotIn("python3 -m gideon", out.getvalue())
 
     def test_select_refusal_and_both_next_lines_follow_the_form(self) -> None:
         for installed in (False, True):

@@ -5,9 +5,9 @@ field is deprecated.  The reader follows PEP 440's Appendix B parser, PEP 503's
 normalized project names, PEP 592's per-file yanks, PEP 629's API versioning,
 PEP 691's JSON representation, PEP 700's separate file/version lists, and
 PEP 792's quarantined-project status, as described in the verified research
-note. A file whose filename's stable version is at or below the current value
-is set aside before attribution, as with a legacy upload filed under an older
-release.
+note. A file whose filename version is at or below the current value by PEP
+440's full order is set aside before attribution, as with a legacy upload or a
+pre-release filed under an older release.
 """
 
 import json
@@ -79,6 +79,7 @@ _PRE_RELEASES: Final = {
 }
 
 
+@total_ordering
 @dataclass(frozen=True, slots=True)
 class _ParsedVersion:
     """The normalized components captured by the PEP 440 pattern."""
@@ -89,6 +90,35 @@ class _ParsedVersion:
     post: int | None
     dev: int | None
     local: tuple[str | int, ...] | None
+
+    def _key(self) -> tuple[tuple[object, ...], ...]:
+        pre: tuple[object, ...]
+        if self.pre is None:
+            pre = (0,) if self.dev is not None and self.post is None else (2,)
+        else:
+            pre = (1, *self.pre)
+        post = (0,) if self.post is None else (1, self.post)
+        dev = (1,) if self.dev is None else (0, self.dev)
+        local = (
+            (0,)
+            if self.local is None
+            else (
+                1,
+                tuple(
+                    (1, part) if isinstance(part, int) else (0, part)
+                    for part in self.local
+                ),
+            )
+        )
+        return ((self.epoch,), self.release, pre, post, dev, local)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _ParsedVersion) and self._key() == other._key()
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, _ParsedVersion):
+            return NotImplemented
+        return self._key() < other._key()
 
 
 def _parsed_version(text: str) -> _ParsedVersion | None:
@@ -172,6 +202,17 @@ class StableVersion:
         if not isinstance(other, StableVersion):
             return NotImplemented
         return self._key() < other._key()
+
+
+def version_order(text: str) -> tuple[tuple[object, ...], ...] | None:
+    """Return *text*'s key in PEP 440's total order, or None when it is invalid.
+
+    The set-aside compares by this order; StableVersion remains the candidate
+    order.
+    """
+
+    parsed = _parsed_version(text)
+    return parsed._key() if parsed is not None else None
 
 
 def version_from_filename(filename: str, project: str) -> str | None:
@@ -299,6 +340,8 @@ def pypi_version(fetcher: Fetcher, project: str, current: str) -> str | None:
     current_version = StableVersion.parse(current)
     if current_version is None:
         raise ValueError(f"current PyPI version {current!r} is not stable")
+    current_order = version_order(current)
+    assert current_order is not None
     url = f"{PYPI_INDEX_ROOT}/{project}/"
     response = fetcher.get(url, headers={"Accept": PYPI_ACCEPT})
     versions, files = _index_document(url, _json(url, response))
@@ -310,8 +353,8 @@ def pypi_version(fetcher: Fetcher, project: str, current: str) -> str | None:
         if version is None:
             unattributed.append(file.filename)
             continue
-        filed = StableVersion.parse(version)
-        if filed is not None and filed <= current_version:
+        filed = version_order(version)
+        if filed is not None and filed <= current_order:
             continue
         identity = _version_identity(version)
         if identity not in listed:

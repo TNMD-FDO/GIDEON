@@ -1,4 +1,4 @@
-"""Read generation records and write their identities, footprints, and promotions."""
+"""Read generation records and manifests; write identities, footprints, state, and given gold."""
 
 import json
 import re
@@ -68,6 +68,16 @@ class PromotionOutcome:
 
     retired: tuple[str, ...]
     promoted_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class DemotionOutcome:
+    """A demoted generation's prior state and the build halves cleared."""
+
+    name: str
+    previous_state: str
+    lexical_cleared: bool
+    dense_cleared: bool
 
 
 _WRITE_SQL = """BEGIN;
@@ -164,6 +174,45 @@ BEGIN
 END
 $promotion$;
 SELECT current_setting('gideon.promotion_outcome')::jsonb;
+COMMIT;
+"""
+
+
+_NOT_DEMOTABLE = "generation is no longer built or live"
+_DEMOTE_SQL = f"""\\set QUIET on
+BEGIN;
+SELECT set_config('gideon.demotion_payload', :'v_payload', true) AS stored \\gset
+DO $demotion$
+DECLARE
+    payload jsonb := current_setting('gideon.demotion_payload')::jsonb;
+    demoted text;
+    previous_state text;
+BEGIN
+    WITH previous AS (
+        SELECT gen_id, state FROM public.index_generations
+        WHERE gen_id = payload->>'name' AND state IN ('built', 'live')
+        FOR UPDATE
+    )
+    UPDATE public.index_generations AS generation
+    SET state = 'building', built_at = NULL, promoted_at = NULL,
+        lexical_built_at = CASE WHEN (payload->>'lexical_short')::boolean
+            THEN NULL ELSE generation.lexical_built_at END,
+        dense_built_at = CASE WHEN (payload->>'dense_short')::boolean
+            THEN NULL ELSE generation.dense_built_at END
+    FROM previous
+    WHERE generation.gen_id = previous.gen_id AND generation.state IN ('built', 'live')
+    RETURNING generation.gen_id, previous.state INTO demoted, previous_state;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION '{_NOT_DEMOTABLE}';
+    END IF;
+    PERFORM set_config('gideon.demotion_outcome', jsonb_build_object(
+        'name', demoted, 'previous_state', previous_state,
+        'lexical_cleared', (payload->>'lexical_short')::boolean,
+        'dense_cleared', (payload->>'dense_short')::boolean
+    )::text, true);
+END
+$demotion$;
+SELECT current_setting('gideon.demotion_outcome')::jsonb;
 COMMIT;
 """
 
@@ -444,6 +493,48 @@ def promote_generation(
     return PromotionOutcome(tuple(value["retired"]), value["promoted_at"])
 
 
+def demote_generation(
+    host: Host, rendered_dir: PathLike, name: str, *,
+    lexical_short: bool, dense_short: bool, command_path: str,
+) -> DemotionOutcome | Problem:
+    """Demote a built or live row and clear only its short build halves atomically."""
+
+    state_fix = (
+        f"Run {report.command(f'index report {name}')} to read its state, "
+        f"then run {report.command(command_path)} again."
+    )
+    if not lexical_short and not dense_short:
+        return Problem(f"{name}: demotion requires at least one short build half", state_fix)
+    payload = {"name": name, "lexical_short": lexical_short, "dense_short": dense_short}
+    sql = worker.bind("v_payload", json.dumps(payload, separators=(",", ":"))) + "\n" + _DEMOTE_SQL
+    result = _run(host, rendered_dir, sql, command_path)
+    if isinstance(result, Problem):
+        return result
+    fix = database_fix(rendered_dir, command_path)
+    if result.returncode != 0:
+        if _NOT_DEMOTABLE in result.stderr:
+            return Problem(f"{name}: {_NOT_DEMOTABLE}; nothing was demoted", state_fix)
+        return Problem(f"generation demotion failed (exit {result.returncode})", fix)
+    try:
+        value = json.loads(result.stdout)
+    except ValueError:
+        value = None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"name", "previous_state", "lexical_cleared", "dense_cleared"}
+        or value["name"] != name
+        or value["previous_state"] not in ("built", "live")
+        or type(value["lexical_cleared"]) is not bool
+        or type(value["dense_cleared"]) is not bool
+        or value["lexical_cleared"] != lexical_short
+        or value["dense_cleared"] != dense_short
+    ):
+        return Problem("generation demotion returned an invalid outcome", fix)
+    return DemotionOutcome(
+        value["name"], value["previous_state"], value["lexical_cleared"], value["dense_cleared"],
+    )
+
+
 def _parse_manifest_row(line: str, *, with_doc_id: bool) -> dict[str, str] | None:
     """Validate a manifest projection's source id and content-addressed hashes."""
 
@@ -528,3 +619,26 @@ def read_manifest_rows(
         seen.add(value["source_id"])
         rows.append((value["source_id"], value["canonical_text_sha256"], value["doc_id"]))
     return tuple(rows)
+
+
+def write_gold(
+    host: Host, rendered_dir: PathLike, name: str, source_ids: Sequence[str], command_path: str,
+) -> None | Problem:
+    """Record the gold source ids a sample build was given without replacing any."""
+
+    sql = (
+        worker.bind("v_name", name) + "\n"
+        + worker.bind("v_source_ids", json.dumps(list(source_ids), separators=(",", ":")))
+        + "\nINSERT INTO public.generation_gold (gen_id, source_id) "
+        "SELECT :'v_name', jsonb_array_elements_text(:'v_source_ids'::jsonb) "
+        "ON CONFLICT DO NOTHING;\n"
+    )
+    result = _run(host, rendered_dir, sql, command_path)
+    if isinstance(result, Problem):
+        return result
+    if result.returncode != 0:
+        return Problem(
+            f"generation gold write failed (exit {result.returncode})",
+            database_fix(rendered_dir, command_path),
+        )
+    return None

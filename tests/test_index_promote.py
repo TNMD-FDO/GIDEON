@@ -17,14 +17,15 @@ from unittest.mock import patch
 from uuid import UUID
 
 from derivedstores_fake import empty_store_secrets
-from test_corpus_install import NOW
+from test_corpus_install import NOW, ROOT, SITE_PATH
 from test_derivedstores import os_reply, q_reply
+from test_engine_verify import models_text
 from test_index_record import LABEL, NAME, RENDERED, SPACE, row_for
 from test_index_report import report_for
 from test_index_treatment import treatment_for
 
-from gideon.host import backuplock, report, secrets, stack, worker
-from gideon.host.index import buildreport, generations, promote, record, sample
+from gideon.host import backuplock, models, report, secrets, stack, worker
+from gideon.host.index import buildreport, generations, lexical, promote, record, sample
 from gideon.host.render.ci import CI_ROOT, CI_SECRETS_DIR, CI_STACK, PRODUCTION_STACK
 from gideon.host.render.opensearch import (
     OPENSEARCH_PASSWORD_SECRET_NAME,
@@ -41,7 +42,7 @@ from gideon.host.sysio import Command, PathLike, RealHost
 
 CHECKOUT = Path("/fictitious-promote-checkout")
 OLD = generations.generation_name("caselaw", "corpus-2099-01-01", SPACE)
-STAGES = ("preconditions", "candidate", "aliases", "gates", "flip", "lexical", "dense", "next")
+STAGES = ("preconditions", "candidate", "aliases", "memory", "gates", "flip", "lexical", "dense", "next")
 
 
 def built_row(name: str) -> record.GenerationRow:
@@ -74,6 +75,9 @@ class FakeHost(RealHost):
         )
         self.targets: dict[str, tuple[str, ...]] = {"lexical": (self.old,), "dense": (self.old,)}
         self.jobs: dict[str, tuple[int, str]] = {}
+        self.points: dict[str, int | None] = {self.name: 11, self.old: 7}
+        self.site_text = (ROOT / "config/site.example.yaml").read_text() + "\nhardware_profile: 1x1v-1d\n"
+        self.model_text = models_text()
         self.sibling_job: tuple[int, str] | None = None
         self.euid = 0
         self.files = dict(empty_store_secrets())
@@ -99,6 +103,10 @@ class FakeHost(RealHost):
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
         key = os.fspath(path)
+        if key == SITE_PATH:
+            return self.site_text
+        if key == str(CHECKOUT / "models.lock"):
+            return self.model_text
         self.reads.append(key)
         if key not in self.files:
             raise FileNotFoundError(key)
@@ -168,6 +176,9 @@ class FakeHost(RealHost):
             event = f"job:{lock}"
             job = self.jobs.get(lock)
             data = job[0] if job is not None and job[1] in {"todo", "doing"} else ""
+        elif "ORDER BY collection, created_at, gen_id" in sql:
+            code = self.event("resident-record")
+            return subprocess.CompletedProcess(argv, code, "\n".join(json.dumps(asdict(row)) for row in self.rows.values()), "")
         elif "row_to_json(generation)" in sql:
             event = "candidate"
             row = self.rows.get(self.bound(sql, "v_name"))
@@ -202,6 +213,18 @@ class FakeHost(RealHost):
     def store(self, argv: list[str], store: str, method: str, path: str, body: Any) -> subprocess.CompletedProcess[str]:
         data: object
         self.requests.append((store, method, path, body))
+        if store == "dense" and (path == "/collections" or path.endswith("/points/count")):
+            code = self.event("dense-list" if method == "GET" else f"dense-count:{path.split('/')[2]}")
+            if code:
+                return subprocess.CompletedProcess(argv, code, "", "fictitious store diagnostic")
+            if path == "/collections":
+                assert method == "GET" and body is None
+                data = {"result": {"collections": [{"name": name} for name in self.points]}}
+                return subprocess.CompletedProcess(argv, 0, q_reply(data), "")
+            assert method == "POST" and body == {"exact": True}
+            count = self.points[path.split('/')[2]]
+            data = {"result": {"count": count}} if count is not None else {"status": {"error": "fictitious absent collection"}}
+            return subprocess.CompletedProcess(argv, 0, q_reply(data, 200 if count is not None else 404), "")
         code = self.event(f"{store}-{'read' if method == 'GET' else 'write'}")
         if code:
             return subprocess.CompletedProcess(argv, code, "", "fictitious store diagnostic")
@@ -302,7 +325,144 @@ class Promote(unittest.TestCase):
     def assert_untouched(self, before: tuple[dict[str, record.GenerationRow], dict[str, tuple[str, ...]]]) -> None:
         self.assertEqual((self.host.rows, self.host.targets), before)
         self.assertNotIn("flip", self.host.events)
-        self.assertFalse(any(method == "POST" for _, method, _, _ in self.host.requests))
+        self.assertFalse(any(method == "POST" and not path.endswith("/points/count")
+                             for _, method, path, _ in self.host.requests))
+        self.assertEqual(self.gates, [])
+
+    def memory_ceiling(self) -> int:
+        loaded = models.load_models_lock_text(self.host.model_text)
+        assert loaded.lock is not None
+        profile = loaded.lock.profile(loaded.lock.reference)
+        assert profile is not None
+        return profile.chunk_guards.serving_ceiling_chunks
+
+    def test_memory_row_counts_every_collection_between_aliases_and_gates(self) -> None:
+        """Promotion uses exact store counts and finishes every other job read first."""
+
+        self.host.points = {self.host.name: 11, self.host.old: 7, "fictitious-outside": 5, "gone": None}
+        code, out, err = self.run_promote()
+        self.assertEqual((code, err), (0, ""), out)
+        line = next(line for line in out.splitlines() if line.startswith("memory:"))
+        expected = f"counted {OLD} (live) 7, {NAME} (built) 11, fictitious-outside (unrecorded) 5 = 23"
+        self.assertEqual(line, f"memory: ok — {NAME}: {expected}; 23 ≤ serving ceiling {self.memory_ceiling()}")
+        self.assertLess(out.index("aliases: ok"), out.index("memory: ok"))
+        self.assertLess(out.index("memory: ok"), out.index("suite-part:"))
+        self.assertLess(out.index("memory: ok"), out.index("gates: ok"))
+        self.assertLess(self.host.events.index("resident-record"), self.host.events.index("dense-list"))
+        for prefix in lexical.JOB_SUBJECTS:
+            self.assertLess(self.host.events.index(f"job:{prefix}{OLD}"), self.host.events.index("dense-list"))
+        counts = [(path, body) for store, method, path, body in self.host.requests
+                  if store == "dense" and method == "POST" and path.endswith("/points/count")]
+        self.assertEqual(counts, [(f"/collections/{name}/points/count", {"exact": True}) for name in sorted(self.host.points)])
+
+    def test_memory_refusal_counts_candidate_and_names_other_residents_before_the_profile_fix(self) -> None:
+        """A refusal must neither call gates nor change records or aliases."""
+
+        for sibling in (False, True):
+            with self.subTest(sibling=sibling):
+                self.host = FakeHost(sibling=sibling)
+                retired_name = generations.generation_name("caselaw", "corpus-2098-01-01", SPACE)
+                built_name = generations.generation_name("caselaw", "corpus-2098-01-02", SPACE)
+                if sibling:
+                    retired_name, built_name = sample.sample_name(retired_name), sample.sample_name(built_name)
+                self.host.rows[retired_name] = replace(built_row(retired_name), state="retired", retired_at=NOW.isoformat())
+                self.host.rows[built_name] = built_row(built_name)
+                self.host.points = {self.host.name: self.memory_ceiling() - 10, self.host.old: 7,
+                                    retired_name: 2, built_name: 1, "fictitious-outside": 1}
+                before = copy.deepcopy((self.host.rows, self.host.targets))
+                out = self.refuse("memory", "resident chunks exceed the serving ceiling")
+                line = next(line for line in out.splitlines() if line.startswith("memory:"))
+                problem, fix = line.split(" Fix: ", 1)
+                self.assertIn(f"{self.host.name} (built) {self.host.points[self.host.name]}", problem)
+                self.assertIn(f"= {self.memory_ceiling() + 1}; {self.memory_ceiling() + 1} ≤ serving ceiling {self.memory_ceiling()}", problem)
+                opening, rest = fix.split("The live generation", 1)
+                self.assertTrue(opening.startswith("Other resident collections: "))
+                self.assertIn(f"retired: {retired_name}", opening)
+                self.assertIn(f"built: {built_name} (promotable, or droppable after retirement)", opening)
+                self.assertIn("fictitious-outside (outside the record)", opening)
+                self.assertNotIn(self.host.name, opening)
+                self.assertNotIn(self.host.old, opening)
+                gc_command = report.command("index gc --stack ci" if sibling else "index gc")
+                self.assertIn(gc_command, opening)
+                self.assertIn(f"{self.host.old} retires at this flip and stays resident for seven days until {gc_command} drops it", rest)
+                self.assertIn("Select a larger hardware_profile in /etc/gideon/site.yaml", rest)
+                self.assertIn("the guards derive from the profile's RAM, as docs/runbooks/release-files.md §4 says", rest)
+                self.assertNotIn("gates:", out)
+                self.assertNotIn("flip:", out)
+                self.assert_untouched(before)
+
+    def test_other_generations_queued_or_running_jobs_refuse_memory_before_listing(self) -> None:
+        """Promotion checks every subject regardless of recorded state or store presence."""
+
+        for state in ("building", "built", "live", "retired", "failed"):
+            for prefix, subject in lexical.JOB_SUBJECTS.items():
+                for status in ("todo", "doing"):
+                    with self.subTest(state=state, prefix=prefix, status=status):
+                        self.host = FakeHost()
+                        old = self.host.rows[OLD]
+                        self.host.rows[OLD] = replace(
+                            old, state=state, failure_reason="store" if state == "failed" else None,
+                            promoted_at=NOW.isoformat() if state in {"live", "retired"} else None,
+                            retired_at=NOW.isoformat() if state == "retired" else None,
+                        )
+                        self.host.points.pop(OLD)
+                        self.host.jobs[prefix + OLD] = (731, status)
+                        before = copy.deepcopy((self.host.rows, self.host.targets))
+                        out = self.refuse("memory", f"{OLD}: {subject} job 731 is queued or running")
+                        self.assertIn(report.command(f"index build caselaw --lockfile {old.corpus_lockfile}"), out)
+                        self.assertNotIn("dense-list", self.host.events)
+                        self.assertNotIn("gates:", out)
+                        self.assert_untouched(before)
+
+    def test_sample_live_refill_refuses_memory_and_names_its_sample_rejoin(self) -> None:
+        for status in ("todo", "doing"):
+            with self.subTest(status=status):
+                self.host = FakeHost(sibling=True)
+                self.host.jobs[DENSE_LOCK_PREFIX + self.host.old] = (731, status)
+                before = copy.deepcopy((self.host.rows, self.host.targets))
+                out = self.refuse("memory", f"{self.host.old}: dense job 731 is queued or running")
+                row = self.host.rows[self.host.old]
+                self.assertIn(report.command(f"index build caselaw --sample --lockfile {row.corpus_lockfile}"), out)
+                self.assertNotIn("dense-list", self.host.events)
+                self.assertEqual(secrets.current_directory(), Path(CI_SECRETS_DIR))
+                self.assert_untouched(before)
+
+    def test_memory_profile_refusal_stops_before_resident_read_gates_or_flip(self) -> None:
+        for artifact in ("site", "lock"):
+            with self.subTest(artifact=artifact):
+                self.host = FakeHost()
+                if artifact == "site":
+                    self.host.site_text = "fictitious: [invalid yaml"
+                else:
+                    self.host.model_text = "fictitious: [invalid yaml"
+                before = copy.deepcopy((self.host.rows, self.host.targets))
+                out = self.refuse("memory", "YAML")
+                self.assertIn("aliases: ok", out)
+                self.assertNotIn("resident-record", self.host.events)
+                self.assertNotIn("dense-list", self.host.events)
+                self.assert_untouched(before)
+
+    def test_memory_read_failures_stop_before_gates_and_flip(self) -> None:
+        for event in ("resident-record", f"job:{DENSE_LOCK_PREFIX}{OLD}", "dense-list", f"dense-count:{NAME}"):
+            with self.subTest(event=event):
+                self.host = FakeHost()
+                self.host.failures[event] = 3
+                before = copy.deepcopy((self.host.rows, self.host.targets))
+                self.refuse("memory", "exit 3")
+                self.assert_untouched(before)
+
+    def test_converge_skips_profile_and_resident_reads_even_above_the_ceiling(self) -> None:
+        del self.host.rows[OLD]
+        self.host.rows[NAME] = replace(self.host.rows[NAME], state="live", promoted_at=NOW.isoformat())
+        self.host.points = {NAME: self.memory_ceiling() + 1}
+        self.host.site_text = "invalid: [yaml"
+        self.host.model_text = "invalid: [yaml"
+        self.host.failures.update({"resident-record": 3, "dense-list": 3})
+        code, out, err = self.run_promote()
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("memory: ok — already live; skipped memory check", out)
+        self.assertNotIn("resident-record", self.host.events)
+        self.assertNotIn("dense-list", self.host.events)
         self.assertEqual(self.gates, [])
 
     def test_root_and_generation_grammar_refuse_without_any_io(self) -> None:
@@ -459,7 +619,8 @@ class Promote(unittest.TestCase):
         self.assertLess(out.index("suite-part:"), out.index("gates: refuse"))
         self.assertEqual((self.host.rows, self.host.targets), before)
         self.assertNotIn("flip", self.host.events)
-        self.assertFalse(any(method == "POST" for _, method, _, _ in self.host.requests))
+        self.assertFalse(any(method == "POST" and not path.endswith("/points/count")
+                             for _, method, path, _ in self.host.requests))
         self.assertIn(self.run_ids[0], out)
         self.assertNotIn("Next:", out)
 
@@ -474,7 +635,7 @@ class Promote(unittest.TestCase):
         self.assertIn(f"gates: ok — build-gates run {minted} passed", out)
         self.assertEqual(self.snapshots, [before])
         rows = [line.split(":", 1)[0] for line in out.splitlines() if not line.startswith("Next:")]
-        self.assertEqual(rows, [*STAGES[:3], "suite-part", *STAGES[3:]])
+        self.assertEqual(rows, [*STAGES[:4], "suite-part", *STAGES[4:]])
         self.assertEqual(self.host.rows[NAME].state, "live")
         self.assertEqual(self.host.rows[NAME].promoted_at, NOW.isoformat())
         self.assertEqual(self.host.rows[OLD].state, "retired")
@@ -507,6 +668,9 @@ class Promote(unittest.TestCase):
         self.assertEqual(self.gates[0].stack, CI_STACK)
         self.assertEqual(self.gates[0].generation, self.host.name)
         self.assertEqual(self.gate_directories, [Path(CI_SECRETS_DIR)])
+        self.assertIn("memory: ok", out)
+        self.assertTrue(any(path == f"/collections/{self.host.name}/points/count"
+                            for _, _, path, _ in self.host.requests))
         self.assertTrue(self.host.reads)
         self.assertTrue(all(Path(path).parent == Path(CI_SECRETS_DIR) for path in self.host.reads))
         self.assertTrue(all(str(CI_ROOT) in " ".join(argv) for argv, _ in self.host.calls))
@@ -541,6 +705,7 @@ class Promote(unittest.TestCase):
         self.assertNotIn("lexical-write", self.host.events[first_events:])
         self.assertIn("dense-write", self.host.events[first_events:])
         self.assertIn("gates: ok — already live; skipped build-gates", out)
+        self.assertIn("memory: ok — already live; skipped memory check", out)
         self.assertIn("flip: ok — already live; skipped record promotion", out)
         self.assertIn("lexical: ok — unchanged", out)
 
@@ -565,7 +730,8 @@ class Promote(unittest.TestCase):
         before = copy.deepcopy((self.host.rows, self.host.targets))
         self.refuse("flip", "promotion failed (exit 3)")
         self.assertEqual((self.host.rows, self.host.targets), before)
-        self.assertFalse(any(method == "POST" for _, method, _, _ in self.host.requests))
+        self.assertFalse(any(method == "POST" and not path.endswith("/points/count")
+                             for _, method, path, _ in self.host.requests))
         self.host.failures.clear()
 
         def change_candidate() -> None:

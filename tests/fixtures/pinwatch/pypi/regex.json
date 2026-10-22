@@ -1,0 +1,1594 @@
+{
+ "meta": {
+  "_last-serial": 41575701,
+  "api-version": "1.4"
+ },
+ "name": "regex",
+ "project-status": {
+  "status": "active"
+ },
+ "versions": [
+  "2015.10.29",
+  "2015.11.05",
+  "2018.06.20",
+  "2026.9.10",
+  "2026.9.29"
+ ],
+ "files": [
+  {
+   "filename": "regex-2015.10.29-cp25-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:05:55.493922Z"
+  },
+  {
+   "filename": "regex-2015.10.29-cp25-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:05:45.274486Z"
+  },
+  {
+   "filename": "regex-2015.10.29-cp26-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:05:36.727156Z"
+  },
+  {
+   "filename": "regex-2015.10.29-cp26-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:05:21.370637Z"
+  },
+  {
+   "filename": "regex-2015.10.29-cp27-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:05:08.441972Z"
+  },
+  {
+   "filename": "regex-2015.10.29-cp27-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:04:56.046026Z"
+  },
+  {
+   "filename": "regex-2015.10.29-cp31-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:04:46.752270Z"
+  },
+  {
+   "filename": "regex-2015.10.29-cp31-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:04:37.310380Z"
+  },
+  {
+   "filename": "regex-2015.10.29-cp32-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:04:25.830697Z"
+  },
+  {
+   "filename": "regex-2015.10.29-cp32-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:04:16.333285Z"
+  },
+  {
+   "filename": "regex-2015.10.29-cp33-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:04:00.182804Z"
+  },
+  {
+   "filename": "regex-2015.10.29-cp33-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:03:51.458147Z"
+  },
+  {
+   "filename": "regex-2015.10.29-cp34-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:03:40.233484Z"
+  },
+  {
+   "filename": "regex-2015.10.29-cp34-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:03:29.309268Z"
+  },
+  {
+   "filename": "regex-2015.10.29-cp35-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:03:18.510923Z"
+  },
+  {
+   "filename": "regex-2015.10.29-cp35-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:02:57.217223Z"
+  },
+  {
+   "filename": "regex-2015.10.29.tar.gz",
+   "yanked": false,
+   "upload-time": "2015-10-29T00:02:40.361120Z"
+  },
+  {
+   "filename": "regex-2015.11.05b-cp25-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:35:16.420190Z"
+  },
+  {
+   "filename": "regex-2015.11.05b-cp25-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:35:02.042717Z"
+  },
+  {
+   "filename": "regex-2015.11.05b-cp26-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:34:52.249450Z"
+  },
+  {
+   "filename": "regex-2015.11.05b-cp26-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:34:42.551813Z"
+  },
+  {
+   "filename": "regex-2015.11.05b-cp27-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:34:32.188387Z"
+  },
+  {
+   "filename": "regex-2015.11.05b-cp27-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:34:22.897293Z"
+  },
+  {
+   "filename": "regex-2015.11.05b-cp31-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:34:04.629907Z"
+  },
+  {
+   "filename": "regex-2015.11.05b-cp31-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:33:47.048623Z"
+  },
+  {
+   "filename": "regex-2015.11.05b-cp32-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:33:27.666533Z"
+  },
+  {
+   "filename": "regex-2015.11.05b-cp32-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:33:00.079625Z"
+  },
+  {
+   "filename": "regex-2015.11.05b-cp33-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:32:48.535202Z"
+  },
+  {
+   "filename": "regex-2015.11.05b-cp33-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:32:39.291062Z"
+  },
+  {
+   "filename": "regex-2015.11.05b-cp34-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:32:29.536919Z"
+  },
+  {
+   "filename": "regex-2015.11.05b-cp34-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:32:20.365693Z"
+  },
+  {
+   "filename": "regex-2015.11.05b-cp35-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:32:02.496500Z"
+  },
+  {
+   "filename": "regex-2015.11.05b-cp35-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:31:51.851658Z"
+  },
+  {
+   "filename": "regex-2015.11.05b.tar.gz",
+   "yanked": false,
+   "upload-time": "2015-11-05T13:31:40.345363Z"
+  },
+  {
+   "filename": "regex-2018.06.20-cp26-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T00:02:48.402068Z"
+  },
+  {
+   "filename": "regex-2018.06.20-cp26-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T00:02:52.448257Z"
+  },
+  {
+   "filename": "regex-2018.06.20-cp27-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T00:02:56.399920Z"
+  },
+  {
+   "filename": "regex-2018.06.20-cp27-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T00:03:00.523523Z"
+  },
+  {
+   "filename": "regex-2018.06.20-cp33-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T00:03:04.465309Z"
+  },
+  {
+   "filename": "regex-2018.06.20-cp33-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T00:03:08.503616Z"
+  },
+  {
+   "filename": "regex-2018.06.20-cp34-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T00:03:12.458534Z"
+  },
+  {
+   "filename": "regex-2018.06.20-cp34-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T00:03:16.550421Z"
+  },
+  {
+   "filename": "regex-2018.06.20-cp35-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T00:03:20.583306Z"
+  },
+  {
+   "filename": "regex-2018.06.20-cp35-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T00:03:24.352258Z"
+  },
+  {
+   "filename": "regex-2018.06.20-cp36-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T00:03:28.329691Z"
+  },
+  {
+   "filename": "regex-2018.06.20-cp36-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T00:03:31.941757Z"
+  },
+  {
+   "filename": "regex-2018.06.20-cp37-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T00:03:35.625610Z"
+  },
+  {
+   "filename": "regex-2018.06.20-cp37-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T00:03:39.675415Z"
+  },
+  {
+   "filename": "regex-2018.06.20.tar.gz",
+   "yanked": false,
+   "upload-time": "2018-06-20T00:03:46.885682Z"
+  },
+  {
+   "filename": "regex-2018.06.20a-cp26-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T23:08:14.484961Z"
+  },
+  {
+   "filename": "regex-2018.06.20a-cp26-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T23:08:18.532721Z"
+  },
+  {
+   "filename": "regex-2018.06.20a-cp27-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T23:08:22.447362Z"
+  },
+  {
+   "filename": "regex-2018.06.20a-cp27-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T23:08:26.021162Z"
+  },
+  {
+   "filename": "regex-2018.06.20a-cp33-none-win32.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T23:08:30.074991Z"
+  },
+  {
+   "filename": "regex-2018.06.20a-cp33-none-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2018-06-20T23:08:33.794702Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-macosx_10_9_universal2.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:21.178851Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-macosx_10_9_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:22.687573Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-macosx_11_0_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:23.835197Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:24.979891Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:26.363892Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:27.741602Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:29.074373Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:30.586978Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:32.223610Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-musllinux_1_2_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:33.510453Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-musllinux_1_2_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:34.931087Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-musllinux_1_2_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:36.248051Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-musllinux_1_2_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:37.538301Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-musllinux_1_2_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:39.649308Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-win32.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:41.352740Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:42.540425Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp310-cp310-win_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:44.141249Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp311-cp311-macosx_10_9_universal2.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:45.767654Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp311-cp311-macosx_10_9_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:47.359865Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp311-cp311-macosx_11_0_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:48.731316Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:50.021275Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp311-cp311-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:51.363251Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp311-cp311-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:52.811658Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:54.241417Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp311-cp311-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:55.749827Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp311-cp311-musllinux_1_2_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:57.211793Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp311-cp311-musllinux_1_2_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:56:59.194190Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp311-cp311-musllinux_1_2_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:01.031523Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp311-cp311-musllinux_1_2_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:02.774167Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp311-cp311-musllinux_1_2_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:04.216762Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp311-cp311-win32.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:05.726086Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp311-cp311-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:07.089223Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp311-cp311-win_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:08.442830Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp312-cp312-macosx_10_13_universal2.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:09.987829Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp312-cp312-macosx_10_13_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:11.350405Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp312-cp312-macosx_11_0_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:13.127759Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:14.680017Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp312-cp312-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:16.674295Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp312-cp312-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:18.402093Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:19.859874Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp312-cp312-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:21.620813Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp312-cp312-musllinux_1_2_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:23.048832Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp312-cp312-musllinux_1_2_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:24.658649Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp312-cp312-musllinux_1_2_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:26.268181Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp312-cp312-musllinux_1_2_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:27.901099Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp312-cp312-musllinux_1_2_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:29.786006Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp312-cp312-win32.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:31.782524Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp312-cp312-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:33.648157Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp312-cp312-win_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:35.156213Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp313-cp313-macosx_10_13_universal2.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:36.757332Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp313-cp313-macosx_10_13_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:38.811611Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp313-cp313-macosx_11_0_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:40.482659Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:42.098372Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp313-cp313-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:44.030787Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp313-cp313-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:45.691413Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:47.548923Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp313-cp313-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:49.630734Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp313-cp313-musllinux_1_2_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:51.270033Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp313-cp313-musllinux_1_2_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:53.163431Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp313-cp313-musllinux_1_2_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:54.805037Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp313-cp313-musllinux_1_2_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:56.627213Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp313-cp313-musllinux_1_2_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:57:58.313852Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp313-cp313-win32.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:00.009585Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp313-cp313-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:01.731418Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp313-cp313-win_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:03.422912Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314-macosx_10_15_universal2.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:05.118911Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314-macosx_10_15_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:06.822073Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314-macosx_11_0_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:08.675247Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:10.339830Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:12.186611Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:13.903970Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:15.949126Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:17.628834Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314-musllinux_1_2_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:19.476003Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314-musllinux_1_2_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:21.683110Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314-musllinux_1_2_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:23.842345Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314-musllinux_1_2_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:25.607119Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314-musllinux_1_2_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:27.406202Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314-win32.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:29.116987Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:30.899398Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314-win_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:32.594429Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314t-macosx_10_15_universal2.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:34.306037Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314t-macosx_10_15_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:36.296089Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314t-macosx_11_0_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:37.964084Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:40.438626Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314t-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:42.349158Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314t-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:44.488798Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:46.560081Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314t-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:48.473699Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314t-musllinux_1_2_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:50.286156Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314t-musllinux_1_2_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:52.224142Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314t-musllinux_1_2_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:54.478265Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314t-musllinux_1_2_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:56.432403Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314t-musllinux_1_2_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:58:59.066333Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314t-win32.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:00.942378Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314t-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:02.876640Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp314-cp314t-win_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:05.009928Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315-macosx_10_15_universal2.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:07.051882Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315-macosx_10_15_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:09.007749Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315-macosx_11_0_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:10.859180Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:12.823980Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:15.352931Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:17.310205Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:19.328339Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:21.592914Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315-musllinux_1_2_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:23.734130Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315-musllinux_1_2_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:25.798492Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315-musllinux_1_2_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:28.510253Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315-musllinux_1_2_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:30.656079Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315-musllinux_1_2_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:32.852261Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315-win32.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:34.927703Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:36.860398Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315-win_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:38.875663Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315t-macosx_10_15_universal2.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:40.987029Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315t-macosx_10_15_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:43.039496Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315t-macosx_11_0_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:44.954574Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:47.194336Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315t-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:49.537295Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315t-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:51.776493Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315t-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:54.428540Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315t-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:56.799050Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315t-musllinux_1_2_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T20:59:59.390138Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315t-musllinux_1_2_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T21:00:03.304439Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315t-musllinux_1_2_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T21:00:05.680586Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315t-musllinux_1_2_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T21:00:08.410703Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315t-musllinux_1_2_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T21:00:10.768871Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315t-win32.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T21:00:14.003968Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315t-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T21:00:16.275683Z"
+  },
+  {
+   "filename": "regex-2026.9.10-cp315-cp315t-win_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-09T21:00:19.113384Z"
+  },
+  {
+   "filename": "regex-2026.9.10.tar.gz",
+   "yanked": false,
+   "upload-time": "2026-09-09T21:00:21.521267Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-macosx_10_9_universal2.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:45:50.322376Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-macosx_10_9_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:45:51.826282Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-macosx_11_0_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:45:53.017090Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:45:54.331762Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:45:56.065181Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:45:57.491345Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:45:58.746777Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:00.200852Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:01.491649Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-musllinux_1_2_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:02.817270Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-musllinux_1_2_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:04.152151Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-musllinux_1_2_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:05.794380Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-musllinux_1_2_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:07.258936Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-musllinux_1_2_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:08.890818Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-win32.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:10.331300Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:11.638472Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp310-cp310-win_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:13.248107Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp311-cp311-macosx_10_9_universal2.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:14.510675Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp311-cp311-macosx_10_9_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:16.292738Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp311-cp311-macosx_11_0_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:17.646339Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:18.976874Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp311-cp311-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:20.684198Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp311-cp311-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:22.599118Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:23.981955Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp311-cp311-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:25.318321Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp311-cp311-musllinux_1_2_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:26.963731Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp311-cp311-musllinux_1_2_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:28.580979Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp311-cp311-musllinux_1_2_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:29.941989Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp311-cp311-musllinux_1_2_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:31.358759Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp311-cp311-musllinux_1_2_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:32.775902Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp311-cp311-win32.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:34.179953Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp311-cp311-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:35.484912Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp311-cp311-win_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:37.193437Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp312-cp312-macosx_10_13_universal2.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:38.938175Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp312-cp312-macosx_10_13_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:40.406398Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp312-cp312-macosx_11_0_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:41.959218Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:43.373393Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp312-cp312-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:45.328695Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp312-cp312-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:47.041579Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:48.894785Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp312-cp312-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:50.640733Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp312-cp312-musllinux_1_2_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:52.396152Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp312-cp312-musllinux_1_2_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:54.128643Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp312-cp312-musllinux_1_2_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:56.106040Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp312-cp312-musllinux_1_2_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:57.665676Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp312-cp312-musllinux_1_2_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:46:59.236072Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp312-cp312-win32.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:01.135981Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp312-cp312-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:04.436556Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp312-cp312-win_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:06.541251Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp313-cp313-macosx_10_13_universal2.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:08.251209Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp313-cp313-macosx_10_13_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:09.764972Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp313-cp313-macosx_11_0_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:11.723549Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:13.235922Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp313-cp313-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:14.877399Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp313-cp313-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:16.622592Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:18.268613Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp313-cp313-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:19.921561Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp313-cp313-musllinux_1_2_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:21.552163Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp313-cp313-musllinux_1_2_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:23.276653Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp313-cp313-musllinux_1_2_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:25.193901Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp313-cp313-musllinux_1_2_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:27.005935Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp313-cp313-musllinux_1_2_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:29.233784Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp313-cp313-win32.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:31.140966Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp313-cp313-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:32.709219Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp313-cp313-win_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:34.674006Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314-macosx_10_15_universal2.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:36.541025Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314-macosx_10_15_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:38.233739Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314-macosx_11_0_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:39.957880Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:41.676911Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:43.755267Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:45.594781Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:47.372667Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:49.518675Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314-musllinux_1_2_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:51.279364Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314-musllinux_1_2_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:53.368423Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314-musllinux_1_2_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:55.606077Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314-musllinux_1_2_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:57.617749Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314-musllinux_1_2_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:47:59.922864Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314-win32.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:01.800008Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:03.614809Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314-win_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:05.624276Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314t-macosx_10_15_universal2.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:07.833371Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314t-macosx_10_15_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:09.684365Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314t-macosx_11_0_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:11.454553Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:13.321753Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314t-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:15.313086Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314t-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:17.328524Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:19.320625Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314t-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:21.615463Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314t-musllinux_1_2_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:23.871433Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314t-musllinux_1_2_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:26.255839Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314t-musllinux_1_2_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:28.389542Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314t-musllinux_1_2_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:30.400675Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314t-musllinux_1_2_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:32.375552Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314t-win32.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:34.720863Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314t-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:36.864862Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp314-cp314t-win_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:38.901263Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315-macosx_10_15_universal2.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:40.858549Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315-macosx_10_15_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:42.952337Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315-macosx_11_0_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:44.985680Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:46.948692Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:49.168389Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:51.322115Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:53.529669Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:56.036593Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315-musllinux_1_2_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:48:58.284570Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315-musllinux_1_2_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:00.506997Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315-musllinux_1_2_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:02.984029Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315-musllinux_1_2_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:05.264298Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315-musllinux_1_2_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:07.644371Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315-win32.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:10.513168Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:12.849946Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315-win_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:15.331509Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315t-macosx_10_15_universal2.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:17.705791Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315t-macosx_10_15_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:20.171415Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315t-macosx_11_0_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:22.342242Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:24.612422Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315t-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:26.996224Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315t-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:29.822099Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315t-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:32.404839Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315t-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:35.076838Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315t-musllinux_1_2_aarch64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:37.395156Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315t-musllinux_1_2_ppc64le.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:39.927720Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315t-musllinux_1_2_riscv64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:42.581272Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315t-musllinux_1_2_s390x.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:45.238228Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315t-musllinux_1_2_x86_64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:47.878064Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315t-win32.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:50.524781Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315t-win_amd64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:53.224463Z"
+  },
+  {
+   "filename": "regex-2026.9.29-cp315-cp315t-win_arm64.whl",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:55.655708Z"
+  },
+  {
+   "filename": "regex-2026.9.29.tar.gz",
+   "yanked": false,
+   "upload-time": "2026-09-29T00:49:58.298089Z"
+  }
+ ]
+}

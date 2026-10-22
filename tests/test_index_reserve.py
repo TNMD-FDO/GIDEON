@@ -7,13 +7,17 @@ from fractions import Fraction
 
 from test_index_record import RENDERED, FakeHost
 
-from gideon.host import worker
+from gideon.host import report, worker
 from gideon.host.corpus.record import database_fix
 from gideon.host.index.guards import (
     CHUNK_PROJECTION_SQL,
     ChunkProjection,
+    ResidentCollection,
+    counted_text,
     judge_guard,
+    judge_promotion,
     read_chunk_projection,
+    resident_fix,
 )
 from gideon.host.index.reserve import (
     ALERT_RESERVE_MULTIPLIER,
@@ -177,9 +181,87 @@ class Guard(unittest.TestCase):
             with self.subTest(counts=counts):
                 projection = projection_from(FakeHost(stdout=json.dumps(counts)))
                 assert isinstance(projection, ChunkProjection)
-                verdict = judge_guard(projection, guards)
+                verdict = judge_guard(projection, guards, (), candidate="fictitious-candidate")
                 self.assertEqual(verdict.kind, kind)
                 self.assertIn(reason, verdict.reason)
                 self.assertEqual(verdict.projection, projection)
                 self.assertEqual(verdict.refusal, guards.build_refusal_chunks)
                 self.assertEqual(verdict.ceiling, guards.serving_ceiling_chunks)
+                self.assertEqual((verdict.counted, verdict.resident), ((), 0))
+
+    def test_resident_sum_decides_the_exact_integer_boundary(self) -> None:
+        """The guard admits equality and refuses a single resident point beyond it."""
+
+        guards = ChunkGuards(5, 3, 1300)
+        projection = ChunkProjection(1, 1, 3, 3)
+        ceiling = guards.serving_ceiling_chunks
+        for points, kind in ((ceiling - 5, "cleared"), (ceiling - 4, "refused"),
+                             (ceiling, "refused"), (ceiling + 1, "refused")):
+            with self.subTest(points=points):
+                residents = (ResidentCollection("fictitious-other", points, "retired"),)
+                verdict = judge_guard(projection, guards, residents, candidate="fictitious-candidate")
+                self.assertEqual(verdict.kind, kind)
+                self.assertEqual((verdict.counted, verdict.resident), (residents, points))
+        zero = ChunkProjection(1, 1, 0, 0)
+        verdict = judge_guard(zero, guards, (ResidentCollection("other", ceiling, "built"),), candidate="candidate")
+        self.assertEqual(verdict.kind, "refused")
+
+    def test_candidate_points_are_replaced_by_the_projection_and_skips_stand(self) -> None:
+        """The guard counts a resumed candidate only through its projection."""
+
+        guards = ChunkGuards(5, 3, 1300)
+        candidate = ResidentCollection("fictitious-candidate", guards.serving_ceiling_chunks * 2, "building")
+        other = ResidentCollection("fictitious-built", 11, "built")
+        verdict = judge_guard(ChunkProjection(1, 1, 7, 7), guards, (candidate, other), candidate=candidate.name)
+        self.assertEqual(verdict.kind, "cleared")
+        self.assertEqual((verdict.counted, verdict.resident), ((other,), other.points))
+        for projection in (ChunkProjection(0, 0, 0, 0), ChunkProjection(101, 1, 99, 9999)):
+            with self.subTest(projection=projection):
+                verdict = judge_guard(projection, guards, (candidate,), candidate="another-candidate")
+                self.assertEqual(verdict.kind, "skipped")
+                self.assertEqual((verdict.counted, verdict.resident), ((candidate,), candidate.points))
+
+    def test_promotion_counts_the_candidate_and_clears_at_the_ceiling(self) -> None:
+        """Promotion admits the entire resident sum at, never above, the ceiling."""
+
+        guards = ChunkGuards(5, 3, 1300)
+        candidate = ResidentCollection("fictitious-candidate", 7, "built")
+        for other_points, kind in ((0, "cleared"), (guards.serving_ceiling_chunks - 7, "cleared"),
+                                   (guards.serving_ceiling_chunks - 6, "refused")):
+            with self.subTest(other_points=other_points):
+                counted = (candidate, ResidentCollection("fictitious-live", other_points, "live"))
+                verdict = judge_promotion(counted, guards)
+                self.assertEqual(verdict.kind, kind)
+                self.assertEqual(verdict.counted, counted)
+                self.assertEqual(verdict.resident, candidate.points + other_points)
+                self.assertEqual(verdict.ceiling, guards.serving_ceiling_chunks)
+                self.assertIn("exceed" if kind == "refused" else "within", verdict.reason)
+        self.assertEqual(judge_promotion((), guards).kind, "cleared")
+
+    def test_counted_text_names_states_points_and_sum_or_none(self) -> None:
+        self.assertEqual(counted_text(()), "counted none = 0")
+        counted = (ResidentCollection("fictitious-a", 7, "retired"), ResidentCollection("fictitious-b", 11, "unrecorded"))
+        self.assertEqual(counted_text(counted), "counted fictitious-a (retired) 7, fictitious-b (unrecorded) 11 = 18")
+
+    def test_resident_fix_groups_states_omits_live_and_names_the_stack_gc(self) -> None:
+        counted = (
+            ResidentCollection("fictitious-live", 17, "live"),
+            ResidentCollection("fictitious-retired-z", 7, "retired"),
+            ResidentCollection("fictitious-built", 11, "built"),
+            ResidentCollection("fictitious-outside", 5, "unrecorded"),
+            ResidentCollection("fictitious-retired-a", 3, "retired"),
+        )
+        for command_path, gc_command in (
+            (COMMAND_PATH, "index gc"),
+            ("index build caselaw --sample --lockfile corpus-2099-01-03", "index gc --stack ci"),
+            ("index promote caselaw__corpus-2099-01-03__fictitious-space__sample", "index gc --stack ci"),
+        ):
+            with self.subTest(command_path=command_path):
+                fix = resident_fix(counted, live="fictitious-live", command_path=command_path)
+                self.assertEqual(fix, "Other resident collections: built: fictitious-built "
+                                 "(promotable, or droppable after retirement); retired: "
+                                 "fictitious-retired-a, fictitious-retired-z (reclaim with "
+                                 f"{report.command(gc_command)} after the retirement hold); unrecorded: "
+                                 "fictitious-outside (outside the record). ")
+        self.assertEqual(resident_fix(counted[:1], live="fictitious-live", command_path=COMMAND_PATH), "")
+        self.assertEqual(resident_fix((), live=None, command_path=COMMAND_PATH), "")

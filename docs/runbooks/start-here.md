@@ -41,6 +41,7 @@ This is one page by situation: each item gives a command, when there is one, and
 - After a site-file edit, run `gideon apply`; after an `alerts.*` change, also run `gideon alerts test`. For a renewed certificate, run `gideon tls reload`. [docs/runbooks/install-upgrade.md §4](install-upgrade.md); [docs/runbooks/office-services-setup.md §4](office-services-setup.md)
 - For backups by hand, run `gideon backup run`, `gideon backup push`, or `gideon backup drill`; read their rows. [docs/runbooks/backup-restore.md §3](backup-restore.md)
 - To go back in time, run `gideon restore --from staging` or `gideon restore --from target`. [docs/runbooks/backup-restore.md §4](backup-restore.md); for a rebuilt box, [docs/runbooks/backup-restore.md §5](backup-restore.md)
+- To know what a failure costs, the work lost and the time to an answered turn, read the table. [docs/runbooks/backup-restore.md §7](backup-restore.md)
 - After an engine or driver change, run `gideon engine verify`. [docs/runbooks/model-upgrade.md §7](model-upgrade.md)
 - When `gideon upgrade <tag>` or `gideon preflight` refuses on `hardware-profile` naming GPU count or DRAM, or a model server pages and `nvidia-smi -L` no longer lists its card, the box is under its profile's floor. [docs/runbooks/install-upgrade.md §12](install-upgrade.md)
 - When someone joins or leaves, change the directory group, then run `gideon users reconcile --now`. [docs/runbooks/office-services-setup.md §1](office-services-setup.md)

@@ -48,6 +48,7 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0027_stage_counts.sql": (ROOT / "migrations/0027_stage_counts.sql").read_text(),
     f"{ROOT}/migrations/0028_walk_pipeline.sql": (ROOT / "migrations/0028_walk_pipeline.sql").read_text(),
     f"{ROOT}/migrations/0029_documents_illegible.sql": (ROOT / "migrations/0029_documents_illegible.sql").read_text(),
+    f"{ROOT}/migrations/0030_generation_gold.sql": (ROOT / "migrations/0030_generation_gold.sql").read_text(),
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -183,6 +184,7 @@ class Converge(unittest.TestCase):
                 "0027_stage_counts",
                 "0028_walk_pipeline",
                 "0029_documents_illegible",
+                "0030_generation_gold",
             ),
         )
 
@@ -358,6 +360,7 @@ class Converge(unittest.TestCase):
                 "0027_stage_counts",
                 "0028_walk_pipeline",
                 "0029_documents_illegible",
+                "0030_generation_gold",
             ),
         )
 

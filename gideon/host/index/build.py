@@ -1,7 +1,8 @@
 """Build a collection's near-duplicate clusters, indexes, and risk states, and append its report.
 
 Production builds check smoke evidence after preconditions and before generation.
-Samples run guard, reserve, both indexes, gold, treatment, and report across the corpus and sibling records.
+Samples record their given gold before guard, reserve, both indexes, gold,
+treatment, and report across the corpus and sibling records.
 """
 
 import argparse
@@ -20,6 +21,7 @@ from gideon.host import (
     engine,
     models,
     report,
+    secrets,
     site,
     stack,
     staging,
@@ -41,7 +43,7 @@ from gideon.host.index import (
 )
 from gideon.host.index import record as indexrecord
 from gideon.host.index.sample import SampleInputs, sample_inputs_hash, sample_name
-from gideon.host.render.ci import CI_QDRANT_DATA_ROOT, CI_ROOT
+from gideon.host.render.ci import CI_QDRANT_DATA_ROOT, CI_ROOT, CI_SECRETS_DIR
 from gideon.host.render.engine import EMBED
 from gideon.host.render.opensearch import OPENSEARCH_SERVICE_NAME
 from gideon.host.render.qdrant import QDRANT_DATA_ROOT, QDRANT_SERVICE_NAME
@@ -54,7 +56,7 @@ from gideon.host.render.worker import (
     WORKER_SERVICE_NAME,
 )
 from gideon.host.report import Problem, StageResult
-from gideon.host.sysio import LockingHost, PathLike, RealHost, WritableBytesHost
+from gideon.host.sysio import Host, LockingHost, PathLike, RealHost, WritableBytesHost
 
 COMMAND_PATH = "index build"
 
@@ -73,11 +75,12 @@ class _JobResult:
 
 @dataclass(frozen=True, slots=True)
 class _Preconditions:
-    """The generation inputs, the profile's guards, and optional treatment capture."""
+    """The build inputs, guards, treatment capture, and optional generation resume."""
 
     inputs: dense.DenseInputs
     treatment_snapshot: str | None
     chunk_guards: models.ChunkGuards
+    resume_generation: str | None
 
 
 def _utc_now() -> datetime:
@@ -157,7 +160,7 @@ def _collection_scope(
 
 
 def _selected_profile(
-    host: IndexHost, checkout: Path, site_path: PathLike, command_path: str,
+    host: Host, checkout: Path, site_path: PathLike, command_path: str,
 ) -> models.HardwareProfile | Problem:
     loaded_site = site.load_site(Path(site_path), host=host)
     if loaded_site.errors:
@@ -187,7 +190,7 @@ def embed_target(
 
 
 def chunk_guards(
-    host: IndexHost, checkout: Path, site_path: PathLike, command_path: str,
+    host: Host, checkout: Path, site_path: PathLike, command_path: str,
 ) -> models.ChunkGuards | Problem:
     """Read the selected profile's chunk guards, which the guard row judges."""
 
@@ -286,12 +289,15 @@ def _preconditions(
             f"Run {report.command(f'corpus install {lockfile.label}')} or {report.command('corpus cut')}, "
             f"then run {report.command(command_path)} again.",
         )
+    superseded = None
     if row.state == "superseded":
         retry = f"{COMMAND_PATH} {collection.name}" if sample is None else command_path
-        return Problem(
+        superseded = Problem(
             f"lockfile {lockfile.label} is superseded",
             f"Use a current lockfile with {report.command(retry)}, then retry.",
         )
+        if sample is not None:
+            return superseded
     target = embed_target(host, checkout, site_path, command_path)
     if isinstance(target, Problem):
         return target
@@ -301,6 +307,17 @@ def _preconditions(
     inputs = collection_inputs(loaded, lockfile, collection, registry, target, command_path)
     if isinstance(inputs, Problem):
         return inputs
+    resume_generation = None
+    if superseded is not None:
+        generation = indexrecord.read_generation_by_inputs(
+            host, rendered_dir, inputs.collection, inputs.inputs_hash, command_path=command_path,
+        )
+        if isinstance(generation, Problem):
+            return generation
+        # A failed row is the resume's own retry, as an unsuperseded build retries it.
+        if generation is None or generation.state not in ("building", "failed") or lockfile.label not in generation.lockfiles:
+            return superseded
+        resume_generation = generation.gen_id
     if sample is not None:
         name = sample_name(inputs.name)
         if lexical._name_problem(name, command_path) is not None:
@@ -310,7 +327,7 @@ def _preconditions(
             inputs, name=name, sample=sample,
             inputs_hash=sample_inputs_hash(inputs.inputs_hash, lockfile.label, sample.fill_per_million),
         )
-    return _Preconditions(inputs, treatment_snapshot(lockfile), guarded)
+    return _Preconditions(inputs, treatment_snapshot(lockfile), guarded, resume_generation)
 
 
 def _guard(
@@ -325,16 +342,26 @@ def _guard(
     )
     if isinstance(projection, Problem):
         return _refuse("guard", projection)
-    verdict = guards.judge_guard(projection, chunk_guards)
+    resident = guards.read_resident(
+        host, rendered_dir, candidate=inputs.name, command_path=command_path,
+    )
+    if isinstance(resident, Problem):
+        return _refuse("guard", resident)
+    verdict = guards.judge_guard(projection, chunk_guards, resident, candidate=inputs.name)
+    margin = f"{verdict.ceiling}/{verdict.refusal}"
     figures = (
         f"{inputs.name}: ready {projection.ready}, chunked {projection.chunked}, "
         f"chunks {projection.chunks}, projected chunks {projection.projected}; "
-        f"build refusal {verdict.refusal}, serving ceiling {verdict.ceiling}"
+        f"build refusal {verdict.refusal}, serving ceiling {verdict.ceiling}; "
+        f"{guards.counted_text(verdict.counted)}; margin {margin}; "
+        f"{verdict.resident} + {projection.projected} × {margin} ≤ serving ceiling {verdict.ceiling}"
     )
     if verdict.kind == "refused":
+        live = next((row.name for row in verdict.counted if row.state == "live"), None)
         return _refuse("guard", Problem(
             f"{figures}; {verdict.reason}",
-            f"Make a smaller lockfile with {report.command('corpus cut')}, or select a larger "
+            guards.resident_fix(verdict.counted, live=live, command_path=command_path)
+            + f"Make a smaller lockfile with {report.command('corpus cut')}, or select a larger "
             "hardware_profile in /etc/gideon/site.yaml; the guards derive from the profile's "
             "RAM, as docs/runbooks/release-files.md §4 says; then run "
             f"{report.command(command_path)} again.",
@@ -798,7 +825,10 @@ def finish_generation(
 
 
 def _gold(host: IndexHost, rendered_dir: PathLike, inputs: dense.DenseInputs, command_path: str) -> int:
-    """Report gold presence and changed judged hashes without gating on either."""
+    """Report gold presence and changed judged hashes without gating on either.
+
+    The given list was recorded at generation.
+    """
 
     assert inputs.sample is not None
     gold = {document.source_id: document.sha256 for document in inputs.sample.gold}
@@ -824,6 +854,7 @@ def _build_sample(
 ) -> int:
     """Run a sample's guard, reserve, cluster, build, counts, dense, gold, built, treatment, and report.
 
+    The generation stage has already recorded the given gold list.
     Corpus reads use corpus_dir; generation reads and writes use rendered_dir.
     Guard, reserve, and gold refusals return without a report; cluster, build, counts,
     dense, and built refusals run the finish stages under the engine lock.
@@ -886,6 +917,7 @@ def run_index_build(
     if sample is not None:
         command_path += " --sample"
         rendered_dir = CI_ROOT
+        secrets.select_directory(Path(CI_SECRETS_DIR))
     if args.lockfile is not None:
         command_path += f" --lockfile {args.lockfile}"
     active_stage = ["preconditions"]
@@ -930,6 +962,8 @@ def run_index_build(
         detail = f"{inputs.collection}: {inputs.label}; {inputs.snapshot}; pipeline {inputs.pipeline}; embedding space {inputs.embedding_space}; served model {inputs.served_model}; dimensions {inputs.dimensions}"
         if sample is not None:
             detail += f"; eval set {sample.set_version}; fill per million {sample.fill_per_million}"
+        if prepared.resume_generation is not None:
+            detail += f"; lockfile {inputs.label} is superseded; resuming {prepared.resume_generation}"
         report.print_stage(StageResult("preconditions", True, detail + lock_detail, ""))
         if sample is None:
             active_stage[0] = "smoke"
@@ -955,10 +989,6 @@ def run_index_build(
         if isinstance(outcome, Problem):
             return _refuse(active_stage[0], outcome)
         recorded = True
-        report.print_stage(StageResult("generation", True, f"{outcome.name}: {outcome.state}, {outcome.outcome}", ""))
-        if outcome.state == "live" and sample is None:
-            report.print_stage(StageResult("generation", True, f"{outcome.name}: generation is live; nothing built", ""))
-            return 0
         if outcome.state == "retired":
             retry = COMMAND_PATH if sample is None else command_path
             return _refuse(active_stage[0], Problem(
@@ -967,6 +997,19 @@ def run_index_build(
                 f"{report.command('corpus cut')} and build it with {report.command(retry)}.",
             ))
         inputs = replace(inputs, name=outcome.name)
+        generation_detail = f"{outcome.name}: {outcome.state}, {outcome.outcome}"
+        if sample is not None:
+            problem = indexrecord.write_gold(
+                io, rendered_dir, inputs.name, sorted(document.source_id for document in sample.gold),
+                command_path=command_path,
+            )
+            if isinstance(problem, Problem):
+                return _refuse(active_stage[0], problem)
+            generation_detail += f"; gold {len(sample.gold)} recorded"
+        report.print_stage(StageResult("generation", True, generation_detail, ""))
+        if outcome.state == "live" and sample is None:
+            report.print_stage(StageResult("generation", True, f"{outcome.name}: generation is live; nothing built", ""))
+            return 0
         if sample is not None:
             return _build_sample(
                 io, rendered_dir, inputs, command_path, sleep=sleep, monotonic=monotonic,

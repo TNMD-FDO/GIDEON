@@ -10,7 +10,16 @@ from typing import Literal
 from uuid import uuid4
 
 from gideon.host import backuplock, report, secrets, stack
-from gideon.host.index import aliases, buildreport, lexical, record, sample, serving
+from gideon.host.index import (
+    aliases,
+    build,
+    buildreport,
+    guards,
+    lexical,
+    record,
+    sample,
+    serving,
+)
 from gideon.host.render.ci import CI_ROOT, CI_SECRETS_DIR, CI_STACK, PRODUCTION_STACK
 from gideon.host.render.worker import CLUSTER_BUDGET_SECONDS, GENERATION_PATTERN
 from gideon.host.report import Problem, StageResult
@@ -101,11 +110,13 @@ def _candidate(
 def run_index_promote(
     args: argparse.Namespace, *, run_gates: Callable[..., int],
     host: LockingHost | None = None, rendered_dir: PathLike = "/etc/gideon/rendered",
-    checkout: PathLike | None = None, clock: Callable[[], datetime] = _utc_now,
+    checkout: PathLike | None = None, site_path: PathLike = "/etc/gideon/site.yaml",
+    clock: Callable[[], datetime] = _utc_now,
 ) -> int:
     """Check the candidate, run its gates, flip the record, then point each store alias."""
 
     io = RealHost() if host is None else host
+    root = Path(checkout) if checkout is not None else Path(__file__).parents[3]
     name = args.gen
     command_path = f"{COMMAND_PATH} {name}"
     active_stage = "preconditions"
@@ -193,6 +204,39 @@ def run_index_promote(
             f"{row.collection}: lexical {', '.join(targets.lexical) or 'none'}; "
             f"dense {', '.join(targets.dense) or 'none'}", "",
         ))
+
+        active_stage = "memory"
+        if converge:
+            report.print_stage(StageResult(active_stage, True, "already live; skipped memory check", ""))
+        else:
+            chunk_guards = build.chunk_guards(io, root, site_path, command_path)
+            if isinstance(chunk_guards, Problem):
+                return _refuse(active_stage, chunk_guards, command_path)
+            resident = guards.read_resident(io, rendered_dir, candidate=name, command_path=command_path)
+            if isinstance(resident, Problem):
+                return _refuse(active_stage, resident, command_path)
+            verdict = guards.judge_promotion(resident, chunk_guards)
+            figures = (
+                f"{name}: {guards.counted_text(verdict.counted)}; "
+                f"{verdict.resident} ≤ serving ceiling {verdict.ceiling}"
+            )
+            if verdict.kind == "refused":
+                live = next((item.name for item in verdict.counted if item.state == "live"), None)
+                others = tuple(item for item in verdict.counted if item.name != name)
+                fix = guards.resident_fix(others, live=live, command_path=command_path)
+                if live is not None:
+                    gc_command = "index gc --stack ci" if is_sample else "index gc"
+                    fix += (
+                        f"The live generation {live} retires at this flip and stays resident "
+                        f"for seven days until {report.command(gc_command)} drops it. "
+                    )
+                fix += (
+                    "Select a larger hardware_profile in /etc/gideon/site.yaml; the guards derive "
+                    "from the profile's RAM, as docs/runbooks/release-files.md §4 says; then run "
+                    f"{report.command(command_path)} again."
+                )
+                return _refuse(active_stage, Problem(f"{figures}; {verdict.reason}", fix), command_path)
+            report.print_stage(StageResult(active_stage, True, figures, ""))
 
         active_stage = "gates"
         if converge:

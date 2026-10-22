@@ -1,4 +1,13 @@
-"""Generation record statements and parsing over a recording host."""
+"""Generation record statements and parsing over a recording host.
+
+Writes and reads bind on stdin by name or by inputs: absent, foreign, malformed, and
+failed reads; created, found, and appended outcomes; the parser's refusals and the
+reason union; ordered and promoted reads; the requested and whole manifest reads and
+their invalid rows; footprint bindings, halves and total, and older-row backfill; the
+promotion's and the demotion's statements, their outcomes, the no-row abort, the
+demotion's halves and no-flag refusal, and invalid replies; and the given-gold write's
+bindings, empty list, and refusals.
+"""
 
 import json
 import subprocess
@@ -11,9 +20,11 @@ from gideon.host.corpus.record import database_fix
 from gideon.host.index.generations import GenerationInputs, generation_name
 from gideon.host.index.record import (
     BuildingOutcome,
+    DemotionOutcome,
     GenerationRow,
     PromotedRow,
     PromotionOutcome,
+    demote_generation,
     promote_generation,
     read_generation,
     read_generation_by_inputs,
@@ -23,6 +34,7 @@ from gideon.host.index.record import (
     read_promoted,
     write_building,
     write_footprint,
+    write_gold,
 )
 from gideon.host.index.sample import SOURCE_ID_MAX_LENGTH
 from gideon.host.render.worker import GENERATION_FAILURE_REASONS, PIPELINE_VERSION
@@ -259,6 +271,121 @@ class Promotion(unittest.TestCase):
                 else:
                     self.assertIn("Restore Docker Compose and psql", result.fix)
                 self.assertIn(report.command("index promote"), result.fix)
+                self.assertNotIn(host.stderr, result.problem + result.fix)
+                self.assertEqual(len(host.calls), 1)
+
+
+class DemotionWriter(unittest.TestCase):
+    def test_built_and_live_demotions_bind_payload_and_clear_only_short_halves(self) -> None:
+        for state in ("built", "live"):
+            for lexical, dense in ((True, False), (False, True), (True, True)):
+                for directory in (RENDERED, "/fictitious-ci-rendered"):
+                    with self.subTest(state=state, lexical=lexical, dense=dense, directory=directory):
+                        expected = DemotionOutcome(NAME, state, lexical, dense)
+                        host = FakeHost(stdout=json.dumps(asdict(expected)) + "\n")
+                        self.assertEqual(demote_generation(
+                            host, directory, NAME, lexical_short=lexical,
+                            dense_short=dense, command_path="restore",
+                        ), expected)
+                        self.assertEqual(len(host.calls), 1)
+                        argv, sql = host.calls[0]
+                        self.assertEqual(argv, worker.psql_argv(directory))
+                        self.assertIn("gideon_worker", argv)
+                        self.assertIn("ON_ERROR_STOP=1", argv)
+                        assert sql is not None
+                        payload = {"name": NAME, "lexical_short": lexical, "dense_short": dense}
+                        self.assertTrue(sql.startswith(worker.bind(
+                            "v_payload", json.dumps(payload, separators=(",", ":")),
+                        ) + "\n"))
+                        self.assertEqual(sql.count("\\set v_payload "), 1)
+                        for value in (NAME, "UPDATE", "lexical_short", "dense_short"):
+                            self.assertNotIn(value, " ".join(argv))
+                        self.assertIn("\\set QUIET on\nBEGIN;", sql)
+                        self.assertIn("current_setting('gideon.demotion_payload')::jsonb", sql)
+                        self.assertIn("WHERE gen_id = payload->>'name' AND state IN ('built', 'live')", sql)
+                        self.assertIn("FOR UPDATE", sql)
+                        self.assertIn("SET state = 'building', built_at = NULL, promoted_at = NULL", sql)
+                        for half in ("lexical", "dense"):
+                            self.assertIn(
+                                f"{half}_built_at = CASE WHEN (payload->>'{half}_short')::boolean\n"
+                                f"            THEN NULL ELSE generation.{half}_built_at END", sql,
+                            )
+                        self.assertIn("RETURNING generation.gen_id, previous.state INTO demoted, previous_state", sql)
+                        self.assertIn("SELECT current_setting('gideon.demotion_outcome')::jsonb;", sql)
+                        for untouched in (
+                            "counts", "bytes", "lockfiles", "clustered_at", "retired_at",
+                            "cluster_treatment", "generation_documents", "embedding_ledger", "DELETE",
+                        ):
+                            self.assertNotIn(untouched, sql)
+                        self.assertTrue(sql.endswith("COMMIT;\n"))
+
+    def test_neither_half_short_refuses_before_a_statement(self) -> None:
+        host = FakeHost()
+        result = demote_generation(
+            host, RENDERED, NAME, lexical_short=False, dense_short=False, command_path="restore",
+        )
+        assert isinstance(result, Problem)
+        self.assertIn("at least one short build half", result.problem)
+        self.assertIn(report.command(f"index report {NAME}"), result.fix)
+        self.assertIn(report.command("restore"), result.fix)
+        self.assertEqual(host.calls, [])
+
+    def test_no_row_updated_refuses_with_report_and_restore_fix(self) -> None:
+        host = FakeHost(code=3, stderr="ERROR: generation is no longer built or live")
+        result = demote_generation(
+            host, RENDERED, NAME, lexical_short=True, dense_short=False, command_path="restore",
+        )
+        self.assertEqual(result, Problem(
+            f"{NAME}: generation is no longer built or live; nothing was demoted",
+            f"Run {report.command(f'index report {NAME}')} to read its state, "
+            f"then run {report.command('restore')} again.",
+        ))
+        self.assertEqual(len(host.calls), 1)
+        sql = host.calls[0][1] or ""
+        guard = sql.index("IF NOT FOUND THEN")
+        abort = sql.index("RAISE EXCEPTION 'generation is no longer built or live'")
+        outcome = sql.index("SELECT current_setting('gideon.demotion_outcome')::jsonb;")
+        self.assertLess(sql.index("RETURNING generation.gen_id, previous.state"), guard)
+        self.assertLess(guard, abort)
+        self.assertLess(abort, outcome)
+        self.assertLess(outcome, sql.index("COMMIT;"))
+
+    def test_invalid_outcomes_refuse_with_database_fix(self) -> None:
+        valid = asdict(DemotionOutcome(NAME, "live", True, False))
+        invalid_states: tuple[object, ...] = ("building", "retired", "failed", None, [])
+        invalid: tuple[object, ...] = (
+            None, [], {},
+            *({key: value for key, value in valid.items() if key != missing} for missing in valid),
+            {**valid, "unexpected": "fictitious diagnostic"},
+            {**valid, "name": "fictitious-other-name"}, {**valid, "name": None},
+            *({**valid, "previous_state": state} for state in invalid_states),
+            *({**valid, "lexical_cleared": value} for value in (None, 1, "true", False)),
+            *({**valid, "dense_cleared": value} for value in (None, 0, "false", True)),
+        )
+        for stdout in ("", "broken", json.dumps(valid) + "\n" + json.dumps(valid),
+                       *(json.dumps(value) for value in invalid)):
+            with self.subTest(stdout=stdout):
+                host = FakeHost(stdout=stdout)
+                self.assertEqual(demote_generation(
+                    host, RENDERED, NAME, lexical_short=True, dense_short=False, command_path="restore",
+                ), Problem("generation demotion returned an invalid outcome", database_fix(RENDERED, "restore")))
+                self.assertEqual(len(host.calls), 1)
+
+    def test_failed_exit_overrides_success_and_unavailable_tools_refuse_without_retry(self) -> None:
+        stdout = json.dumps(asdict(DemotionOutcome(NAME, "built", True, False)))
+        for code, error in ((3, None), (127, None), (0, FileNotFoundError()), (0, subprocess.SubprocessError())):
+            with self.subTest(code=code, error=error):
+                host = FakeHost(code=code, error=error, stdout=stdout, stderr="fictitious-private-diagnostic")
+                result = demote_generation(
+                    host, RENDERED, NAME, lexical_short=True, dense_short=False, command_path="restore",
+                )
+                assert isinstance(result, Problem)
+                if code == 3:
+                    self.assertEqual(result.problem, "generation demotion failed (exit 3)")
+                    self.assertEqual(result.fix, database_fix(RENDERED, "restore"))
+                else:
+                    self.assertIn("Restore Docker Compose and psql", result.fix)
+                self.assertIn(report.command("restore"), result.fix)
                 self.assertNotIn(host.stderr, result.problem + result.fix)
                 self.assertEqual(len(host.calls), 1)
 
@@ -640,6 +767,65 @@ class ManifestReader(unittest.TestCase):
                     self.assertIn("Restore Docker Compose and psql", result.fix)
                 self.assertNotIn(host.stderr, result.problem + result.fix)
                 self.assertIn(report.command("index build caselaw --sample"), result.fix)
+                self.assertEqual(len(host.calls), 1)
+
+
+class GoldWriter(unittest.TestCase):
+    """A sample's given gold is an insert-only record with stdin-bound ids."""
+
+    def test_generation_and_ids_are_bound_on_stdin_with_one_insert(self) -> None:
+        source_ids = ("example:opinion:17", "example:opinion:29")
+        host = FakeHost()
+        self.assertIsNone(write_gold(host, RENDERED, NAME, source_ids, "index build caselaw --sample"))
+
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, worker.psql_argv(RENDERED))
+        assert sql is not None
+        self.assertEqual(sql.splitlines()[:2], [
+            worker.bind("v_name", NAME),
+            worker.bind("v_source_ids", json.dumps(list(source_ids), separators=(",", ":"))),
+        ])
+        self.assertEqual(sql.count("\\set "), 2)
+        self.assertEqual(sql.splitlines()[2:], [
+            "INSERT INTO public.generation_gold (gen_id, source_id) "
+            "SELECT :'v_name', jsonb_array_elements_text(:'v_source_ids'::jsonb) "
+            "ON CONFLICT DO NOTHING;",
+        ])
+        for value in (NAME, *source_ids, "INSERT", "v_name", "v_source_ids"):
+            self.assertNotIn(value, " ".join(argv))
+
+    def test_empty_list_still_runs_the_insert(self) -> None:
+        host = FakeHost()
+        self.assertIsNone(write_gold(host, RENDERED, NAME, [], "index build caselaw --sample"))
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, worker.psql_argv(RENDERED))
+        assert sql is not None
+        self.assertIn(worker.bind("v_source_ids", "[]"), sql)
+        self.assertIn("INSERT INTO public.generation_gold", sql)
+        self.assertTrue(sql.endswith("ON CONFLICT DO NOTHING;\n"))
+
+    def test_failed_write_and_unavailable_tools_refuse_with_their_fixes_without_retry(self) -> None:
+        command_path = "index build caselaw --sample"
+        tools_fix = f"Restore Docker Compose and psql, then run {report.command(command_path)} again."
+        for code, error in ((3, None), (127, None), (0, FileNotFoundError()), (0, subprocess.SubprocessError())):
+            with self.subTest(code=code, error=error):
+                host = FakeHost(code=code, error=error, stderr="Fictitious private database diagnostic")
+                result = write_gold(host, RENDERED, NAME, ("example:opinion:17",), command_path)
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                if error is not None:
+                    self.assertEqual(result, Problem(
+                        f"generation record command could not run ({type(error).__name__})", tools_fix,
+                    ))
+                elif code == 127:
+                    self.assertEqual(result, Problem("generation record command is unavailable (exit 127)", tools_fix))
+                else:
+                    self.assertEqual(result, Problem(
+                        f"generation gold write failed (exit {code})", database_fix(RENDERED, command_path),
+                    ))
+                self.assertNotIn(host.stderr, result.problem + result.fix)
                 self.assertEqual(len(host.calls), 1)
 
 

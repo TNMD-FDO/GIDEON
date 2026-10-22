@@ -2,6 +2,7 @@
 
 Each entry holds the backup lock (``backuplock.py``) for its whole run, so a
 backup, a push, and a restore never overlap; ``backuplock.py`` owns the rules.
+Store recovery and levelling run with the worker down, so no job races a demotion.
 """
 
 import argparse
@@ -33,6 +34,7 @@ from gideon.host import (
     sshtarget,
     stack,
 )
+from gideon.host.index import level
 from gideon.host.render.command import render_to_disk
 from gideon.host.render.compose import STORE_SERVICES
 from gideon.host.report import (
@@ -1088,7 +1090,7 @@ def _stores_stage(
     run_id: str,
     build_box: bool,
     present_sources: frozenset[str],
-) -> StageResult:
+) -> tuple[StageResult, level.LevelReport | None]:
     # Only the build box runs the registry step, so only it has a unit to start.
     if build_box:
         started = run_stage(
@@ -1099,7 +1101,7 @@ def _stores_stage(
             _REGISTRY_FIX,
         )
         if not started.ok:
-            return started
+            return started, None
     # The restored render is the making host's: a store started from it would
     # reserve that host's memory, so the tier starts from this host's render.
     try:
@@ -1119,9 +1121,9 @@ def _stores_stage(
             "stores", False,
             f"render for this host failed: {type(exc).__name__}: {exc}",
             apply.RENDER_FIX,
-        )
+        ), None
     if outcome.exit_code != 0 or outcome.rendered is None or outcome.inputs is None:
-        return StageResult("stores", False, "render inputs were refused", apply.RENDER_FIX)
+        return StageResult("stores", False, "render inputs were refused", apply.RENDER_FIX), None
     up = run_stage(
         io,
         "stores",
@@ -1130,7 +1132,7 @@ def _stores_stage(
         _stage_fix(),
     )
     if not up.ok:
-        return up
+        return up, None
     ready, detail, service = apply.wait_for_store_tier(io, rendered_dir, sleep)
     if not ready:
         return StageResult(
@@ -1138,20 +1140,24 @@ def _stores_stage(
             False,
             detail,
             stack.logs_fix(rendered_dir, service),
-        )
+        ), None
 
     # The replaced staging directory is the local fallback while the indexes
-    # are put back, so it goes only after the recovery succeeds.
+    # are put back and levelled, so it goes only after both succeed. The worker
+    # is down throughout, so no job races the demotions.
     recovered = derivedstores.recover_all(
         io, rendered_dir, present_sources=present_sources
     )
     if isinstance(recovered, Problem):
-        return StageResult("stores", False, recovered.problem, recovered.fix)
+        return StageResult("stores", False, recovered.problem, recovered.fix), None
+    level_report = level.level_all(io, rendered_dir, recovered=recovered, command_path="restore")
+    if isinstance(level_report, Problem):
+        return StageResult("stores", False, level_report.problem, level_report.fix), None
 
     replaced_removed = False
     if replaced is not None:
         if not replaced.startswith(backupset.STAGING + ".replaced-"):
-            return StageResult("stores", False, f"unsafe replacement path: {replaced}", _stage_fix())
+            return StageResult("stores", False, f"unsafe replacement path: {replaced}", _stage_fix()), level_report
         removed = run_stage(
             io,
             "stores",
@@ -1160,7 +1166,7 @@ def _stores_stage(
             _stage_fix(),
         )
         if not removed.ok:
-            return removed
+            return removed, level_report
         replaced_removed = True
 
     detail_row: Mapping[str, object] = {
@@ -1176,6 +1182,7 @@ def _stores_stage(
         "reowned": reowned,
         "replaced_removed": replaced_removed,
         "indexes": derivedstores.recovery_audit(recovered),
+        "level": level.level_audit(level_report),
     }
     row = audit.AuditRow(
         run_id,
@@ -1193,8 +1200,11 @@ def _stores_stage(
             False,
             f"restore audit write failed: {problem}",
             stack.logs_fix(rendered_dir, "postgres"),
-        )
-    clauses = "; ".join(derivedstores.recovery_clause(result) for result in recovered)
+        ), level_report
+    clauses = "; ".join((
+        *(derivedstores.recovery_clause(result) for result in recovered),
+        *level.level_clauses(level_report),
+    ))
     return StageResult(
         "stores",
         True,
@@ -1206,7 +1216,7 @@ def _stores_stage(
             "the host registry running"
         ),
         "",
-    )
+    ), level_report
 
 
 def _next_stage(
@@ -1216,8 +1226,9 @@ def _next_stage(
     build_box: bool,
     has_gideon_ids: bool,
     closing_lines: tuple[str, ...],
+    level_lines: tuple[str, ...] = (),
 ) -> tuple[StageResult, tuple[str, ...]]:
-    """State the terminal state and the two next steps.
+    """State the terminal state and the next steps, including index resumes.
 
     Whether the secrets on disk are the restored cluster's is decided by the
     set's keyed fingerprint against the live secret directory, never by a
@@ -1247,19 +1258,18 @@ def _next_stage(
             ),
         )
     lines += closing_lines
+    next_commands = ", then ".join((
+        report.command("apply"), *level_lines, report.command("backup run --full"),
+    ))
     if has_gideon_ids:
-        lines += (
-            f"Next: {report.command('apply')}, then "
-            f"{report.command('backup run --full')}",
-        )
+        lines += (f"Next: {next_commands}",)
     else:
         # This set was re-owned by the ids it records, so the managed /data
         # directories still need provision's own re-own before the apply.
         lines += (
             f"Next: {report.command('host provision')} (the first provision's "
             "mode flags), because this set records no gideon ids, then "
-            f"{report.command('apply')}, then "
-            f"{report.command('backup run --full')}",
+            f"{next_commands}",
         )
     return (
         StageResult(
@@ -1478,7 +1488,7 @@ def _restore_body(
     if not postgres_result.ok:
         return 1
 
-    stores_result = _stores_stage(
+    stores_result, level_report = _stores_stage(
         io,
         rendered_dir,
         site_path=site_path,
@@ -1505,6 +1515,7 @@ def _restore_body(
     print_stage(stores_result)
     if not stores_result.ok:
         return 1
+    assert level_report is not None
 
     next_result, next_lines = _next_stage(
         io,
@@ -1512,6 +1523,7 @@ def _restore_body(
         build_box=build_box,
         has_gideon_ids=selected.manifest.gideon_ids is not None,
         closing_lines=closing_lines,
+        level_lines=level.next_lines(level_report),
     )
     print_stage(next_result)
     if next_result.ok:

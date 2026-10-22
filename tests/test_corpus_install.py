@@ -23,6 +23,7 @@ from uuid import UUID
 
 import test_index_treatment
 import yaml  # type: ignore[import-untyped]
+from derivedstores_fake import empty_store_secrets, level_store_result
 from test_engine_verify import models_text
 
 from gideon.host import (
@@ -31,6 +32,7 @@ from gideon.host import (
     fetch,
     models,
     report,
+    secrets,
     stack,
     staging,
     worker,
@@ -58,10 +60,10 @@ from gideon.host.index import (
 from gideon.host.index.record import GenerationRow, PromotedRow
 from gideon.host.index.sample import sample_name
 from gideon.host.render import worker as worker_identity
-from gideon.host.render.ci import CI_ROOT
+from gideon.host.render.ci import CI_ROOT, CI_SECRETS_DIR
 from gideon.host.render.engine import EMBED
 from gideon.host.render.opensearch import OPENSEARCH_SERVICE_NAME
-from gideon.host.render.qdrant import QDRANT_SERVICE_NAME
+from gideon.host.render.qdrant import QDRANT_SECRET_NAME, QDRANT_SERVICE_NAME
 from gideon.host.sysio import Command, PathLike, RealHost
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -153,6 +155,13 @@ class FakeHost(RealHost):
         self.store_state_text: str | None = None
         self.state_read = 2
         self.generations: dict[str, GenerationRow] = {}
+        self.qdrant_points: dict[str, int | None] = {}
+        self.sibling_qdrant_points: dict[str, int | None] = {}
+        self.store_requests: list[tuple[str, str, str, object]] = []
+        self.secret_files = dict(empty_store_secrets())
+        self.secret_files[str(Path(CI_SECRETS_DIR) / QDRANT_SECRET_NAME)] = "fictitious-ci-qdrant-key\n"
+        self.secret_reads: list[str] = []
+        self.live_jobs: dict[str, tuple[int, str]] = {}
         self.projection_counts = {"ready": 3, "chunked": 2, "chunks": 11}
         self.promoted: tuple[PromotedRow, ...] = ()
         self.free_bytes = 16_000_000
@@ -209,6 +218,7 @@ class FakeHost(RealHost):
         self.lock_paths: list[str] = []
         self.identity_checked = False
         self.sibling_lockfiles: dict[str, dict[str, Any]] = {}
+        self.given_gold: dict[str, set[str]] = {}
         self.manifest_hashes: dict[str, str] = {}
         self.manifest_rows: tuple[tuple[str, str, str], ...] = ()
         self.smoke_row: dict[str, object] | None = {
@@ -376,6 +386,9 @@ class FakeHost(RealHost):
         self.lock_releases += 1
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
+        if str(path) in self.secret_files:
+            self.secret_reads.append(str(path))
+            return self.secret_files[str(path)]
         if str(path) == SITE_PATH:
             if self.site_text is None:
                 raise FileNotFoundError(str(path))
@@ -400,6 +413,8 @@ class FakeHost(RealHost):
             phase = "footprint"
         elif "WHERE collection = :'v_collection'" in input:
             phase = "collections"
+        elif "ORDER BY collection, created_at, gen_id" in input:
+            phase = "resident-record"
         elif "public.index_generations" in input:
             if self.engine_holder is not None and not self.identity_checked:
                 phase = "generation-read"
@@ -425,6 +440,9 @@ class FakeHost(RealHost):
             return subprocess.CompletedProcess(command, 0, json.dumps(self.projection_counts), "")
         if phase == "reserve":
             return subprocess.CompletedProcess(command, 0, json.dumps([asdict(row) for row in self.promoted]), "")
+        if phase == "resident-record":
+            rows = sorted(self.generations.values(), key=lambda row: (row.collection, row.created_at, row.gen_id))
+            return subprocess.CompletedProcess(command, 0, "\n".join(json.dumps(asdict(row)) for row in rows), "")
         if phase == "footprint":
             name = self._bound(input, "v_name")
             generation = self.generations[name]
@@ -463,8 +481,16 @@ class FakeHost(RealHost):
                 row = self.generations.get(self._bound(input, "v_name"))
             return subprocess.CompletedProcess(command, 0, json.dumps(asdict(row)) if row is not None else "", "")
         if phase in {"live-job", "dense-live-job", "cluster-live-job"}:
+            lock = self._bound(input, "v_lock")
+            if lock in self.live_jobs:
+                job_id, status = self.live_jobs[lock]
+                return subprocess.CompletedProcess(command, 0, str(job_id) if status in {"todo", "doing"} else "", "")
             live_id = (self.dense_live_id if self.active_task == worker_identity.DENSE_TASK else
                        self.cluster_live_id if self.active_task == worker_identity.DUPES_TASK else self.live_id)
+            prefix = (worker_identity.DENSE_LOCK_PREFIX if self.active_task == worker_identity.DENSE_TASK else
+                      worker_identity.DUPES_LOCK_PREFIX if self.active_task == worker_identity.DUPES_TASK else "index-")
+            if live_id is not None and self.jobs[live_id]["name"] != lock.removeprefix(prefix):
+                live_id = None
             return subprocess.CompletedProcess(command, 0, str(live_id) if live_id is not None else "", "")
         if phase in {"defer", "dense-defer", "cluster-defer"}:
             args = json.loads(self._bound(input, "v_args"))
@@ -540,6 +566,22 @@ class FakeHost(RealHost):
         command = list(argv)
         self.calls.append(command)
         self.executions.append((command, input, self.engine_holder))
+        for store_directory, point_counts in ((RENDERED, self.qdrant_points), (str(CI_ROOT), self.sibling_qdrant_points)):
+            prefix = stack.exec_argv(store_directory, QDRANT_SERVICE_NAME)
+            if command[:len(prefix)] != prefix:
+                continue
+            assert input is not None
+            method, store_path, _ = input.split("\r\n", 1)[0].split()
+            store_body = json.loads(input.partition("\r\n\r\n")[2]) if method == "POST" else None
+            self.store_requests.append((store_directory, method, store_path, store_body))
+            phase = "qdrant-listing" if method == "GET" else "qdrant-count"
+            if self.interrupt_phase == phase:
+                raise KeyboardInterrupt
+            if self.fail_phase == phase:
+                return subprocess.CompletedProcess(command, 3, "", "fictitious store diagnostic")
+            store_result = level_store_result(command, input, store_directory, counts={QDRANT_SERVICE_NAME: point_counts}, aliases={})
+            assert store_result is not None
+            return store_result
         if command == smoke.reader_argv(RENDERED):
             assert input is not None and "FROM public.eval_runs" in input
             self.statements.append(input)
@@ -608,6 +650,16 @@ class FakeHost(RealHost):
                     counts for (label, _, _), counts in sorted(self.stage_counts_rows.items())
                     if label == counts_label
                 ]), "")
+            if "public.generation_gold" in input:
+                self.statements.append(input)
+                if self.interrupt_phase == "gold-write":
+                    raise KeyboardInterrupt
+                if self.fail_phase == "gold-write":
+                    return subprocess.CompletedProcess(command, 3, "", "private diagnostic")
+                name = self._bound(input, "v_name")
+                identifiers = json.loads(self._bound(input, "v_source_ids"))
+                self.given_gold.setdefault(name, set()).update(identifiers)
+                return subprocess.CompletedProcess(command, 0, "", "")
             if (
                 "WITH RECURSIVE chain AS" in input
                 or command == worker.psql_argv(CI_ROOT) and "DO $cut$" in input
@@ -1037,6 +1089,8 @@ class Install(unittest.TestCase):
     """The selected lockfile is checked before its files are hashed."""
 
     def setUp(self) -> None:
+        self.addCleanup(secrets.select_directory, secrets.current_directory())
+        secrets.select_directory(Path("/fictitious-corpus-secrets"))
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -1334,7 +1388,11 @@ class Install(unittest.TestCase):
             f"guard: ok — {name}: ready {ready_documents}, chunked {chunked_documents}, chunks {chunks}, "
             f"projected chunks {-(-chunks * ready_documents // chunked_documents)}; "
             f"build refusal {profile.chunk_guards.build_refusal_chunks}, "
-            f"serving ceiling {profile.chunk_guards.serving_ceiling_chunks}",
+            f"serving ceiling {profile.chunk_guards.serving_ceiling_chunks}; counted none = 0; "
+            f"margin {profile.chunk_guards.serving_ceiling_chunks}/{profile.chunk_guards.build_refusal_chunks}; "
+            f"0 + {-(-chunks * ready_documents // chunked_documents)} × "
+            f"{profile.chunk_guards.serving_ceiling_chunks}/{profile.chunk_guards.build_refusal_chunks} "
+            f"≤ serving ceiling {profile.chunk_guards.serving_ceiling_chunks}",
             f"reserve: ok — skipped: no promoted generation for {collection}; reserve not judged; "
             f"/data free {self.host.free_bytes} bytes",
             f"cluster: ok — {name}: deferred job {cluster_job}",
@@ -1769,12 +1827,33 @@ class Install(unittest.TestCase):
         code, out, err = self.run_install()
         self.assertEqual((code, err), (1, ""), out)
         self.assertIn("guard: refuse", out)
+        self.assertIn("counted none = 0", out)
         self.assertIn("projected chunks 2000000000", out)
         self.assertIn(report.command("corpus cut"), out)
         self.assertNotIn("reserve:", out)
         self.assertNotIn("cluster:", out)
         self.assertEqual(self.host.deferred, [])
         self.assertEqual(self.host.reports, [])
+        self.assertIsNone(self.host.lock_holder)
+
+    def test_resident_store_at_the_ceiling_refuses_install_before_index_jobs(self) -> None:
+        """Corpus install shares the aggregate build guard and its store fix."""
+
+        loaded = models.load_models_lock(self.checkout / "models.lock")
+        assert loaded.lock is not None
+        profile = loaded.lock.profile(loaded.lock.reference)
+        assert profile is not None
+        ceiling = profile.chunk_guards.serving_ceiling_chunks
+        self.host.qdrant_points = {"fictitious-unrecorded": ceiling}
+        code, out, err = self.run_install()
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn("guard: refuse", out)
+        self.assertIn(f"counted fictitious-unrecorded (unrecorded) {ceiling} = {ceiling}", out)
+        self.assertIn("resident chunks plus the projection at the margin exceed the serving ceiling", out)
+        self.assertIn("outside the record", out)
+        self.assertEqual((self.host.deferred, self.host.reports), ([], []))
+        self.assertNotIn("cluster:", out)
+        self.assertNotIn("report:", out)
         self.assertIsNone(self.host.lock_holder)
 
     def test_without_treatment_the_overruled_stage_prints_nothing(self) -> None:
