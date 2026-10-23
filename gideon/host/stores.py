@@ -6,11 +6,15 @@ password ever travels in argv or an environment.  SQL goes on stdin only.
 """
 
 import re
+import subprocess
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from gideon.host import stack
+from gideon.host import pgbackrest, report, stack
 from gideon.host.secrets import read_secret
 from gideon.host.sysio import CompletedText, Host, PathLike
 
@@ -19,6 +23,8 @@ _SUPERUSER: Final = "postgres"
 _ADMIN_DATABASE: Final = "postgres"
 _SCHEMA_ROLE: Final = "gideon"
 _SCHEMA_DATABASE: Final = "gideon"
+REPLAY_WAIT_SECONDS: Final = 900.0
+_REPLAY_POLL_SECONDS: Final = 2.0
 # The version is spliced into SQL as a literal, so the accepted names are the
 # characters a version can safely be.
 _MIGRATION_NAME = re.compile(r"^[0-9]{4}_[a-z0-9_]+\.sql$")
@@ -72,6 +78,16 @@ class ConvergeReport:
         return self.problem is None
 
 
+@dataclass(frozen=True, slots=True)
+class ReplayReach:
+    """The last replayed commit, WAL position, and segment after recovery."""
+
+    instant: datetime | None
+    lsn: str
+    segment: str
+    segment_size: int
+
+
 def _logs_fix(rendered_dir: PathLike) -> str:
     return stack.logs_fix(rendered_dir, _POSTGRES_SERVICE)
 
@@ -114,6 +130,103 @@ def _query(
         detail = result.stderr.strip() or f"exit {result.returncode}"
         return f"psql {action} failed: {detail}"
     return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+
+
+def _replay_query(io: Host, rendered_dir: PathLike, sql: str) -> str | report.Problem:
+    """Read replay state, keeping empty columns for SQL nulls."""
+
+    try:
+        result = _psql(
+            io,
+            rendered_dir,
+            role=_SUPERUSER,
+            database=_ADMIN_DATABASE,
+            flags=("-tA", "-F", "\t", "-v", "ON_ERROR_STOP=1"),
+            sql=sql,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return report.Problem(f"psql replay query failed: {exc}", _logs_fix(rendered_dir))
+    if result.returncode != 0:
+        return report.Problem(
+            f"psql replay query failed: {report.command_detail(result)}",
+            _logs_fix(rendered_dir),
+        )
+    return result.stdout
+
+
+def replay_reach(
+    io: Host,
+    rendered_dir: PathLike,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    wait_seconds: float = REPLAY_WAIT_SECONDS,
+) -> ReplayReach | report.Problem:
+    """Wait for recovery to end, then read its reach before any restart.
+
+    Postgres answers during replay, and ``pg_walfile_name`` cannot run in
+    recovery, so the reach is read only once recovery has ended; the replay
+    functions turn null again at a restart. A null commit instant is a valid
+    reach: no commit was replayed.
+    """
+
+    remaining = wait_seconds
+    while True:
+        recovery = _replay_query(io, rendered_dir, "SELECT pg_is_in_recovery();\n")
+        if isinstance(recovery, report.Problem):
+            return recovery
+        state = recovery.strip()
+        if state == "f":
+            break
+        if state != "t":
+            return report.Problem(
+                "Postgres returned a malformed recovery state.", _logs_fix(rendered_dir)
+            )
+        if remaining <= 0:
+            return report.Timeout(
+                f"Postgres is still in recovery after waiting {wait_seconds:g} seconds.",
+                _logs_fix(rendered_dir),
+            )
+        interval = min(_REPLAY_POLL_SECONDS, remaining)
+        sleep(interval)
+        remaining -= interval
+
+    # The replay position is the end of the last record, which after a WAL
+    # switch is the next segment's first byte, and pg_walfile_name names the
+    # segment holding the byte it is given: the segment is the last byte's.
+    answer = _replay_query(
+        io,
+        rendered_dir,
+        "SELECT pg_last_xact_replay_timestamp(), pg_last_wal_replay_lsn(), "
+        "pg_walfile_name(pg_last_wal_replay_lsn() - 1), "
+        "(SELECT setting FROM pg_settings WHERE name = 'wal_segment_size');\n",
+    )
+    if isinstance(answer, report.Problem):
+        return answer
+    try:
+        instant_text, lsn, segment, size_text = (
+            column.strip() for column in answer.rstrip("\r\n").split("\t")
+        )
+        if not lsn:
+            return report.Problem(
+                "Postgres has no replay position; the server did not recover.",
+                _logs_fix(rendered_dir),
+            )
+        pgbackrest.lsn_value(lsn)
+        if not size_text.isdecimal():
+            raise ValueError("WAL segment size is not a byte count")
+        segment_size = int(size_text)
+        pgbackrest.segment_ordinal(segment, pgbackrest.segments_per_log(segment_size))
+        instant = datetime.fromisoformat(instant_text) if instant_text else None
+        if instant is not None:
+            if instant.tzinfo is None or instant.utcoffset() is None:
+                raise ValueError("replay instant has no timezone")
+            instant = instant.astimezone(UTC)
+    except ValueError as exc:
+        return report.Problem(
+            f"Postgres returned a malformed replay reach: {exc}.",
+            _logs_fix(rendered_dir),
+        )
+    return ReplayReach(instant, lsn, segment, segment_size)
 
 
 def _statement(

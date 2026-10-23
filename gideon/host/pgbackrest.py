@@ -1,6 +1,7 @@
-"""pgBackRest command construction and host-side convergence."""
+"""pgBackRest commands, convergence, and backup, archive, and history reads."""
 
 import json
+import re
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -49,6 +50,7 @@ class BackupInfo:
     # The timeline the backup was taken on: the first eight hex digits of its
     # archive start segment. A restore recovers along it (see restore.py).
     timeline: int | None = None
+    lsn_stop: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +58,16 @@ class InfoResult(PgBackRestResult):
     """Parsed pgBackRest info, or its refusal."""
 
     infos: tuple[BackupInfo, ...] = ()
+    archive_id: str | None = None
+    archive_max: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryResult(PgBackRestResult):
+    """The latest repository timeline and its ancestor switch positions."""
+
+    latest: int = 1
+    chain: tuple[tuple[int, int], ...] = ()
 
 
 def exec_argv(rendered_dir: PathLike, *pgbackrest_args: str) -> list[str]:
@@ -292,18 +304,18 @@ def verify(host: Host, argv: Sequence[str]) -> str | None:
     return f"pgBackRest verify failed: {command_detail(result)}"
 
 
-def _backup_records(value: object) -> tuple[Mapping[str, object], ...]:
+def _info_records(value: object, field: str) -> tuple[Mapping[str, object], ...]:
     records: list[Mapping[str, object]] = []
 
     def walk(node: object) -> None:
         if isinstance(node, Mapping):
-            backups = node.get("backup")
-            if isinstance(backups, list):
+            entries = node.get(field)
+            if isinstance(entries, list):
                 records.extend(
-                    entry for entry in backups if isinstance(entry, Mapping)
+                    entry for entry in entries if isinstance(entry, Mapping)
                 )
             for key, child in node.items():
-                if key != "backup":
+                if key != field:
                     walk(child)
         elif isinstance(node, list):
             for child in node:
@@ -311,6 +323,14 @@ def _backup_records(value: object) -> tuple[Mapping[str, object], ...]:
 
     walk(value)
     return tuple(records)
+
+
+def _archive_database_id(entry: Mapping[str, object]) -> int:
+    database = entry.get("database")
+    value = database.get("id") if isinstance(database, Mapping) else None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("archive database id is missing")
+    return value
 
 
 def info(host: Host, rendered_dir: PathLike, *, running: bool = True) -> InfoResult:
@@ -339,7 +359,7 @@ def info(host: Host, rendered_dir: PathLike, *, running: bool = True) -> InfoRes
     try:
         document = json.loads(result.stdout)
         parsed: list[BackupInfo] = []
-        for entry in _backup_records(document):
+        for entry in _info_records(document, "backup"):
             label = entry.get("label")
             backup_type = entry.get("type")
             timestamp = entry.get("timestamp")
@@ -351,13 +371,123 @@ def info(host: Host, rendered_dir: PathLike, *, running: bool = True) -> InfoRes
             archive = entry.get("archive")
             start = archive.get("start") if isinstance(archive, Mapping) else None
             timeline = int(start[:8], 16) if isinstance(start, str) and len(start) >= 8 else None
-            parsed.append(BackupInfo(label, backup_type, float(stop), timeline))
+            lsn = entry.get("lsn")
+            lsn_stop = lsn.get("stop") if isinstance(lsn, Mapping) else None
+            if lsn_stop is not None and not isinstance(lsn_stop, str):
+                raise TypeError("backup stop LSN is not a string")
+            parsed.append(BackupInfo(label, backup_type, float(stop), timeline, lsn_stop))
+        # After a stanza upgrade the list holds one entry per cluster; the
+        # newest database id is the cluster a restore replays.
+        archives = sorted(_info_records(document, "archive"), key=_archive_database_id)
+        archive_id = archives[-1].get("id") if archives else None
+        archive_max = archives[-1].get("max") if archives else None
+        if archive_id is not None and not isinstance(archive_id, str):
+            raise TypeError("archive id is not a string")
+        if archive_max is not None and not isinstance(archive_max, str):
+            raise TypeError("archive maximum is not a string")
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         return InfoResult(
             problem=f"pgBackRest info returned malformed JSON: {exc}.",
             fix=_logs_fix(rendered_dir),
         )
-    return InfoResult(infos=tuple(parsed))
+    return InfoResult(infos=tuple(parsed), archive_id=archive_id, archive_max=archive_max)
+
+
+def lsn_value(lsn: str) -> int:
+    """Convert a PostgreSQL X/Y WAL position to its byte offset."""
+
+    if re.fullmatch(r"[0-9A-Fa-f]{1,8}/[0-9A-Fa-f]{1,8}", lsn) is None:
+        raise ValueError("invalid WAL position")
+    log, offset = lsn.split("/")
+    return (int(log, 16) << 32) + int(offset, 16)
+
+
+def segments_per_log(wal_segment_size_bytes: int) -> int:
+    """Return the number of WAL segments in a 2**32-byte log."""
+
+    if wal_segment_size_bytes <= 0 or (1 << 32) % wal_segment_size_bytes:
+        raise ValueError("WAL segment size must be a positive divisor of 2**32")
+    return (1 << 32) // wal_segment_size_bytes
+
+
+def segment_ordinal(name: str, segments_per_log: int) -> int:
+    """Number a WAL segment across log rollovers, independent of timeline."""
+
+    if re.fullmatch(r"[0-9A-Fa-f]{24}", name) is None:
+        raise ValueError("invalid WAL segment name")
+    return int(name[8:16], 16) * segments_per_log + int(name[16:24], 16)
+
+
+def reaches_latest(
+    backup: BackupInfo, latest: int, chain: tuple[tuple[int, int], ...]
+) -> bool:
+    """Whether a backup can follow the history to the latest timeline."""
+
+    if backup.lsn_stop is None or backup.timeline is None:
+        return False
+    stop = lsn_value(backup.lsn_stop)
+    return backup.timeline == latest or any(
+        backup.timeline == timeline and stop <= switch for timeline, switch in chain
+    )
+
+
+def history(host: Host, rendered_dir: PathLike, archive_id: str) -> HistoryResult:
+    """Read the latest timeline's history through one-off repository commands."""
+
+    path = f"archive/{STANZA}/{archive_id}"
+    result = _command_result(
+        host,
+        run_argv(rendered_dir, "repo-ls", path, "--output=json"),
+        action="history listing",
+        rendered_dir=rendered_dir,
+        timeout=_INFO_TIMEOUT,
+    )
+    if isinstance(result, PgBackRestResult):
+        return HistoryResult(problem=result.problem, fix=result.fix)
+    try:
+        document = json.loads(result.stdout)
+        if not isinstance(document, dict):
+            raise TypeError("history listing is not an object")
+        files = {
+            int(name[:8], 16): name
+            for name in document
+            if re.fullmatch(r"[0-9A-Fa-f]{8}\.history", name)
+        }
+    except (TypeError, ValueError) as exc:
+        return HistoryResult(
+            problem=f"pgBackRest history listing returned malformed JSON: {exc}.",
+            fix=_logs_fix(rendered_dir),
+        )
+    if not files:
+        return HistoryResult()
+    latest = max(files)
+    result = _command_result(
+        host,
+        run_argv(rendered_dir, "repo-get", f"{path}/{files[latest]}"),
+        action="history read",
+        rendered_dir=rendered_dir,
+        timeout=_INFO_TIMEOUT,
+    )
+    if isinstance(result, PgBackRestResult):
+        return HistoryResult(problem=result.problem, fix=result.fix)
+    chain: list[tuple[int, int]] = []
+    try:
+        for line in result.stdout.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            timeline_text, lsn, _reason = line.split(None, 2)
+            timeline = int(timeline_text)
+            if not (0 < timeline < latest) or (chain and timeline <= chain[-1][0]):
+                raise ValueError("ancestor timelines are out of order")
+            chain.append((timeline, lsn_value(lsn)))
+        if not chain:
+            raise ValueError("history has no ancestor timeline")
+    except ValueError as exc:
+        return HistoryResult(
+            problem=f"pgBackRest history returned malformed content: {exc}.",
+            fix=_logs_fix(rendered_dir),
+        )
+    return HistoryResult(latest=latest, chain=tuple(chain))
 
 
 def newest_full(infos: Sequence[BackupInfo]) -> BackupInfo | None:

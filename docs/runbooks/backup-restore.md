@@ -11,7 +11,8 @@ which an operator can query, never as a log line. The backup target's side is §
 | What | Where | When |
 |---|---|---|
 | The pgBackRest repository (weekly full, nightly incremental, every archived WAL segment) | `/data/backup-staging/pgbackrest/` | continuously: the `postgres` service archives each WAL segment as it closes (at most every 5 minutes) |
-| One backup set per run: `manifest.json`, `secrets.tar.age`, `files/<root>/`, and `data-bulk-cas.listing` when the content-addressed store is carried | `/data/backup-staging/sets/<label>/` | `backup run` — nightly at 01:00 office time by `gideon-backup.timer`, or by hand |
+| One backup set per run: `manifest.json`, `secrets.tar.age`, `files/<root>/` for every snapshotted root, and `data-bulk-cas.listing`, the names and sizes of the store objects the set pins | `/data/backup-staging/sets/<label>/` | `backup run` — nightly at 01:00 office time by `gideon-backup.timer`, or by hand |
+| The one copy of the content-addressed store every set whose `manifest.json` reads `version` 2 pins its objects in, added to by each run and never rewritten | `/data/backup-staging/data-bulk-cas/` | `backup run`'s two passes; its objects no remaining set's listing names are removed by the run's `prune` |
 | The off-box copy: dated hard-linked snapshots of the whole staging directory | `<backup.target.path>/<label>/` on the target | `backup push` — right after the nightly run in the same unit |
 | The drill's throwaway project (`gideon-drill`, loopback port 18090, no GPU, no Caddy) | `/data/drill/` | `backup drill` — on `backup.drill_interval`, a Saturday at 04:00 office time by `gideon-backup-drill.timer`, or by hand |
 | The standing developer sibling (`gideon-ci`, loopback port 18100, production's engine through its relay, no Caddy) — outside the backup set, rebuilt from scratch by `down --wipe` then `up` | `/data/ci/` | `sudo python3 -m tools.cistack up`, by a developer or the runner's jobs; stopped by `down` |
@@ -58,10 +59,13 @@ and one OpenSearch repository snapshot; the other nights carry the unchanged
 files by hard link. The stores' live data directories, `/data/fast/qdrant` and
 `/data/fast/opensearch`, are in no set: a restore puts the indexes back from the
 snapshots, so losing one costs hours rather than the days a re-embed takes. The
-content-addressed store at `/data/bulk/cas` is another root: the run
-copies its objects twice, links unchanged objects to the previous set's copy,
-and pins the copy's sorted names and sizes in `data-bulk-cas.listing` beside
-`manifest.json`. The secrets ride only as
+content-addressed store at `/data/bulk/cas` is another root: the run lists
+the live objects and copies what it listed into staging's one copy, before the
+Postgres backup and again after its archive boundary, adding and never
+removing, and pins the two listings' sorted names and sizes in
+`data-bulk-cas.listing` beside `manifest.json`, whose `version` reads 2. A set
+whose manifest reads 1 holds its own copy under `files/data-bulk-cas/` and is
+read that way until it ages out. The secrets ride only as
 `secrets.tar.age`, sealed to two age recipients named in the set's
 `manifest.json`, so the office can open a set anywhere and the box can open its
 own sets. The office recipient (`/etc/gideon/backup_age_recipient`) has an
@@ -106,12 +110,15 @@ nothing older is recoverable, and there is no monthly tier.
   riding as they stand; a store that cannot be reached or refuses fails the run
   with its logs command, and a repository directory the store cannot write fails
   it with `host provision --only disk-layout`), `files` (`linked n of m sampled`: the hard-link
-  verdict against the previous set — zero links with a previous set is a
-  failure, because a full copy would hide a retention overrun), `secrets`,
+  verdict for the snapshotted roots against the previous set — zero links with
+  a previous set is a failure, because a full copy would hide a retention
+  overrun; the store's copy in staging has no verdict), `secrets`,
   `postgres` (`full` or `incr`, then the archive boundary and one commit past
   it before the WAL segment is archived), `complete` (a second copy of the
   content-addressed store and of the frontend's uploads root, reporting what
-  arrived in each since the first pass), `counts`, `manifest`, `prune`, `applied`.
+  arrived in each since the first pass), `counts`, `manifest`, `prune`
+  (`pruned N old set(s); data-bulk-cas: removed M object(s) from the store
+  copy`, the objects no remaining set's listing names), `applied`.
   A set is complete only once `manifest.json` exists; an interrupted run leaves
   a `.partial` directory that the next run prunes after a day.
 - **`backup push`** — `record` (`push.json`, the snapshot's coverage record),
@@ -119,8 +126,9 @@ nothing older is recoverable, and there is no monthly tier.
   transfer above 90 % of the total fails the push — snapshots must share one
   path on one filesystem so they can use hard links), `finalize`, `prune`,
   `check` (the newest set's manifest, `push.json`, the tarball, pgBackRest's
-  info files and the set's backup manifest, plus 1 % of every root, re-hashed
-  on the target; `--verify-all` re-hashes every file), `audit`.
+  info files and the set's backup manifest, plus 1 % of every root — for the
+  store, every hundredth object the set's listing names, in the snapshot's
+  `data-bulk-cas/` — re-hashed on the target; `--verify-all` re-hashes every file), `audit`.
 - **`backup drill`** — `teardown-before`, `prepare`, `tarball` (hash and age
   header, one recipient stanza per recipient the manifest names), `verify` (pgBackRest's own repository verification), `postgres`
   (the set's own backup restored to its consistency point, archiving off),
@@ -134,9 +142,9 @@ nothing older is recoverable, and there is no monthly tier.
   database cannot be listed or counted; a drift far larger than a night's
   writing is read against the Backup board and is worth a question),
   `frontend` (healthy means its migrations ran clean on the restored database),
-  `cas-walk` (the set's store listing held to its manifest pin, the set's copy
-  of the store re-listed and held to that listing, every object hashed against
-  its name, then every object the restored `documents` rows name held to the
+  `cas-walk` (the set's store listing held to its manifest pin, every object it
+  names hashed against its name in staging's copy — a version-1 set
+  has its own copy re-listed and held to that listing first — then every object the restored `documents` rows name held to the
   listing: `walked N object(s) (B bytes), every object hashes to its name; D
   document row(s) name objects the set holds; S s`; a failure names the first
   ten objects or document ids, and §4 holds the repair), `retrieval-read` (one
@@ -237,11 +245,13 @@ SH
 ```
 
 When `backup drill`'s `cas-walk` names an object whose bytes do not hash to
-its name, the damaged file is the set's copy at
-`/data/backup-staging/sets/<label>/files/data-bulk-cas/<first two>/<next two>/<name>`.
-Remove that path first: the next `backup run` hard-links its copy against this
-set's by size and modification time, so a damaged copy that keeps both is
-carried into every later set until its path is gone. Then hash the live
+its name, the damaged file is staging's copy at
+`/data/backup-staging/data-bulk-cas/<first two>/<next two>/<name>` (for a
+version-1 set, the set's own at
+`/data/backup-staging/sets/<label>/files/data-bulk-cas/<first two>/<next two>/<name>`).
+Remove that path first: the next `backup run` never rewrites an object already
+in the copy, so a damaged copy is pinned by every later set until its path is
+gone. Then hash the live
 object, `sudo sha256sum /data/bulk/cas/<first two>/<next two>/<name>`: where
 the sum is not its name, move that path aside and write its bytes again from their source, since
 the store leaves an existing object of the same size untouched; or return the
@@ -269,6 +279,33 @@ row with the store's logs command and leaves the tier running.
 A set made before a secret rotation restores the older value: after that
 `apply`, run `gideon secrets rotate <name>` for every secret
 rotated since the set was made (the install runbook's rotation step, `v0.1.40`).
+
+When Postgres does not answer and its files are what is damaged, stop the
+whole stack with `sudo docker compose -f /etc/gideon/rendered/compose.yaml down`
+and run `gideon restore --from staging --archive-end`. It replaces Postgres
+alone, from the newest complete local set whose backup the archive's latest
+timeline descends from, and replays the local archive to its end: the stop
+less at most 300 s (`archive_timeout`), where a bare restore of the same set
+stops at its 01:00 boundary. Every file root, the content-addressed store, the
+live indexes, and the secrets on disk are left in place; `verify:` checks the
+pgBackRest repository alone, `files:` reads skipped, and the `Secrets:` line
+says the secrets on disk are the live box's, nothing decrypted, since the
+replayed record carries every rotation up to the archive's end. A running
+cluster that answers refuses: use `--at` or the bare form while it does. The
+`stores:` row and a `Reached:` line after `Secrets:` name the last replayed
+commit's instant, the WAL position, its segment, and the archive's newest
+segment; a replay short of that segment by N means the archive has a gap there,
+and the newest set's boundary, by the bare restore, is the fallback. What was
+written after the reached instant has no row afterwards and nothing that reads
+the record reaches it: an upload is uploaded again; a store object is written
+again from its source, as for a left-out object above; a generation promoted
+in that tail goes back to the record's live generation, whose aliases the
+level step repoints, and `gideon index promote <generation>` is run again; a
+generation whose row was created in that tail is not in the record at all —
+`gideon index report` lists the record's generations, a name a store holds
+beyond them is that generation's, and its
+`gideon index build <collection> --lockfile <label>` run again converges on the same name and resumes it,
+filling what the stores lack and removing nothing they hold.
 
 ## 5. Total-loss recovery (a rebuilt box)
 
@@ -360,7 +397,7 @@ expires the repository's retention on its own; only the nightly run does.
 
 ## 7. What a failure costs: recovery point and recovery time
 
-**Recovery point** is the newest archive boundary a failure's recovery reaches,
+**Recovery point** is the newest archive boundary, or the archive end, a failure's recovery reaches,
 stated as the worst-case committed work lost; **recovery time** is the time
 from the first recovery command to the first answered turn.
 The figures below are what the design delivers today, each proven by a dated
@@ -373,20 +410,22 @@ its size.
 | Failure | Recovery point | Recovery time | Procedure | Proof |
 |---|---|---|---|---|
 | A database error while Postgres answers (a bad migration, a wrong delete) | The pre-restore set's boundary, taken after its own backup: a point-in-time restore to any instant before it, reached from the earlier set's backup and the archived WAL; the work after the chosen instant is discarded by choice, nothing else is lost; an instant past an earlier restore waits for that restore's full backup (below) | 2,052 s (34 min): the pre-restore set 536 s, the restore's other stages 1,202 s, the apply 309 s, the turn 4 s | §4, `gideon restore --from staging --at <instant>`, then `gideon apply` and any `gideon index build` and `gideon index promote` its `Next:` line names | A timed run on 2026-10-21 over a 69.5 GB set, `v0.3.181` |
-| A damaged cluster that does not answer | The newest complete local set's boundary, up to a day behind (the 01:00 run's); the archived WAL past it is on disk and currently unreachable | 1,506 s, derived: a stopped-stack restore of the newest set (1,193 s) plus the database-error run's apply and turn (313 s) | §4 with the stack stopped first, `gideon restore --from staging`, then `gideon apply` | Unproven as a whole; the timed restore that reaches archived WAL while Postgres is down |
+| A damaged cluster that does not answer | The archive end: the stop less at most 300 s (`archive_timeout`), 3 s measured; the newest complete set's boundary, by the bare restore, when the archive has a gap | 1,237 s (21 min): the restore 919 s (the repository's verify 880 s of them), the apply 313 s, the turn 4 s | §4 with the stack stopped first, `gideon restore --from staging --archive-end`, then `gideon apply` and `gideon backup run --full` | A timed run on 2026-10-22 over a 69.6 GB set, `v0.3.183` |
 | A lost derived store's index (Qdrant, OpenSearch) | The newest full run's index snapshot, up to a week behind the record, then levelled with it | 1,685 s from the restore's start to the restored and levelled store, before the apply, over a 1,197,330-point scratch generation (2026-10-21); to a query answered through the alias, unproven | §4, the `stores:` row's put-back and level step, then the `Next:` line's `gideon index build` and `gideon index promote` | The 2026-10-21 record over a 1,197,330-point scratch generation and a 69.5 GB set, `v0.3.181`, for the store; the query's seconds unproven, read at the first restore after the first promoted generation |
-| Lost content-addressed store objects | The newest complete local set's copy; an object stored since is written again from its source (§4's listing command) | Seconds per missing object at the put-back; the whole store's put-back unproven at today's size | §4, the `files:` row's `data-bulk-cas` clause and the listing command | Unproven; the clean-VM full restore at the next minor release with the store in the set |
+| Lost content-addressed store objects | Staging's store copy, every object the newest complete local set's listing names; an object stored since is written again from its source (§4's listing command) | Seconds per missing object at the put-back; the whole store's put-back unproven at today's size | §4, the `files:` row's `data-bulk-cas` clause and the listing command | Unproven; the clean-VM full restore at the next minor release with the store in the set |
 | A lost box or `/data` volume (staging shares the volume) | The newest finished push: a day by design, two days observed while pushes overrun | The rebuilt-box sequence of §5, unproven at today's size; the model weights' fetch and a replacement machine's arrival stated outside the figure | §5 | Unproven; the clean-VM full restore at the next minor release, the 1,179 s run of 2026-09-17 at `v0.1.77` over a 35.9 GB set predating the store named as the last record |
 
 For a damaged cluster, stop the whole stack first so the `pre-restore` stage
 skips: a partially running stack refuses.
-The archived WAL past the newest complete set's boundary is on disk but
-unreachable until the restore can reach it while Postgres is down, so the
-recovery point stays up to a day behind.
-The recovery time is derived: two stopped-stack restores of the newest local
-set on 2026-10-21, over a 69.5 GB set at `v0.3.181`, took 1,165 s and 1,193 s,
-and the slower one plus the database-error run's apply (309 s) and turn (4 s)
-is 1,506 s; no run has yet timed this path through to an answered turn.
+`--archive-end` replays the archived WAL past the newest complete set's
+boundary to the archive's newest segment, so the recovery point is the stop
+less at most the 300 s `archive_timeout`, where the bare restore stops at the
+set's boundary, up to a day behind (the 01:00 run's).
+The timed run on 2026-10-22 stopped the whole stack at 00:41:24 UTC and
+reached the last commit at 00:41:20, 3 s before it, its `Reached:` line naming
+the archive end reached; it verifies the pgBackRest repository alone and puts
+back no file root, so it is faster than a bare stopped-stack restore of the
+same set (1,165 s and 1,193 s on 2026-10-21, before the apply).
 
 After any restore, `--at` reaches no instant later than that restore until the
 full backup its `Next:` line names has finished, since a point-in-time restore
@@ -395,7 +434,7 @@ restore starts a new one.
 Run `gideon backup run --full` at once after every restore's apply.
 A restore whose instant its set cannot reach stops the stack, runs to its
 `stores:` row, and refuses there with Postgres restarting; recover with a
-stopped-stack restore of the newest local set, as for a damaged cluster.
+stopped-stack restore of the newest local set, `gideon restore --from staging`.
 
 A pre-restore set this release takes records its boundary after its own backup
 and restores as any other set.

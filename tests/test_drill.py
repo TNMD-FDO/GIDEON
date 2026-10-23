@@ -39,7 +39,6 @@ STORE_PIN = backupset.ListingPin(
     "data-bulk-cas.listing", len(STORE_LISTING), hashlib.sha256(STORE_LISTING.encode()).hexdigest(),
     len(STORE_OBJECTS), sum(map(len, STORE_OBJECTS.values())),
 )
-STORE_COPY = os.path.join(backupset.files_dir(backupset.set_dir(SET_LABEL)), "data-bulk-cas")
 DOCUMENT_ID = hashlib.sha256(b"fictitious document").hexdigest()
 RECIPIENT = "age1" + "a" * 58
 AGE_HEADER = (
@@ -137,6 +136,9 @@ def make_manifest() -> backupset.Manifest:
     )
 
 
+STORE_COPY = backupset.store_copy(backupset.STAGING, backupset.set_dir(SET_LABEL), make_manifest(), "data-bulk-cas")
+
+
 class FakeClient:
     def __init__(self, ready: bool) -> None:
         self.ready = ready
@@ -184,9 +186,10 @@ class FakeHost:
         )
         self.fail_listing_pin = fail_listing_pin
         self.documents = [(DOCUMENT_ID, *STORE_OBJECTS)]
-        self.object_bytes = {os.fspath(cas.object_path(name, STORE_COPY)): data for name, data in STORE_OBJECTS.items()}
+        self.store_copy = backupset.store_copy(backupset.STAGING, backupset.set_dir(SET_LABEL), self.manifest, "data-bulk-cas")
+        self.object_bytes = {os.fspath(cas.object_path(name, self.store_copy)): data for name, data in STORE_OBJECTS.items()}
         if planted_object:
-            planted_path = os.fspath(cas.object_path(sorted(STORE_OBJECTS)[0], STORE_COPY))
+            planted_path = os.fspath(cas.object_path(sorted(STORE_OBJECTS)[0], self.store_copy))
             self.object_bytes[planted_path] = b"x" * len(self.object_bytes[planted_path])
         self.calls: list[
             tuple[tuple[str, ...], str | None, str | None, float | None]
@@ -354,7 +357,7 @@ class FakeHost:
 
     def stat(self, path: PathLike) -> os.stat_result:
         key = os.fspath(path)
-        if key == STORE_COPY:
+        if key == self.store_copy:
             return os.stat_result((0o40700, 0, 0, 1, 0, 0, 0, 0, 0, 0))
         if key in self.files:
             return os.stat_result((0o100644, 0, 0, 1, 0, 0, len(self.files[key].encode()), 0, 0, 0))
@@ -618,6 +621,31 @@ class StoreChecks(unittest.TestCase):
         self.assertFalse(any(call[0] == ("sha256sum", "-c", "-") for call in host.calls))
         self.assertNotIn("objects", detail)
         self.assertIn("teardown: ok", output)
+
+    def test_staging_copy_walk_ignores_extra_objects_and_names_a_failing_listed_one(self) -> None:
+        value = replace(make_manifest(), version=backupset.MANIFEST_VERSION)
+        extra = hashlib.sha256(b"fictitious object pinned by a different set").hexdigest()
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                host = FakeHost(manifest=value, planted_object=failed)
+                host.object_bytes[os.fspath(cas.object_path(extra, host.store_copy))] = b"fictitious damaged unlisted bytes"
+                code, output, detail = self._observe(host)
+                self.assertEqual(code, int(failed), output)
+                self.assertEqual(detail["objects"], STORE_PIN.objects)
+                self.assertNotIn(extra, output)
+                self.assertFalse(any("-fprintf" in argv for argv, _, _, _ in host.calls))
+                hashes = [call for call in host.calls if call[0] == ("sha256sum", "-c", "-") and call[2] == host.store_copy]
+                self.assertEqual(hashes, [(
+                    ("sha256sum", "-c", "-"),
+                    "".join(f"{name}  {name[:2]}/{name[2:4]}/{name}\n" for name in sorted(STORE_OBJECTS)),
+                    host.store_copy, None,
+                )])
+                if failed:
+                    self.assertIn(f"1 object(s) do not hash to their names: {sorted(STORE_OBJECTS)[0]}", output)
+                    self.assertEqual(cast(Mapping[str, str], detail["checks"])["retrieval_read"], "skipped")
+                else:
+                    self.assertEqual(cast(Mapping[str, str], detail["checks"])["retrieval_read"], "pass")
+                self.assertIn("teardown: ok", output)
 
     def test_missing_object_counts_document_rows_and_names_at_most_ten_ids(self) -> None:
         host = FakeHost()

@@ -32,18 +32,18 @@
       "type": "timeseries"
     },
     {
-      "description": "This compares bytes sent off the box with the total snapshot size for each recorded push. A first push may send everything; later pushes should send under 90 percent, or the push fails. Read docs/runbooks/backup-restore.md §3.",
+      "description": "This charts the share of the set's bytes each recorded push sent off the box. A first push may send everything. The line marks the 90 percent the push rule measures after setting aside bytes new to the set since the previous snapshot, so a push after a large intake can stand above the line and still have passed. A push over an unchanged set near the line means snapshots stopped sharing one target tree. The byte figures are in the runs table. Read docs/runbooks/backup-restore.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
-      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": [{"matcher": {"id": "byName", "options": "transferred_bytes"}, "properties": [{"id": "displayName", "value": "Transferred"}]}, {"matcher": {"id": "byName", "options": "total_bytes"}, "properties": [{"id": "displayName", "value": "Total"}]}]},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 1, "min": 0, "custom": {"axisSoftMax": 1, "thresholdsStyle": {"mode": "line"}}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 0.9}]}}, "overrides": [{"matcher": {"id": "byName", "options": "transferred_share"}, "properties": [{"id": "displayName", "value": "Transferred share"}]}]},
       "gridPos": {"h": 7, "w": 12, "x": 0, "y": 7},
-      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, (detail->>'transferred_bytes')::double precision AS transferred_bytes, (detail->>'total_bytes')::double precision AS total_bytes FROM audit_log WHERE kind = 'backup_push' ORDER BY at", "refId": "A"}],
-      "title": "Push transferred versus total bytes",
+      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, (detail->>'transferred_bytes')::double precision / NULLIF((detail->>'total_bytes')::double precision, 0) AS transferred_share FROM audit_log WHERE kind = 'backup_push' ORDER BY at", "refId": "A"}],
+      "title": "Push transferred share of total bytes",
       "type": "timeseries"
     },
     {
-      "description": "This charts paths checked on the backup target and old target snapshots removed during each recorded push. Checked paths show the copy was verified, while zero removed snapshots is normal when none has expired; a failed check prevents a successful push row. Read docs/runbooks/backup-restore.md §3.",
+      "description": "This charts paths checked on the backup target and old target snapshots removed during each recorded push. Checked paths show the copy was verified, while zero removed snapshots is normal when none has expired; a failed check prevents a successful push row. Pruned reads on the right-hand axis at its own scale. The quarterly full re-hash (backup push --verify-all) checks every path, so its verified count stands far above the nightly sample's. Read docs/runbooks/backup-restore.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
-      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": [{"matcher": {"id": "byName", "options": "verified"}, "properties": [{"id": "displayName", "value": "Verified"}]}, {"matcher": {"id": "byName", "options": "pruned"}, "properties": [{"id": "displayName", "value": "Pruned"}]}]},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "min": 0}, "overrides": [{"matcher": {"id": "byName", "options": "verified"}, "properties": [{"id": "displayName", "value": "Verified"}]}, {"matcher": {"id": "byName", "options": "pruned"}, "properties": [{"id": "displayName", "value": "Pruned"}, {"id": "custom.axisPlacement", "value": "right"}, {"id": "min", "value": 0}, {"id": "decimals", "value": 0}]}]},
       "gridPos": {"h": 7, "w": 12, "x": 12, "y": 7},
       "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, (detail->>'verified')::double precision AS verified, (detail->>'pruned')::double precision AS pruned FROM audit_log WHERE kind = 'backup_push' ORDER BY at", "refId": "A"}],
       "title": "Verified and pruned counts",
@@ -67,6 +67,15 @@
       "targets": [{"format": "table", "rawSql": "SELECT at, detail->>'result' AS result FROM audit_log WHERE kind = 'backup_drill' ORDER BY at DESC LIMIT 5", "refId": "A"}],
       "title": "Restore drill result",
       "type": "table"
+    },
+    {
+      "description": "This charts how long each recorded push took, from its row. The first push after a new set form or a target restore copies more and takes longer; a steady duration is expected after it. Read docs/runbooks/backup-restore.md §3.",
+      "datasource": {"type": "postgres", "uid": "gideon-rows"},
+      "fieldConfig": {"defaults": {"unit": "h", "decimals": 1}, "overrides": [{"matcher": {"id": "byName", "options": "duration_h"}, "properties": [{"id": "displayName", "value": "Duration"}]}]},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 14},
+      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, (detail->>'duration_s')::double precision / 3600.0 AS duration_h FROM audit_log WHERE kind = 'backup_push' ORDER BY at", "refId": "A"}],
+      "title": "Push duration",
+      "type": "timeseries"
     },
     {
       "description": "This table lists the ten newest recorded backup runs, pushes, drills, and restores with each result, sizes, and the share of sampled files reused. A run, push, or restore reads completed when healthy; a healthy drill reads pass. A failed drill or a missing expected run needs investigation. Read docs/runbooks/backup-restore.md §3.",

@@ -619,7 +619,10 @@ class BackupBoard(unittest.TestCase):
     def test_duration_charts_read_whole_minutes(self) -> None:
         board = json.loads(GrafanaBackupArtifact.emit(inputs()))
         panels = {panel["title"]: panel for panel in board["panels"]}
-        for title in ("Backup run duration", "Restore drill duration"):
+        for title, kind in (
+            ("Backup run duration", "backup_run"),
+            ("Restore drill duration", "backup_drill"),
+        ):
             with self.subTest(panel=title):
                 panel = panels[title]
                 sql = panel["targets"][0]["rawSql"]
@@ -628,9 +631,91 @@ class BackupBoard(unittest.TestCase):
                     r"(?i)\(\s*detail\s*->>\s*'duration_s'\s*\)\s*::\s*double\s+precision\s*/\s*60\.0\s+AS\s+duration_min\b",
                 )
                 self.assertEqual(outer_select_columns(sql), ["time", "duration_min"])
+                self.assertIn(f"WHERE kind = '{kind}'", sql)
                 self.assertEqual(panel["fieldConfig"]["defaults"]["unit"], "m")
                 self.assertEqual(panel["fieldConfig"]["defaults"]["decimals"], 0)
                 self.assertEqual(column_overrides(panel)["duration_min"]["displayName"], "Duration")
+
+    def test_push_duration_chart_reads_hours(self) -> None:
+        # A push runs for hours, so whole minutes rounded to whole hours would label uneven ticks.
+        board = json.loads(GrafanaBackupArtifact.emit(inputs()))
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        panel = panels["Push duration"]
+        sql = panel["targets"][0]["rawSql"]
+        self.assertRegex(
+            sql,
+            r"(?i)\(\s*detail\s*->>\s*'duration_s'\s*\)\s*::\s*double\s+precision\s*/\s*3600\.0\s+AS\s+duration_h\b",
+        )
+        self.assertEqual(outer_select_columns(sql), ["time", "duration_h"])
+        self.assertIn("WHERE kind = 'backup_push'", sql)
+        self.assertEqual(panel["fieldConfig"]["defaults"]["unit"], "h")
+        self.assertEqual(panel["fieldConfig"]["defaults"]["decimals"], 1)
+        self.assertEqual(column_overrides(panel)["duration_h"]["displayName"], "Duration")
+
+    def test_push_chart_reads_the_transferred_share_against_the_push_rule(self) -> None:
+        board = json.loads(GrafanaBackupArtifact.emit(inputs()))
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        panel = panels["Push transferred share of total bytes"]
+        self.assertNotIn("Push transferred versus total bytes", panels)
+        sql = panel["targets"][0]["rawSql"]
+        self.assertRegex(
+            sql,
+            r"(?i)\(\s*detail\s*->>\s*'transferred_bytes'\s*\)\s*::\s*double\s+precision\s*/\s*NULLIF\(",
+        )
+        self.assertRegex(
+            sql,
+            r"(?i)NULLIF\(\s*\(\s*detail\s*->>\s*'total_bytes'\s*\)\s*::\s*double\s+precision\s*,\s*0\s*\)\s+AS\s+transferred_share\b",
+        )
+        self.assertEqual(outer_select_columns(sql), ["time", "transferred_share"])
+        self.assertIn("FROM audit_log WHERE kind = 'backup_push' ORDER BY at", sql)
+        defaults = panel["fieldConfig"]["defaults"]
+        self.assertEqual(defaults["unit"], "percentunit")
+        self.assertEqual(defaults["decimals"], 1)
+        self.assertEqual(defaults["min"], 0)
+        self.assertEqual(defaults["custom"]["axisSoftMax"], 1)
+        self.assertEqual(defaults["custom"]["thresholdsStyle"]["mode"], "line")
+        self.assertEqual(defaults["thresholds"]["mode"], "absolute")
+        self.assertEqual(
+            defaults["thresholds"]["steps"],
+            [{"color": "green", "value": None}, {"color": "red", "value": 0.9}],
+        )
+        self.assertEqual(
+            column_overrides(panel),
+            {"transferred_share": {"displayName": "Transferred share"}},
+        )
+        self.assertRegex(panel["description"], r"(?i)line marks the 90 percent")
+
+    def test_counts_chart_puts_pruned_on_its_own_axis(self) -> None:
+        board = json.loads(GrafanaBackupArtifact.emit(inputs()))
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        panel = panels["Verified and pruned counts"]
+        defaults = panel["fieldConfig"]["defaults"]
+        self.assertEqual(defaults["unit"], "short")
+        self.assertEqual(defaults["decimals"], 0)
+        self.assertEqual(defaults["min"], 0)
+        overrides = column_overrides(panel)
+        self.assertEqual(overrides["pruned"]["custom.axisPlacement"], "right")
+        self.assertEqual(overrides["pruned"]["min"], 0)
+        self.assertEqual(overrides["pruned"]["decimals"], 0)
+        self.assertNotIn("custom.axisPlacement", overrides["verified"])
+        self.assertEqual(overrides["pruned"]["displayName"], "Pruned")
+        self.assertEqual(overrides["verified"]["displayName"], "Verified")
+
+    def test_every_grid_row_fills_its_width(self) -> None:
+        board = json.loads(GrafanaBackupArtifact.emit(inputs()))
+        rows: dict[int, list[tuple[int, int]]] = {}
+        for panel in board["panels"]:
+            grid = panel["gridPos"]
+            rows.setdefault(grid["y"], []).append((grid["x"], grid["w"]))
+        for y, spans in rows.items():
+            with self.subTest(y=y):
+                self.assertEqual(sum(width for _, width in spans), GRID_COLUMNS)
+                end = 0
+                for x, width in sorted(spans):
+                    self.assertGreater(width, 0)
+                    self.assertGreaterEqual(x, end)
+                    end = x + width
+                    self.assertLessEqual(end, GRID_COLUMNS)
 
 
 class EvalBoard(unittest.TestCase):

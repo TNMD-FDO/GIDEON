@@ -176,24 +176,33 @@ class FakeHost:
         del check, cwd, env
         command = tuple(argv)
         self.calls.append((command, input, timeout))
+        queue = self.commands.get(command)
+        if not queue:
+            queue = next(
+                (value for key, value in self.commands.items() if command[: len(key)] == key and value),
+                None,
+            )
+        reply = queue.pop(0) if queue else empty_store_result(command, input, RENDERED)
+        if reply is None:
+            reply = result(command)
+        if reply.returncode != 0:
+            return reply
         if command and command[0] == "mv" and len(command) == 3:
             source, destination = command[1:]
             for path in tuple(self.files):
                 if path == source or path.startswith(source + "/"):
                     self.files[destination + path[len(source) :]] = self.files.pop(path)
-        queue = self.commands.get(command)
-        if queue:
-            return queue.pop(0)
-        prefix_queue = next(
-            (value for key, value in self.commands.items() if command[: len(key)] == key and value),
-            None,
-        )
-        if prefix_queue is not None:
-            return prefix_queue.pop(0)
-        store_reply = empty_store_result(command, input, RENDERED)
-        if store_reply is not None:
-            return store_reply
-        return result(command)
+            for path in tuple(self.stats):
+                if path == source or path.startswith(source + "/"):
+                    self.stats[destination + path[len(source) :]] = self.stats.pop(path)
+            self.names.append(os.path.basename(destination))
+        if command[:2] == ("rm", "-rf") and len(command) == 3:
+            removed = command[2]
+            for path in tuple(self.files):
+                if path == removed or path.startswith(removed + "/"):
+                    self.files.pop(path)
+            self.names = [name for name in self.names if backupset.set_dir(name) != removed]
+        return reply
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
         del encoding
@@ -247,6 +256,7 @@ class FakeHost:
     ) -> None:
         del mode, parents, exist_ok
         self.mkdir_calls.append(os.fspath(path))
+        self.files[os.fspath(path)] = ""
 
     def take_lock(self, path: PathLike, record: str) -> str | None:
         key = os.fspath(path)
@@ -344,13 +354,17 @@ def _commands(*, old: backupset.Manifest | None = None) -> dict[tuple[str, ...],
             ]
     store = next(root for root in backupset.inventory_roots(CHECKOUT) if root.kind is backupset.RootKind.STORE)
     partial = backupset.partial_dir("20260902T120000Z")
-    copy = os.path.join(backupset.files_dir(partial), store.name)
+    copy = backupset.store_copy_dir(backupset.STAGING, store.name)
     listing_path = backupset.listing_path(partial, store.name)
-    store_rsync = ("rsync", "-rtp", "--stats", "--exclude=.*", store.source + "/", copy + "/")
-    commands[store_rsync] = [
-        result(store_rsync, stdout="Number of regular files transferred: 1\n"),
-        result(store_rsync, stdout="Number of regular files transferred: 0\n"),
-    ]
+    for number, arrived in ((1, 1), (2, 0)):
+        store_rsync = (
+            "rsync", "-rtp", "--stats", "--exclude=.*",
+            "--ignore-existing", f"--files-from={partial}/{store.name}.pass{number}.paths",
+            store.source + "/", copy + "/",
+        )
+        commands[store_rsync] = [
+            result(store_rsync, stdout=f"Number of regular files transferred: {arrived}\n")
+        ]
     uploads = next(root for root in backupset.inventory_roots(CHECKOUT) if root.user_written)
     uploads_copy = os.path.join(backupset.files_dir(partial), uploads.name)
     previous_copy = (
@@ -366,10 +380,14 @@ def _commands(*, old: backupset.Manifest | None = None) -> dict[tuple[str, ...],
     commands[uploads_rsync] = [
         result(uploads_rsync, stdout="Number of regular files transferred: 0\n")
     ]
-    commands[tuple(backuproots._store_stray_argv())] = [result((), stdout="")]
-    commands[tuple(backuproots._store_listing_argv(listing_path))] = [result(())]
-    commands[("env", "LC_ALL=C", "sort", "-o", listing_path, listing_path)] = [result(())]
+    commands[tuple(backuproots._store_stray_argv(store.exclusions))] = [result((), stdout="")]
+    commands[(
+        "env", "LC_ALL=C", "sort", "-u", "-o", listing_path,
+        f"{partial}/{store.name}.pass1.listing", f"{partial}/{store.name}.pass2.listing",
+    )] = [result(())]
     commands[("sha256sum", listing_path)] = [result((), stdout=f"{'d' * 64}  {listing_path}\n")]
+    final_listing = backupset.listing_path(backupset.set_dir("20260902T120000Z"), store.name)
+    commands[("sha256sum", final_listing)] = [result((), stdout=f"{'d' * 64}  {final_listing}\n")]
     commands[("awk", "-F", "\t", '{n++; b+=$2} END {printf "%.0f %.0f\\n", n, b}', listing_path)] = [result((), stdout="1 7\n")]
     if old is not None:
         commands[tuple(pgbackrest.backup_argv(RENDERED, "incr"))] = [result(())]
@@ -614,6 +632,7 @@ class BackupRun(unittest.TestCase):
         self.assertIn("indexes: ok — qdrant: 0 collection(s) in ", out.getvalue())
         self.assertIn("; opensearch: 0 index(es) in ", out.getvalue())
         self.assertIn("complete: ok — completed 2 root(s); data-bulk-openwebui: 0 file(s), data-bulk-cas: 0 object(s) arrived since the first pass", out.getvalue())
+        self.assertIn("prune: ok — pruned 0 old set(s); data-bulk-cas: removed 0 object(s) from the store copy", out.getvalue())
         manifest_path = os.path.join(backupset.set_dir("20260902T120000Z"), backupset.MANIFEST_NAME)
         parsed = backupset.parse_manifest(host.files[manifest_path])
         self.assertIsInstance(parsed, backupset.Manifest)
@@ -621,11 +640,15 @@ class BackupRun(unittest.TestCase):
         self.assertGreater(parsed.archive_through, NOW)
         self.assertGreaterEqual(parsed.finished, parsed.archive_through)
         self.assertEqual(parsed.started, NOW)
+        self.assertEqual(parsed.version, backupset.MANIFEST_VERSION)
+        self.assertTrue(parsed.store_in_staging)
         self.assertEqual(parsed.commit, "new-commit")
         self.assertEqual(parsed.recipients, (RECIPIENT, "age1" + "c" * 58))
         self.assertEqual(parsed.gideon_ids, GIDEON_IDS)
         store = next(root for root in backupset.inventory_roots(CHECKOUT) if root.kind is backupset.RootKind.STORE)
         self.assertNotIn(store.name, parsed.inventory)
+        self.assertNotIn(os.path.join(backupset.files_dir(backupset.partial_dir("20260902T120000Z")), store.name), host.mkdir_calls)
+        self.assertIn(backupset.store_copy_dir(backupset.STAGING, store.name), host.mkdir_calls)
         self.assertEqual(set(parsed.inventory), {root.name for root in backupset.inventory_roots(CHECKOUT) if root.kind is not backupset.RootKind.STORE})
         self.assertEqual(parsed.listings[store.name], backupset.ListingPin(f"{store.name}.listing", 70, "d" * 64, 1, 7))
         self.assertEqual(
@@ -697,13 +720,18 @@ class BackupRun(unittest.TestCase):
                 "/data/bulk/openwebui/",
                 f"{backupset.partial_dir('20260902T120000Z')}/files/data-bulk-openwebui/",
             ),
-            (
-                "rsync", "-rtp", "--stats", "--exclude=.*", store.source + "/",
-                f"{backupset.partial_dir('20260902T120000Z')}/files/{store.name}/",
+            *(
+                (
+                    "rsync", "-rtp", "--stats", "--exclude=.*",
+                    "--ignore-existing",
+                    f"--files-from={backupset.partial_dir('20260902T120000Z')}/{store.name}.pass{number}.paths",
+                    store.source + "/", backupset.store_copy_dir(backupset.STAGING, store.name) + "/",
+                )
+                for number in (1, 2)
             ),
         }
         self.assertEqual(set(rsync), expected_rsync)
-        self.assertEqual(rsync.count(next(argv for argv in rsync if argv[1:3] == ("-rtp", "--stats"))), 2)
+        self.assertEqual(sum(argv[1:3] == ("-rtp", "--stats") for argv in rsync), 2)
         audit_inputs = [
             call[1]
             for call in host.calls
@@ -940,12 +968,14 @@ class BackupRun(unittest.TestCase):
             result(uploads_argv, stdout="Number of regular files transferred: 2\n")
         ]
         store = next(root for root in backupset.inventory_roots(CHECKOUT) if root.kind is backupset.RootKind.STORE)
-        copy = os.path.join(backupset.files_dir(backupset.partial_dir("20260902T120000Z")), store.name)
-        argv = ("rsync", "-rtp", "--stats", "--exclude=.*", store.source + "/", copy + "/")
-        host.commands[argv] = [
-            result(argv, stdout="Number of regular files transferred: 1\n"),
-            result(argv, returncode=23, stderr="disk full"),
-        ]
+        copy = backupset.store_copy_dir(backupset.STAGING, store.name)
+        argv = (
+            "rsync", "-rtp", "--stats", "--exclude=.*",
+            "--ignore-existing",
+            f"--files-from={backupset.partial_dir('20260902T120000Z')}/{store.name}.pass2.paths",
+            store.source + "/", copy + "/",
+        )
+        host.commands[argv] = [result(argv, returncode=23, stderr="disk full")]
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = backup.run_backup_run(argparse.Namespace(full=True, label=None), host=host, root=CHECKOUT, now=NOW)
@@ -957,7 +987,7 @@ class BackupRun(unittest.TestCase):
         self.assertIn("disk full", out.getvalue())
         self.assertIn("Fix: Run sudo python3 -m gideon apply, then retry.", out.getvalue())
         rsync_calls = [call[0] for call in host.calls if call[0][0] == "rsync"]
-        self.assertLess(rsync_calls.index(uploads_argv), rsync_calls.index(argv, rsync_calls.index(argv) + 1))
+        self.assertLess(rsync_calls.index(uploads_argv), rsync_calls.index(argv))
         self.assertEqual(host.commands[uploads_argv], [])
         self.assertNotIn(os.path.join(backupset.partial_dir("20260902T120000Z"), backupset.MANIFEST_NAME), host.files)
         self.assertNotIn(os.path.join(backupset.set_dir("20260902T120000Z"), backupset.MANIFEST_NAME), host.files)
@@ -1209,6 +1239,7 @@ class BackupRun(unittest.TestCase):
             now=NOW,
             local_days=7,
             final=backupset.set_dir("new"),
+            roots=(),
         )
         self.assertTrue(stage.ok)
         self.assertEqual(count, 1)
@@ -1227,10 +1258,59 @@ class BackupRun(unittest.TestCase):
                 now=NOW,
                 local_days=7,
                 final=backupset.set_dir("new"),
+                roots=(),
             )
         self.assertFalse(unsafe.ok)
         self.assertEqual(unsafe_count, 0)
         self.assertIn("outside /data/backup-staging/sets", unsafe.detail)
+
+    def test_prune_reloads_complete_sets_then_calls_every_root_and_collects_clauses(self) -> None:
+        old = replace(previous_manifest(), finished=NOW - timedelta(days=8))
+        current = replace(previous_manifest(), label="20260902T120000Z", finished=NOW)
+        host = FakeHost(
+            names=[old.label, current.label, "unfinished"],
+            files={os.path.join(backupset.set_dir(value.label), backupset.MANIFEST_NAME): value.to_json()
+                   for value in (old, current)},
+        )
+        roots = tuple(mock.Mock(spec=backuproots.TakingRoot) for _ in range(3))
+        roots[0].prune.return_value = backuproots.Pruned(0, "")
+        roots[1].prune.return_value = backuproots.Pruned(2, "example-store: removed 2 object(s) from the store copy")
+        roots[2].prune.return_value = backuproots.Pruned(1, "another root clause")
+        calls = mock.Mock()
+        for index, root in enumerate(roots):
+            calls.attach_mock(root.prune, f"root{index}")
+        with mock.patch.object(backupset, "list_sets", wraps=backupset.list_sets) as listed:
+            stage, count = backup._prune_stage(host, now=NOW, local_days=7, final=backupset.set_dir(current.label), roots=roots)
+        remaining = (backupset.SetRef(current.label, backupset.set_dir(current.label), current.finished, True, current),)
+        self.assertEqual(listed.call_args_list, [mock.call(host, backupset.STAGING), mock.call(host, backupset.STAGING)])
+        self.assertEqual(calls.mock_calls, [mock.call.root0(remaining), mock.call.root1(remaining), mock.call.root2(remaining)])
+        self.assertEqual(host.calls, [(("rm", "-rf", backupset.set_dir(old.label)), None, None)])
+        self.assertEqual((stage, count), (StageResult(
+            "prune", True, "pruned 1 old set(s); example-store: removed 2 object(s) from the store copy, another root clause", "",
+        ), 1))
+
+    def test_prune_root_problem_stops_the_stage_and_preserves_or_supplies_its_fix(self) -> None:
+        for fix in ("", "example repair"):
+            with self.subTest(fix=fix):
+                host = FakeHost()
+                refused = mock.Mock(spec=backuproots.TakingRoot)
+                refused.prune.return_value = backupset.Problem("example prune refusal", fix)
+                uncalled = mock.Mock(spec=backuproots.TakingRoot)
+                stage, count = backup._prune_stage(host, now=NOW, local_days=7, final=backupset.set_dir("new"), roots=(refused, uncalled))
+                self.assertEqual((stage, count), (StageResult("prune", False, "example prune refusal", fix or backup._PRUNE_FIX), 0))
+                refused.prune.assert_called_once_with(())
+                uncalled.prune.assert_not_called()
+                self.assertEqual(host.calls, [])
+
+    def test_prune_cannot_relist_sets_refuses_before_any_root(self) -> None:
+        host = FakeHost()
+        root = mock.Mock(spec=backuproots.TakingRoot)
+        with mock.patch.object(backupset, "list_sets", side_effect=((), OSError("denied"))) as listed:
+            stage, count = backup._prune_stage(host, now=NOW, local_days=7, final=backupset.set_dir("new"), roots=(root,))
+        self.assertEqual((stage, count), (StageResult("prune", False, "cannot list backup sets: denied", backup._PRUNE_FIX), 0))
+        self.assertEqual(listed.call_args_list, [mock.call(host, backupset.STAGING), mock.call(host, backupset.STAGING)])
+        root.prune.assert_not_called()
+        self.assertEqual(host.calls, [])
 
     def test_failed_tar_stops_before_pgbackrest(self) -> None:
         host = _host()

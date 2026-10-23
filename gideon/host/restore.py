@@ -33,6 +33,7 @@ from gideon.host import (
     site,
     sshtarget,
     stack,
+    stores,
 )
 from gideon.host.index import level
 from gideon.host.render.command import render_to_disk
@@ -90,6 +91,22 @@ def _set_fix() -> str:
     return f"Run {report.command('backup run')}, then retry."
 
 
+def _archive_fallback_fix() -> str:
+    return (
+        f"Run {report.command('restore --from staging')}, then "
+        f"{report.command('apply')}, then {report.command('backup run --full')}."
+    )
+
+
+def _archive_running_fix() -> str:
+    return (
+        f"Use {report.command('restore --from staging --at <instant>')} "
+        "(or omit --at) while Postgres answers. For a cluster that does not answer, "
+        "stop the stack with docker compose -f /etc/gideon/rendered/compose.yaml "
+        f"down, then run {report.command('restore --from staging --archive-end')}."
+    )
+
+
 def _account_fix() -> str:
     return f"Run {report.command('host provision')}, then retry."
 
@@ -128,6 +145,7 @@ class _Selection:
     snapshot: backupset.RemoteSnapshot | None
     record: backupset.PushRecord | None
     set_ref: backupset.SetRef | None
+    archive_end: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +154,36 @@ class _Fetched:
     replaced: str
     selected: backupset.SetRef
     reowned: int
+
+
+@dataclass(frozen=True, slots=True)
+class _Reach:
+    """The replay's position against the archive end selected before restore."""
+
+    instant: datetime | None
+    lsn: str
+    segment: str
+    archive_end: str
+    short_by: int
+    past: bool
+
+
+def _reach_detail(reach: _Reach) -> str:
+    instant = reach.instant.isoformat() if reach.instant is not None else "no commit replayed"
+    detail = (
+        f"{instant}; lsn={reach.lsn}; segment={reach.segment}; "
+        f"archive newest segment={reach.archive_end}"
+    )
+    if reach.short_by:
+        detail += (
+            f"; short by {reach.short_by} segment(s); "
+            "see docs/runbooks/backup-restore.md §4"
+        )
+    elif reach.past:
+        detail += "; past the archive's newest segment"
+    else:
+        detail += "; archive end reached"
+    return detail
 
 
 def _refuse(problem: str, fix: str) -> int:
@@ -150,7 +198,7 @@ def _preconditions(
     build_box: bool,
     rendered_dir: PathLike,
     site_path: PathLike,
-) -> tuple[SiteConfig, str, datetime | None, backupset.AccountIds] | None:
+) -> tuple[SiteConfig, str, datetime | None, backupset.AccountIds, bool] | None:
     loaded = site.load_site(Path(site_path), host=io)
     if loaded.errors or loaded.config is None:
         _refuse(
@@ -164,6 +212,14 @@ def _preconditions(
         _refuse(
             "restore source must be staging or target.",
             "Use --from staging or --from target, then retry.",
+        )
+        return None
+
+    archive_end = getattr(args, "archive_end", False)
+    if archive_end and source == "target":
+        _refuse(
+            "--archive-end requires the local archive and cannot use --from target.",
+            f"Use {report.command('restore --from staging --archive-end')}, then retry.",
         )
         return None
 
@@ -226,7 +282,7 @@ def _preconditions(
         if active is not None and active.returncode == 0:
             _refuse(_UNDECLARED_REGISTRY_PROBLEM, _UNDECLARED_REGISTRY_FIX)
             return None
-    return config, source, at, gideon_ids
+    return config, source, at, gideon_ids, archive_end
 
 
 def _selection_detail(selection: _Selection, unfinished: Sequence[str] = ()) -> str:
@@ -296,6 +352,78 @@ def _select_staging(
     choice = _Selection("staging", boundary, None, None, selected)
     detail = f"source=staging; set={selected.label}; archive_through={boundary.isoformat()}"
     return StageResult("select", True, detail, ""), choice
+
+
+def _select_archive_end(
+    io: Host, rendered_dir: PathLike
+) -> tuple[StageResult, _Selection | None]:
+    try:
+        sets = backupset.list_sets(io)
+    except OSError as exc:
+        return StageResult("select", False, f"cannot list backup sets: {exc}", _set_fix()), None
+    complete = tuple(ref for ref in sets if ref.complete and ref.manifest is not None)
+    if not complete:
+        return StageResult("select", False, "no complete backup set is available", _set_fix()), None
+
+    found = pgbackrest.info(io, rendered_dir, running=False)
+    if not found.ok:
+        return StageResult("select", False, found.problem or "pgBackRest info failed", found.fix), None
+    if not found.archive_max:
+        return StageResult("select", False, "the local archive has no archived WAL segment", _set_fix()), None
+    if found.archive_id is None:
+        return StageResult(
+            "select", False, "pgBackRest info records no archive id",
+            stack.logs_fix(rendered_dir, "postgres"),
+        ), None
+    history = pgbackrest.history(io, rendered_dir, found.archive_id)
+    if not history.ok:
+        return StageResult("select", False, history.problem or "pgBackRest history failed", history.fix), None
+
+    backups = {entry.label: entry for entry in found.infos}
+    passed: list[str] = []
+    for ref in complete:
+        assert ref.manifest is not None
+        label = ref.manifest.pgbackrest_label
+        entry = backups.get(label)
+        if entry is None:
+            passed.append(f"set {ref.label}: the repository holds no backup {label}")
+            continue
+        if entry.lsn_stop is None:
+            passed.append(f"set {ref.label}: backup {label} records no stop LSN")
+            continue
+        try:
+            reaches = pgbackrest.reaches_latest(entry, history.latest, history.chain)
+        except ValueError as exc:
+            return StageResult(
+                "select", False, f"backup {label} records a malformed stop LSN: {exc}",
+                stack.logs_fix(rendered_dir, "postgres"),
+            ), None
+        if not reaches:
+            passed.append(
+                f"set {ref.label}: backup {label} on timeline {entry.timeline} "
+                f"cannot reach timeline {history.latest}"
+            )
+            continue
+        choice = _Selection("staging", None, None, None, ref, found.archive_max)
+        detail = (
+            f"source=staging; set={ref.label}; backup={label}; timeline={entry.timeline}; "
+            f"latest_timeline={history.latest}; archive_end={found.archive_max}"
+        )
+        if passed:
+            detail += "; passed over: " + "; ".join(passed)
+        return StageResult("select", True, detail, ""), choice
+
+    newest = complete[0]
+    assert newest.manifest is not None
+    newest_backup = backups.get(newest.manifest.pgbackrest_label)
+    timeline = newest_backup.timeline if newest_backup is not None else None
+    detail = (
+        f"no complete backup set reaches latest timeline {history.latest}; "
+        f"newest set={newest.label}; timeline={timeline}; newest local archive boundary="
+        f"{newest.manifest.archive_through.isoformat()}; archive_end={found.archive_max}; "
+        "passed over: " + "; ".join(passed)
+    )
+    return StageResult("select", False, detail, _archive_fallback_fix()), None
 
 
 def _select_target(
@@ -391,6 +519,7 @@ def _pre_restore_stage(
     site_path: PathLike,
     root: PathLike | None,
     now: datetime,
+    archive_end: bool = False,
 ) -> tuple[StageResult, str | None]:
     # The order is running, fresh, partial, incomplete, take, push: a fresh
     # stack has nothing a safety set would protect, while a staging of
@@ -434,6 +563,13 @@ def _pre_restore_stage(
             ),
             None,
         )
+
+    if archive_end:
+        return StageResult(
+            "pre-restore", False,
+            "the stack is running and Postgres answers; --archive-end is for a cluster that does not answer",
+            _archive_running_fix(),
+        ), None
 
     if not any(ref.complete for ref in sets):
         incomplete = tuple(ref.label for ref in sets if not ref.complete)
@@ -793,13 +929,19 @@ def _verify_stage(
     *,
     selected: backupset.SetRef,
     later: tuple[backupset.SetRef, ...] = (),
+    repository_only: bool = False,
 ) -> StageResult:
     if selected.manifest is None:
         return StageResult("verify", False, "selected set has no manifest", _set_fix())
     manifest = selected.manifest
+    inventory_roots = backupset.inventory_roots(manifest.checkout)
+    if repository_only:
+        inventory_roots = tuple(
+            root for root in inventory_roots if root.kind is backupset.RootKind.REPOSITORY
+        )
     roots = backuproots.held(
         io,
-        backupset.inventory_roots(manifest.checkout),
+        inventory_roots,
         selected,
         later,
     )
@@ -813,24 +955,25 @@ def _verify_stage(
                 problem.fix or _VERIFY_FIX,
             )
 
-    tarball = os.path.join(selected.path, backupset.TARBALL_NAME)
-    try:
-        hashed = io.run(["sha256sum", tarball])
-    except (OSError, subprocess.SubprocessError) as exc:
-        return StageResult("verify", False, f"tarball checksum failed: {exc}", _VERIFY_FIX)
-    if hashed.returncode != 0:
-        return StageResult(
-            "verify",
-            False,
-            f"tarball checksum failed: {command_detail(hashed)}",
-            _VERIFY_FIX,
-        )
-    try:
-        hashes = backupset.parse_sha256sum(hashed.stdout)
-    except ValueError as exc:
-        return StageResult("verify", False, f"tarball checksum was malformed: {exc}", _VERIFY_FIX)
-    if hashes.get(tarball, "").casefold() != manifest.tarball_sha256.casefold():
-        return StageResult("verify", False, "tarball checksum does not match the manifest", _VERIFY_FIX)
+    if not repository_only:
+        tarball = os.path.join(selected.path, backupset.TARBALL_NAME)
+        try:
+            hashed = io.run(["sha256sum", tarball])
+        except (OSError, subprocess.SubprocessError) as exc:
+            return StageResult("verify", False, f"tarball checksum failed: {exc}", _VERIFY_FIX)
+        if hashed.returncode != 0:
+            return StageResult(
+                "verify",
+                False,
+                f"tarball checksum failed: {command_detail(hashed)}",
+                _VERIFY_FIX,
+            )
+        try:
+            hashes = backupset.parse_sha256sum(hashed.stdout)
+        except ValueError as exc:
+            return StageResult("verify", False, f"tarball checksum was malformed: {exc}", _VERIFY_FIX)
+        if hashes.get(tarball, "").casefold() != manifest.tarball_sha256.casefold():
+            return StageResult("verify", False, "tarball checksum does not match the manifest", _VERIFY_FIX)
 
     for root in roots:
         problem = root.prove(rendered_dir)
@@ -841,7 +984,13 @@ def _verify_stage(
                 problem.problem,
                 problem.fix or _VERIFY_FIX,
             )
-    return StageResult("verify", True, "backup set hashes and pgBackRest verification passed", "")
+    detail = (
+        "repository hashes and pgBackRest verification passed; "
+        "tarball not checked, every other root left in place"
+        if repository_only
+        else "backup set hashes and pgBackRest verification passed"
+    )
+    return StageResult("verify", True, detail, "")
 
 
 def _stop_stage(io: Host, rendered_dir: PathLike, *, build_box: bool) -> StageResult:
@@ -1029,8 +1178,9 @@ def _postgres_stage(
     at: datetime | None,
     boundary: datetime,
     backup_label: str,
+    archive_end: bool = False,
 ) -> StageResult:
-    """Restore the selected set's own backup, along its own timeline, to its target.
+    """Restore the selected backup to its target or to the archive's end.
 
     Three rehearsals taught the three parts. The backup is named (``--set``):
     left to pgBackRest, the backup is auto-selected as the newest that stopped
@@ -1041,21 +1191,27 @@ def _postgres_stage(
     backup's own LSN and could not reach it. The target is named
     (``--type=time``): ``--at`` when given, else the set's archive boundary,
     so the restore ends where the set's record says it does.
+
+    The fourth lesson is a damaged cluster's archive end: ``--type=default``
+    follows ``--target-timeline=latest`` with no recovery target or target
+    action, so recovery ends when the archive runs out rather than failing
+    on a time target no archived commit passes.
     """
 
-    timeline = _backup_timeline(io, rendered_dir, backup_label)
-    if isinstance(timeline, StageResult):
-        return timeline
-    target = at if at is not None else boundary
-    args = [
-        "restore",
-        "--delta",
-        f"--set={backup_label}",
-        f"--target-timeline={timeline}",
-        "--type=time",
-        f"--target={backupset.pgbackrest_target(target)}",
-        "--target-action=promote",
-    ]
+    args = ["restore", "--delta", f"--set={backup_label}"]
+    if archive_end:
+        args.extend(("--type=default", "--target-timeline=latest"))
+    else:
+        timeline = _backup_timeline(io, rendered_dir, backup_label)
+        if isinstance(timeline, StageResult):
+            return timeline
+        target = at if at is not None else boundary
+        args.extend((
+            f"--target-timeline={timeline}",
+            "--type=time",
+            f"--target={backupset.pgbackrest_target(target)}",
+            "--target-action=promote",
+        ))
     return run_stage(
         io,
         "postgres",
@@ -1090,7 +1246,9 @@ def _stores_stage(
     run_id: str,
     build_box: bool,
     present_sources: frozenset[str],
-) -> tuple[StageResult, level.LevelReport | None]:
+    archive_end: str | None = None,
+    reach_wait: float = stores.REPLAY_WAIT_SECONDS,
+) -> tuple[StageResult, level.LevelReport | None, _Reach | None]:
     # Only the build box runs the registry step, so only it has a unit to start.
     if build_box:
         started = run_stage(
@@ -1101,7 +1259,7 @@ def _stores_stage(
             _REGISTRY_FIX,
         )
         if not started.ok:
-            return started, None
+            return started, None, None
     # The restored render is the making host's: a store started from it would
     # reserve that host's memory, so the tier starts from this host's render.
     try:
@@ -1121,9 +1279,9 @@ def _stores_stage(
             "stores", False,
             f"render for this host failed: {type(exc).__name__}: {exc}",
             apply.RENDER_FIX,
-        ), None
+        ), None, None
     if outcome.exit_code != 0 or outcome.rendered is None or outcome.inputs is None:
-        return StageResult("stores", False, "render inputs were refused", apply.RENDER_FIX), None
+        return StageResult("stores", False, "render inputs were refused", apply.RENDER_FIX), None, None
     up = run_stage(
         io,
         "stores",
@@ -1132,7 +1290,7 @@ def _stores_stage(
         _stage_fix(),
     )
     if not up.ok:
-        return up, None
+        return up, None, None
     ready, detail, service = apply.wait_for_store_tier(io, rendered_dir, sleep)
     if not ready:
         return StageResult(
@@ -1140,24 +1298,47 @@ def _stores_stage(
             False,
             detail,
             stack.logs_fix(rendered_dir, service),
-        ), None
+        ), None, None
+
+    reach: _Reach | None = None
+    if archive_end is not None:
+        replayed = stores.replay_reach(io, rendered_dir, sleep=sleep, wait_seconds=reach_wait)
+        if isinstance(replayed, Problem):
+            return StageResult("stores", False, replayed.problem, replayed.fix), None, None
+        try:
+            per_log = pgbackrest.segments_per_log(replayed.segment_size)
+            difference = (
+                pgbackrest.segment_ordinal(archive_end, per_log)
+                - pgbackrest.segment_ordinal(replayed.segment, per_log)
+            )
+        except ValueError as exc:
+            return StageResult(
+                "stores", False, f"cannot compare replay with the archive end: {exc}",
+                stack.logs_fix(rendered_dir, "postgres"),
+            ), None, None
+        reach = _Reach(
+            replayed.instant, replayed.lsn, replayed.segment, archive_end,
+            max(0, difference), difference < 0,
+        )
 
     # The replaced staging directory is the local fallback while the indexes
     # are put back and levelled, so it goes only after both succeed. The worker
     # is down throughout, so no job races the demotions.
-    recovered = derivedstores.recover_all(
-        io, rendered_dir, present_sources=present_sources
-    )
+    recovered: tuple[derivedstores.StoreRecovery, ...] | Problem = ()
+    if archive_end is None:
+        recovered = derivedstores.recover_all(
+            io, rendered_dir, present_sources=present_sources
+        )
     if isinstance(recovered, Problem):
-        return StageResult("stores", False, recovered.problem, recovered.fix), None
+        return StageResult("stores", False, recovered.problem, recovered.fix), None, reach
     level_report = level.level_all(io, rendered_dir, recovered=recovered, command_path="restore")
     if isinstance(level_report, Problem):
-        return StageResult("stores", False, level_report.problem, level_report.fix), None
+        return StageResult("stores", False, level_report.problem, level_report.fix), None, reach
 
     replaced_removed = False
     if replaced is not None:
         if not replaced.startswith(backupset.STAGING + ".replaced-"):
-            return StageResult("stores", False, f"unsafe replacement path: {replaced}", _stage_fix()), level_report
+            return StageResult("stores", False, f"unsafe replacement path: {replaced}", _stage_fix()), level_report, reach
         removed = run_stage(
             io,
             "stores",
@@ -1166,10 +1347,10 @@ def _stores_stage(
             _stage_fix(),
         )
         if not removed.ok:
-            return removed, level_report
+            return removed, level_report, reach
         replaced_removed = True
 
-    detail_row: Mapping[str, object] = {
+    detail_row: dict[str, object] = {
         "source": source,
         "set_label": selected.label,
         "snapshot_label": snapshot.label if snapshot is not None else None,
@@ -1184,6 +1365,14 @@ def _stores_stage(
         "indexes": derivedstores.recovery_audit(recovered),
         "level": level.level_audit(level_report),
     }
+    if reach is not None:
+        detail_row.update({
+            "reached": reach.instant.isoformat() if reach.instant is not None else None,
+            "reached_lsn": reach.lsn,
+            "reached_segment": reach.segment,
+            "archive_end": reach.archive_end,
+            "archive_end_reached": reach.short_by == 0,
+        })
     row = audit.AuditRow(
         run_id,
         "restore",
@@ -1200,11 +1389,13 @@ def _stores_stage(
             False,
             f"restore audit write failed: {problem}",
             stack.logs_fix(rendered_dir, "postgres"),
-        ), level_report
+        ), level_report, reach
     clauses = "; ".join((
         *(derivedstores.recovery_clause(result) for result in recovered),
         *level.level_clauses(level_report),
     ))
+    if reach is not None:
+        clauses = f"reached {_reach_detail(reach)}" + (f"; {clauses}" if clauses else "")
     return StageResult(
         "stores",
         True,
@@ -1216,7 +1407,7 @@ def _stores_stage(
             "the host registry running"
         ),
         "",
-    ), level_report
+    ), level_report, reach
 
 
 def _next_stage(
@@ -1227,36 +1418,45 @@ def _next_stage(
     has_gideon_ids: bool,
     closing_lines: tuple[str, ...],
     level_lines: tuple[str, ...] = (),
+    reach: _Reach | None = None,
 ) -> tuple[StageResult, tuple[str, ...]]:
     """State the terminal state and the next steps, including index resumes.
 
-    Whether the secrets on disk are the restored cluster's is decided by the
-    set's keyed fingerprint against the live secret directory, never by a
-    file's presence: apply regenerates the files on a rebuilt box.
+    Outside an archive-end replay, whether the secrets on disk are the
+    restored cluster's is decided by the set's keyed fingerprint against
+    the live secret directory, never by a file's presence: apply regenerates
+    the files on a rebuilt box. An archive-end replay keeps the live secrets.
 
     A set that records no ``gideon`` ids was re-owned by the ids it holds,
     so its next steps name ``host provision`` — which re-owns the managed
     ``/data`` directories — before the apply.
     """
 
-    tarball = os.path.join(selected.path, backupset.TARBALL_NAME)
-    kept = (
-        selected.manifest is not None
-        and secrets.fingerprint(io) == selected.manifest.secrets_fingerprint
-    )
     lines: tuple[str, ...]
-    if kept:
+    if reach is not None:
         lines = (
-            f"Secrets: the secrets on disk are the set's; the tarball is at {tarball}",
+            "Secrets: the secrets on disk are the live box's; the replayed record "
+            "carries every rotation up to the archive end, so nothing is decrypted.",
+            f"Reached: {_reach_detail(reach)}",
         )
     else:
-        lines = (
-            (
-                "Secrets: the secrets on disk are not the set's (a rebuilt box): decrypt "
-                "the tarball with the office's age identity: age -d -i "
-                f"<identity file kept off-box> {tarball} | tar -x -C /etc/gideon"
-            ),
+        tarball = os.path.join(selected.path, backupset.TARBALL_NAME)
+        kept = (
+            selected.manifest is not None
+            and secrets.fingerprint(io) == selected.manifest.secrets_fingerprint
         )
+        if kept:
+            lines = (
+                f"Secrets: the secrets on disk are the set's; the tarball is at {tarball}",
+            )
+        else:
+            lines = (
+                (
+                    "Secrets: the secrets on disk are not the set's (a rebuilt box): decrypt "
+                    "the tarball with the office's age identity: age -d -i "
+                    f"<identity file kept off-box> {tarball} | tar -x -C /etc/gideon"
+                ),
+            )
     lines += closing_lines
     next_commands = ", then ".join((
         report.command("apply"), *level_lines, report.command("backup run --full"),
@@ -1360,9 +1560,11 @@ def _restore_body(
     )
     if prerequisites is None:
         return 1
-    config, source, at, gideon_ids = prerequisites
+    config, source, at, gideon_ids, archive_end = prerequisites
 
-    if source == "staging":
+    if archive_end:
+        select_result, selection = _select_archive_end(io, rendered_dir)
+    elif source == "staging":
         select_result, selection = _select_staging(io, at, label=getattr(args, "set", None))
     else:
         select_result, selection = _select_target(io, config, at)
@@ -1379,8 +1581,9 @@ def _restore_body(
         site_path=site_path,
         root=root,
         now=effective_now,
+        archive_end=archive_end,
     )
-    if pre_result.ok and source == "staging" and at is not None:
+    if pre_result.ok and source == "staging" and at is not None and not archive_end:
         bound_failure = _staging_bound(io, at=at)
         if bound_failure is not None:
             pre_result = bound_failure
@@ -1427,6 +1630,7 @@ def _restore_body(
         rendered_dir,
         selected=selected,
         later=later,
+        repository_only=archive_end,
     )
     print_stage(verify_result)
     if not verify_result.ok:
@@ -1463,12 +1667,21 @@ def _restore_body(
     else:
         print_stage(StageResult("swap", True, "skipped (staging source)", ""))
 
-    files_result, roots_restored, file_reowned, store_counts, added, closing_lines, present_sources = _restore_files_stage(
-        io,
-        selected=selected,
-        gideon_ids=gideon_ids,
-        later=later,
-    )
+    if archive_end:
+        files_result = StageResult("files", True, "skipped (every root left in place)", "")
+        roots_restored: tuple[str, ...] = ()
+        file_reowned = 0
+        store_counts: Mapping[str, backuproots.StoreCounts] = {}
+        added: Mapping[str, int] = {}
+        closing_lines: tuple[str, ...] = ()
+        present_sources: frozenset[str] = frozenset()
+    else:
+        files_result, roots_restored, file_reowned, store_counts, added, closing_lines, present_sources = _restore_files_stage(
+            io,
+            selected=selected,
+            gideon_ids=gideon_ids,
+            later=later,
+        )
     print_stage(files_result)
     if not files_result.ok:
         return 1
@@ -1483,12 +1696,13 @@ def _restore_body(
         at=restore_at,
         boundary=selected.manifest.archive_through,
         backup_label=selected.manifest.pgbackrest_label,
+        archive_end=archive_end,
     )
     print_stage(postgres_result)
     if not postgres_result.ok:
         return 1
 
-    stores_result, level_report = _stores_stage(
+    stores_result, level_report, reach = _stores_stage(
         io,
         rendered_dir,
         site_path=site_path,
@@ -1511,6 +1725,8 @@ def _restore_body(
         run_id=str(uuid.uuid4()),
         build_box=build_box,
         present_sources=present_sources,
+        archive_end=selection.archive_end,
+        reach_wait=stores.REPLAY_WAIT_SECONDS,
     )
     print_stage(stores_result)
     if not stores_result.ok:
@@ -1524,6 +1740,7 @@ def _restore_body(
         has_gideon_ids=selected.manifest.gideon_ids is not None,
         closing_lines=closing_lines,
         level_lines=level.next_lines(level_report),
+        reach=reach,
     )
     print_stage(next_result)
     if next_result.ok:

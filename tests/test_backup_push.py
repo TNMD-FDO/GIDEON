@@ -500,33 +500,34 @@ class PushContracts(unittest.TestCase):
         store = next(root for root in backupset.inventory_roots("/work/GIDEON") if root.kind is backupset.RootKind.STORE)
         listing = "".join(f"{index:064x}\t7\n" for index in range(201))
         pin = backupset.ListingPin(f"{store.name}.listing", len(listing), "9" * 64, 201, 201 * 7)
-        value = replace(manifest(), listings={store.name: pin})
-        fake = host(local_set_manifest=value, remote_manifest=value.to_json(), listing_text=listing)
-        local_set = backupset.SetRef(LOCAL_SET, backupset.set_dir(LOCAL_SET), value.finished, True, value)
-        record_text = backupset.PushRecord(PUSH_LABEL, NOW, LOCAL_SET, value.archive_through).to_json()
-        sample = backup._push_check_input(
-            fake, local_set=local_set, remote_manifest=value, record_text=record_text, verify_all=False
-        )
-        self.assertIsInstance(sample, str)
-        assert isinstance(sample, str)
-        self.assertIn(f"{pin.sha256}  sets/{LOCAL_SET}/{pin.file}\n", sample)
-        for index in (0, 100, 200):
-            name = f"{index:064x}"
-            self.assertIn(f"{name}  sets/{LOCAL_SET}/files/{store.name}/{name[:2]}/{name[2:4]}/{name}\n", sample)
-        self.assertEqual(sum(f"sets/{LOCAL_SET}/files/{store.name}/" in line for line in sample.splitlines()), 3)
-        self.assertIn(
-            (("awk", "NR % 100 == 1", backupset.listing_path(backupset.set_dir(LOCAL_SET), store.name)), None, None),
-            fake.calls,
-        )
+        for version, place in ((1, f"sets/{LOCAL_SET}/files/{store.name}"), (2, store.name)):
+            with self.subTest(version=version):
+                value = replace(manifest(), version=version, listings={store.name: pin})
+                fake = host(local_set_manifest=value, remote_manifest=value.to_json(), listing_text=listing)
+                local_set = backupset.SetRef(LOCAL_SET, backupset.set_dir(LOCAL_SET), value.finished, True, value)
+                record_text = backupset.PushRecord(PUSH_LABEL, NOW, LOCAL_SET, value.archive_through).to_json()
+                sample = backup._push_check_input(
+                    fake, local_set=local_set, remote_manifest=value, record_text=record_text, verify_all=False
+                )
+                self.assertIsInstance(sample, str)
+                assert isinstance(sample, str)
+                self.assertIn(f"{pin.sha256}  sets/{LOCAL_SET}/{pin.file}\n", sample)
+                for index in (0, 100, 200):
+                    name = f"{index:064x}"
+                    self.assertIn(f"{name}  {place}/{name[:2]}/{name[2:4]}/{name}\n", sample)
+                self.assertEqual(sum(f"  {place}/" in line for line in sample.splitlines()), 3)
+                self.assertEqual(fake.calls, [(
+                    ("awk", "NR % 100 == 1", backupset.listing_path(backupset.set_dir(LOCAL_SET), store.name)), None, None,
+                )])
 
-        fake.calls.clear()
-        all_lines = backup._push_check_input(
-            fake, local_set=local_set, remote_manifest=value, record_text=record_text, verify_all=True
-        )
-        self.assertIsInstance(all_lines, str)
-        assert isinstance(all_lines, str)
-        self.assertEqual(sum(f"sets/{LOCAL_SET}/files/{store.name}/" in line for line in all_lines.splitlines()), 201)
-        self.assertFalse(any(call[0][0] == "awk" for call in fake.calls))
+                fake.calls.clear()
+                all_lines = backup._push_check_input(
+                    fake, local_set=local_set, remote_manifest=value, record_text=record_text, verify_all=True
+                )
+                self.assertIsInstance(all_lines, str)
+                assert isinstance(all_lines, str)
+                self.assertEqual(sum(f"  {place}/" in line for line in all_lines.splitlines()), 201)
+                self.assertEqual(fake.calls, [])
 
         previous = manifest()
         without_pin = host(local_set_manifest=previous)
@@ -537,30 +538,35 @@ class PushContracts(unittest.TestCase):
         self.assertIsInstance(unchanged, str)
         assert isinstance(unchanged, str)
         self.assertNotIn(f"sets/{LOCAL_SET}/{pin.file}", unchanged)
-        self.assertFalse(any(call[0][0] == "awk" for call in without_pin.calls))
+        self.assertEqual(without_pin.calls, [])
 
     def test_full_copy_guard_subtracts_only_bytes_new_since_previous_set(self) -> None:
         store = next(root for root in backupset.inventory_roots("/work/GIDEON") if root.kind is backupset.RootKind.STORE)
         name = "a" * 64
         listing = f"{name}\t400\n"
         pin = backupset.ListingPin(f"{store.name}.listing", len(listing), "b" * 64, 1, 400)
-        current = replace(manifest(), listings={store.name: pin})
+        value = replace(manifest(), listings={store.name: pin})
         older_label = "20260901T110000Z"
         remote_label = "20260901T120000Z"
         remote_listing = f"{remote_label}\t1\n"
-        record = backupset.PushRecord(remote_label, NOW - timedelta(days=1), older_label, current.archive_through).to_json()
+        record = backupset.PushRecord(remote_label, NOW - timedelta(days=1), older_label, value.archive_through).to_json()
         transfer = "Total file size: 1,000 bytes\nTotal transferred file size: 901 bytes\n"
         cases = (
-            ("empty prior pin", replace(pin, objects=0, bytes=0), True, record, 0),
-            ("equal pins", pin, True, record, 1),
-            ("prior set gone", pin, False, record, 0),
+            ("empty prior pin", 1, 1, replace(pin, objects=0, bytes=0), True, record, 0),
+            ("equal pins", 1, 1, pin, True, record, 1),
+            ("prior set gone", 1, 1, pin, False, record, 0),
             # An unreadable record names no prior set: the store counts whole and the push proceeds.
-            ("record unreadable", pin, True, "{", 0),
+            ("record unreadable", 1, 1, pin, True, "{", 0),
+            ("first staging copy", 2, 1, pin, True, record, 0),
+            ("staging copy already pushed", 2, 2, pin, True, record, 1),
+            ("old-form after new-form", 1, 2, pin, True, record, 1),
+            ("new-form empty prior pin", 2, 2, replace(pin, objects=0, bytes=0), True, record, 0),
         )
-        for case, prior_pin, staged, record_text, expected_code in cases:
+        for case, version, previous_version, prior_pin, staged, record_text, expected_code in cases:
             with self.subTest(case=case):
+                current = replace(value, version=version)
                 previous_set = replace(
-                    current,
+                    current, version=previous_version,
                     label=older_label,
                     started=current.started - timedelta(days=1),
                     finished=current.finished - timedelta(days=1),

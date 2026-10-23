@@ -25,6 +25,8 @@ from gideon.host.sysio import Host, PathLike
 STAGING: Final = "/data/backup-staging"
 SETS_DIR: Final = f"{STAGING}/sets"
 MANIFEST_NAME: Final = "manifest.json"
+MANIFEST_VERSION: Final = 2
+STORE_IN_STAGING_VERSION: Final = 2
 TARBALL_NAME: Final = "secrets.tar.age"
 FILES_DIR: Final = "files"
 FRONTEND_UPLOADS: Final = "/data/bulk/openwebui"
@@ -568,9 +570,9 @@ class Manifest:
         if (
             not isinstance(self.version, int)
             or isinstance(self.version, bool)
-            or self.version != 1
+            or self.version not in (1, MANIFEST_VERSION)
         ):
-            raise ValueError("Manifest version must be 1")
+            raise ValueError("Manifest version must be 1 or 2")
         if not isinstance(self.kind, Kind):
             raise TypeError("Manifest kind must be a Kind")
         if not isinstance(self.recipients, tuple) or not self.recipients or any(
@@ -589,6 +591,12 @@ class Manifest:
             raise TypeError("Manifest listings must map root names to ListingPin")
         for field in ("started", "finished", "archive_through"):
             object.__setattr__(self, field, _utc(getattr(self, field), field))
+
+    @property
+    def store_in_staging(self) -> bool:
+        """Whether this set pins objects in staging's shared store copy."""
+
+        return self.version >= STORE_IN_STAGING_VERSION
 
     def to_json(self) -> str:
         """Serialize this manifest deterministically as indented JSON."""
@@ -653,9 +661,9 @@ def _parse_manifest_document(document: object) -> Manifest:
         raise _ParseError(_field_problem("manifest", "must be an object"))
     version_value = _required(document, "version", _MANIFEST_FIX)
     if not isinstance(version_value, int) or isinstance(version_value, bool):
-        raise _ParseError(_field_problem("version", "must be the integer 1"))
-    if version_value != 1:
-        raise _ParseError(_field_problem("version", "must be 1"))
+        raise _ParseError(_field_problem("version", "must be the integer 1 or 2"))
+    if version_value not in (1, MANIFEST_VERSION):
+        raise _ParseError(_field_problem("version", "must be 1 or 2"))
 
     label = _string_field(document, "label")
     label_problem = validate_label(label)
@@ -943,6 +951,20 @@ def listing_path(set_path: PathLike, root_name: str) -> str:
     """Return the listing path beside a set's manifest."""
 
     return os.path.join(os.fspath(set_path), f"{root_name}.listing")
+
+
+def store_copy_dir(staging: PathLike, root_name: str) -> str:
+    """Return the store copy's place beside staging's repository."""
+
+    return os.path.join(os.fspath(staging), root_name)
+
+
+def store_copy(staging: PathLike, set_path: PathLike, manifest: Manifest, root_name: str) -> str:
+    """Return the store copy pinned by this set's manifest form."""
+
+    if manifest.store_in_staging:
+        return store_copy_dir(staging, root_name)
+    return os.path.join(files_dir(set_path), root_name)
 
 
 def list_sets(host: Host, staging: PathLike = STAGING) -> tuple[SetRef, ...]:

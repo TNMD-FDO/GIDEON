@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.184](docs/release-notes/v0.3.184.md) — 2026-10-23 — WAL-end restore, one staged store, Backup charts
 - [v0.3.183](docs/release-notes/v0.3.183.md) — 2026-10-22 — doctrine answered, chats swept nightly, shm at 1 GiB
 - [v0.3.182](docs/release-notes/v0.3.182.md) — 2026-10-21 — levelled restores, memory summed, recovery targets
 - [v0.3.181](docs/release-notes/v0.3.181.md) — 2026-10-21 — pipeline 1.1.0, illegible ciphers, one current spec

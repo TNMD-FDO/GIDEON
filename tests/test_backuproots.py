@@ -10,12 +10,12 @@ import tempfile
 import unittest
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 from unittest import mock
 
-from gideon.host import backuproots, backupset, cas, pgbackrest, stack
+from gideon.host import backup, backuproots, backupset, cas, pgbackrest, stack
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, Host, PathLike, RealHost
 
@@ -306,52 +306,73 @@ class StoreTaking(unittest.TestCase):
     """A store is copied before and after the archive boundary, and its listing pinned."""
 
     def setUp(self) -> None:
-        self.copy = os.path.join(backupset.files_dir(PARTIAL), ROOT)
+        self.copy = "/example/staging/" + ROOT
         self.listing_path = backupset.listing_path(PARTIAL, ROOT)
-        self.copy_argv = (
-            "rsync", "-rtp", "--stats", "--exclude=cache/", SOURCE + "/", self.copy + "/",
+        self.stray_argv = (
+            "find", ".", "-regextype", "posix-basic", "-mindepth", "1",
+            "!", "(", "-type", "d", "-regex", r"\./[0-9a-f]\{2\}", ")",
+            "!", "(", "-type", "d", "-regex", r"\./[0-9a-f]\{2\}/[0-9a-f]\{2\}", ")",
+            "!", "-name", ".*",
+            "!", "(", "-type", "f", "-regex", r"\./\([0-9a-f]\{2\}\)/\([0-9a-f]\{2\}\)/\1\2[0-9a-f]\{60\}", ")",
+            "-print", "-quit",
         )
 
-    def test_store_take_link_dest_depends_on_previous_pin_and_object_count(self) -> None:
+    def root(self, host: FakeHost, prior: backupset.SetRef | None = None) -> backuproots.TakingRoot:
+        row = backupset.InventoryRoot(ROOT, SOURCE, (".*",), backupset.RootKind.STORE, False)
+        (root,) = backuproots.taking(cast(Host, host), (row,), PARTIAL, prior)
+        return root
+
+    def pass_commands(self, number: int) -> tuple[tuple[str, ...], ...]:
+        listing = f"{PARTIAL}/{ROOT}.pass{number}.listing"
+        paths = f"{PARTIAL}/{ROOT}.pass{number}.paths"
+        return (
+            ("find", ".", "-regextype", "posix-basic", "-type", "f", "-regex",
+             r"\./\([0-9a-f]\{2\}\)/\([0-9a-f]\{2\}\)/\1\2[0-9a-f]\{60\}",
+             "-fprintf", listing, r"%f\t%s\n"),
+            ("env", "LC_ALL=C", "sort", "-o", listing, listing),
+            ("awk", "-F", "\t", "-v", f"paths={paths}",
+             'BEGIN {printf "" > paths} {print substr($1, 1, 2) "/" substr($1, 3, 2) "/" $1 > paths}', listing),
+            ("rsync", "-rtp", "--stats", "--exclude=.*", "--ignore-existing", f"--files-from={paths}", SOURCE + "/", self.copy + "/"),
+        )
+
+    def test_store_take_lists_live_objects_and_never_links_to_previous(self) -> None:
         pin = backupset.ListingPin(f"{ROOT}.listing", 0, "a" * 64, 0, 0)
         old = previous()
         assert old.manifest is not None
-        pinned = replace(old, manifest=replace(old.manifest, listings={ROOT: pin}))
-        counted = replace(old, manifest=replace(old.manifest, listings={ROOT: replace(pin, objects=1)}))
-        old_copy = os.path.join(backupset.files_dir(PREVIOUS), ROOT)
-        linked_argv = self.copy_argv[:-2] + (f"--link-dest={old_copy}/",) + self.copy_argv[-2:]
-        link_check = ("find", self.copy, "-type", "f", "-links", "+1", "-print", "-quit")
-        cases = (
-            (None, self.copy_argv, False),
-            (old, self.copy_argv, False),
-            (pinned, linked_argv, False),
-            (counted, linked_argv, True),
-        )
-        for prior, argv, check_links in cases:
-            with self.subTest(prior=prior, check_links=check_links):
-                responses = [completed(argv, stdout="Number of regular files transferred: 1\n")]
-                if check_links:
-                    responses.append(completed(link_check, stdout=f"{self.copy}/linked\n"))
-                host = FakeHost(responses, existing=(SOURCE,))
-                self.assertEqual(bound(host, backupset.RootKind.STORE, prior).take(), backuproots.Taken(True, {}))
-                expected: list[tuple[str, object, object]] = [
+        for prior in (None, old, replace(old, manifest=replace(old.manifest, listings={ROOT: pin})),
+                      replace(old, manifest=replace(old.manifest, listings={ROOT: replace(pin, objects=1)}))):
+            with self.subTest(prior=prior):
+                commands = self.pass_commands(1)
+                host = FakeHost((completed(self.stray_argv), *(completed(argv) for argv in commands[:-1]),
+                                 completed(commands[-1], stdout="Number of regular files transferred: 1\n")), existing=(SOURCE,))
+                self.assertEqual(self.root(host, prior).take(), backuproots.Taken(True, {}))
+                self.assertEqual(host.calls, [
                     ("exists", SOURCE, {}),
+                    ("run", self.stray_argv, {"cwd": SOURCE}),
+                    ("run", commands[0], {"cwd": SOURCE}),
+                    ("run", commands[1], {"cwd": None}),
+                    ("run", commands[2], {"cwd": None}),
                     ("mkdir", self.copy, {"mode": 0o750, "parents": True, "exist_ok": True}),
-                    ("run", argv, {"cwd": None}),
-                ]
-                if check_links:
-                    expected.append(("run", link_check, {"cwd": None}))
-                self.assertEqual(host.calls, expected)
+                    ("run", commands[3], {"cwd": None}),
+                ])
                 self.assertEqual(host.responses, [])
 
-    def test_complete_reports_counts_and_only_user_written_snapshots_act(self) -> None:
-        host = FakeHost((completed(self.copy_argv, stdout="Number of regular files transferred: 1,234\n"),), existing=(SOURCE,))
-        self.assertEqual(bound(host, backupset.RootKind.STORE).complete(), backuproots.Completed(True, 1234, f"{ROOT}: 1234 object(s)"))
+    def test_complete_runs_pass_two_and_reports_arrivals(self) -> None:
+        commands = self.pass_commands(2)
+        host = FakeHost((*(completed(argv) for argv in commands[:-1]),
+                         completed(commands[-1], stdout="Number of regular files transferred: 1,234\n")), existing=(SOURCE,))
+        self.assertEqual(self.root(host).complete(), backuproots.Completed(True, 1234, f"{ROOT}: 1234 object(s)"))
         self.assertEqual(host.calls, [
             ("exists", SOURCE, {}),
+            ("run", commands[0], {"cwd": SOURCE}),
+            ("run", commands[1], {"cwd": None}),
+            ("run", commands[2], {"cwd": None}),
             ("mkdir", self.copy, {"mode": 0o750, "parents": True, "exist_ok": True}),
-            ("run", self.copy_argv, {"cwd": None}),
+            ("run", commands[3], {"cwd": None}),
         ])
+        self.assertEqual(host.responses, [])
+
+    def test_complete_only_user_written_snapshots_act(self) -> None:
         for kind in (backupset.RootKind.SNAPSHOT, backupset.RootKind.REPOSITORY):
             with self.subTest(kind=kind):
                 idle = FakeHost()
@@ -365,7 +386,7 @@ class StoreTaking(unittest.TestCase):
                 )
                 argv = (
                     "rsync", "-a", "--exclude=cache/", *link_dest, "--stats",
-                    SOURCE + "/", self.copy + "/",
+                    SOURCE + "/", os.path.join(backupset.files_dir(PARTIAL), ROOT) + "/",
                 )
                 row = backupset.InventoryRoot(
                     ROOT, SOURCE, ("cache/",), backupset.RootKind.SNAPSHOT, True, True
@@ -386,112 +407,220 @@ class StoreTaking(unittest.TestCase):
                         self.assertIn("file snapshot", outcome.problem)
                         self.assertEqual(outcome.fix, "")
                         self.assertEqual(failed_snapshot.calls, [("run", argv, {"cwd": None})])
-        failed = FakeHost((completed(self.copy_argv, returncode=23, stderr="disk full"),), existing=(SOURCE,))
-        self.assertEqual(
-            bound(failed, backupset.RootKind.STORE).complete(),
-            Problem(f"store copy for {ROOT} failed: disk full", ""),
-        )
 
-    def test_store_take_refusals_keep_their_detail_and_fix(self) -> None:
-        absent = FakeHost()
-        self.assertEqual(
-            bound(absent, backupset.RootKind.STORE).take(),
-            Problem(f"content-addressed store root is missing: {SOURCE}", "Run sudo python3 -m gideon host provision --only disk-layout, then retry."),
-        )
-        for response, detail in (
-            (completed(self.copy_argv, returncode=23, stderr="denied"), "denied"),
-            (OSError("rsync unavailable"), "rsync unavailable"),
-            (completed(self.copy_argv, stdout="statistics absent"), "reported no transferred file count"),
-        ):
-            with self.subTest(response=response):
-                host = FakeHost((response,), existing=(SOURCE,))
-                problem = bound(host, backupset.RootKind.STORE).take()
-                self.assertIsInstance(problem, Problem)
-                assert isinstance(problem, Problem)
-                self.assertIn(detail, problem.problem)
-                self.assertEqual(problem.fix, "")
+    def test_store_pass_refusals_keep_their_detail_and_fix(self) -> None:
+        for number in (1, 2):
+            with self.subTest(number=number):
+                absent = FakeHost()
+                root = self.root(absent)
+                self.assertEqual(root.take() if number == 1 else root.complete(), Problem(
+                    f"content-addressed store root is missing: {SOURCE}",
+                    "Run sudo python3 -m gideon host provision --only disk-layout, then retry.",
+                ))
+            commands = ((self.stray_argv,) if number == 1 else ()) + self.pass_commands(number)
+            for index, argv in enumerate(commands):
+                for response in (completed(argv, returncode=24, stderr="tool denied"), OSError("tool unavailable")):
+                    with self.subTest(number=number, tool=argv[0], response=response):
+                        host = FakeHost((*(completed(item) for item in commands[:index]), response), existing=(SOURCE,))
+                        root = self.root(host)
+                        problem = root.take() if number == 1 else root.complete()
+                        self.assertIsInstance(problem, Problem)
+                        assert isinstance(problem, Problem)
+                        self.assertIn("tool", problem.problem)
+                        self.assertEqual(problem.fix, "")
+                        self.assertEqual(host.responses, [])
+            host = FakeHost((*(completed(argv) for argv in commands),), existing=(SOURCE,))
+            root = self.root(host)
+            problem = root.take() if number == 1 else root.complete()
+            self.assertIsInstance(problem, Problem)
+            assert isinstance(problem, Problem)
+            self.assertIn("reported no transferred file count", problem.problem)
 
-        pin = backupset.ListingPin(f"{ROOT}.listing", 0, "a" * 64, 1, 7)
-        old = previous()
-        assert old.manifest is not None
-        pinned = replace(old, manifest=replace(old.manifest, listings={ROOT: pin}))
-        old_copy = os.path.join(backupset.files_dir(PREVIOUS), ROOT)
-        argv = self.copy_argv[:-2] + (f"--link-dest={old_copy}/",) + self.copy_argv[-2:]
-        link_check = ("find", self.copy, "-type", "f", "-links", "+1", "-print", "-quit")
-        host = FakeHost((completed(argv, stdout="Number of regular files transferred: 0\n"), completed(link_check)), existing=(SOURCE,))
-        self.assertEqual(bound(host, backupset.RootKind.STORE, pinned).take(), Problem(backuproots.LINK_PROBLEM, backuproots.LINK_FIX))
-        self.assertEqual(host.calls[-1], ("run", link_check, {"cwd": None}))
-        failed_link = FakeHost((completed(argv, stdout="Number of regular files transferred: 0\n"), completed(link_check, returncode=1, stderr="find denied")), existing=(SOURCE,))
-        self.assertEqual(
-            bound(failed_link, backupset.RootKind.STORE, pinned).take(),
-            Problem(f"store link check for {ROOT} failed: find denied", ""),
-        )
+    def test_store_take_names_stray_at_live_path_before_copying(self) -> None:
+        host = FakeHost((completed(self.stray_argv, stdout="./aa/bb/not-an-object\n"),), existing=(SOURCE,))
+        self.assertEqual(self.root(host).take(), Problem(
+            f"{SOURCE}/aa/bb/not-an-object is not an object in its own shard directories",
+            "Move the named path out of the live content-addressed store, then re-run backup run.",
+        ))
+        self.assertEqual(host.calls, [("exists", SOURCE, {}), ("run", self.stray_argv, {"cwd": SOURCE})])
 
-    def test_store_inventory_writes_sorted_listing_and_reads_pin(self) -> None:
-        regex = r"\./\([0-9a-f]\{2\}\)/\([0-9a-f]\{2\}\)/\1\2[0-9a-f]\{60\}"
-        stray_argv = (
-            "find", ".", "-regextype", "posix-basic", "-mindepth", "1",
-            "!", "(", "-type", "d", "-regex", r"\./[0-9a-f]\{2\}", ")",
-            "!", "(", "-type", "d", "-regex", r"\./[0-9a-f]\{2\}/[0-9a-f]\{2\}", ")",
-            "!", "(", "-type", "f", "-regex", regex, ")", "-print", "-quit",
-        )
-        find_argv = ("find", ".", "-regextype", "posix-basic", "-type", "f", "-regex", regex, "-fprintf", self.listing_path, r"%f\t%s\n")
-        sort_argv = ("env", "LC_ALL=C", "sort", "-o", self.listing_path, self.listing_path)
+    def test_store_inventory_unions_passes_removes_scratch_and_reads_pin(self) -> None:
+        union_argv = ("env", "LC_ALL=C", "sort", "-u", "-o", self.listing_path,
+                      f"{PARTIAL}/{ROOT}.pass1.listing", f"{PARTIAL}/{ROOT}.pass2.listing")
         sha_argv = ("sha256sum", self.listing_path)
         awk_argv = ("awk", "-F", "\t", '{n++; b+=$2} END {printf "%.0f %.0f\\n", n, b}', self.listing_path)
         digest = "c" * 64
         responses = (
-            completed(stray_argv), completed(find_argv), completed(sort_argv),
+            completed(union_argv),
             completed(sha_argv, stdout=f"{digest}  {self.listing_path}\n"),
             completed(awk_argv, stdout="2 17\n"),
         )
         stats = {self.listing_path: os.stat_result((0, 0, 0, 0, 0, 0, 136, 0, 0, 0))}
         host = FakeHost(responses, stats=stats)
-        self.assertEqual(
-            bound(host, backupset.RootKind.STORE).inventory(),
-            backuproots.Inventoried((), 17, backupset.ListingPin(f"{ROOT}.listing", 136, digest, 2, 17)),
-        )
+        self.assertEqual(self.root(host).inventory(), backuproots.Inventoried(
+            (), 17, backupset.ListingPin(f"{ROOT}.listing", 136, digest, 2, 17),
+        ))
         self.assertEqual(host.calls, [
-            ("run", stray_argv, {"cwd": self.copy}),
-            ("run", find_argv, {"cwd": self.copy}),
-            ("run", sort_argv, {"cwd": None}),
+            ("run", union_argv, {"cwd": None}),
+            *(('unlink', f"{PARTIAL}/{ROOT}.pass{number}.{suffix}", {"missing_ok": False})
+              for number in (1, 2) for suffix in ("listing", "paths")),
             ("run", sha_argv, {"cwd": None}),
             ("run", awk_argv, {"cwd": None}),
             ("stat", self.listing_path, {}),
         ])
         self.assertEqual(host.responses, [])
-
-        offender = "./aa/bb/not-an-object"
-        stray = FakeHost((completed(stray_argv, stdout=offender + "\n"),))
-        self.assertEqual(
-            bound(stray, backupset.RootKind.STORE).inventory(),
-            Problem(f"{SOURCE}/aa/bb/not-an-object is not an object in its own shard directories", "Move the named path out of the live content-addressed store, then re-run backup run."),
-        )
         malformed = FakeHost(responses[:-1] + (completed(awk_argv, stdout="bad count\n"),), stats=stats)
-        problem = bound(malformed, backupset.RootKind.STORE).inventory()
+        problem = self.root(malformed).inventory()
         self.assertIsInstance(problem, Problem)
         assert isinstance(problem, Problem)
         self.assertIn("pinning", problem.problem)
         self.assertEqual(problem.fix, "")
-        failures = (
-            (0, stray_argv, "store shape check"),
-            (1, find_argv, "store listing"),
-            (2, sort_argv, "store listing sort"),
-            (3, sha_argv, "hashing"),
-            (4, awk_argv, "counting"),
-        )
-        for index, argv, phrase in failures:
+        for index, argv, phrase in ((0, union_argv, "union"), (1, sha_argv, "hashing"), (2, awk_argv, "counting")):
             with self.subTest(tool=argv[0]):
-                refused = list(responses[:index])
-                refused.append(completed(argv, returncode=1, stderr="tool denied"))
-                failed = FakeHost(refused, stats=stats)
-                outcome = bound(failed, backupset.RootKind.STORE).inventory()
+                failed = FakeHost((*responses[:index], completed(argv, returncode=1, stderr="tool denied")), stats=stats)
+                outcome = self.root(failed).inventory()
                 self.assertIsInstance(outcome, Problem)
                 assert isinstance(outcome, Problem)
                 self.assertIn(phrase, outcome.problem)
                 self.assertIn("tool denied", outcome.problem)
                 self.assertEqual(outcome.fix, "")
                 self.assertEqual(failed.responses, [])
+
+
+class StorePruning(unittest.TestCase):
+    """Prune only objects absent from every verified remaining listing."""
+
+    def setUp(self) -> None:
+        self.copy = "/example/staging/" + ROOT
+        self.named = f"/example/staging.prune-{ROOT}.named.listing"
+        self.listed_copy = f"/example/staging.prune-{ROOT}.copy.listing"
+        self.content = f"{'a' * 64}\t7\n"
+        self.pin = backupset.ListingPin(f"{ROOT}.listing", len(self.content), hashlib.sha256(self.content.encode()).hexdigest(), 1, 7)
+        self.refs = (
+            later_ref("old-form", {}, listings={ROOT: self.pin}),
+            replace(later_ref("new-form", {}, listings={ROOT: self.pin}),
+                    manifest=replace(manifest_with({}), version=backupset.MANIFEST_VERSION, listings={ROOT: self.pin})),
+        )
+        self.listings = tuple(os.path.join(ref.path, self.pin.file) for ref in self.refs)
+        self.stats = {path: cast(os.stat_result, mock.Mock(st_size=self.pin.size)) for path in self.listings}
+        self.hash_commands = tuple(("sha256sum", path) for path in self.listings)
+        self.responses = tuple(completed(argv, stdout=f"{self.pin.sha256}  {argv[1]}\n") for argv in self.hash_commands)
+        self.commands = (
+            ("env", "LC_ALL=C", "sort", "-u", "-o", self.named, *self.listings),
+            ("find", ".", "-regextype", "posix-basic", "-type", "f", "-regex",
+             r"\./\([0-9a-f]\{2\}\)/\([0-9a-f]\{2\}\)/\1\2[0-9a-f]\{60\}",
+             "-fprintf", self.listed_copy, r"%f\t%s\n"),
+            ("env", "LC_ALL=C", "sort", "-o", self.listed_copy, self.listed_copy),
+            ("env", "LC_ALL=C", "join", "-t", "\t", "-j", "1", "-v", "2", self.named, self.listed_copy),
+            ("xargs", "-0", "-r", "rm", "-f", "--"),
+        )
+        self.cleanup = [("unlink", path, {"missing_ok": True}) for path in (self.named, self.listed_copy)]
+        self.verified: list[tuple[str, object, object]] = []
+        for path, argv in zip(self.listings, self.hash_commands, strict=True):
+            self.verified.extend((("stat", path, {}), ("run", argv, {"cwd": None})))
+        self.pipeline = [("run", argv, {"cwd": self.copy if index == 1 else None})
+                         for index, argv in enumerate(self.commands[:-1])]
+
+    def test_prune_verifies_both_forms_then_removes_only_unnamed_objects(self) -> None:
+        unnamed = ("b" * 64, "c" * 64)
+        joined = "".join(f"{name}\t9\n" for name in unnamed)
+        host = FakeHost((*self.responses, *(completed(argv) for argv in self.commands[:3]),
+                         completed(self.commands[3], stdout=joined), completed(self.commands[4])),
+                        stats=self.stats, existing=(self.copy,))
+        ignored = (later_ref("unpinned", {}), replace(self.refs[0], complete=False), replace(self.refs[0], manifest=None))
+        result = bound(host, backupset.RootKind.STORE).prune((*self.refs, *ignored))
+        self.assertEqual(result, backuproots.Pruned(2, f"{ROOT}: removed 2 object(s) from the store copy"))
+        self.assertEqual(host.calls, [
+            *self.cleanup, *self.verified, ("exists", self.copy, {}), *self.pipeline,
+            ("run", self.commands[4], {"cwd": self.copy, "input": "".join(f"{name[:2]}/{name[2:4]}/{name}\0" for name in unnamed)}),
+            *self.cleanup,
+        ])
+        self.assertEqual(host.responses, [])
+
+    def test_prune_without_pins_leaves_copy_alone_and_other_kinds_do_nothing(self) -> None:
+        host = FakeHost()
+        self.assertEqual(bound(host, backupset.RootKind.STORE).prune((later_ref("unpinned", {}),)),
+                         backuproots.Pruned(0, f"{ROOT}: the store copy is left as it is; no listing names it"))
+        self.assertEqual(host.calls, self.cleanup * 2)
+        for kind in (backupset.RootKind.SNAPSHOT, backupset.RootKind.REPOSITORY):
+            with self.subTest(kind=kind):
+                idle = FakeHost()
+                self.assertEqual(bound(idle, kind).prune(self.refs), backuproots.Pruned(0, ""))
+                self.assertEqual(idle.calls, [])
+
+    def test_prune_refuses_a_missing_copy_after_verifying_listings(self) -> None:
+        host = FakeHost(self.responses, stats=self.stats)
+        self.assertEqual(bound(host, backupset.RootKind.STORE).prune(self.refs),
+                         Problem(f"store copy for {ROOT} is missing: {self.copy}", ""))
+        self.assertEqual(host.calls, [*self.cleanup, *self.verified, ("exists", self.copy, {}), *self.cleanup])
+
+    def test_prune_pin_failure_names_set_and_listing_and_removes_nothing(self) -> None:
+        for absent, size, digest, response in (
+            (True, self.pin.size, self.pin.sha256, None),
+            (False, self.pin.size + 1, self.pin.sha256, None),
+            (False, self.pin.size, "d" * 64, None),
+            (False, self.pin.size, self.pin.sha256, completed(self.hash_commands[1], returncode=1, stderr="denied")),
+            (False, self.pin.size, self.pin.sha256, OSError("unavailable")),
+            (False, self.pin.size, self.pin.sha256, completed(self.hash_commands[1], stdout="malformed")),
+        ):
+            with self.subTest(absent=absent, size=size, digest=digest, response=response):
+                stats = dict(self.stats)
+                stats[self.listings[1]] = cast(os.stat_result, mock.Mock(st_size=size))
+                if absent:
+                    stats.pop(self.listings[1])
+                bad_hash = response if response is not None else completed(self.hash_commands[1], stdout=f"{digest}  {self.listings[1]}\n")
+                host = FakeHost((self.responses[0],) if absent else (self.responses[0], bad_hash), stats=stats, existing=(self.copy,))
+                outcome = bound(host, backupset.RootKind.STORE).prune(self.refs)
+                self.assertIsInstance(outcome, Problem)
+                assert isinstance(outcome, Problem)
+                self.assertIn(self.refs[1].label, outcome.problem)
+                self.assertIn(self.listings[1], outcome.problem)
+                self.assertEqual(outcome.fix, "")
+                self.assertEqual(host.calls, [*self.cleanup, *(self.verified[:-1] if absent else self.verified), *self.cleanup])
+                self.assertEqual(host.responses, [])
+
+    def test_prune_tool_failures_stop_and_always_unlink_scratch(self) -> None:
+        for index, argv in enumerate(self.commands):
+            for response in (completed(argv, returncode=1, stderr="denied"), OSError("unavailable")):
+                with self.subTest(index=index, response=response):
+                    host = FakeHost((*self.responses, *(completed(item) for item in self.commands[:index]), response),
+                                    stats=self.stats, existing=(self.copy,))
+                    result = bound(host, backupset.RootKind.STORE).prune(self.refs)
+                    self.assertIsInstance(result, Problem)
+                    assert isinstance(result, Problem)
+                    self.assertEqual(result.fix, "")
+                    attempted = self.pipeline[:index + 1] if index < 4 else [*self.pipeline, ("run", self.commands[4], {"cwd": self.copy, "input": ""})]
+                    self.assertEqual(host.calls, [*self.cleanup, *self.verified, ("exists", self.copy, {}), *attempted, *self.cleanup])
+                    self.assertEqual(host.responses, [])
+
+    def test_prune_malformed_join_removes_nothing_and_empty_join_feeds_no_paths(self) -> None:
+        for joined in (f"{'b' * 64}\t9\n../escape\t1\n", f"{'b' * 64}\tbad\n", f"{'b' * 64}\t1\textra\n", ""):
+            with self.subTest(joined=joined):
+                responses = (*self.responses, *(completed(argv) for argv in self.commands[:3]), completed(self.commands[3], stdout=joined))
+                host = FakeHost((*responses, completed(self.commands[4])) if not joined else responses,
+                                stats=self.stats, existing=(self.copy,))
+                outcome = bound(host, backupset.RootKind.STORE).prune(self.refs)
+                removal = []
+                if joined:
+                    self.assertEqual(outcome, Problem(f"store prune listing join for {ROOT} returned a malformed line", ""))
+                else:
+                    self.assertEqual(outcome, backuproots.Pruned(0, f"{ROOT}: removed 0 object(s) from the store copy"))
+                    removal = [("run", self.commands[4], {"cwd": self.copy, "input": ""})]
+                self.assertEqual(host.calls, [*self.cleanup, *self.verified, ("exists", self.copy, {}), *self.pipeline, *removal, *self.cleanup])
+                self.assertEqual(host.responses, [])
+
+    def test_prune_initial_cleanup_failure_refuses_before_reading_any_listing(self) -> None:
+        host = FakeHost()
+        original_unlink = host.unlink
+
+        def unlink(path: PathLike, *, missing_ok: bool = False) -> None:
+            original_unlink(path, missing_ok=missing_ok)
+            raise OSError("denied")
+
+        with mock.patch.object(host, "unlink", side_effect=unlink):
+            self.assertEqual(bound(host, backupset.RootKind.STORE).prune(self.refs),
+                             Problem(f"store prune for {ROOT} failed: denied", ""))
+        self.assertEqual(host.calls, [self.cleanup[0], *self.cleanup])
 
 
 class StoreRealTools(unittest.TestCase):
@@ -582,6 +711,8 @@ class StoreRealTools(unittest.TestCase):
             source = Path(temporary) / "source"
             partial = Path(temporary) / "sets" / "current.partial"
             source.mkdir()
+            partial.mkdir(parents=True)
+            copy = Path(backupset.store_copy_dir(temporary, ROOT))
             row = backupset.InventoryRoot(ROOT, str(source), (".*",), backupset.RootKind.STORE, False)
             (root,) = backuproots.taking(RealHost(), (row,), str(partial), None)
 
@@ -596,6 +727,7 @@ class StoreRealTools(unittest.TestCase):
             writer_temporary = cas.object_path(first, source).parent / ".writer-temp"
             writer_temporary.write_bytes(b"uncommitted")
             self.assertEqual(root.take(), backuproots.Taken(True, {}))
+            cas.object_path(first, source).unlink()
             second = put(b"second object")
             self.assertEqual(root.complete(), backuproots.Completed(True, 1, f"{ROOT}: 1 object(s)"))
             outcome = root.inventory()
@@ -608,126 +740,308 @@ class StoreRealTools(unittest.TestCase):
             content = listing_path.read_text(encoding="utf-8")
             self.assertEqual(content, "".join(f"{name}\t{size}\n" for name, size in sorted(((first, len(b"first object")), (second, len(b"second object"))))))
             self.assertEqual(outcome.pin, backupset.ListingPin(listing_path.name, len(content.encode()), hashlib.sha256(content.encode()).hexdigest(), 2, outcome.set_bytes))
-            for name in (first, second):
-                self.assertEqual(cas.object_path(name, source).read_bytes(), cas.object_path(name, partial / "files" / ROOT).read_bytes())
-            self.assertFalse((partial / "files" / ROOT / first[:2] / first[2:4] / writer_temporary.name).exists())
+            for name, data in ((first, b"first object"), (second, b"second object")):
+                self.assertEqual(cas.object_path(name, copy).read_bytes(), data)
+            self.assertTrue(writer_temporary.exists())
+            self.assertFalse((copy / first[:2] / first[2:4] / writer_temporary.name).exists())
+            self.assertFalse((partial / "files" / ROOT).exists())
+            self.assertEqual(sorted(path.name for path in partial.iterdir()), [listing_path.name])
+
+    @unittest.skipUnless(shutil.which("rsync"), "rsync is required for the real store-copy case")
+    def test_a_live_object_changed_later_never_replaces_the_copy_every_set_pins(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source"
+            sets = Path(temporary) / "sets"
+            content = b"fictitious intact object"
+            name = hashlib.sha256(content).hexdigest()
+            live = cas.object_path(name, source)
+            live.parent.mkdir(parents=True)
+            live.write_bytes(content)
+            row = backupset.InventoryRoot(ROOT, str(source), (".*",), backupset.RootKind.STORE, False)
+            copied = cas.object_path(name, backupset.store_copy_dir(temporary, ROOT))
+            for label in ("first.partial", "second.partial"):
+                partial = sets / label
+                partial.mkdir(parents=True)
+                (root,) = backuproots.taking(RealHost(), (row,), str(partial), None)
+                self.assertIsInstance(root.take(), backuproots.Taken)
+                self.assertIsInstance(root.complete(), backuproots.Completed)
+                self.assertEqual(copied.read_bytes(), content)
+                live.write_bytes(b"fictitious damaged bytes, longer")
+                os.utime(live, (0, 0))
+
+    @unittest.skipUnless(shutil.which("rsync"), "rsync is required for the real store-copy case")
+    def test_empty_store_passes_create_an_empty_pinned_listing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source"
+            partial = Path(temporary) / "sets" / "current.partial"
+            source.mkdir()
+            partial.mkdir(parents=True)
+            row = backupset.InventoryRoot(ROOT, str(source), (".*",), backupset.RootKind.STORE, False)
+            (root,) = backuproots.taking(RealHost(), (row,), str(partial), None)
+            self.assertEqual(root.take(), backuproots.Taken(True, {}))
+            self.assertEqual(root.complete(), backuproots.Completed(True, 0, f"{ROOT}: 0 object(s)"))
+            outcome = root.inventory()
+            self.assertEqual(outcome, backuproots.Inventoried(
+                (), 0, backupset.ListingPin(f"{ROOT}.listing", 0, hashlib.sha256(b"").hexdigest(), 0, 0),
+            ))
+            self.assertEqual(Path(backupset.listing_path(partial, ROOT)).read_bytes(), b"")
+            self.assertFalse((partial / "files" / ROOT).exists())
+
+    @unittest.skipUnless(shutil.which("rsync"), "rsync is required for the real store-copy case")
+    def test_two_runs_share_one_copy_and_prune_only_unpinned_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            staging = base / "staging"
+            source = base / "live"
+            source.mkdir()
+            host = RealHost()
+            row = backupset.InventoryRoot(ROOT, str(source), (".*",), backupset.RootKind.STORE, False)
+            data: dict[str, bytes] = {}
+
+            def put(content: bytes) -> str:
+                name = hashlib.sha256(content).hexdigest()
+                path = cas.object_path(name, source)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+                data[name] = content
+                return name
+
+            def finish(root: backuproots.TakingRoot, label: str, names: Sequence[str], finished: datetime) -> backupset.SetRef:
+                outcome = root.inventory()
+                self.assertIsInstance(outcome, backuproots.Inventoried)
+                assert isinstance(outcome, backuproots.Inventoried)
+                listing_path = Path(backupset.listing_path(root.partial, ROOT))
+                expected = "".join(f"{name}\t{len(data[name])}\n" for name in sorted(names))
+                self.assertEqual(listing_path.read_text(), expected)
+                pin = backupset.ListingPin(listing_path.name, len(expected.encode()), hashlib.sha256(expected.encode()).hexdigest(), len(names), sum(len(data[name]) for name in names))
+                self.assertEqual(outcome, backuproots.Inventoried((), pin.bytes, pin))
+                value = replace(manifest_with({}), version=backupset.MANIFEST_VERSION, label=label, finished=finished, listings={ROOT: pin})
+                Path(root.partial, backupset.MANIFEST_NAME).write_text(value.to_json())
+                final = staging / "sets" / label
+                Path(root.partial).rename(final)
+                self.assertFalse((final / "files" / ROOT).exists())
+                self.assertEqual(sorted(path.name for path in final.iterdir()), [pin.file, backupset.MANIFEST_NAME])
+                return backupset.SetRef(label, str(final), finished, True, value)
+
+            shared = put(b"shared across two fictitious backups")
+            old_only = put(b"present in the first pass alone")
+            first_partial = staging / "sets" / "20251223T000000Z.partial"
+            first_partial.mkdir(parents=True)
+            (first_root,) = backuproots.taking(host, (row,), str(first_partial), None)
+            self.assertEqual(first_root.take(), backuproots.Taken(True, {}))
+            cas.object_path(old_only, source).unlink()
+            first_late = put(b"arrived after the first archive boundary")
+            self.assertEqual(first_root.complete(), backuproots.Completed(True, 1, f"{ROOT}: 1 object(s)"))
+            first = finish(first_root, "20251223T000000Z", (shared, old_only, first_late), NOW - timedelta(days=9))
+            copy = Path(backupset.store_copy_dir(staging, ROOT))
+            shared_before = cas.object_path(shared, copy).stat()
+            cas.object_path(first_late, source).unlink()
+
+            second_early = put(b"new in the second backup's first pass")
+            second_partial = staging / "sets" / "20260101T000000Z.partial"
+            second_partial.mkdir()
+            (second_root,) = backuproots.taking(host, (row,), str(second_partial), first)
+            self.assertEqual(second_root.take(), backuproots.Taken(True, {}))
+            shared_after = cas.object_path(shared, copy).stat()
+            self.assertEqual((shared_after.st_ino, shared_after.st_mtime_ns), (shared_before.st_ino, shared_before.st_mtime_ns))
+            cas.object_path(second_early, source).unlink()
+            second_late = put(b"new in the second backup's second pass")
+            self.assertEqual(second_root.complete(), backuproots.Completed(True, 1, f"{ROOT}: 1 object(s)"))
+            second = finish(second_root, "20260101T000000Z", (shared, second_early, second_late), NOW)
+            for name, content in data.items():
+                self.assertEqual(cas.object_path(name, copy).read_bytes(), content)
+
+            with mock.patch.object(backupset, "STAGING", str(staging)), mock.patch.object(backupset, "SETS_DIR", str(staging / "sets")):
+                stage, removed = backup._prune_stage(host, now=NOW, local_days=7, final=second.path, roots=(second_root,))
+            self.assertEqual((stage.ok, removed, stage.detail), (True, 1, f"pruned 1 old set(s); {ROOT}: removed 2 object(s) from the store copy"))
+            self.assertFalse(Path(first.path).exists())
+            self.assertTrue(Path(second.path).exists())
+            for name in (old_only, first_late):
+                self.assertFalse(cas.object_path(name, copy).exists())
+                self.assertTrue(cas.object_path(name, copy).parent.is_dir())
+            for name in (shared, second_early, second_late):
+                self.assertEqual(cas.object_path(name, copy).read_bytes(), data[name])
+            self.assertFalse(Path(f"{staging}.prune-{ROOT}.named.listing").exists())
+            self.assertFalse(Path(f"{staging}.prune-{ROOT}.copy.listing").exists())
+
+    def test_old_form_listing_pins_objects_until_its_set_is_pruned(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            staging = Path(temporary) / "staging"
+            copy = Path(backupset.store_copy_dir(staging, ROOT))
+            data = {hashlib.sha256(content).hexdigest(): content for content in (b"shared", b"old only", b"new only")}
+            shared, old_only, new_only = data
+            for name, content in data.items():
+                path = cas.object_path(name, copy)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+            refs = []
+            for version, label, names, finished in (
+                (1, "20251226T000000Z", (shared, old_only), NOW - timedelta(days=6)),
+                (backupset.MANIFEST_VERSION, "20260101T000000Z", (shared, new_only), NOW),
+            ):
+                set_path = staging / "sets" / label
+                set_path.mkdir(parents=True)
+                if version == 1:
+                    for name in names:
+                        path = cas.object_path(name, set_path / "files" / ROOT)
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(data[name])
+                listing = "".join(f"{name}\t{len(data[name])}\n" for name in sorted(names))
+                pin = backupset.ListingPin(f"{ROOT}.listing", len(listing.encode()), hashlib.sha256(listing.encode()).hexdigest(), len(names), sum(len(data[name]) for name in names))
+                (set_path / pin.file).write_text(listing)
+                value = replace(manifest_with({}), version=version, label=label, finished=finished, listings={ROOT: pin})
+                (set_path / backupset.MANIFEST_NAME).write_text(value.to_json())
+                refs.append(backupset.SetRef(label, str(set_path), finished, True, value))
+            old, current = refs
+            row = backupset.InventoryRoot(ROOT, "/example/unused-live", (".*",), backupset.RootKind.STORE, False)
+            (root,) = backuproots.taking(RealHost(), (row,), str(staging / "sets" / "current.partial"), None)
+            with mock.patch.object(backupset, "STAGING", str(staging)), mock.patch.object(backupset, "SETS_DIR", str(staging / "sets")):
+                stage, removed = backup._prune_stage(RealHost(), now=NOW, local_days=7, final=current.path, roots=(root,))
+                self.assertEqual((stage.ok, removed, stage.detail), (True, 0, f"pruned 0 old set(s); {ROOT}: removed 0 object(s) from the store copy"))
+                self.assertTrue(cas.object_path(old_only, copy).exists())
+                stage, removed = backup._prune_stage(RealHost(), now=NOW + timedelta(days=2), local_days=7, final=current.path, roots=(root,))
+            self.assertEqual((stage.ok, removed, stage.detail), (True, 1, f"pruned 1 old set(s); {ROOT}: removed 1 object(s) from the store copy"))
+            self.assertFalse(Path(old.path).exists())
+            self.assertFalse(cas.object_path(old_only, copy).exists())
+            self.assertTrue(Path(current.path).exists())
+            self.assertFalse((Path(current.path) / "files" / ROOT).exists())
+            for name in (shared, new_only):
+                self.assertEqual(cas.object_path(name, copy).read_bytes(), data[name])
 
     @unittest.skipUnless(shutil.which("rsync"), "rsync is required for the real store put-back case")
     def test_put_back_adds_only_intact_missing_objects_and_keeps_live_files(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            base = Path(temporary)
-            source = base / "live"
-            source.mkdir()
-            source.chmod(cas.DIRECTORY_MODE)
-            set_path = base / "staging" / "sets" / "current"
-            copy = Path(backupset.files_dir(set_path)) / ROOT
-            copy.mkdir(parents=True)
+        for version in (1, backupset.MANIFEST_VERSION):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                source = base / "live"
+                source.mkdir()
+                source.chmod(cas.DIRECTORY_MODE)
+                set_path = base / "staging" / "sets" / "current"
+                set_path.mkdir(parents=True)
+                value = replace(manifest_with({}), version=version)
+                copy = Path(backupset.store_copy(base / "staging", set_path, value, ROOT))
+                copy.mkdir(parents=True)
 
-            def put(directory: Path, data: bytes, *, name: str | None = None) -> str:
-                object_name = name or hashlib.sha256(data).hexdigest()
-                object_path = cas.object_path(object_name, directory)
-                object_path.parent.mkdir(parents=True, exist_ok=True)
-                object_path.write_bytes(data)
-                return object_name
+                def put(directory: Path, data: bytes, *, name: str | None = None) -> str:
+                    object_name = name or hashlib.sha256(data).hexdigest()
+                    object_path = cas.object_path(object_name, directory)
+                    object_path.parent.mkdir(parents=True, exist_ok=True)
+                    object_path.write_bytes(data)
+                    return object_name
 
-            held_name = put(copy, b"held in the set")
-            put(source, b"different live bytes", name=held_name)
-            damaged_name = put(copy, b"damaged copy", name=hashlib.sha256(b"original bytes").hexdigest())
-            added_name = put(copy, b"new object")
-            live_only = put(source, b"live only")
-            names_and_sizes = sorted(
-                ((held_name, len(b"held in the set")), (damaged_name, len(b"damaged copy")),
-                 (added_name, len(b"new object")))
-            )
-            content = "".join(f"{name}\t{size}\n" for name, size in names_and_sizes)
-            listing_path = Path(backupset.listing_path(set_path, ROOT))
-            listing_path.write_text(content, encoding="utf-8")
-            pin = backupset.ListingPin(
-                listing_path.name, len(content.encode()), hashlib.sha256(content.encode()).hexdigest(),
-                len(names_and_sizes), sum(size for _, size in names_and_sizes),
-            )
-            manifest = replace(manifest_with({}), listings={ROOT: pin})
-            ref = backupset.SetRef("current", str(set_path), NOW, True, manifest)
-            row = backupset.InventoryRoot(ROOT, str(source), (), backupset.RootKind.STORE, False)
-            with mock.patch.object(backupset, "STAGING", str(base / "staging")):
-                (root,) = backuproots.held(RealHost(), (row,), ref)
-                self.assertIsNone(root.verify())
-                outcome = root.put_back(backupset.AccountIds(2000, 2000))
-            self.assertIsInstance(outcome, backuproots.PutBack)
-            assert isinstance(outcome, backuproots.PutBack)
-            self.assertEqual(outcome.counts, {ROOT: backuproots.StoreCounts(1, 1)})
-            self.assertEqual(outcome.clauses, (f"{ROOT}: added 1 object(s), 1 left out",))
-            self.assertIn(damaged_name, outcome.closing_lines[0])
-            self.assertEqual(cas.object_path(held_name, source).read_bytes(), b"different live bytes")
-            self.assertEqual(cas.object_path(live_only, source).read_bytes(), b"live only")
-            self.assertFalse(cas.object_path(damaged_name, source).exists())
-            added_path = cas.object_path(added_name, source)
-            self.assertEqual(added_path.read_bytes(), b"new object")
-            self.assertEqual(stat.S_IMODE(added_path.stat().st_mode), cas.OBJECT_MODE)
-            self.assertEqual(stat.S_IMODE(added_path.parent.stat().st_mode), cas.DIRECTORY_MODE)
-            self.assertFalse((base / f"staging.live-{ROOT}.listing").exists())
+                held_name = put(copy, b"held in the set")
+                put(source, b"different live bytes", name=held_name)
+                damaged_name = put(copy, b"damaged copy", name=hashlib.sha256(b"original bytes").hexdigest())
+                added_name = put(copy, b"new object")
+                live_only = put(source, b"live only")
+                names_and_sizes = sorted(
+                    ((held_name, len(b"held in the set")), (damaged_name, len(b"damaged copy")),
+                     (added_name, len(b"new object")))
+                )
+                content = "".join(f"{name}\t{size}\n" for name, size in names_and_sizes)
+                listing_path = Path(backupset.listing_path(set_path, ROOT))
+                listing_path.write_text(content, encoding="utf-8")
+                pin = backupset.ListingPin(
+                    listing_path.name, len(content.encode()), hashlib.sha256(content.encode()).hexdigest(),
+                    len(names_and_sizes), sum(size for _, size in names_and_sizes),
+                )
+                manifest = replace(value, listings={ROOT: pin})
+                unlisted = None
+                if manifest.store_in_staging:
+                    unlisted = put(copy, b"pinned by another fictitious set")
+                ref = backupset.SetRef("current", str(set_path), NOW, True, manifest)
+                row = backupset.InventoryRoot(ROOT, str(source), (), backupset.RootKind.STORE, False)
+                with mock.patch.object(backupset, "STAGING", str(base / "staging")):
+                    (root,) = backuproots.held(RealHost(), (row,), ref)
+                    self.assertIsNone(root.verify())
+                    walk_dir = base / "walk"
+                    walk_dir.mkdir()
+                    self.assertEqual(root.walk(str(walk_dir)), backuproots.StoreWalk(
+                        pin.objects, pin.bytes, tuple(name for name, _ in names_and_sizes), (damaged_name,),
+                    ))
+                    outcome = root.put_back(backupset.AccountIds(2000, 2000))
+                self.assertIsInstance(outcome, backuproots.PutBack)
+                assert isinstance(outcome, backuproots.PutBack)
+                self.assertEqual(outcome.counts, {ROOT: backuproots.StoreCounts(1, 1)})
+                self.assertEqual(outcome.clauses, (f"{ROOT}: added 1 object(s), 1 left out",))
+                self.assertIn(damaged_name, outcome.closing_lines[0])
+                self.assertEqual(cas.object_path(held_name, source).read_bytes(), b"different live bytes")
+                self.assertEqual(cas.object_path(live_only, source).read_bytes(), b"live only")
+                self.assertFalse(cas.object_path(damaged_name, source).exists())
+                if unlisted is not None:
+                    self.assertFalse(cas.object_path(unlisted, source).exists())
+                added_path = cas.object_path(added_name, source)
+                self.assertEqual(added_path.read_bytes(), b"new object")
+                self.assertEqual(stat.S_IMODE(added_path.stat().st_mode), cas.OBJECT_MODE)
+                self.assertEqual(stat.S_IMODE(added_path.parent.stat().st_mode), cas.DIRECTORY_MODE)
+                self.assertFalse((base / f"staging.live-{ROOT}.listing").exists())
 
     @unittest.skipUnless(shutil.which("rsync"), "rsync is required for the real store put-back case")
     def test_later_copy_repairs_a_damaged_object_and_adds_its_own_object(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            base = Path(temporary)
-            source = base / "live"
-            source.mkdir()
-            source.chmod(cas.DIRECTORY_MODE)
-            selected_path = base / "staging" / "sets" / "selected"
-            later_path = base / "staging" / "sets" / "later"
+        for selected_version, later_version in ((1, 1), (1, 2), (2, 1), (2, 2)):
+            with self.subTest(selected=selected_version, later=later_version), tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                source = base / "live"
+                source.mkdir()
+                source.chmod(cas.DIRECTORY_MODE)
+                selected_path = base / "staging" / "sets" / "selected"
+                later_path = base / "staging" / "sets" / "later"
 
-            def put(directory: Path, data: bytes, *, name: str | None = None) -> str:
-                object_name = name or hashlib.sha256(data).hexdigest()
-                path = cas.object_path(object_name, directory)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
-                return object_name
+                def put(directory: Path, data: bytes, *, name: str | None = None) -> str:
+                    object_name = name or hashlib.sha256(data).hexdigest()
+                    path = cas.object_path(object_name, directory)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                    return object_name
 
-            selected_copy = Path(backupset.files_dir(selected_path)) / ROOT
-            later_copy = Path(backupset.files_dir(later_path)) / ROOT
-            selected_good = put(selected_copy, b"selected object")
-            repaired = put(selected_copy, b"damaged object", name=hashlib.sha256(b"whole object").hexdigest())
-            put(later_copy, b"whole object")
-            later_only = put(later_copy, b"later object")
-            live_only = put(source, b"live object")
+                selected_path.mkdir(parents=True)
+                later_path.mkdir(parents=True)
+                selected_manifest = replace(manifest_with({}), version=selected_version)
+                later_manifest = replace(manifest_with({}), version=later_version)
+                selected_copy = Path(backupset.store_copy(base / "staging", selected_path, selected_manifest, ROOT))
+                later_copy = Path(backupset.store_copy(base / "staging", later_path, later_manifest, ROOT))
+                selected_good = put(selected_copy, b"selected object")
+                repaired = put(selected_copy, b"damaged object", name=hashlib.sha256(b"whole object").hexdigest())
+                put(later_copy, b"whole object")
+                later_only = put(later_copy, b"later object")
+                live_only = put(source, b"live object")
 
-            def pin_for(set_path: Path, sizes: Mapping[str, int]) -> backupset.ListingPin:
-                content = "".join(f"{name}\t{size}\n" for name, size in sorted(sizes.items()))
-                listing_path = Path(backupset.listing_path(set_path, ROOT))
-                listing_path.write_text(content, encoding="utf-8")
-                return backupset.ListingPin(
-                    listing_path.name, len(content.encode()), hashlib.sha256(content.encode()).hexdigest(),
-                    len(sizes), sum(sizes.values()),
+                def pin_for(set_path: Path, sizes: Mapping[str, int]) -> backupset.ListingPin:
+                    content = "".join(f"{name}\t{size}\n" for name, size in sorted(sizes.items()))
+                    listing_path = Path(backupset.listing_path(set_path, ROOT))
+                    listing_path.write_text(content, encoding="utf-8")
+                    return backupset.ListingPin(
+                        listing_path.name, len(content.encode()), hashlib.sha256(content.encode()).hexdigest(),
+                        len(sizes), sum(sizes.values()),
+                    )
+
+                selected_pin = pin_for(selected_path, {selected_good: len(b"selected object"), repaired: len(b"damaged object")})
+                later_pin = pin_for(later_path, {repaired: len(b"whole object"), later_only: len(b"later object")})
+                selected = backupset.SetRef(
+                    "selected", str(selected_path), NOW, True,
+                    replace(selected_manifest, listings={ROOT: selected_pin}),
                 )
-
-            selected_pin = pin_for(selected_path, {selected_good: len(b"selected object"), repaired: len(b"damaged object")})
-            later_pin = pin_for(later_path, {repaired: len(b"whole object"), later_only: len(b"later object")})
-            selected = backupset.SetRef(
-                "selected", str(selected_path), NOW, True,
-                replace(manifest_with({}), listings={ROOT: selected_pin}),
-            )
-            later = backupset.SetRef(
-                "later", str(later_path), NOW, True,
-                replace(manifest_with({}), listings={ROOT: later_pin}),
-            )
-            row = backupset.InventoryRoot(ROOT, str(source), (), backupset.RootKind.STORE, False)
-            with mock.patch.object(backupset, "STAGING", str(base / "staging")):
-                (root,) = backuproots.held(RealHost(), (row,), selected, (later,))
-                self.assertIsNone(root.verify())
-                outcome = root.put_back(backupset.AccountIds(2000, 2000))
-            self.assertIsInstance(outcome, backuproots.PutBack)
-            assert isinstance(outcome, backuproots.PutBack)
-            self.assertEqual(outcome.counts, {ROOT: backuproots.StoreCounts(3, 0)})
-            self.assertEqual(outcome.clauses, (f"{ROOT}: added 3 object(s), 0 left out (with later)",))
-            self.assertEqual(outcome.closing_lines, ())
-            for name, expected in ((selected_good, b"selected object"), (repaired, b"whole object"),
-                                   (later_only, b"later object"), (live_only, b"live object")):
-                self.assertEqual(cas.object_path(name, source).read_bytes(), expected)
-            for name in (selected_good, repaired, later_only):
-                path = cas.object_path(name, source)
-                self.assertEqual(stat.S_IMODE(path.stat().st_mode), cas.OBJECT_MODE)
-                self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), cas.DIRECTORY_MODE)
+                later = backupset.SetRef(
+                    "later", str(later_path), NOW, True,
+                    replace(later_manifest, listings={ROOT: later_pin}),
+                )
+                row = backupset.InventoryRoot(ROOT, str(source), (), backupset.RootKind.STORE, False)
+                with mock.patch.object(backupset, "STAGING", str(base / "staging")):
+                    (root,) = backuproots.held(RealHost(), (row,), selected, (later,))
+                    self.assertIsNone(root.verify())
+                    outcome = root.put_back(backupset.AccountIds(2000, 2000))
+                self.assertIsInstance(outcome, backuproots.PutBack)
+                assert isinstance(outcome, backuproots.PutBack)
+                self.assertEqual(outcome.counts, {ROOT: backuproots.StoreCounts(3, 0)})
+                self.assertEqual(outcome.clauses, (f"{ROOT}: added 3 object(s), 0 left out (with later)",))
+                self.assertEqual(outcome.closing_lines, ())
+                for name, expected in ((selected_good, b"selected object"), (repaired, b"whole object"),
+                                       (later_only, b"later object"), (live_only, b"live object")):
+                    self.assertEqual(cas.object_path(name, source).read_bytes(), expected)
+                for name in (selected_good, repaired, later_only):
+                    path = cas.object_path(name, source)
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), cas.OBJECT_MODE)
+                    self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), cas.DIRECTORY_MODE)
 
 
 class Inventory(unittest.TestCase):
@@ -1368,6 +1682,35 @@ class HeldRoots(unittest.TestCase):
         assert isinstance(store_root, backuproots._HeldStore)
         self.assertIsNone(store_root.later)
 
+    def test_held_store_binds_each_form_and_reads_listings_from_their_sets(self) -> None:
+        pin = backupset.ListingPin("fictitious-store.listing", 0, hashlib.sha256(b"").hexdigest(), 0, 0)
+        row = backupset.InventoryRoot(ROOT, SOURCE, (), backupset.RootKind.STORE, False)
+        staging = "/example/staging"
+        for selected_version, later_version in ((1, 1), (1, 2), (2, 1), (2, 2)):
+            with self.subTest(selected=selected_version, later=later_version):
+                selected = replace(previous(), manifest=replace(manifest_with({}), version=selected_version, listings={ROOT: pin}))
+                later = later_ref("later", {}, listings={ROOT: pin})
+                assert later.manifest is not None and selected.manifest is not None
+                later = replace(later, manifest=replace(later.manifest, version=later_version))
+                assert later.manifest is not None
+                selected_copy = backupset.store_copy(staging, selected.path, selected.manifest, ROOT)
+                later_copy = backupset.store_copy(staging, later.path, later.manifest, ROOT)
+                listings = tuple(os.path.join(ref.path, pin.file) for ref in (selected, later))
+                host = FakeHost(
+                    tuple(completed(("sha256sum", listing), stdout=f"{pin.sha256}  {listing}\n") for listing in listings),
+                    stats={listing: cast(os.stat_result, mock.Mock(st_size=pin.size)) for listing in listings},
+                )
+                (root,) = backuproots.held(cast(Host, host), (row,), selected, (later,))
+                assert isinstance(root, backuproots._HeldStore)
+                self.assertEqual((root.set_path, root.copy), (selected.path, selected_copy))
+                self.assertEqual(root._listings(), ((selected.path, selected_copy, pin), (later.path, later_copy, pin)))
+                self.assertIsNone(root.verify())
+                self.assertEqual(host.calls, [
+                    ("stat", listings[0], {}), ("run", ("sha256sum", listings[0]), {"cwd": None}),
+                    ("stat", listings[1], {}), ("run", ("sha256sum", listings[1]), {"cwd": None}),
+                ])
+                self.assertEqual(host.responses, [])
+
     def test_snapshot_verify_walks_exact_copy_then_checks_hashes(self) -> None:
         file = entry("nested/file", sha256="a" * 64)
         row = backupset.InventoryRoot(ROOT, SOURCE, (), backupset.RootKind.SNAPSHOT, True)
@@ -1874,6 +2217,46 @@ class StoreRestore(unittest.TestCase):
         self.assertEqual(backuproots.fetched(cast(Host, host), (row,), "/side", (unpinned, unknown)), ())
         self.assertEqual(host.calls, [])
 
+    def test_fetched_binds_the_shared_copy_once_at_the_first_new_form_set(self) -> None:
+        side = "/example/side"
+        row = backupset.InventoryRoot(ROOT, SOURCE, (), backupset.RootKind.STORE, False)
+        pin = backupset.ListingPin(f"{ROOT}.listing", 0, hashlib.sha256(b"").hexdigest(), 0, 0)
+        refs = []
+        for version, label in ((1, "old-one"), (2, "new-one"), (1, "old-two"), (2, "new-two")):
+            ref = later_ref(label, {}, listings={ROOT: pin})
+            assert ref.manifest is not None
+            refs.append(replace(ref, path=f"{side}/sets/{label}", manifest=replace(ref.manifest, version=version)))
+        shared = backupset.store_copy_dir(side, ROOT)
+        assert refs[0].manifest is not None and refs[2].manifest is not None
+        bases = (
+            backupset.store_copy(side, refs[0].path, refs[0].manifest, ROOT),
+            shared,
+            backupset.store_copy(side, refs[2].path, refs[2].manifest, ROOT),
+        )
+        listing_paths = tuple(os.path.join(ref.path, pin.file) for ref in refs)
+        expected_listings = ((listing_paths[0],), (listing_paths[1], listing_paths[3]), (listing_paths[2],))
+        commands = tuple(("chown", "-R", "-h", "0:0", base) for base in bases)
+        host = FakeHost(tuple(completed(argv) for argv in commands))
+        ignored = (replace(refs[1], complete=False), replace(refs[1], manifest=None), later_ref("unpinned", {}))
+        roots = backuproots.fetched(cast(Host, host), (row,), side, (*refs, *ignored))
+        self.assertEqual(tuple(root.base for root in roots), bases)
+        self.assertEqual(tuple(root.manifest for root in roots), tuple(refs[index].manifest for index in (0, 1, 2)))
+        for root, listings in zip(roots, expected_listings, strict=True):
+            assert isinstance(root, backuproots._FetchedStore)
+            self.assertEqual(root.listings, listings)
+            claims = root.reown(backupset.AccountIds(2000, 2000))
+            assert isinstance(claims, backuproots.Claims)
+            self.assertEqual(claims.owners, {(0, 0, False): list(listings)})
+            self.assertEqual(claims.modes, {0o644: list(listings)})
+        self.assertEqual(host.calls, [("run", argv, {"cwd": None}) for argv in commands])
+        self.assertEqual(host.responses, [])
+
+        old_only = FakeHost()
+        roots = backuproots.fetched(cast(Host, old_only), (row,), side, (refs[0], refs[2]))
+        self.assertEqual(tuple(root.base for root in roots), (bases[0], bases[2]))
+        self.assertNotIn(shared, tuple(root.base for root in roots))
+        self.assertEqual(old_only.calls, [])
+
     def test_held_store_verifies_listing_pin_and_refuses_mismatch(self) -> None:
         content = f"{'a' * 64}\t5\n"
         pin = backupset.ListingPin(f"{ROOT}.listing", len(content), hashlib.sha256(content.encode()).hexdigest(), 1, 5)
@@ -2191,8 +2574,8 @@ class HeldStoreWalk(unittest.TestCase):
             ("awk", "-F", "\t", '{n++; b+=$2} END {printf "%.0f %.0f\\n", n, b}', self.walk_listing),
         )
 
-    def _bound(self, host: FakeHost, pin: backupset.ListingPin | None) -> backuproots.HeldRoot:
-        manifest = replace(manifest_with({}), listings={ROOT: pin} if pin is not None else {})
+    def _bound(self, host: FakeHost, pin: backupset.ListingPin | None, *, version: int = 1) -> backuproots.HeldRoot:
+        manifest = replace(manifest_with({}), version=version, listings={ROOT: pin} if pin is not None else {})
         row = backupset.InventoryRoot(ROOT, SOURCE, (), backupset.RootKind.STORE, False)
         (root,) = backuproots.held(cast(Host, host), (row,), replace(previous(), manifest=manifest))
         return root
@@ -2227,6 +2610,38 @@ class HeldStoreWalk(unittest.TestCase):
                     ("read_text", self.set_listing, {}),
                     ("run", argv, {"cwd": self.copy, "input": "".join(f"{name}  {path}\n" for name, path in zip(self.names, paths, strict=True))}),
                 ])
+
+    def test_staging_walk_checks_only_listed_names_and_keeps_the_pin_counts(self) -> None:
+        copy = backupset.store_copy_dir("/example/staging", ROOT)
+        paths = tuple(f"{name[:2]}/{name[2:4]}/{name}" for name in self.names)
+        argv = ("sha256sum", "-c", "-")
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                failed_names = (self.names[0],) if failed else ()
+                output = "".join(f"{path}: {'FAILED' if name in failed_names else 'OK'}\n"
+                                 for name, path in zip(self.names, paths, strict=True))
+                host = FakeHost((completed(self.argv[0]), completed(argv, returncode=int(failed), stdout=output)),
+                                files={self.set_listing: self.content})
+                self.assertEqual(self._bound(host, self.pin, version=backupset.MANIFEST_VERSION).walk(self.walk_dir),
+                                 backuproots.StoreWalk(self.pin.objects, self.pin.bytes, self.names, failed_names))
+                self.assertEqual(host.calls, [
+                    ("run", self.argv[0], {"cwd": copy}),
+                    ("read_text", self.set_listing, {}),
+                    ("run", argv, {"cwd": copy, "input": "".join(f"{name}  {path}\n" for name, path in zip(self.names, paths, strict=True))}),
+                ])
+                self.assertEqual(host.responses, [])
+
+    def test_staging_walk_refuses_count_mismatch_and_stray_before_hashing(self) -> None:
+        copy = backupset.store_copy_dir("/example/staging", ROOT)
+        host = FakeHost((completed(self.argv[0]),), files={self.set_listing: self.content})
+        wrong = replace(self.pin, objects=self.pin.objects + 1)
+        self.assertEqual(self._bound(host, wrong, version=backupset.MANIFEST_VERSION).walk(self.walk_dir),
+                         Problem(f"store listing {self.set_listing} names {len(self.names)} object(s), expected {wrong.objects}", ""))
+        self.assertEqual(host.calls, [("run", self.argv[0], {"cwd": copy}), ("read_text", self.set_listing, {})])
+        host = FakeHost((completed(self.argv[0], stdout="./stray\n"),))
+        self.assertEqual(self._bound(host, self.pin, version=backupset.MANIFEST_VERSION).walk(self.walk_dir),
+                         Problem(f"{copy}/stray is not an object in its own shard directories", ""))
+        self.assertEqual(host.calls, [("run", self.argv[0], {"cwd": copy})])
 
     def test_no_pin_and_stray_entry_refuse_before_listing(self) -> None:
         host = FakeHost()

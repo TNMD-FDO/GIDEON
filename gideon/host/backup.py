@@ -823,7 +823,7 @@ def _manifest_stage(
 
     commit = _commit_for(io, checkout)
     manifest = backupset.Manifest(
-        1,
+        backupset.MANIFEST_VERSION,
         label,
         kind,
         started,
@@ -868,9 +868,10 @@ def _prune_stage(
     now: datetime,
     local_days: int,
     final: str,
+    roots: tuple[backuproots.TakingRoot, ...],
 ) -> tuple[StageResult, int]:
     try:
-        sets = backupset.list_sets(io)
+        sets = backupset.list_sets(io, backupset.STAGING)
     except OSError as exc:
         return StageResult("prune", False, f"cannot list backup sets: {exc}", _PRUNE_FIX), 0
     partial_mtimes: dict[str, float] = {}
@@ -905,7 +906,21 @@ def _prune_stage(
             return StageResult("prune", False, f"prune failed for {candidate}: {exc}", _PRUNE_FIX), 0
         if removed.returncode != 0:
             return _run_failure("prune", f"prune failed for {candidate}", removed, _PRUNE_FIX), 0
-    return StageResult("prune", True, f"pruned {len(candidates)} old set(s)", ""), len(candidates)
+    try:
+        remaining = tuple(ref for ref in backupset.list_sets(io, backupset.STAGING) if ref.complete)
+    except OSError as exc:
+        return StageResult("prune", False, f"cannot list backup sets: {exc}", _PRUNE_FIX), 0
+    clauses: list[str] = []
+    for root in roots:
+        outcome = root.prune(remaining)
+        if isinstance(outcome, Problem):
+            return StageResult("prune", False, outcome.problem, outcome.fix or _PRUNE_FIX), 0
+        if outcome.clause:
+            clauses.append(outcome.clause)
+    detail = f"pruned {len(candidates)} old set(s)"
+    if clauses:
+        detail += "; " + ", ".join(clauses)
+    return StageResult("prune", True, detail, ""), len(candidates)
 
 
 def _applied_stage(
@@ -1159,6 +1174,7 @@ def _backup_run_body(
             now=started,
             local_days=config.backup.local_days,
             final=final,
+            roots=roots,
         )
     print_stage(prune_result)
     if not prune_result.ok:

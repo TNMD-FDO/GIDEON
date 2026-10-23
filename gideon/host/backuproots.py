@@ -46,6 +46,12 @@ def _store_root_fix() -> str:
     return f"Run {report.command('host provision --only disk-layout')}, then retry."
 
 
+def _staging_of(set_path: str) -> str:
+    """The staging directory holding a set, in place or in a side directory: ``<staging>/sets/<label>``."""
+
+    return os.path.dirname(os.path.dirname(set_path))
+
+
 def _object_relative(name: str) -> str:
     """An object's path under its store root: its two shard directories, then its name."""
 
@@ -93,11 +99,12 @@ def _transferred(io: Host, argv: Sequence[str], what: str, *, input: str | None 
 # GNU find's default regular-expression type ignores the \{n\} intervals; the
 # basic type honours them, and its back-references hold an object's name to
 # its own two shard directories.
-def _store_stray_argv() -> list[str]:
+def _store_stray_argv(exclusions: Sequence[str] = ()) -> list[str]:
     return [
         "find", ".", "-regextype", "posix-basic", "-mindepth", "1",
         "!", "(", "-type", "d", "-regex", r"\./[0-9a-f]\{2\}", ")",
         "!", "(", "-type", "d", "-regex", r"\./[0-9a-f]\{2\}/[0-9a-f]\{2\}", ")",
+        *(predicate for pattern in exclusions for predicate in ("!", "-name", pattern)),
         "!", "(", "-type", "f", "-regex", _OBJECT_REGEX, ")",
         "-print", "-quit",
     ]
@@ -137,6 +144,25 @@ def _listing_pin(io: Host, listing: str) -> backupset.ListingPin | Problem:
         )
     except (OSError, KeyError, ValueError) as exc:
         return Problem(f"pinning {listing} failed: {exc}", "")
+
+
+def verify_listing(io: Host, listing: str, pin: backupset.ListingPin) -> Problem | None:
+    """Hold a store listing to the size and hash its manifest pins."""
+
+    try:
+        size = io.stat(listing).st_size
+    except OSError as exc:
+        return Problem(f"store listing {listing} cannot be read: {exc}", "")
+    hashed = _checked(io, ["sha256sum", listing], f"store listing hash for {listing}", cwd=None)
+    if isinstance(hashed, Problem):
+        return hashed
+    try:
+        digest = backupset.parse_sha256sum(hashed.stdout)[listing]
+    except (KeyError, ValueError) as exc:
+        return Problem(f"store listing hash for {listing} is malformed: {exc}", "")
+    if size != pin.size or digest != pin.sha256:
+        return Problem(f"store listing {listing} does not match its manifest pin", "")
+    return None
 
 
 def listing_names(io: Host, listing: str) -> tuple[str, ...] | Problem:
@@ -206,6 +232,14 @@ class Inventoried:
     entries: tuple[backupset.Entry, ...]
     set_bytes: int
     pin: backupset.ListingPin | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Pruned:
+    """A root's removed object count and its prune row clause."""
+
+    removed: int
+    clause: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +342,9 @@ class TakingRoot:
     def complete(self) -> Completed | Problem:
         raise NotImplementedError
 
+    def prune(self, remaining: Sequence[backupset.SetRef]) -> Pruned | Problem:
+        return Pruned(0, "")
+
     def _copy(self) -> str:
         return os.path.join(backupset.files_dir(self.partial), self.name)
 
@@ -401,71 +438,143 @@ class _TakingRepository(TakingRoot):
 
 @dataclass(frozen=True, slots=True)
 class _TakingStore(TakingRoot):
-    def _transfer(self, *, first: bool) -> int | Problem:
+    def _copy(self) -> str:
+        return backupset.store_copy_dir(_staging_of(self.partial), self.name)
+
+    def _pass_listing(self, number: int) -> str:
+        return os.path.join(self.partial, f"{self.name}.pass{number}.listing")
+
+    def _transfer(self, number: int) -> int | Problem:
         destination = self._copy()
         try:
             if not self.io.exists(self.source):
                 return Problem(f"content-addressed store root is missing: {self.source}", _store_root_fix())
+        except OSError as exc:
+            return Problem(f"store copy failed for {self.name}: {exc}", "")
+        if number == 1:
+            stray = _checked(
+                self.io, _store_stray_argv(self.exclusions), f"store shape check for {self.name}", cwd=self.source
+            )
+            if isinstance(stray, Problem):
+                return stray
+            if stray.stdout.strip():
+                offender = os.path.join(self.source, stray.stdout.strip().removeprefix("./"))
+                return Problem(f"{offender} is not an object in its own shard directories", _STORE_SHAPE_FIX)
+        listing = self._pass_listing(number)
+        paths = listing.removesuffix(".listing") + ".paths"
+        for argv, what, cwd in (
+            (_store_listing_argv(listing), "store listing", self.source),
+            (_store_sort_argv(listing), "store listing sort", None),
+            ([
+                "awk", "-F", "\t", "-v", f"paths={paths}",
+                'BEGIN {printf "" > paths} {print substr($1, 1, 2) "/" substr($1, 3, 2) "/" $1 > paths}',
+                listing,
+            ], "store paths", None),
+        ):
+            done = _checked(self.io, argv, f"{what} for {self.name}", cwd=cwd)
+            if isinstance(done, Problem):
+                return done
+        try:
             self.io.mkdir(destination, mode=0o750, parents=True, exist_ok=True)
         except OSError as exc:
             return Problem(f"store copy failed for {self.name}: {exc}", "")
-        extra: tuple[str, ...] = ()
-        if (
-            first
-            and self.previous is not None
-            and self.previous.manifest is not None
-            and self.name in self.previous.manifest.listings
-        ):
-            previous_copy = os.path.join(backupset.files_dir(self.previous.path), self.name)
-            extra = (f"--link-dest={previous_copy}/",)
-        argv = _store_copy_argv(self.source, destination, self.exclusions, *extra)
+        # An object is immutable by its name, and every set pins the one copy: a live
+        # object that later changes is never copied over the intact one already here.
+        argv = _store_copy_argv(
+            self.source, destination, self.exclusions, "--ignore-existing", f"--files-from={paths}"
+        )
         return _transferred(self.io, argv, f"store copy for {self.name}")
 
     def take(self) -> Taken | Problem:
-        transferred = self._transfer(first=True)
+        transferred = self._transfer(1)
         if isinstance(transferred, Problem):
             return transferred
-        if self.previous is not None and self.previous.manifest is not None:
-            pin = self.previous.manifest.listings.get(self.name)
-            if pin is not None and pin.objects > 0:
-                linked = _checked(
-                    self.io,
-                    ["find", self._copy(), "-type", "f", "-links", "+1", "-print", "-quit"],
-                    f"store link check for {self.name}",
-                )
-                if isinstance(linked, Problem):
-                    return linked
-                if not linked.stdout.strip():
-                    return Problem(LINK_PROBLEM, LINK_FIX)
         return Taken(True, {})
 
     def complete(self) -> Completed | Problem:
-        transferred = self._transfer(first=False)
+        transferred = self._transfer(2)
         if isinstance(transferred, Problem):
             return transferred
         return Completed(True, transferred, f"{self.name}: {transferred} object(s)")
 
     def inventory(self) -> Inventoried | Problem:
-        copy = self._copy()
         listing = backupset.listing_path(self.partial, self.name)
-        stray = _checked(self.io, _store_stray_argv(), f"store shape check for {self.name}", cwd=copy)
-        if isinstance(stray, Problem):
-            return stray
-        if stray.stdout.strip():
-            # The copy mirrors the live store, so the offender is named where it can be moved.
-            offender = os.path.join(self.source, stray.stdout.strip().removeprefix("./"))
-            return Problem(f"{offender} is not an object in its own shard directories", _STORE_SHAPE_FIX)
-        for argv, what, cwd in (
-            (_store_listing_argv(listing), "store listing", copy),
-            (_store_sort_argv(listing), "store listing sort", None),
-        ):
-            done = _checked(self.io, argv, f"{what} for {self.name}", cwd=cwd)
-            if isinstance(done, Problem):
-                return done
+        combined = _checked(
+            self.io,
+            ["env", "LC_ALL=C", "sort", "-u", "-o", listing, self._pass_listing(1), self._pass_listing(2)],
+            f"store listing union for {self.name}",
+        )
+        if isinstance(combined, Problem):
+            return combined
+        try:
+            for number in (1, 2):
+                scratch = self._pass_listing(number)
+                self.io.unlink(scratch)
+                self.io.unlink(scratch.removesuffix(".listing") + ".paths")
+        except OSError as exc:
+            return Problem(f"store scratch removal for {self.name} failed: {exc}", "")
         pin = _listing_pin(self.io, listing)
         if isinstance(pin, Problem):
             return pin
         return Inventoried((), pin.bytes, pin)
+
+    def prune(self, remaining: Sequence[backupset.SetRef]) -> Pruned | Problem:
+        staging = _staging_of(self.partial)
+        named_listing = f"{staging}.prune-{self.name}.named.listing"
+        copy_listing = f"{staging}.prune-{self.name}.copy.listing"
+        scratch = (named_listing, copy_listing)
+        try:
+            for path in scratch:
+                self.io.unlink(path, missing_ok=True)
+            listings: list[str] = []
+            for ref in remaining:
+                if not ref.complete or ref.manifest is None:
+                    continue
+                pin = ref.manifest.listings.get(self.name)
+                if pin is None:
+                    continue
+                listing = os.path.join(ref.path, pin.file)
+                problem = verify_listing(self.io, listing, pin)
+                if problem is not None:
+                    return Problem(f"{ref.label}: {problem.problem}", "")
+                listings.append(listing)
+            if not listings:
+                return Pruned(0, f"{self.name}: the store copy is left as it is; no listing names it")
+            copy = self._copy()
+            if not self.io.exists(copy):
+                return Problem(f"store copy for {self.name} is missing: {copy}", "")
+            joined: CompletedText | None = None
+            for argv, what, cwd in (
+                (["env", "LC_ALL=C", "sort", "-u", "-o", named_listing, *listings], "store named listing union", None),
+                (_store_listing_argv(copy_listing), "store copy listing", copy),
+                (_store_sort_argv(copy_listing), "store copy listing sort", None),
+                (["env", "LC_ALL=C", "join", "-t", "\t", "-j", "1", "-v", "2", named_listing, copy_listing],
+                 "store prune listing join", None),
+            ):
+                result = _checked(self.io, argv, f"{what} for {self.name}", cwd=cwd)
+                if isinstance(result, Problem):
+                    return result
+                joined = result
+            assert joined is not None
+            paths: list[str] = []
+            for line in joined.stdout.splitlines():
+                name, separator, size = line.partition("\t")
+                if not separator or _OBJECT_NAME.fullmatch(name) is None or not size.isdecimal():
+                    return Problem(f"store prune listing join for {self.name} returned a malformed line", "")
+                paths.append(_object_relative(name))
+            removed = _checked(
+                self.io, ["xargs", "-0", "-r", "rm", "-f", "--"], f"store prune removal for {self.name}",
+                cwd=copy, input="".join(f"{path}\0" for path in paths),
+            )
+            if isinstance(removed, Problem):
+                return removed
+            return Pruned(len(paths), f"{self.name}: removed {len(paths)} object(s) from the store copy")
+        except OSError as exc:
+            return Problem(f"store prune for {self.name} failed: {exc}", "")
+        finally:
+            for path in scratch:
+                with suppress(OSError):
+                    self.io.unlink(path, missing_ok=True)
 
 
 def taking(
@@ -566,6 +675,8 @@ class _PushedRepository(PushedRoot):
 @dataclass(frozen=True, slots=True)
 class _PushedStore(PushedRoot):
     pin: backupset.ListingPin | None
+    in_staging: bool
+    place: str
 
     def check(self, *, verify_all: bool) -> Checked | Problem:
         if self.pin is None:
@@ -579,23 +690,24 @@ class _PushedStore(PushedRoot):
                 return Problem(f"store listing read for {self.name} failed: {exc}", "")
         else:
             selected = _checked(
-                self.io, ["awk", "NR % 100 == 1", listing], f"store listing sample for {self.name}"
+                self.io, ["awk", "NR % 100 == 1", listing], f"store listing sample for {self.name}", cwd=None
             )
             if isinstance(selected, Problem):
                 return selected
             text = selected.stdout
-        place = os.path.join(_relative_place(backupset.files_dir(backupset.set_dir(self.label))), self.name)
         sampled: list[tuple[str, str]] = []
         for number, line in enumerate(text.splitlines(), start=1):
             name, separator, size = line.partition("\t")
             if not separator or _OBJECT_NAME.fullmatch(name) is None or not size.isdecimal():
                 return Problem(f"store listing sample line {number} is malformed for {self.name}", "")
-            sampled.append((f"{place}/{_object_relative(name)}", name))
+            sampled.append((f"{self.place}/{_object_relative(name)}", name))
         return Checked(mandatory, tuple(sampled))
 
     def arrived(self, previous: backupset.Manifest | None) -> int:
         if self.pin is None:
             return 0
+        if self.in_staging and (previous is None or not previous.store_in_staging):
+            return self.pin.bytes
         older = previous.listings.get(self.name) if previous is not None else None
         return max(0, self.pin.bytes - (older.bytes if older is not None else 0))
 
@@ -614,7 +726,10 @@ def pushed(
         row = registry.get(name)
         entries = manifest.inventory.get(name, ())
         if row is not None and row.kind is backupset.RootKind.STORE:
-            bound.append(_PushedStore(io, name, entries, label, manifest.listings.get(name)))
+            bound.append(_PushedStore(
+                io, name, entries, label, manifest.listings.get(name), manifest.store_in_staging,
+                _relative_place(backupset.store_copy(backupset.STAGING, backupset.set_dir(label), manifest, name)),
+            ))
         elif row is not None and row.kind is backupset.RootKind.REPOSITORY:
             bound.append(_PushedRepository(io, name, entries, label, row.source, manifest.pgbackrest_label))
         else:
@@ -853,20 +968,19 @@ class _FetchedRepository(FetchedRoot):
 
 @dataclass(frozen=True, slots=True)
 class _FetchedStore(FetchedRoot):
-    """A fetched store copy needs one ownership pass and a listing claim."""
+    """A fetched store copy needs one ownership pass and claims for its listings."""
 
-    pin: backupset.ListingPin
-    set_path: str
+    listings: tuple[str, ...]
 
     def reown(self, gideon_ids: backupset.AccountIds) -> Claims | Problem:
         del gideon_ids
-        result = _checked(self.io, ["chown", "-R", "-h", "0:0", self.base], f"store reown for {self.name}")
+        result = _checked(self.io, ["chown", "-R", "-h", "0:0", self.base], f"store reown for {self.name}", cwd=None)
         if isinstance(result, Problem):
             return result
         claims = Claims()
-        listing = os.path.join(self.set_path, self.pin.file)
-        claims.add_owner(listing, 0, 0)
-        claims.add_mode(listing, 0o644)
+        for listing in self.listings:
+            claims.add_owner(listing, 0, 0)
+            claims.add_mode(listing, 0o644)
         return claims
 
 
@@ -882,6 +996,14 @@ def fetched(
     complete = tuple(ref for ref in sets if ref.complete and ref.manifest is not None)
     if not complete:
         return ()
+    staging_listings: dict[str, list[str]] = {}
+    for ref in complete:
+        assert ref.manifest is not None
+        if ref.manifest.store_in_staging:
+            for row in roots:
+                pin = ref.manifest.listings.get(row.name)
+                if row.kind is backupset.RootKind.STORE and pin is not None:
+                    staging_listings.setdefault(row.name, []).append(os.path.join(ref.path, pin.file))
     newest = complete[0]
     assert newest.manifest is not None
     bound: list[FetchedRoot] = []
@@ -914,10 +1036,18 @@ def fetched(
         for row in roots:
             pin = ref.manifest.listings.get(row.name)
             if row.kind is backupset.RootKind.STORE and pin is not None:
+                if ref.manifest.store_in_staging:
+                    grouped = staging_listings.pop(row.name, None)
+                    if grouped is None:
+                        continue
+                    listings = tuple(grouped)
+                    base = backupset.store_copy_dir(side, row.name)
+                else:
+                    listings = (os.path.join(ref.path, pin.file),)
+                    base = backupset.store_copy(side, ref.path, ref.manifest, row.name)
                 bound.append(
                     _FetchedStore(
-                        io, row.name, (), os.path.join(backupset.files_dir(ref.path), row.name),
-                        ref.manifest, pin, ref.path,
+                        io, row.name, (), base, ref.manifest, listings,
                     )
                 )
     return tuple(bound)
@@ -1164,6 +1294,7 @@ class _HeldRepository(HeldRoot):
 class _HeldStore(HeldRoot):
     """A store verifies its listing, walks its copy, and restores missing, intact objects."""
 
+    set_path: str
     pin: backupset.ListingPin | None
     later: backupset.SetRef | None = None
 
@@ -1178,65 +1309,54 @@ class _HeldStore(HeldRoot):
         if stray.stdout.strip():
             offender = os.path.join(self.copy, stray.stdout.strip().removeprefix("./"))
             return Problem(f"{offender} is not an object in its own shard directories", "")
-        listing = os.path.join(scratch_dir, self.name + ".listing")
-        for argv, what, cwd in (
-            (_store_listing_argv(listing), "store listing", self.copy),
-            (_store_sort_argv(listing), "store listing sort", None),
-        ):
-            result = _checked(self.io, argv, f"{what} for {self.name}", cwd=cwd)
-            if isinstance(result, Problem):
-                return result
-        pin = _listing_pin(self.io, listing)
-        if isinstance(pin, Problem):
-            return pin
-        if (pin.size, pin.sha256, pin.objects, pin.bytes) != (
-            self.pin.size, self.pin.sha256, self.pin.objects, self.pin.bytes
-        ):
-            return Problem(f"{self.copy} does not match the store listing's manifest pin", "")
-        set_listing = os.path.join(os.path.dirname(os.path.dirname(self.copy)), self.pin.file)
+        if not self.manifest.store_in_staging:
+            listing = os.path.join(scratch_dir, self.name + ".listing")
+            for argv, what, cwd in (
+                (_store_listing_argv(listing), "store listing", self.copy),
+                (_store_sort_argv(listing), "store listing sort", None),
+            ):
+                result = _checked(self.io, argv, f"{what} for {self.name}", cwd=cwd)
+                if isinstance(result, Problem):
+                    return result
+            pin = _listing_pin(self.io, listing)
+            if isinstance(pin, Problem):
+                return pin
+            if (pin.size, pin.sha256, pin.objects, pin.bytes) != (
+                self.pin.size, self.pin.sha256, self.pin.objects, self.pin.bytes
+            ):
+                return Problem(f"{self.copy} does not match the store listing's manifest pin", "")
+        set_listing = os.path.join(self.set_path, self.pin.file)
         names = listing_names(self.io, set_listing)
         if isinstance(names, Problem):
             return names
+        if self.manifest.store_in_staging and len(names) != self.pin.objects:
+            return Problem(f"store listing {set_listing} names {len(names)} object(s), expected {self.pin.objects}", "")
         checked = hash_objects(self.io, self.copy, names)
         if isinstance(checked, Problem):
             return checked
         _, failed = checked
-        return StoreWalk(pin.objects, pin.bytes, names, tuple(sorted(failed)))
+        return StoreWalk(self.pin.objects, self.pin.bytes, names, tuple(sorted(failed)))
 
     def verify(self) -> Problem | None:
-        for copy, pin in self._listings():
-            problem = self._verify_listing(copy, pin)
+        for set_path, _, pin in self._listings():
+            listing = os.path.join(set_path, pin.file)
+            problem = verify_listing(self.io, listing, pin)
             if problem is not None:
-                return problem
+                return Problem(problem.problem, _physical_fix())
         return None
 
-    def _listings(self) -> tuple[tuple[str, backupset.ListingPin], ...]:
-        listings: list[tuple[str, backupset.ListingPin]] = []
+    def _listings(self) -> tuple[tuple[str, str, backupset.ListingPin], ...]:
+        staging = _staging_of(self.set_path)
+        listings: list[tuple[str, str, backupset.ListingPin]] = []
         if self.pin is not None:
-            listings.append((self.copy, self.pin))
+            copy = backupset.store_copy(staging, self.set_path, self.manifest, self.name)
+            listings.append((self.set_path, copy, self.pin))
         if self.later is not None and self.later.manifest is not None:
             pin = self.later.manifest.listings.get(self.name)
             if pin is not None:
-                copy = os.path.join(backupset.files_dir(self.later.path), self.name)
-                listings.append((copy, pin))
+                copy = backupset.store_copy(staging, self.later.path, self.later.manifest, self.name)
+                listings.append((self.later.path, copy, pin))
         return tuple(listings)
-
-    def _verify_listing(self, copy: str, pin: backupset.ListingPin) -> Problem | None:
-        listing = os.path.join(os.path.dirname(os.path.dirname(copy)), pin.file)
-        try:
-            size = self.io.stat(listing).st_size
-        except OSError as exc:
-            return Problem(f"store listing for {self.name} cannot be read: {exc}", _physical_fix())
-        hashed = _checked(self.io, ["sha256sum", listing], f"store listing hash for {self.name}")
-        if isinstance(hashed, Problem):
-            return Problem(hashed.problem, _physical_fix())
-        try:
-            digest = backupset.parse_sha256sum(hashed.stdout)[listing]
-        except (KeyError, ValueError) as exc:
-            return Problem(f"store listing hash for {self.name} is malformed: {exc}", _physical_fix())
-        if size != pin.size or digest != pin.sha256:
-            return Problem(f"store listing for {self.name} does not match its manifest pin", _physical_fix())
-        return None
 
     def prove(self, rendered_dir: PathLike) -> Problem | None:
         return None
@@ -1254,7 +1374,7 @@ class _HeldStore(HeldRoot):
         live_listing = f"{backupset.STAGING}.live-{self.name}.listing"
         added = 0
         missing: set[str] = set()
-        for copy, pin in listings:
+        for set_path, copy, pin in listings:
             try:
                 # A leftover of a killed restore goes first; each pass makes a
                 # fresh live listing so it sees objects added by the prior pass.
@@ -1262,7 +1382,7 @@ class _HeldStore(HeldRoot):
             except OSError as exc:
                 return Problem(f"store listing cleanup for {self.name} failed: {exc}", "")
             try:
-                needed = self._needed(live_listing, copy, pin)
+                needed = self._needed(live_listing, set_path, pin)
             finally:
                 # The next restore removes any scratch file left by this one.
                 with suppress(OSError):
@@ -1301,10 +1421,10 @@ class _HeldStore(HeldRoot):
             {self.name: StoreCounts(added, left_out)}, closing,
         )
 
-    def _needed(self, live_listing: str, copy: str, pin: backupset.ListingPin) -> list[str] | Problem:
+    def _needed(self, live_listing: str, set_path: str, pin: backupset.ListingPin) -> list[str] | Problem:
         """The names the set lists and the live store lacks, matched by name alone."""
 
-        listing = os.path.join(os.path.dirname(os.path.dirname(copy)), pin.file)
+        listing = os.path.join(set_path, pin.file)
         joined: CompletedText | None = None
         for argv, what, cwd in (
             (_store_listing_argv(live_listing), "live store listing", self.source),
@@ -1361,7 +1481,7 @@ def held(
 
     if set_ref.manifest is None:
         raise ValueError("held set has no manifest")
-    staging = os.path.dirname(os.path.dirname(set_ref.path))
+    staging = _staging_of(set_ref.path)
     bound: list[HeldRoot] = []
     for row in roots:
         entries = set_ref.manifest.inventory.get(row.name, ())
@@ -1385,9 +1505,9 @@ def held(
             bound.append(
                 _HeldStore(
                     io, row.name, row.source,
-                    os.path.join(backupset.files_dir(set_ref.path), row.name), entries,
-                    set_ref.manifest, set_ref.manifest.listings.get(row.name),
-                    next(
+                    backupset.store_copy(staging, set_ref.path, set_ref.manifest, row.name), entries,
+                    set_ref.manifest, set_path=set_ref.path, pin=set_ref.manifest.listings.get(row.name),
+                    later=next(
                         (
                             ref for ref in reversed(later)
                             if ref.manifest is not None and row.name in ref.manifest.listings

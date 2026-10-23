@@ -450,6 +450,13 @@ class IndexBuild(unittest.TestCase):
 
 
 class RestoreSelection(unittest.TestCase):
+    def test_at_and_archive_end_are_exclusive_at_parse_time(self) -> None:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as ctx:
+            main(["restore", "--from", "staging", "--at", "2026-09-03T01:00Z", "--archive-end"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("not allowed with argument --at", err.getvalue())
+
     def test_at_and_set_are_exclusive_at_parse_time(self) -> None:
         err = io.StringIO()
         with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as ctx:

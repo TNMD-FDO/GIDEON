@@ -1,5 +1,6 @@
 """pgBackRest argv, repository, and JSON-info contracts."""
 
+import json
 import os
 import subprocess
 import unittest
@@ -193,6 +194,37 @@ class Argv(unittest.TestCase):
 
 
 class Operations(unittest.TestCase):
+    def test_info_reads_stop_lsn_and_the_archive_with_the_highest_database_id(self) -> None:
+        argv = tuple(pgbackrest.exec_argv(RENDERED, "info", "--output=json"))
+        backup = {
+            "label": "fictitious-backup", "type": "full", "timestamp": {"stop": 100},
+            "archive": {"start": "000000020000000000000005"},
+            "lsn": {"stop": "0/7000000"},
+        }
+        for maximum in ("00000002000000000000000A", None):
+            with self.subTest(maximum=maximum):
+                newest = {"database": {"id": 9}, "id": "1000-9", "max": maximum}
+                older = {"database": {"id": 2}, "id": "1000-2", "max": "000000010000000000000001"}
+                document = [{"repo": [{"backup": [backup], "archive": [newest, older]}]}]
+                host = FakeHost({argv: done(argv, json.dumps(document))})
+                result = pgbackrest.info(host, RENDERED)
+                self.assertTrue(result.ok, result.problem)
+                self.assertEqual(result.archive_id, newest["id"])
+                self.assertEqual(result.archive_max, maximum)
+                self.assertEqual(result.infos, (
+                    pgbackrest.BackupInfo("fictitious-backup", "full", 100, 2, "0/7000000"),
+                ))
+
+    def test_info_refuses_an_archive_without_a_database_id(self) -> None:
+        argv = tuple(pgbackrest.exec_argv(RENDERED, "info", "--output=json"))
+        for database in (None, {}, {"id": True}):
+            with self.subTest(database=database):
+                document = [{"archive": [{"database": database, "id": "1000-1", "max": None}]}]
+                result = pgbackrest.info(FakeHost({argv: done(argv, json.dumps(document))}), RENDERED)
+                self.assertFalse(result.ok)
+                self.assertIn("archive database id is missing", result.problem or "")
+                self.assertEqual(result.fix, "docker compose -f /etc/gideon/rendered/compose.yaml logs postgres")
+
     def test_info_parses_full_and_incremental_and_finds_newest_full(self) -> None:
         argv = tuple(pgbackrest.exec_argv(RENDERED, "info", "--output=json"))
         document = (
@@ -290,3 +322,102 @@ class Operations(unittest.TestCase):
         )
         self.assertEqual(host.chmod_calls, [(pgbackrest.REPOSITORY_PATH, 0o750)])
         self.assertEqual(host.chown_calls, [(pgbackrest.REPOSITORY_PATH, 4321, 5432)])
+
+
+class History(unittest.TestCase):
+    """The repository history supplies timeline ancestry while Postgres is down."""
+
+    def _argv(self, *args: str) -> tuple[str, ...]:
+        return COMPOSE + (
+            "run", "--rm", "--no-deps", "-u", "postgres", "postgres", "pgbackrest",
+            f"--stanza={pgbackrest.STANZA}", *args,
+        )
+
+    def test_latest_history_is_read_by_numeric_timeline_and_parsed(self) -> None:
+        path = f"archive/{pgbackrest.STANZA}/1000-1"
+        listing = self._argv("repo-ls", path, "--output=json")
+        get = self._argv("repo-get", f"{path}/0000000A.history")
+        files = {
+            "00000002.history": {"type": "file"},
+            "0000000A.history": {"type": "file"},
+            "0000000900000000": {"type": "path"},
+            "000000FF.history.partial": {"type": "file"},
+        }
+        host = FakeHost({
+            listing: done(listing, json.dumps(files)),
+            get: done(get, "# fictitious ancestry\n\n1\t0/4000000\tfirst fork\n9 1/8000000 later fork\n"),
+        })
+        result = pgbackrest.history(host, RENDERED, "1000-1")
+        self.assertTrue(result.ok, result.problem)
+        self.assertEqual(result.latest, 10)
+        self.assertEqual(result.chain, ((1, 0x4000000), (9, 0x108000000)))
+        self.assertEqual([argv for argv, _ in host.calls], [listing, get])
+
+    def test_timeline_one_has_no_history_file_to_fetch(self) -> None:
+        listing = self._argv("repo-ls", f"archive/{pgbackrest.STANZA}/1000-1", "--output=json")
+        host = FakeHost({listing: done(listing, '{"0000000100000000":{"type":"path"}}')})
+        result = pgbackrest.history(host, RENDERED, "1000-1")
+        self.assertTrue(result.ok, result.problem)
+        self.assertEqual((result.latest, result.chain), (1, ()))
+        self.assertEqual([argv for argv, _ in host.calls], [listing])
+
+    def test_malformed_history_and_failed_commands_return_the_logs_fix(self) -> None:
+        path = f"archive/{pgbackrest.STANZA}/1000-1"
+        listing = self._argv("repo-ls", path, "--output=json")
+        get = self._argv("repo-get", f"{path}/00000002.history")
+        for label, responses, expected in (
+            ("listing", {listing: failed(listing, "fictitious listing failure")}, "fictitious listing failure"),
+            ("get", {listing: done(listing, '{"00000002.history":{}}'), get: failed(get, "fictitious get failure")}, "fictitious get failure"),
+            ("line", {listing: done(listing, '{"00000002.history":{}}'), get: done(get, "1 not-an-lsn fictitious fork\n")}, "malformed content"),
+        ):
+            with self.subTest(label=label):
+                result = pgbackrest.history(FakeHost(responses), RENDERED, "1000-1")
+                self.assertFalse(result.ok)
+                self.assertIn(expected, result.problem or "")
+                self.assertEqual(result.fix, "docker compose -f /etc/gideon/rendered/compose.yaml logs postgres")
+
+
+class WalPositions(unittest.TestCase):
+    """WAL positions and timeline forks are compared without a running host."""
+
+    def test_lsn_values(self) -> None:
+        for text, expected in (("0/0", 0), ("0/FF", 255), ("A/10", 10 * 2**32 + 16)):
+            with self.subTest(text=text):
+                self.assertEqual(pgbackrest.lsn_value(text), expected)
+
+    def test_segments_per_log(self) -> None:
+        for size, expected in ((16 * 1024**2, 256), (64 * 1024**2, 64), (1024**3, 4)):
+            with self.subTest(size=size):
+                self.assertEqual(pgbackrest.segments_per_log(size), expected)
+
+    def test_segment_ordinals_and_the_log_rollover(self) -> None:
+        for name, per_log, expected in (
+            ("0000000200000000000000FF", 256, 255),
+            ("000000030000000100000000", 256, 256),
+            ("000000020000000200000003", 64, 131),
+        ):
+            with self.subTest(name=name, per_log=per_log):
+                self.assertEqual(pgbackrest.segment_ordinal(name, per_log), expected)
+        self.assertEqual(
+            pgbackrest.segment_ordinal("000000030000000100000000", 256)
+            - pgbackrest.segment_ordinal("0000000200000000000000FF", 256),
+            1,
+        )
+        for name in ("00000001", "00000002000000000000000Z"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                pgbackrest.segment_ordinal(name, 256)
+
+    def test_backups_reach_the_latest_timeline_only_before_its_fork(self) -> None:
+        chain = ((1, 0x4000000), (2, 0x8000000))
+        for timeline, stop, expected in (
+            (3, "0/9000000", True),
+            (2, "0/7000000", True),
+            (2, "0/8000000", True),
+            (2, "0/8000001", False),
+            (4, "0/1000000", False),
+            (3, None, False),
+            (2, None, False),
+        ):
+            with self.subTest(timeline=timeline, stop=stop):
+                backup = pgbackrest.BackupInfo("fictitious-backup", "full", 100, timeline, stop)
+                self.assertEqual(pgbackrest.reaches_latest(backup, 3, chain), expected)

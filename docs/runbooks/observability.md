@@ -81,11 +81,12 @@ and the runbook section to follow.
   not paged and not shown. A tile turns red at once, while its rule waits out
   its pending period, so a red tile is a page on its way.
 - **Backup** — the last 35 days of M25 (run duration, set bytes, hard-link
-  ratio, push transferred vs total, verified counts) and M26 (drill duration
-  and result) as series over the rows. The drill table shows the five newest
-  results. The last ten runs table shows each row's result and the share of
-  sampled files reused: a run, push, or restore reads `completed` when it has
-  no recorded result, and a drill shows its own result word.
+  ratio, push transferred share, push duration, verified and pruned counts)
+  and M26 (drill duration and result) as series over the rows. The drill table
+  shows the five newest results. The last ten runs table shows each row's
+  result and the share of sampled files reused: a run, push, or restore reads
+  `completed` when it has no recorded result, and a drill shows its own result
+  word.
 - **GPU** — per-GPU utilisation, memory in GiB, temperature, power, and the
   driver version from DCGM. The temperature card's dashed line is each card's
   own maximum operating temperature, read through the exporter; a card that

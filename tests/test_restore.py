@@ -9,7 +9,7 @@ import os
 import subprocess
 import unittest
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
@@ -36,6 +36,7 @@ from gideon.host import (
     site,
     sshtarget,
     stack,
+    stores,
     worker,
 )
 from gideon.host.corpus.record import database_fix
@@ -171,6 +172,17 @@ def manifest_with_snapshots(*roots: backupset.InventoryRoot) -> backupset.Manife
     return replace(value, inventory={**value.inventory, **{root.name: () for root in roots}})
 
 
+@dataclass(frozen=True)
+class Replay:
+    """A fictitious recovery's last commit and WAL position."""
+
+    instant: datetime | None = NOW - timedelta(seconds=10)
+    lsn: str | None = "0/A000000"
+    segment: str = "00000003000000000000000A"
+    segment_size: int = 16 * 1024**2
+    recovery_polls: int = 0
+
+
 class FakeHost:
     """A recording Host with independent local and fetched set listings."""
 
@@ -188,6 +200,11 @@ class FakeHost:
         fail_checksum: bool = False,
         fail_pgbackrest: bool = False,
         info_has_label: bool = True,
+        archive_max: str | None = "00000002000000000000000A",
+        history_files: Mapping[str, str] | None = None,
+        lsn_stop: str | None = "0/7000000",
+        backup_timeline: int = 2,
+        replay: Replay | None = None,
         fail_identity_exec: bool = False,
         secrets_present: bool = False,
         partial: bool = False,
@@ -217,6 +234,7 @@ class FakeHost:
     ) -> None:
         value = manifest_value or manifest()
         self.manifest_value = value
+        self.store_copy = backupset.store_copy(backupset.STAGING, backupset.set_dir(LOCAL_SET), value, STORE_ROOT.name)
         self.partial = partial
         self.fail_swap = fail_swap
         self.physical_escape = physical_escape
@@ -259,6 +277,14 @@ class FakeHost:
         self.fail_checksum = fail_checksum
         self.fail_pgbackrest = fail_pgbackrest
         self.info_has_label = info_has_label
+        self.archive_max = archive_max
+        self.history_files = dict(history_files) if history_files is not None else {
+            "00000002.history": "1\t0/4000000\tfictitious fork\n",
+        }
+        self.lsn_stop = lsn_stop
+        self.backup_timeline = backup_timeline
+        self.replay = replay or Replay()
+        self.recovery_polls_remaining = self.replay.recovery_polls
         self.fail_identity_exec = fail_identity_exec
         self.calls: list[tuple[tuple[str, ...], str | None, str | None, float | None]] = []
         self.events: list[str] = []
@@ -316,6 +342,19 @@ class FakeHost:
         del check, env
         command = tuple(argv)
         self.calls.append((command, input, None if cwd is None else os.fspath(cwd), timeout))
+        if "psql" in command and input is not None:
+            if "pg_is_in_recovery()" in input:
+                recovering = self.recovery_polls_remaining > 0
+                self.recovery_polls_remaining -= int(recovering)
+                return completed(command, stdout="t\n" if recovering else "f\n")
+            if "pg_last_xact_replay_timestamp()" in input:
+                if self.recovery_polls_remaining:
+                    return completed(command, returncode=1, stderr="still in recovery")
+                reach = self.replay
+                return completed(command, stdout="\t".join((
+                    reach.instant.isoformat() if reach.instant is not None else "",
+                    reach.lsn or "", reach.segment, str(reach.segment_size),
+                )) + "\n")
         if command == tuple(worker.psql_argv(RENDERED)):
             assert input is not None
             self.generation_statements.append(input)
@@ -394,7 +433,11 @@ class FakeHost:
         if command and command[0] == "rsync":
             if "--files-from=-" in command:
                 paths = (input or "").splitlines()
-                set_path = command[-2].rstrip("/").rsplit("/files/", 1)[0]
+                set_path = (
+                    backupset.set_dir(LOCAL_SET)
+                    if self._local_path(command[-2].rstrip("/")) == self.store_copy
+                    else command[-2].rstrip("/").rsplit("/files/", 1)[0]
+                )
                 listing_path = self._local_path(backupset.listing_path(set_path, STORE_ROOT.name))
                 sizes = dict(line.split("\t", 1) for line in self.files[listing_path].splitlines())
                 if self.store_live is not None:
@@ -471,9 +514,12 @@ class FakeHost:
                     stdout="".join(f"{path}: {'OK' if okay else 'FAILED'}\n" for path, okay in checks),
                     returncode=int(any(not okay for _, okay in checks)),
                 )
-            if cwd is not None and os.fspath(cwd).endswith("/files/" + STORE_ROOT.name):
+            if cwd is not None and (
+                self._local_path(os.fspath(cwd)) == self.store_copy
+                or os.fspath(cwd).endswith("/files/" + STORE_ROOT.name)
+            ):
                 lines = (input or "").splitlines()
-                damaged_here = self.store_damaged if f"/sets/{LOCAL_SET}/" in os.fspath(cwd) else set()
+                damaged_here = self.store_damaged if self._local_path(os.fspath(cwd)) == self.store_copy else set()
                 output = "".join(
                     f"{line.split('  ', 1)[1]}: {'FAILED' if line.split('  ', 1)[0] in damaged_here else 'OK'}\n"
                     for line in lines
@@ -494,14 +540,25 @@ class FakeHost:
         if "pgbackrest" in command and "verify" in command:
             return completed(command, returncode=int(self.fail_pgbackrest))
         if "pgbackrest" in command and "info" in command and "--output=json" in command:
-            # The repository now in place: the set's backup on timeline 2.
             labels = [self.manifest_value.pgbackrest_label] if self.info_has_label else []
-            backups = ",".join(
-                f'{{"label":"{label}","type":"full","timestamp":{{"stop":100}},'
-                f'"archive":{{"start":"000000020000000000000005","stop":"000000020000000000000007"}}}}'
-                for label in labels
-            )
-            return completed(command, stdout=f'[{{"name":"gideon","backup":[{backups}]}}]')
+            backups = [{
+                "label": label, "type": "full", "timestamp": {"stop": 100},
+                "archive": {"start": f"{self.backup_timeline:08X}0000000000000005"},
+                "lsn": {"stop": self.lsn_stop},
+            } for label in labels]
+            return completed(command, stdout=json.dumps([{
+                "name": "gideon", "backup": backups,
+                "archive": [{"database": {"id": 1}, "id": "1000-1", "max": self.archive_max}],
+            }]))
+        if "pgbackrest" in command and "repo-ls" in command and "--output=json" in command:
+            return completed(command, stdout=json.dumps({
+                name: {"type": "file"} for name in self.history_files
+            }))
+        if "pgbackrest" in command and "repo-get" in command:
+            name = command[-1].rsplit("/", 1)[-1]
+            if name not in self.history_files:
+                return completed(command, returncode=1, stderr="fictitious history file missing")
+            return completed(command, stdout=self.history_files[name])
         if "run" in command and "id" in command:
             flag = "-u" if "-u" in command else "-g"
             return completed(command, stdout=("1000" if flag == "-u" else "1001") + "\n")
@@ -2320,6 +2377,41 @@ class StoreRestoreCommands(RenderedRestoreCase):
                     self._audit_text(fake),
                 )
 
+    def test_staging_restore_reads_each_manifest_form_and_names_a_damaged_object(self) -> None:
+        data = (b"fictitious intact object", b"fictitious damaged object")
+        sizes = {hashlib.sha256(content).hexdigest(): len(content) for content in data}
+        damaged = hashlib.sha256(data[1]).hexdigest()
+        live_only = hashlib.sha256(b"fictitious live object").hexdigest()
+        original, listing = manifest_with_store(sizes)
+        for version in (1, backupset.MANIFEST_VERSION):
+            for fail_object in (False, True):
+                with self.subTest(version=version, damaged=fail_object):
+                    value = replace(original, version=version)
+                    fake = make_host(manifest_value=value, store_listing=listing,
+                                     store_live={live_only: 9}, store_damaged=(damaged,) if fail_object else ())
+                    code, output = self._run(fake, "staging")
+                    self.assertEqual(code, 0, output)
+                    copy = backupset.store_copy(backupset.STAGING, backupset.set_dir(LOCAL_SET), value, STORE_ROOT.name)
+                    checks = [call for call in fake.calls if call[0] == ("sha256sum", "-c", "-") and call[2] == copy]
+                    self.assertEqual(checks, [(
+                        ("sha256sum", "-c", "-"),
+                        "".join(f"{name}  {name[:2]}/{name[2:4]}/{name}\n" for name in sorted(sizes)), copy, None,
+                    )])
+                    passing = sorted(name for name in sizes if not fail_object or name != damaged)
+                    transfers = [call for call in fake.calls if "--files-from=-" in call[0]]
+                    self.assertEqual(transfers, [(
+                        ("rsync", "-rtp", "--stats", f"--chmod=D{cas.DIRECTORY_MODE:o},F{cas.OBJECT_MODE:o}",
+                         "--ignore-existing", "--files-from=-", copy + "/", os.fspath(cas.ROOT) + "/"),
+                        "".join(f"{name[:2]}/{name[2:4]}/{name}\n" for name in passing), None, None,
+                    )])
+                    self.assertEqual(fake.store_live, {live_only: 9, **{name: sizes[name] for name in passing}})
+                    self.assertIn(f"{STORE_ROOT.name}: added {len(passing)} object(s), {int(fail_object)} left out", output)
+                    if fail_object:
+                        closing = next(line for line in output.splitlines() if line.startswith("Store:"))
+                        self.assertIn(damaged, closing)
+                    else:
+                        self.assertNotIn("Store:", output)
+
     def test_set_without_store_pin_leaves_live_store_alone(self) -> None:
         live_only = hashlib.sha256(b"live only bytes").hexdigest()
         fake = make_host(store_live={live_only: 15})
@@ -2332,6 +2424,47 @@ class StoreRestoreCommands(RenderedRestoreCase):
         self.assertFalse(any(call[0][:2] == ("sha256sum", "-c") and call[2] is not None and call[2].endswith("/files/" + STORE_ROOT.name) for call in fake.calls))
         self.assertFalse(any(call[0][0] == "rsync" and call[0][-1] == os.fspath(cas.ROOT) + "/" for call in fake.calls))
         self.assertFalse(any(call[2] == os.fspath(cas.ROOT) for call in fake.calls))
+
+    def test_fetched_snapshot_restores_both_forms_and_reowns_each_copy_once(self) -> None:
+        added = hashlib.sha256(b"fictitious fetched object").hexdigest()
+        value, listing = manifest_with_store({added: len(b"fictitious fetched object")})
+        older_label = "20260901T110000Z"
+        side = f"{backupset.STAGING}.fetch-{REMOTE_SNAPSHOT}"
+        for version in (1, backupset.MANIFEST_VERSION):
+            with self.subTest(version=version):
+                current = replace(value, version=version)
+                older = replace(current, label=older_label, started=current.started - timedelta(days=1),
+                                finished=current.finished - timedelta(days=1), inventory={})
+                fake = make_host(
+                    source="target", manifest_value=current, store_listing=listing, store_live={},
+                    names=(LOCAL_SET, older_label), side_names=(LOCAL_SET, older_label),
+                    remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+                )
+                fake.files[os.path.join(backupset.set_dir(older_label), backupset.MANIFEST_NAME)] = older.to_json()
+                fake.files[backupset.listing_path(backupset.set_dir(older_label), STORE_ROOT.name)] = listing
+                code, output = self._run(fake, "target")
+                self.assertEqual(code, 0, output)
+                self.assertIn("fetch: ok", output)
+                self.assertIn("swap: ok — installed the fetched staging directory", output)
+                self.assertEqual(fake.store_live, {added: len(b"fictitious fetched object")})
+                copies = (
+                    (backupset.store_copy_dir(side, STORE_ROOT.name),) if current.store_in_staging else
+                    tuple(backupset.store_copy(side, os.path.join(backupset.sets_dir(side), item.label), item, STORE_ROOT.name)
+                          for item in (current, older))
+                )
+                reowns = [call for call in fake.calls if call[0][:4] == ("chown", "-R", "-h", "0:0")]
+                self.assertEqual(reowns, [(("chown", "-R", "-h", "0:0", copy), None, None, None) for copy in copies])
+                listing_paths = tuple(os.path.join(backupset.sets_dir(side), item.label, item.listings[STORE_ROOT.name].file)
+                                      for item in (current, older))
+                owners = [call for call in fake.calls if call[0][:3] == ("chown", "0:0", "--") and any(path in call[0] for path in listing_paths)]
+                self.assertEqual(owners, [(("chown", "0:0", "--", *listing_paths), None, None, None)])
+                modes = [call for call in fake.calls if call[0][:3] == ("chmod", "0644", "--") and any(path in call[0] for path in listing_paths)]
+                self.assertEqual(len(modes), 1)
+                self.assertEqual(tuple(path for path in modes[0][0][3:] if path in listing_paths), listing_paths)
+                installed = backupset.store_copy(backupset.STAGING, backupset.set_dir(LOCAL_SET), current, STORE_ROOT.name)
+                transfers = [call for call in fake.calls if "--files-from=-" in call[0]]
+                self.assertEqual(len(transfers), 1)
+                self.assertEqual(transfers[0][0][-2:], (installed + "/", os.fspath(cas.ROOT) + "/"))
 
     def test_damaged_missing_object_is_named_after_secrets_and_restore_succeeds(self) -> None:
         damaged = hashlib.sha256(b"intact source bytes").hexdigest()
@@ -2597,3 +2730,269 @@ class RestoreBySetLabel(RenderedRestoreCase):
                     out,
                 )
                 self.assertFalse(any(call[0][-1] == "down" for call in fake.calls))
+
+
+class ArchiveEndRestore(RenderedRestoreCase):
+    """An archive-end restore replays the local archive without replacing the files or live indexes."""
+
+    def _run(self, fake: FakeHost, *, archive_end: bool = True) -> tuple[int, str, str, list[float]]:
+        out, err = io.StringIO(), io.StringIO()
+        sleeps: list[float] = []
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = restore.run_restore(
+                argparse.Namespace(source=fake.source, at=None, archive_end=archive_end),
+                host=fake, now=NOW, sleep=sleeps.append,
+            )
+        return code, out.getvalue(), err.getvalue(), sleeps
+
+    def _detail(self, fake: FakeHost) -> dict[str, Any]:
+        sql = next(request for _, request, _, _ in fake.calls if request and "\\set v_kind 'restore'" in request)
+        line = next(line for line in sql.splitlines() if line.startswith("\\set v_detail '"))
+        return json.loads(line.removeprefix("\\set v_detail '").removesuffix("'"))
+
+    def _row(self, output: str, name: str) -> str:
+        return next(line for line in output.splitlines() if line.startswith(name + ":"))
+
+    def _assert_not_stopped(self, fake: FakeHost) -> None:
+        self.assertFalse(any(argv[-1] == "down" for argv, _, _, _ in fake.calls))
+        self.assertFalse(any("pgbackrest" in argv and "restore" in argv for argv, _, _, _ in fake.calls))
+
+    def test_target_source_refuses_before_select_or_ssh(self) -> None:
+        fake = make_host(source="target")
+        code, output, errors, _ = self._run(fake)
+        self.assertEqual(code, 1)
+        self.assertEqual(output, "")
+        self.assertIn("--archive-end", errors)
+        self.assertIn("cannot use --from target", errors)
+        self.assertIn(report.command("restore --from staging --archive-end"), errors)
+        self.assertFalse(any(argv[0] == "ssh" for argv, _, _, _ in fake.calls))
+        self._assert_not_stopped(fake)
+
+    def test_running_postgres_refuses_with_the_time_target_and_stop_fix(self) -> None:
+        fake = make_host(running=True)
+        code, output, errors, _ = self._run(fake)
+        self.assertEqual(code, 1)
+        self.assertEqual(errors, "")
+        row = self._row(output, "pre-restore")
+        self.assertIn("pre-restore: refuse", row)
+        self.assertIn("Postgres answers", row)
+        self.assertIn(report.command("restore --from staging --at <instant>"), row)
+        self.assertIn("or omit --at", row)
+        self.assertIn("docker compose -f /etc/gideon/rendered/compose.yaml down", row)
+        self._assert_not_stopped(fake)
+
+    def test_partial_stack_keeps_its_refusal(self) -> None:
+        fake = make_host(running=True, partial=True)
+        code, output, errors, _ = self._run(fake)
+        self.assertEqual(code, 1)
+        self.assertEqual(errors, "")
+        self.assertIn("pre-restore: refuse — the stack is partially running", output)
+        self._assert_not_stopped(fake)
+
+    def test_unreachable_latest_timeline_names_the_newest_boundary(self) -> None:
+        fake = make_host(history_files={"00000003.history": "1 0/1000000 first fork\n2 0/6000000 second fork\n"})
+        code, output, errors, _ = self._run(fake)
+        self.assertEqual(code, 1)
+        self.assertEqual(errors, "")
+        row = self._row(output, "select")
+        self.assertIn("select: refuse", row)
+        self.assertIn("latest timeline 3", row)
+        self.assertIn(f"timeline={fake.backup_timeline}", row)
+        self.assertIn(fake.manifest_value.archive_through.isoformat(), row)
+        self.assertIn(report.command("restore --from staging"), row)
+        self.assertIn(report.command("backup run --full"), row)
+        self._assert_not_stopped(fake)
+
+    def test_empty_archive_refuses_with_the_backup_fix(self) -> None:
+        fake = make_host(archive_max=None)
+        code, output, errors, _ = self._run(fake)
+        self.assertEqual(code, 1)
+        self.assertEqual(errors, "")
+        row = self._row(output, "select")
+        self.assertIn("select: refuse — the local archive has no archived WAL segment", row)
+        self.assertIn(report.command("backup run"), row)
+        self._assert_not_stopped(fake)
+
+    def test_stopped_restore_keeps_files_and_indexes_levels_and_audits_the_reach(self) -> None:
+        live = generation("live")
+        built = generation("built", label="corpus-2099-02-03")
+        value, listing = manifest_with_store({"a" * 64: 7})
+        value = replace(value, inventory={**value.inventory, **{root.name: () for root in DERIVED_ROOTS}})
+        fake = make_host(
+            manifest_value=value, store_listing=listing, store_live={"b" * 64: 9},
+            qdrant_files=(f"{live.gen_id}/present.snapshot",),
+            generations=(asdict(live), asdict(built)),
+        )
+        fake.index_counts["qdrant"][built.gen_id] = built.counts["dense_total"] - 1
+        before_files, before_store = dict(fake.files), dict(fake.store_live or {})
+        code, output, errors, sleeps = self._run(fake)
+        self.assertEqual(code, 0, output + errors)
+        self.assertEqual(errors, "")
+        self.assertEqual(sleeps, [])
+        self.assertIn("pre-restore: ok — skipped (stack not running)", output)
+        self.assertIn("files: ok — skipped (every root left in place)", output)
+        self.assertEqual(fake.files, before_files)
+        self.assertEqual(fake.store_live, before_store)
+        self.assertFalse(any(argv[0] in {"rsync", "chown"} for argv, _, _, _ in fake.calls))
+        restore_argv = next(argv for argv, _, _, _ in fake.calls if "pgbackrest" in argv and "restore" in argv)
+        self.assertEqual(restore_argv[restore_argv.index("restore") + 1:], (
+            "--delta", f"--set={value.pgbackrest_label}", "--type=default", "--target-timeline=latest",
+        ))
+        self.assertFalse(any(
+            argv[0] == "sha256sum" and backupset.TARBALL_NAME in " ".join(argv)
+            for argv, _, _, _ in fake.calls
+        ))
+        checks = [call for call in fake.calls if call[0][:2] == ("sha256sum", "-c")]
+        repository = next(root for root in backupset.inventory_roots(value.checkout) if root.kind is backupset.RootKind.REPOSITORY)
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0][2], repository.source)
+        self.assertNotIn("backup.info", checks[0][1] or "")
+        self.assertNotIn("archive.info", checks[0][1] or "")
+        for _, request, _, _ in fake.calls:
+            self.assertNotIn("/snapshots/recover", request or "")
+            self.assertNotIn("/_snapshot/", request or "")
+        self.assertEqual(fake.generations[1]["state"], "building")
+        for targets in fake.index_aliases.values():
+            self.assertEqual(targets[live.collection], (live.gen_id,))
+        detail = self._detail(fake)
+        self.assertEqual({key: detail[key] for key in (
+            "reached", "reached_lsn", "reached_segment", "archive_end", "archive_end_reached",
+        )}, {
+            "reached": fake.replay.instant.isoformat() if fake.replay.instant else None,
+            "reached_lsn": fake.replay.lsn, "reached_segment": fake.replay.segment,
+            "archive_end": fake.archive_max, "archive_end_reached": True,
+        })
+        self.assertEqual(detail["indexes"], {})
+        for name in ("stores", "Reached"):
+            row = self._row(output, name)
+            self.assertIn(fake.replay.lsn or "", row)
+            self.assertIn(fake.replay.segment, row)
+            self.assertIn(fake.archive_max or "", row)
+            self.assertIn("archive end reached", row)
+        replay_read = next(i for i, (_, sql, _, _) in enumerate(fake.calls) if sql and "pg_last_xact_replay_timestamp()" in sql)
+        # A replay ending on a WAL switch stops on the next segment's first byte.
+        self.assertIn("pg_walfile_name(pg_last_wal_replay_lsn() - 1)", fake.calls[replay_read][1] or "")
+        demotion = next(i for i, (_, sql, _, _) in enumerate(fake.calls) if sql and "DO $demotion$" in sql)
+        self.assertLess(replay_read, demotion)
+
+    def test_short_past_null_instant_and_rollover_replays_are_reported(self) -> None:
+        for label, replay, maximum, expected, reached in (
+            ("short", Replay(segment="000000030000000000000007"), "00000002000000000000000A", "short by 3 segment(s)", False),
+            ("past", Replay(segment="00000003000000000000000B"), "00000002000000000000000A", "past the archive's newest segment", True),
+            ("no commit", Replay(instant=None), "00000002000000000000000A", "no commit replayed", True),
+            ("rollover", Replay(lsn="1/1", segment="000000030000000100000000"), "0000000200000000000000FF", "past the archive's newest segment", True),
+            ("rollover short", Replay(lsn="0/FF000000", segment="0000000300000000000000FF"), "000000020000000100000000", "short by 1 segment(s)", False),
+        ):
+            with self.subTest(label=label):
+                fake = make_host(replay=replay, archive_max=maximum)
+                code, output, errors, _ = self._run(fake)
+                self.assertEqual(code, 0, output + errors)
+                for name in ("stores", "Reached"):
+                    row = self._row(output, name)
+                    self.assertIn(expected, row)
+                    if not reached:
+                        self.assertIn("docs/runbooks/backup-restore.md §4", row)
+                    else:
+                        self.assertNotIn("short by", row)
+                detail = self._detail(fake)
+                self.assertEqual(detail["archive_end_reached"], reached)
+                self.assertEqual(detail["reached"], replay.instant.isoformat() if replay.instant else None)
+
+    def test_recovery_polls_wait_before_reading_the_reach(self) -> None:
+        fake = make_host(replay=Replay(recovery_polls=3))
+        code, output, errors, sleeps = self._run(fake)
+        self.assertEqual(code, 0, output + errors)
+        self.assertEqual(len(sleeps), fake.replay.recovery_polls)
+        self.assertTrue(all(pause > 0 for pause in sleeps))
+        self.assertEqual(fake.recovery_polls_remaining, 0)
+        self.assertTrue(self._detail(fake)["archive_end_reached"])
+
+    def test_recovery_bound_refuses_before_level_or_audit(self) -> None:
+        fake = make_host(replay=Replay(recovery_polls=int(stores.REPLAY_WAIT_SECONDS) + 1))
+        code, output, errors, sleeps = self._run(fake)
+        self.assertEqual(code, 1)
+        self.assertEqual(errors, "")
+        self.assertEqual(sum(sleeps), stores.REPLAY_WAIT_SECONDS)
+        row = self._row(output, "stores")
+        self.assertIn("stores: refuse", row)
+        self.assertIn("still in recovery", row)
+        self.assertIn("logs postgres", row)
+        self.assertEqual(fake.generation_statements, [])
+        self.assertNotIn("\\set v_kind 'restore'", "\n".join(sql or "" for _, sql, _, _ in fake.calls))
+        self.assertNotIn("Reached:", output)
+        self.assertTrue(fake.running)
+        problem = stores.replay_reach(fake, RENDERED, sleep=sleeps.append, wait_seconds=0)
+        self.assertIsInstance(problem, report.Timeout)
+        assert isinstance(problem, report.Timeout)
+        self.assertIn("still in recovery", problem.problem)
+        self.assertEqual(problem.fix, stack.logs_fix(RENDERED, "postgres"))
+
+    def test_backup_before_a_timeline_switch_reaches_the_latest_archive(self) -> None:
+        fake = make_host(
+            history_files={"00000003.history": "1 0/4000000 first fork\n2 0/8000000 second fork\n"},
+            archive_max="00000003000000000000000A", replay=Replay(segment="00000004000000000000000A"),
+        )
+        code, output, errors, _ = self._run(fake)
+        self.assertEqual(code, 0, output + errors)
+        self.assertIn(f"timeline={fake.backup_timeline}; latest_timeline=3", self._row(output, "select"))
+
+    def test_unknown_backup_stop_lsn_is_named_and_not_selected(self) -> None:
+        fake = make_host(lsn_stop=None)
+        code, output, errors, _ = self._run(fake)
+        self.assertEqual(code, 1)
+        self.assertEqual(errors, "")
+        self.assertIn("select: refuse", output)
+        self.assertIn(f"backup {fake.manifest_value.pgbackrest_label} records no stop LSN", output)
+        self._assert_not_stopped(fake)
+
+    def test_null_position_and_malformed_reaches_refuse_before_level(self) -> None:
+        for replay, expected in (
+            (Replay(lsn=None), "no replay position"),
+            (Replay(segment="not-a-segment"), "malformed replay reach"),
+            (Replay(segment_size=0), "malformed replay reach"),
+        ):
+            with self.subTest(replay=replay):
+                fake = make_host(replay=replay)
+                code, output, errors, _ = self._run(fake)
+                self.assertEqual(code, 1)
+                self.assertEqual(errors, "")
+                row = self._row(output, "stores")
+                self.assertIn("stores: refuse", row)
+                self.assertIn(expected, row)
+                self.assertIn("logs postgres", row)
+                self.assertEqual(fake.generation_statements, [])
+                self.assertNotIn("Reached:", output)
+
+    def test_set_with_a_missing_backup_is_passed_over_and_named(self) -> None:
+        older = manifest()
+        newer = replace(older, label=LATER_SET, finished=NOW - timedelta(minutes=10), pgbackrest_label="missing-backup")
+        fake = make_host(names=(LATER_SET, LOCAL_SET), manifest_value=older)
+        fake.files[os.path.join(backupset.set_dir(newer.label), backupset.MANIFEST_NAME)] = newer.to_json()
+        code, output, errors, _ = self._run(fake)
+        self.assertEqual(code, 0, output + errors)
+        row = self._row(output, "select")
+        self.assertIn(f"set={older.label}; backup={older.pgbackrest_label}", row)
+        self.assertIn(f"set {newer.label}: the repository holds no backup {newer.pgbackrest_label}", row)
+
+    def test_rotated_secrets_use_the_live_files_and_bare_restore_keeps_its_line(self) -> None:
+        for archive_end in (True, False):
+            with self.subTest(archive_end=archive_end):
+                fake = make_host(secrets_present=False)
+                code, output, errors, _ = self._run(fake, archive_end=archive_end)
+                self.assertEqual(code, 0, output + errors)
+                line = self._row(output, "Secrets")
+                if archive_end:
+                    self.assertIn("the secrets on disk are the live box's", line)
+                    self.assertIn("carries every rotation up to the archive end", line)
+                    self.assertIn("nothing is decrypted", line)
+                    self.assertNotIn("age -d", line)
+                    lines = output.splitlines()
+                    self.assertTrue(lines[lines.index(line) + 1].startswith("Reached:"))
+                else:
+                    tarball = os.path.join(backupset.set_dir(LOCAL_SET), backupset.TARBALL_NAME)
+                    self.assertEqual(line, "Secrets: the secrets on disk are not the set's (a rebuilt box): decrypt "
+                                     "the tarball with the office's age identity: age -d -i "
+                                     f"<identity file kept off-box> {tarball} | tar -x -C /etc/gideon")
+                    self.assertNotIn("Reached:", output)
+                    for key in ("reached", "reached_lsn", "reached_segment", "archive_end", "archive_end_reached"):
+                        self.assertNotIn(key, self._detail(fake))

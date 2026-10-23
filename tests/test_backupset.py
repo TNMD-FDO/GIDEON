@@ -324,6 +324,37 @@ class InventoryParsing(unittest.TestCase):
 
 
 class ManifestContracts(unittest.TestCase):
+    def test_manifest_versions_and_store_copy_by_form(self) -> None:
+        original = manifest("20260902T120809Z", aware(12))
+        staging = Path("/example/staging")
+        set_path = staging / "sets" / original.label
+        for version, in_staging, destination in (
+            (1, False, set_path / "files" / "example-store"),
+            (2, True, staging / "example-store"),
+        ):
+            with self.subTest(version=version):
+                value = replace(original, version=version)
+                self.assertEqual(backupset.parse_manifest(value.to_json()), value)
+                self.assertEqual(json.loads(value.to_json())["version"], version)
+                self.assertEqual(value.store_in_staging, in_staging)
+                self.assertEqual(
+                    backupset.store_copy(staging, set_path, value, "example-store"),
+                    str(destination),
+                )
+        self.assertEqual(backupset.store_copy_dir(staging, "example-store"), str(staging / "example-store"))
+        for bad_version in (0, 3, True, "2"):
+            with self.subTest(version=bad_version):
+                document = json.loads(original.to_json())
+                document["version"] = bad_version
+                problem = backupset.parse_manifest(json.dumps(document))
+                self.assertIsInstance(problem, backupset.Problem)
+                assert isinstance(problem, backupset.Problem)
+                self.assertIn("version", problem.problem)
+                self.assertIn("1 or 2", problem.problem)
+                if isinstance(bad_version, int):
+                    with self.assertRaisesRegex(ValueError, "version must be 1 or 2"):
+                        replace(original, version=bad_version)
+
     def test_manifest_round_trip_is_deterministic(self) -> None:
         value = manifest("20260902T120809Z", aware(12, minute=8))
         text = value.to_json()
@@ -509,7 +540,7 @@ class ManifestContracts(unittest.TestCase):
         self.assertIsInstance(problem, backupset.Problem)
         assert isinstance(problem, backupset.Problem)
         self.assertIn("recipients", problem.problem)
-        document["version"] = 2
+        document["version"] = 3
         problem = backupset.parse_manifest(json.dumps(document))
         self.assertIsInstance(problem, backupset.Problem)
         assert isinstance(problem, backupset.Problem)

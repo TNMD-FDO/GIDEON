@@ -77,6 +77,8 @@ class BackupForms(test_restore.RenderedRestoreCase):
             ("root", restore._root_fix, "Run sudo python3 -m gideon restore --from <staging|target>, then retry."),
             ("apply", restore._apply_fix, "Run sudo python3 -m gideon apply, then retry."),
             ("set", restore._set_fix, "Run sudo python3 -m gideon backup run, then retry."),
+            ("archive fallback", restore._archive_fallback_fix, "Run sudo python3 -m gideon restore --from staging, then sudo python3 -m gideon apply, then sudo python3 -m gideon backup run --full."),
+            ("archive running", restore._archive_running_fix, "Use sudo python3 -m gideon restore --from staging --at <instant> (or omit --at) while Postgres answers. For a cluster that does not answer, stop the stack with docker compose -f /etc/gideon/rendered/compose.yaml down, then run sudo python3 -m gideon restore --from staging --archive-end."),
             ("account", restore._account_fix, "Run sudo python3 -m gideon host provision, then retry."),
             ("push", restore._push_fix, "Run sudo python3 -m gideon backup push, then retry."),
             ("stage", restore._stage_fix, "Run sudo python3 -m gideon apply, then retry."),

@@ -575,6 +575,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="<label>",
         help="restore the named staging set to its archive boundary; rollback is a restore",
     )
+    restore_target.add_argument(
+        "--archive-end",
+        action="store_true",
+        help=(
+            "replay the local archive to its end for a cluster that does not answer; "
+            "Postgres alone, every other root left in place"
+        ),
+    )
     restore.set_defaults(handler=host_cli.run_restore, command_path="restore")
 
     audit = commands.add_parser("audit", help="the append-only audit log")
