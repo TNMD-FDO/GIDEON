@@ -538,9 +538,15 @@ class PlaywrightPage:
             raise _page_error(exc) from exc
         return value if isinstance(value, str) else None
 
-    def screenshot(self, path: Path) -> None:
+    def document_height(self) -> int:
         try:
-            self._page.screenshot(path=str(path), full_page=True)
+            return self._page.evaluate("() => document.documentElement.scrollHeight")
+        except Exception as exc:
+            raise _page_error(exc) from exc
+
+    def screenshot(self, path: Path, *, full_page: bool = True) -> None:
+        try:
+            self._page.screenshot(path=str(path), full_page=full_page)
         except Exception as exc:
             raise _page_error(exc) from exc
 

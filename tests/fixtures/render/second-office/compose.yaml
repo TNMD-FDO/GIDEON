@@ -148,6 +148,7 @@ services:
       timeout: "5s"
       retries: 12
       start_period: "30s"
+    shm_size: 1073741824
     networks:
       - "gideon"
       - "internal"

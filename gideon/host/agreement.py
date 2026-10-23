@@ -6,6 +6,7 @@ import math
 import re
 from dataclasses import dataclass, fields
 from pathlib import Path
+from typing import Final
 
 from gideon.host import caselaw, report, stack, staging, worker
 from gideon.host.render.worker import (
@@ -27,6 +28,7 @@ from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
 
 COMMAND_PATH = "corpus install"
+_DISK_FULL_ERROR: Final[str] = "DiskFull"
 _COUNTS = (
     "documents", "gideon_pairs", "map_rows", "map_outside", "map_pairs",
     "agreed", "gideon_only", "map_only_seen", "map_only_missed",
@@ -229,6 +231,13 @@ def _failure_problem(
     if reason == "malformed":
         return Problem(f"agreement {table or AGREEMENT_TABLE} file is malformed",
                        _logs_fix(rendered_dir, command_path))
+    if reason == "database" and error == _DISK_FULL_ERROR:
+        return Problem(
+            f"agreement {reason} failure ({error})",
+            f"Run {stack.logs_fix(rendered_dir, 'postgres')}; "
+            "the full device may be the container's /dev/shm rather than the data disk; "
+            f"then run {install} again.",
+        )
     if reason in {"database", "local"}:
         return Problem(
             f"agreement {reason} failure ({error or 'unknown error'})",

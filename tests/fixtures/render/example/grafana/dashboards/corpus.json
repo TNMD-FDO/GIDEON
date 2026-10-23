@@ -37,6 +37,10 @@
               {
                 "id": "custom.width",
                 "value": 150
+              },
+              {
+                "id": "displayName",
+                "value": "Lockfile"
               }
             ]
           },
@@ -52,7 +56,7 @@
               },
               {
                 "id": "displayName",
-                "value": "embedding space"
+                "value": "Embedding space"
               }
             ]
           },
@@ -65,6 +69,10 @@
               {
                 "id": "custom.width",
                 "value": 70
+              },
+              {
+                "id": "displayName",
+                "value": "State"
               }
             ]
           },
@@ -77,6 +85,10 @@
               {
                 "id": "custom.width",
                 "value": 70
+              },
+              {
+                "id": "displayName",
+                "value": "Bytes"
               },
               {
                 "id": "unit",
@@ -96,7 +108,7 @@
               },
               {
                 "id": "displayName",
-                "value": "created"
+                "value": "Created"
               },
               {
                 "id": "unit",
@@ -116,7 +128,7 @@
               },
               {
                 "id": "displayName",
-                "value": "lexical built"
+                "value": "Lexical built"
               },
               {
                 "id": "unit",
@@ -136,7 +148,7 @@
               },
               {
                 "id": "displayName",
-                "value": "dense built"
+                "value": "Dense built"
               },
               {
                 "id": "unit",
@@ -156,7 +168,7 @@
               },
               {
                 "id": "displayName",
-                "value": "built"
+                "value": "Built"
               },
               {
                 "id": "unit",
@@ -176,7 +188,7 @@
               },
               {
                 "id": "displayName",
-                "value": "promoted"
+                "value": "Promoted"
               },
               {
                 "id": "unit",
@@ -233,6 +245,10 @@
               {
                 "id": "custom.width",
                 "value": 150
+              },
+              {
+                "id": "displayName",
+                "value": "Lockfile"
               }
             ]
           },
@@ -245,6 +261,10 @@
               {
                 "id": "custom.width",
                 "value": 70
+              },
+              {
+                "id": "displayName",
+                "value": "Court"
               }
             ]
           },
@@ -257,6 +277,10 @@
               {
                 "id": "custom.width",
                 "value": 90
+              },
+              {
+                "id": "displayName",
+                "value": "Status"
               }
             ]
           },
@@ -269,6 +293,10 @@
               {
                 "id": "custom.width",
                 "value": 95
+              },
+              {
+                "id": "displayName",
+                "value": "Documents"
               },
               {
                 "id": "unit",
@@ -325,6 +353,10 @@
               {
                 "id": "custom.width",
                 "value": 150
+              },
+              {
+                "id": "displayName",
+                "value": "Lockfile"
               }
             ]
           },
@@ -337,6 +369,10 @@
               {
                 "id": "custom.width",
                 "value": 70
+              },
+              {
+                "id": "displayName",
+                "value": "Court"
               }
             ]
           },
@@ -349,6 +385,10 @@
               {
                 "id": "custom.width",
                 "value": 125
+              },
+              {
+                "id": "displayName",
+                "value": "Text source"
               }
             ]
           },
@@ -361,6 +401,10 @@
               {
                 "id": "custom.width",
                 "value": 95
+              },
+              {
+                "id": "displayName",
+                "value": "Documents"
               },
               {
                 "id": "unit",
@@ -417,6 +461,10 @@
               {
                 "id": "custom.width",
                 "value": 150
+              },
+              {
+                "id": "displayName",
+                "value": "Lockfile"
               }
             ]
           },
@@ -429,6 +477,10 @@
               {
                 "id": "custom.width",
                 "value": 70
+              },
+              {
+                "id": "displayName",
+                "value": "Court"
               }
             ]
           },
@@ -441,6 +493,10 @@
               {
                 "id": "custom.width",
                 "value": 121
+              },
+              {
+                "id": "displayName",
+                "value": "Precedential"
               }
             ]
           },
@@ -453,6 +509,10 @@
               {
                 "id": "custom.width",
                 "value": 95
+              },
+              {
+                "id": "displayName",
+                "value": "Documents"
               },
               {
                 "id": "unit",
@@ -509,6 +569,10 @@
               {
                 "id": "custom.width",
                 "value": 150
+              },
+              {
+                "id": "displayName",
+                "value": "Lockfile"
               }
             ]
           },
@@ -521,6 +585,10 @@
               {
                 "id": "custom.width",
                 "value": 70
+              },
+              {
+                "id": "displayName",
+                "value": "Court"
               }
             ]
           },
@@ -533,6 +601,10 @@
               {
                 "id": "custom.width",
                 "value": 112
+              },
+              {
+                "id": "displayName",
+                "value": "Reason"
               }
             ]
           },
@@ -545,6 +617,10 @@
               {
                 "id": "custom.width",
                 "value": 95
+              },
+              {
+                "id": "displayName",
+                "value": "Documents"
               },
               {
                 "id": "unit",
@@ -601,6 +677,10 @@
               {
                 "id": "custom.width",
                 "value": 150
+              },
+              {
+                "id": "displayName",
+                "value": "Lockfile"
               }
             ]
           },
@@ -613,6 +693,10 @@
               {
                 "id": "custom.width",
                 "value": 70
+              },
+              {
+                "id": "displayName",
+                "value": "Court"
               }
             ]
           },
@@ -625,6 +709,10 @@
               {
                 "id": "custom.width",
                 "value": 70
+              },
+              {
+                "id": "displayName",
+                "value": "Staged"
               },
               {
                 "id": "unit",
@@ -643,6 +731,10 @@
                 "value": 90
               },
               {
+                "id": "displayName",
+                "value": "Recorded"
+              },
+              {
                 "id": "unit",
                 "value": "locale"
               }
@@ -657,6 +749,10 @@
               {
                 "id": "custom.width",
                 "value": 76
+              },
+              {
+                "id": "displayName",
+                "value": "Ready"
               },
               {
                 "id": "unit",
@@ -675,6 +771,10 @@
                 "value": 70
               },
               {
+                "id": "displayName",
+                "value": "Failed"
+              },
+              {
                 "id": "unit",
                 "value": "locale"
               }
@@ -689,6 +789,10 @@
               {
                 "id": "custom.width",
                 "value": 50
+              },
+              {
+                "id": "displayName",
+                "value": "Pass"
               }
             ]
           },
@@ -701,6 +805,10 @@
               {
                 "id": "custom.width",
                 "value": 90
+              },
+              {
+                "id": "displayName",
+                "value": "Anchored"
               },
               {
                 "id": "unit",
@@ -719,6 +827,10 @@
                 "value": 70
               },
               {
+                "id": "displayName",
+                "value": "Agreed"
+              },
+              {
                 "id": "unit",
                 "value": "locale"
               }
@@ -735,6 +847,10 @@
                 "value": 125
               },
               {
+                "id": "displayName",
+                "value": "GIDEON pairs"
+              },
+              {
                 "id": "unit",
                 "value": "locale"
               }
@@ -749,6 +865,10 @@
               {
                 "id": "custom.width",
                 "value": 94
+              },
+              {
+                "id": "displayName",
+                "value": "Map pairs"
               },
               {
                 "id": "unit",
@@ -788,7 +908,7 @@
     },
     {
       "id": 7,
-      "description": "This shows command and indexing times, failure details, and whether the newest report of each generation that is not retired covers a whole build. Large run or indexing times can mean slow work; a failed stage names where it stopped. lifecycle is the span from creation to built, including gaps between commands, and is never a build duration. Follow docs/runbooks/observability.md §3.",
+      "description": "This shows command and indexing times, failure details, and whether the newest report of each generation that is not retired covers a whole build. Large run or indexing times can mean slow work; a failed stage names where it stopped. Lifecycle is the span from creation to built, including gaps between commands, and is never a build duration. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "postgres",
         "uid": "gideon-rows"
@@ -805,6 +925,10 @@
               {
                 "id": "custom.width",
                 "value": 150
+              },
+              {
+                "id": "displayName",
+                "value": "Lockfile"
               }
             ]
           },
@@ -820,7 +944,7 @@
               },
               {
                 "id": "displayName",
-                "value": "embedding space"
+                "value": "Embedding space"
               }
             ]
           },
@@ -833,6 +957,10 @@
               {
                 "id": "custom.width",
                 "value": 136
+              },
+              {
+                "id": "displayName",
+                "value": "Reported"
               },
               {
                 "id": "unit",
@@ -852,7 +980,7 @@
               },
               {
                 "id": "displayName",
-                "value": "stage"
+                "value": "Stage"
               }
             ]
           },
@@ -868,7 +996,7 @@
               },
               {
                 "id": "displayName",
-                "value": "reason"
+                "value": "Reason"
               }
             ]
           },
@@ -884,11 +1012,11 @@
               },
               {
                 "id": "displayName",
-                "value": "run"
+                "value": "Run"
               },
               {
                 "id": "unit",
-                "value": "s"
+                "value": "dthms"
               }
             ]
           },
@@ -904,11 +1032,11 @@
               },
               {
                 "id": "displayName",
-                "value": "lexical"
+                "value": "Lexical"
               },
               {
                 "id": "unit",
-                "value": "s"
+                "value": "dthms"
               }
             ]
           },
@@ -924,11 +1052,11 @@
               },
               {
                 "id": "displayName",
-                "value": "dense"
+                "value": "Dense"
               },
               {
                 "id": "unit",
-                "value": "s"
+                "value": "dthms"
               }
             ]
           },
@@ -944,11 +1072,11 @@
               },
               {
                 "id": "displayName",
-                "value": "lifecycle"
+                "value": "Lifecycle"
               },
               {
                 "id": "unit",
-                "value": "s"
+                "value": "dthms"
               }
             ]
           },
@@ -961,6 +1089,10 @@
               {
                 "id": "custom.width",
                 "value": 112
+              },
+              {
+                "id": "displayName",
+                "value": "Whole build"
               }
             ]
           }
@@ -996,7 +1128,7 @@
     },
     {
       "id": 8,
-      "description": "This shows recorded dense indexing progress for each generation that is not retired. written is copied plus embedded, and tokens/s is tokens divided by recorded seconds; missing keys and a rate without positive seconds remain blank. A growing waiting queue with counts that stop advancing can mean a stalled build. Follow docs/runbooks/observability.md §3.",
+      "description": "This shows recorded dense indexing progress for each generation that is not retired. Written is Copied plus Embedded, and Tokens/s is Tokens divided by the seconds of the Embedding column; missing keys and a rate without positive seconds remain blank. A growing waiting queue with counts that stop advancing can mean a stalled build. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "postgres",
         "uid": "gideon-rows"
@@ -1013,6 +1145,10 @@
               {
                 "id": "custom.width",
                 "value": 150
+              },
+              {
+                "id": "displayName",
+                "value": "Lockfile"
               }
             ]
           },
@@ -1028,7 +1164,7 @@
               },
               {
                 "id": "displayName",
-                "value": "embedding space"
+                "value": "Embedding space"
               }
             ]
           },
@@ -1041,6 +1177,14 @@
               {
                 "id": "custom.width",
                 "value": 72
+              },
+              {
+                "id": "displayName",
+                "value": "Scope"
+              },
+              {
+                "id": "unit",
+                "value": "count:"
               }
             ]
           },
@@ -1053,6 +1197,14 @@
               {
                 "id": "custom.width",
                 "value": 76
+              },
+              {
+                "id": "displayName",
+                "value": "Written"
+              },
+              {
+                "id": "unit",
+                "value": "count:"
               }
             ]
           },
@@ -1065,6 +1217,14 @@
               {
                 "id": "custom.width",
                 "value": 76
+              },
+              {
+                "id": "displayName",
+                "value": "Present"
+              },
+              {
+                "id": "unit",
+                "value": "count:"
               }
             ]
           },
@@ -1077,6 +1237,14 @@
               {
                 "id": "custom.width",
                 "value": 72
+              },
+              {
+                "id": "displayName",
+                "value": "Copied"
+              },
+              {
+                "id": "unit",
+                "value": "count:"
               }
             ]
           },
@@ -1089,6 +1257,14 @@
               {
                 "id": "custom.width",
                 "value": 85
+              },
+              {
+                "id": "displayName",
+                "value": "Embedded"
+              },
+              {
+                "id": "unit",
+                "value": "count:"
               }
             ]
           },
@@ -1101,6 +1277,14 @@
               {
                 "id": "custom.width",
                 "value": 90
+              },
+              {
+                "id": "displayName",
+                "value": "Tokens"
+              },
+              {
+                "id": "unit",
+                "value": "count:"
               }
             ]
           },
@@ -1113,6 +1297,14 @@
               {
                 "id": "custom.width",
                 "value": 85
+              },
+              {
+                "id": "displayName",
+                "value": "Requests"
+              },
+              {
+                "id": "unit",
+                "value": "count:"
               }
             ]
           },
@@ -1124,11 +1316,15 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 80
+                "value": 94
+              },
+              {
+                "id": "displayName",
+                "value": "Embedding"
               },
               {
                 "id": "unit",
-                "value": "s"
+                "value": "dthms"
               }
             ]
           },
@@ -1141,6 +1337,14 @@
               {
                 "id": "custom.width",
                 "value": 76
+              },
+              {
+                "id": "displayName",
+                "value": "Indexed"
+              },
+              {
+                "id": "unit",
+                "value": "count:"
               }
             ]
           },
@@ -1156,11 +1360,11 @@
               },
               {
                 "id": "displayName",
-                "value": "tokens/s"
+                "value": "Tokens/s"
               },
               {
                 "id": "unit",
-                "value": "short"
+                "value": "count:"
               }
             ]
           }
@@ -1964,7 +2168,11 @@
             "properties": [
               {
                 "id": "unit",
-                "value": "s"
+                "value": "dtdurations"
+              },
+              {
+                "id": "decimals",
+                "value": 1
               }
             ]
           }
@@ -2010,7 +2218,11 @@
         },
         "colorMode": "none",
         "graphMode": "none",
-        "textMode": "value_and_name"
+        "textMode": "value_and_name",
+        "text": {
+          "titleSize": 14,
+          "valueSize": 28
+        }
       }
     }
   ],

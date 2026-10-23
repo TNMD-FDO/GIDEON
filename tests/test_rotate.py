@@ -209,6 +209,13 @@ SYSTEMCTL_ENABLE_UPSTREAM_WATCH = (
     "systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-upstream-watch.timer",
 )
 SYSTEMCTL_ACTIVE_UPSTREAM_WATCH = ("systemctl", "is-active", "gideon-upstream-watch.timer")
+SYSTEMCTL_LINK_RETENTION_SWEEP = (
+    "systemctl", "link", f"{RENDERED}/systemd/gideon-retention-sweep.service",
+)
+SYSTEMCTL_ENABLE_RETENTION_SWEEP = (
+    "systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-retention-sweep.timer",
+)
+SYSTEMCTL_ACTIVE_RETENTION_SWEEP = ("systemctl", "is-active", "gideon-retention-sweep.timer")
 CERT = CERT_PATH
 HANDSHAKE = (
     "openssl",
@@ -662,6 +669,9 @@ def healthy_commands(
         SYSTEMCTL_LINK_UPSTREAM_WATCH: done(SYSTEMCTL_LINK_UPSTREAM_WATCH),
         SYSTEMCTL_ENABLE_UPSTREAM_WATCH: done(SYSTEMCTL_ENABLE_UPSTREAM_WATCH),
         SYSTEMCTL_ACTIVE_UPSTREAM_WATCH: done(SYSTEMCTL_ACTIVE_UPSTREAM_WATCH, stdout="active\n"),
+        SYSTEMCTL_LINK_RETENTION_SWEEP: done(SYSTEMCTL_LINK_RETENTION_SWEEP),
+        SYSTEMCTL_ENABLE_RETENTION_SWEEP: done(SYSTEMCTL_ENABLE_RETENTION_SWEEP),
+        SYSTEMCTL_ACTIVE_RETENTION_SWEEP: done(SYSTEMCTL_ACTIVE_RETENTION_SWEEP, stdout="active\n"),
         PS: done(PS, stdout=running_rows(render_inputs=render_inputs)),
         **healthy_ingress(),
     }
@@ -881,6 +891,9 @@ class EngineRotation(RealStack):
         self.assertIn(SYSTEMCTL_LINK_UPSTREAM_WATCH, calls)
         self.assertIn(SYSTEMCTL_ENABLE_UPSTREAM_WATCH, calls)
         self.assertIn(SYSTEMCTL_ACTIVE_UPSTREAM_WATCH, calls)
+        self.assertLess(calls.index(SYSTEMCTL_LINK_UPSTREAM_WATCH), calls.index(SYSTEMCTL_LINK_RETENTION_SWEEP))
+        self.assertLess(calls.index(SYSTEMCTL_LINK_RETENTION_SWEEP), calls.index(SYSTEMCTL_ENABLE_RETENTION_SWEEP))
+        self.assertLess(calls.index(SYSTEMCTL_ENABLE_RETENTION_SWEEP), calls.index(SYSTEMCTL_ACTIVE_RETENTION_SWEEP))
         self.assertEqual(calls.count(force_recreate(ENGINE_SERVICE_NAME)), 1)
         self.assertEqual(calls.count(force_recreate(API_SERVICE_NAME)), 1)
         self.assertEqual(calls.count(force_recreate("open-webui")), 0)

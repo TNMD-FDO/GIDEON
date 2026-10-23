@@ -214,6 +214,8 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         ProposalsTallyTimerArtifact,
         ReconcileServiceArtifact,
         ReconcileTimerArtifact,
+        RetentionSweepServiceArtifact,
+        RetentionSweepTimerArtifact,
         UpstreamWatchServiceArtifact,
         UpstreamWatchTimerArtifact,
         VerifyServiceArtifact,
@@ -268,6 +270,8 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         ProposalsTallyTimerArtifact(),
         UpstreamWatchServiceArtifact(),
         UpstreamWatchTimerArtifact(),
+        RetentionSweepServiceArtifact(),
+        RetentionSweepTimerArtifact(),
         DcgmCountersArtifact,
     )
 

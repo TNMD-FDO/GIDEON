@@ -1,6 +1,7 @@
 """Compose definition for postgres."""
 
 from collections.abc import Mapping
+from typing import Final
 
 from gideon.host.images import RegistryTarget, reference
 from gideon.host.render import RenderInputs
@@ -22,6 +23,9 @@ POSTGRES_HEALTHCHECK: Mapping[str, object] = {
     "retries": 12,
     "start_period": "30s",
 }
+# Docker's default 64 MB /dev/shm cannot hold a parallel plan's dynamic
+# shared memory. The drill shares this; the sibling inherits it.
+POSTGRES_SHM_SIZE_BYTES: Final[int] = 1 << 30
 
 
 class PostgresService(ServiceDefinition):
@@ -57,5 +61,6 @@ class PostgresService(ServiceDefinition):
             ],
             "secrets": ["postgres_superuser_password"],
             "healthcheck": dict(POSTGRES_HEALTHCHECK),
+            "shm_size": POSTGRES_SHM_SIZE_BYTES,
             "networks": ["gideon", INTERNAL_NETWORK_NAME],
         }

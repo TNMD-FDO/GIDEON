@@ -15,7 +15,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "ba9d4772e07498d15eef2b6ed2c8eb577177c5303d1a5eaddcf05c7809cebe81"
+    sha256: "7551c68b9ffc64302b6c2c93a9a937e69620b788b2aec07eb62a88a89747e98e"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -79,7 +79,7 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/corpus.json":
-    sha256: "636d24c7e5bbc07f6e186a43ac264e611ece451bac174a7aa56d3489bb7427fa"
+    sha256: "d029b752c0dc7d0659e17970f8f8cefc89d58377dbc46ac6d6071295c9050a64"
     mode: "0644"
     owners:
       - "grafana"
@@ -200,12 +200,20 @@ files:
     sha256: "0db0a8ee6fb0840167a07e04773b4180507b67e99392442d0269e8e5c4068b67"
     mode: "0644"
     owners: []
+  "systemd/gideon-retention-sweep.service":
+    sha256: "71497e83729ccc6c7badb2e8db3d208daf927497d5ff03bc738eec91c64b5fe7"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-retention-sweep.timer":
+    sha256: "56b6320b414afe18f65e280874ca4e0f150fce417e96b57d66dee422526564d6"
+    mode: "0644"
+    owners: []
 services:
   caddy: "86b607a02fc284aad98149418e2c5dca70fb57282377143a35ceb8ad09ae3cc8"
   prometheus: "1f72219e9341fcba75e1c0e24a9a5d7cc8298860f8d3bc13a2f01bd41f86a689"
   node-exporter: "8612faaf00b45f47987af313bf79e1df2336243ee6bc9f6eeb2bcaf6f7071e2e"
   grafana: "d960c1ceaa6a77defd2669c758bfc3e67f1be3b94a959adf04daaa72985c0cb2"
-  postgres: "3a9087c68e7c534f00aeec7b032e8dbcb5bad751cc1ff72e9a97629e1da47306"
+  postgres: "22a8e8b30a6d9eaabbee5c36f326b8860b0a06ee3d5ee1d6c95d9aca13fb059f"
   qdrant: "30030653744c6091cd90a6481d358924b2c1eb8e76f86d54f1f6c1d633b61b83"
   opensearch: "27498b570276390bbfcbe9a50dcce211b44b364fec9c7dbf145cab517f4e41a6"
   open-webui: "d9d3e04a06aa6f753b02b0668d95612baad66ae91fa8d206be61d3904e3f0437"

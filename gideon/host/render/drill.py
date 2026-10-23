@@ -10,6 +10,7 @@ from gideon.host.render.compose import (
     OWUI_ENV_FILE,
     OWUI_HEALTHCHECK,
     POSTGRES_HEALTHCHECK,
+    POSTGRES_SHM_SIZE_BYTES,
     image_pin,
     memory_limit_bytes,
 )
@@ -58,6 +59,7 @@ def drill_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
                 ],
                 "secrets": ["postgres_superuser_password"],
                 "healthcheck": dict(POSTGRES_HEALTHCHECK),
+                "shm_size": POSTGRES_SHM_SIZE_BYTES,
                 "networks": ["gideon"],
                 "mem_limit": memory_limit_bytes(inputs.profile, "postgres"),
             },

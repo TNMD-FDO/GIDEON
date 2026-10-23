@@ -6,7 +6,7 @@ import unittest
 from collections.abc import Mapping
 from pathlib import Path
 
-from gideon.host import agreement, report, staging, worker
+from gideon.host import agreement, report, stack, staging, worker
 from gideon.host.render import worker as identity
 from gideon.host.sysio import Command, PathLike, RealHost
 
@@ -225,6 +225,33 @@ class AgreementHost(unittest.TestCase):
         assert isinstance(result, agreement.AgreementRead)
         assert result.failure is not None
         self.assertIn("opinions", result.failure.problem)
+
+    def test_database_disk_full_fix_and_neighbouring_failures(self) -> None:
+        self.host.status = "failed"
+        for reason, error in (
+            ("database", "DiskFull"), ("local", "DiskFull"),
+            ("database", "OperationalError"),
+        ):
+            with self.subTest(reason=reason, error=error):
+                self.host.files[self.failure_path] = json.dumps({
+                    **failure(reason), "error": error,
+                })
+                result = self.read()
+                assert isinstance(result, agreement.AgreementRead)
+                self.assertEqual(result.reason, reason)
+                self.assertFalse(result.done)
+                assert result.failure is not None
+                self.assertEqual(result.failure.problem, f"agreement {reason} failure ({error})")
+                self.assertIn(report.command("corpus install"), result.failure.fix)
+                if reason == "database" and error == "DiskFull":
+                    self.assertIn(stack.logs_fix(RENDERED, "postgres"), result.failure.fix)
+                    self.assertIn("logs postgres", result.failure.fix)
+                    self.assertIn("/dev/shm", result.failure.fix)
+                    self.assertNotIn("host provision", result.failure.fix)
+                else:
+                    self.assertIn(report.command("host provision"), result.failure.fix)
+                    self.assertIn(report.command("apply"), result.failure.fix)
+                    self.assertNotIn("/dev/shm", result.failure.fix)
 
     def test_terminal_without_this_jobs_failure_is_local(self) -> None:
         for status in ("failed", "aborted", "cancelled"):

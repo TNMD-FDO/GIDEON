@@ -208,6 +208,7 @@ class FakePage:
         open_rows: set[str] | None = None,
         unopenable_rows: set[str] | None = None,
         grid_widths: Mapping[str, tuple[int, int]] | None = None,
+        document_heights: Mapping[str, int] | None = None,
     ) -> None:
         self.host = host
         self.password = password
@@ -220,6 +221,7 @@ class FakePage:
         self.open_rows = open_rows or set()
         self.unopenable_rows = unopenable_rows or set()
         self.grid_widths = grid_widths or {}
+        self.document_heights = document_heights or {}
         self.default_panels = panels
         self.current_url = ""
         self.tooltip = ""
@@ -230,6 +232,7 @@ class FakePage:
         self.click_selectors: list[str] = []
         self.count_selectors: list[str] = []
         self.resizes: list[tuple[int, int]] = []
+        self.screenshot_full_pages: list[bool] = []
         self.sleep_count = 0
         self.closed = False
         self.values: dict[str, str] = {}
@@ -353,8 +356,14 @@ class FakePage:
         self.events.append("resize")
         self.resizes.append((width, height))
 
-    def screenshot(self, path: Path) -> None:
+    def document_height(self) -> int:
+        self.events.append("document height")
+        uid = unquote(urlsplit(self.current_url).path.split("/d/", 1)[1])
+        return self.document_heights.get(uid, self.resizes[-1][1])
+
+    def screenshot(self, path: Path, *, full_page: bool) -> None:
         self.events.append("screenshot")
+        self.screenshot_full_pages.append(full_page)
         self.host.write_text(path, "fictitious image")
 
     def wait_until(self, predicate: object, timeout_seconds: float) -> bool:
@@ -364,6 +373,7 @@ class FakePage:
 
     def sleep(self, seconds: float) -> None:
         assert seconds > 0
+        self.events.append("sleep")
         self.sleep_count += 1
 
 
@@ -828,13 +838,25 @@ class BoardRows(unittest.TestCase):
         self.assertIn("summary: refuse", stdout)
 
     def test_screenshot_precedes_tooltip_hover(self) -> None:
-        _, _, _, _, browser_page = self.run_board(
-            [("Broken", "timeseries")],
-            [("Broken", "error", page.NO_DATA_TEXT)],
-        )
-        self.assertLess(
-            browser_page.events.index("screenshot"), browser_page.events.index("hover")
-        )
+        for width in (390, page.VIEWPORT_WIDTH):
+            with self.subTest(width=width):
+                host = FakeHost(
+                    board_document("example-board", [("Broken", "timeseries")])
+                )
+                browser_page = FakePage(
+                    host, [("Broken", "error", page.NO_DATA_TEXT)],
+                    document_heights={"example-board": page.VIEWPORT_FLOOR + 100},
+                )
+                code, _, stderr = self.invoke(
+                    host, browser_page,
+                    argv=["--out", str(OUTPUT), "--width", str(width)],
+                )
+                self.assertEqual(code, 1)
+                self.assertEqual(stderr, "")
+                self.assertLess(
+                    browser_page.events.index("screenshot"),
+                    browser_page.events.index("hover"),
+                )
 
     def test_sign_in_attempts_form_once_after_failure(self) -> None:
         host = FakeHost(board_document("example-board", [("Figure", "timeseries")]))
@@ -1447,6 +1469,9 @@ class BoardRows(unittest.TestCase):
         self.assertEqual(
             browser_page.resizes, [(page.VIEWPORT_WIDTH, page.VIEWPORT_FLOOR)]
         )
+        self.assertNotIn("document height", browser_page.events)
+        self.assertEqual(browser_page.screenshot_full_pages, [True])
+        self.assertNotIn("px tall", stdout)
 
         document["panels"][0]["gridPos"].update({"y": 44, "h": 7})
         host = FakeHost(json.dumps(document))
@@ -1462,6 +1487,8 @@ class BoardRows(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertEqual(browser_page.resizes, [(page.VIEWPORT_WIDTH, expected_height)])
+        self.assertNotIn("document height", browser_page.events)
+        self.assertEqual(browser_page.screenshot_full_pages, [True])
         self.assertLess(
             browser_page.events.index("resize"), browser_page.events.index("goto", 1)
         )
@@ -1493,10 +1520,13 @@ class BoardRows(unittest.TestCase):
                 self.assertEqual(code, 0 if mounted else 1)
                 self.assertEqual(stderr, "")
                 self.assertEqual(browser_page.resizes, [(1280, expected_height)])
+                self.assertNotIn("document height", browser_page.events)
+                self.assertEqual(browser_page.screenshot_full_pages, [True])
                 browser_row = next(row for row in stdout.splitlines() if row.startswith("browser:"))
                 board_row = next(row for row in stdout.splitlines() if row.startswith("board:"))
                 self.assertIn("viewport 1280 px", browser_row)
                 self.assertIn("screenshot example-board.png at 1280 px", board_row)
+                self.assertNotIn("px tall", board_row)
                 if not mounted:
                     self.assertIn("no expected panel mounted", board_row)
                 self.assertLess(
@@ -1544,6 +1574,16 @@ class BoardRows(unittest.TestCase):
                     + page.VIEWPORT_ALLOWANCE,
                 )
                 self.assertEqual(browser_page.resizes, [(width, expected_height)])
+                stacked_capture = width < page.STACK_BREAKPOINT_WIDTH
+                self.assertEqual(browser_page.screenshot_full_pages, [not stacked_capture])
+                self.assertEqual(
+                    browser_page.events.count("document height"), int(stacked_capture)
+                )
+                board_row = next(row for row in stdout.splitlines() if row.startswith("board:"))
+                capture_detail = f"screenshot example-board.png at {width} px"
+                if stacked_capture:
+                    capture_detail += f", {expected_height} px tall"
+                self.assertTrue(board_row.endswith(capture_detail))
                 self.assertIn("Host load: drawn", stdout)
                 self.assertEqual(browser_page.events.count("row click"), 1)
                 self.assertLess(
@@ -1554,12 +1594,142 @@ class BoardRows(unittest.TestCase):
     def test_narrow_viewport_keeps_height_floor(self) -> None:
         host = FakeHost(board_document("example-board", [("Figure", "stat")]))
         browser_page = FakePage(host, [("Figure", "drawn", "42")])
-        code, _, stderr = self.invoke(
+        code, stdout, stderr = self.invoke(
             host, browser_page, argv=["--out", str(OUTPUT), "--width", "390"]
         )
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
         self.assertEqual(browser_page.resizes, [(390, page.VIEWPORT_FLOOR)])
+        self.assertEqual(browser_page.screenshot_full_pages, [False])
+        self.assertIn(
+            f"screenshot example-board.png at 390 px, {page.VIEWPORT_FLOOR} px tall",
+            stdout,
+        )
+
+    def test_narrow_capture_grows_to_document_and_settles_new_panels(self) -> None:
+        document = json.loads(
+            board_document(
+                "example-board", [("First", "timeseries"), ("Below", "timeseries")]
+            )
+        )
+        host = FakeHost(json.dumps(document))
+        document_heights = {"example-board": page.VIEWPORT_FLOOR + 1000}
+        browser_page = FakePage(
+            host, [("First", "drawn", "12 points")],
+            document_heights=document_heights,
+        )
+        resize = browser_page.resize
+
+        def mount_after_correction(width: int, height: int) -> None:
+            resize(width, height)
+            if height == document_heights["example-board"]:
+                browser_page._add_panels([("Below", "drawn", "12 points")])
+
+        with patch.object(browser_page, "resize", side_effect=mount_after_correction):
+            code, stdout, stderr = self.invoke(
+                host, browser_page, argv=["--out", str(OUTPUT), "--width", "390"]
+            )
+        first_height = max(
+            page.VIEWPORT_FLOOR,
+            sum(panel["gridPos"]["h"] for panel in document["panels"])
+            * (page.GRID_CELL_HEIGHT + page.GRID_CELL_MARGIN)
+            + page.VIEWPORT_ALLOWANCE,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            browser_page.resizes,
+            [(390, first_height), (390, document_heights["example-board"])],
+        )
+        first_settle_sleeps = page.SETTLE_SECONDS // page.SETTLE_INTERVAL_SECONDS
+        self.assertEqual(browser_page.sleep_count, first_settle_sleeps + 1)
+        height_read = browser_page.events.index("document height")
+        self.assertEqual(browser_page.events[:height_read].count("sleep"), first_settle_sleeps)
+        self.assertEqual(
+            browser_page.events[height_read:],
+            ["document height", "resize", "sleep", "screenshot"],
+        )
+        self.assertEqual(browser_page.screenshot_full_pages, [False])
+        self.assertIn("panel: ok — example-board: Below: drawn", stdout)
+        self.assertIn(
+            f"screenshot example-board.png at 390 px, {document_heights['example-board']} px tall",
+            stdout,
+        )
+        self.assertIn(str(OUTPUT / "example-board.png"), host.files)
+
+    def test_narrow_document_equal_to_viewport_needs_one_resize(self) -> None:
+        host = FakeHost(board_document("example-board", [("Figure", "stat")]))
+        document_heights = {"example-board": page.VIEWPORT_FLOOR}
+        browser_page = FakePage(
+            host, [("Figure", "drawn", "42")], document_heights=document_heights,
+        )
+        code, stdout, stderr = self.invoke(
+            host, browser_page, argv=["--out", str(OUTPUT), "--width", "390"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(browser_page.resizes, [(390, document_heights["example-board"])])
+        self.assertEqual(browser_page.sleep_count, 1)
+        self.assertEqual(browser_page.screenshot_full_pages, [False])
+        self.assertEqual(browser_page.events.count("document height"), 1)
+        self.assertEqual(browser_page.events[-3:], ["sleep", "document height", "screenshot"])
+        self.assertIn(
+            f"screenshot example-board.png at 390 px, {document_heights['example-board']} px tall",
+            stdout,
+        )
+
+    def test_desktop_capture_is_full_page_without_document_read(self) -> None:
+        for width in (page.STACK_BREAKPOINT_WIDTH, page.VIEWPORT_WIDTH):
+            with self.subTest(width=width):
+                host = FakeHost(board_document("example-board", [("Figure", "stat")]))
+                browser_page = FakePage(
+                    host, [("Figure", "drawn", "42")],
+                    document_heights={"example-board": page.VIEWPORT_FLOOR + 1000},
+                )
+                code, stdout, stderr = self.invoke(
+                    host, browser_page,
+                    argv=["--out", str(OUTPUT), "--width", str(width)],
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(stderr, "")
+                self.assertEqual(browser_page.resizes, [(width, page.VIEWPORT_FLOOR)])
+                self.assertNotIn("document height", browser_page.events)
+                self.assertEqual(browser_page.screenshot_full_pages, [True])
+                board_row = next(row for row in stdout.splitlines() if row.startswith("board:"))
+                self.assertTrue(board_row.endswith(f"screenshot example-board.png at {width} px"))
+
+    def test_document_height_failure_refuses_board_and_continues(self) -> None:
+        first_uid, second_uid = "first-board", "second-board"
+        host = FakeHost(board_document(first_uid, [("Figure", "timeseries")]))
+        host.files[str(DASHBOARD_PATHS[1])] = board_document(
+            second_uid, [("Figure", "timeseries")]
+        )
+        browser_page = FakePage(host, [("Figure", "drawn", "12 points")])
+        read_height = browser_page.document_height
+
+        def document_height() -> int:
+            height = read_height()
+            if urlsplit(browser_page.current_url).path.endswith(f"/d/{first_uid}"):
+                raise PageError(f"fictitious document read failure with {PASSWORD}")
+            return height
+
+        with patch.object(browser_page, "document_height", side_effect=document_height):
+            code, stdout, stderr = self.invoke(
+                host, browser_page, argv=["--out", str(OUTPUT), "--width", "390"]
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, "")
+        refusal = next(row for row in stdout.splitlines() if row.startswith("board: refuse"))
+        self.assertIn(f"{first_uid}: Grafana board could not be read", refusal)
+        self.assertIn("Fix: Check the Grafana ingress and browser request log, then retry.", refusal)
+        self.assertIn(f"panel: ok — {second_uid}: Figure: drawn", stdout)
+        self.assertIn(f"board: ok — {second_uid}", stdout)
+        self.assertLess(stdout.index(refusal), stdout.index(f"board: ok — {second_uid}"))
+        self.assertEqual(browser_page.events.count("document height"), 2)
+        self.assertEqual(browser_page.screenshot_full_pages, [False])
+        self.assertNotIn(str(OUTPUT / f"{first_uid}.png"), host.files)
+        self.assertIn(str(OUTPUT / f"{second_uid}.png"), host.files)
+        self.assertNotIn(PASSWORD, stdout + stderr)
 
     def test_quoted_title_is_escaped_in_panel_selector(self) -> None:
         title = 'A "quoted" title'

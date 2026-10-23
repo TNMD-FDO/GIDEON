@@ -80,7 +80,6 @@ _LANDING: Final = {
     "host gpu": "the escape hatch, pulled only on eval evidence of reranker latency during bulk embedding",
     "registry gc": "in the recorded command surface, no slice scheduled",
     "audit query": "in the recorded command surface, no slice scheduled",
-    "retention sweep": "lands in slice 6 (v0.7.0)",
 }
 
 
@@ -592,9 +591,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     retention = commands.add_parser("retention", help="retention sweeps")
     retention_sub = retention.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
-    _stub_parser(
-        retention_sub, "sweep", "retention sweep", "expire chats, uploads, partitions"
+    sweep = retention_sub.add_parser(
+        "sweep",
+        help="delete expired chats, their uploads, and feedback rows",
+        description=(
+            "Delete chats idle past the office's retention, the files their messages name, "
+            "and feedback rows past that interval or left on a swept chat. "
+            "Write one audit row per swept chat. "
+            "Bindings, index points, reference counts, the uploads-root walk, "
+            "the files of a chat its user deleted, and the partition drop remain for slice 6."
+        ),
     )
+    sweep.set_defaults(handler=host_cli.run_retention_sweep, command_path="retention sweep")
 
     alerts = commands.add_parser("alerts", help="alerting")
     alerts_sub = alerts.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)

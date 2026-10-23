@@ -66,6 +66,7 @@ from gideon.host.render.compose import (
     INTERNAL_NETWORK_NAME,
     NETWORK_NAME,
     OWUI_COMMAND,
+    POSTGRES_SHM_SIZE_BYTES,
     PROJECT_NAME,
     UNIT_PATTERN,
     ComposeArtifact,
@@ -470,6 +471,8 @@ class Registry(unittest.TestCase):
                 "systemd/gideon-proposals-tally.timer",
                 "systemd/gideon-upstream-watch.service",
                 "systemd/gideon-upstream-watch.timer",
+                "systemd/gideon-retention-sweep.service",
+                "systemd/gideon-retention-sweep.timer",
                 DCGM_COUNTERS_PATH,
             ],
         )
@@ -634,6 +637,29 @@ class Compose(unittest.TestCase):
                 self.assertEqual(command[:2], ["bash", "start.sh"])
                 self.assertEqual(command[2:6], ["--workers", "1", "--ws-per-message-deflate", "true"])
                 self.assertEqual(command[-1], "--no-access-log")
+
+    def test_only_postgres_has_shared_memory_in_production_and_drill(self) -> None:
+        documents = [
+            (name, yaml.safe_load(ComposeArtifact().emit(
+                inputs(site_path, no_gpu=no_gpu, build_box=build_box)
+            )))
+            for name, site_path, no_gpu, build_box in FIXTURE_CASES
+        ]
+        documents.append(("drill", drill_compose_document(inputs())))
+        for name, document in documents:
+            services = document["services"]
+            assert isinstance(services, Mapping)
+            for service, block in services.items():
+                with self.subTest(document=name, service=service):
+                    assert isinstance(block, Mapping)
+                    if service == "postgres":
+                        self.assertIs(type(block["shm_size"]), int)
+                        self.assertEqual(block["shm_size"], POSTGRES_SHM_SIZE_BYTES)
+                        self.assertLess(
+                            list(block).index("shm_size"), list(block).index("mem_limit")
+                        )
+                    else:
+                        self.assertNotIn("shm_size", block)
 
     def test_no_gpu_omits_dcgm_but_gpu_hosts_keep_it(self) -> None:
         self.assertIn("dcgm-exporter", service_names(inputs()))
@@ -1374,6 +1400,48 @@ class Core(unittest.TestCase):
                 self.assertIn("Persistent=true", timer)
                 self.assertIn("WantedBy=timers.target", timer)
 
+    def test_retention_sweep_units_are_zoned_bounded_and_persistent_on_every_host_kind(self) -> None:
+        self.assertEqual(systemd.RETENTION_SWEEP_CALENDAR, "*-*-* 02:00:00")
+        self.assertGreater(systemd.RETENTION_SWEEP_TIMEOUT_START_SECONDS, 0)
+        for name, site_path, no_gpu, build_box in FIXTURE_CASES:
+            with self.subTest(host=name):
+                rendered_inputs = inputs(
+                    site_path, no_gpu=no_gpu, build_box=build_box, checkout="/srv/gideon"
+                )
+                rendered = render_all(rendered_inputs)
+                service_file = rendered.by_path["systemd/gideon-retention-sweep.service"]
+                timer_file = rendered.by_path["systemd/gideon-retention-sweep.timer"]
+                service, timer = service_file.content, timer_file.content
+                self.assertIn("Requires=docker.service", service)
+                self.assertIn("After=docker.service network-online.target", service)
+                self.assertIn("Wants=network-online.target", service)
+                self.assertIn("Type=oneshot", service)
+                self.assertIn("WorkingDirectory=/srv/gideon", service)
+                self.assertEqual(
+                    [line for line in service.splitlines() if line.startswith("ExecStart=")],
+                    ["ExecStart=/usr/bin/python3 -m gideon retention sweep"],
+                )
+                self.assertIn(
+                    f"TimeoutStartSec={systemd.RETENTION_SWEEP_TIMEOUT_START_SECONDS}", service
+                )
+                self.assertIn("StandardOutput=journal", service)
+                self.assertIn("StandardError=journal", service)
+                self.assertIn(
+                    f"OnCalendar={systemd.RETENTION_SWEEP_CALENDAR} "
+                    f"{rendered_inputs.site.office.timezone}", timer,
+                )
+                self.assertIn("Persistent=true", timer)
+                self.assertIn("WantedBy=timers.target", timer)
+                for unit in (service_file, timer_file):
+                    self.assertEqual(unit.owners, ())
+                    self.assertEqual(unit.mode, 0o644)
+                    self.assertFalse(unit.secret)
+                    self.assertNotIn("--force", unit.content)
+                    self.assertNotIn("password", unit.content.lower())
+                    self.assertNotIn(str(secrets.current_directory()), unit.content)
+                    for value in rendered_inputs.secrets.values():
+                        self.assertNotIn(value, unit.content)
+
     def test_no_rendered_unit_starts_a_corpus_act(self) -> None:
         forbidden = ("corpus cut", "corpus install", "index build", "index promote")
         for name, site_path, no_gpu, build_box in FIXTURE_CASES:
@@ -1476,6 +1544,8 @@ class Core(unittest.TestCase):
                 "systemd/gideon-proposals-tally.timer",
                 "systemd/gideon-upstream-watch.service",
                 "systemd/gideon-upstream-watch.timer",
+                "systemd/gideon-retention-sweep.service",
+                "systemd/gideon-retention-sweep.timer",
                 DCGM_COUNTERS_PATH,
             },
         )

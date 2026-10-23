@@ -20,6 +20,8 @@ _PROPOSALS_TALLY_SERVICE_TEMPLATE = "systemd/gideon-proposals-tally.service.tmpl
 _PROPOSALS_TALLY_TIMER_TEMPLATE = "systemd/gideon-proposals-tally.timer.tmpl"
 _UPSTREAM_WATCH_SERVICE_TEMPLATE = "systemd/gideon-upstream-watch.service.tmpl"
 _UPSTREAM_WATCH_TIMER_TEMPLATE = "systemd/gideon-upstream-watch.timer.tmpl"
+_RETENTION_SWEEP_SERVICE_TEMPLATE = "systemd/gideon-retention-sweep.service.tmpl"
+_RETENTION_SWEEP_TIMER_TEMPLATE = "systemd/gideon-retention-sweep.timer.tmpl"
 
 RECONCILE_CALENDAR: Final = "*-*-* 03:00:00"
 BACKUP_CALENDAR: Final = "*-*-* 01:00:00"
@@ -32,6 +34,12 @@ NIGHTLY_CALENDAR: Final = "*-*-* 21:00:00"
 PROPOSALS_TALLY_CALENDAR: Final = "*-*-* 07:00:00"
 # Before the 07:00 tally, so a dump seen Monday morning reaches that morning's nudge.
 UPSTREAM_WATCH_CALENDAR: Final = "Mon *-*-* 06:30:00"
+# The nightly expiry hour; it shares the hour with the cotenant's backup,
+# which it does not contend with: a few dozen HTTP calls, no engine.
+RETENTION_SWEEP_CALENDAR: Final = "*-*-* 02:00:00"
+# Exempt operational starting value: four calls per chat for 300 chats at the
+# client's 15-second bound, with an hour for listings, feedback, and audit writes.
+RETENTION_SWEEP_TIMEOUT_START_SECONDS: Final = 21600
 # One undashed command runs the suites in order, so a stop's SIGTERM ends the unit.
 NIGHTLY_SUITES: Final = ("general-smoke", "guardrails")
 # The build box's challenger is last: `-` keeps a failed pair off the unit's verdict.
@@ -254,4 +262,30 @@ class UpstreamWatchTimerArtifact(_SystemdArtifact):
     def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
         substitutions = dict(super()._substitutions(inputs))
         substitutions["calendar"] = _calendar_with_zone(UPSTREAM_WATCH_CALENDAR, inputs)
+        return substitutions
+
+
+class RetentionSweepServiceArtifact(_SystemdArtifact):
+    """Render the nightly chat, upload, and feedback sweep on every host."""
+
+    name = "gideon-retention-sweep-service"
+    relative_path = "systemd/gideon-retention-sweep.service"
+    template_paths = (_RETENTION_SWEEP_SERVICE_TEMPLATE,)
+
+    def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
+        substitutions = dict(super()._substitutions(inputs))
+        substitutions["timeout_start_seconds"] = str(RETENTION_SWEEP_TIMEOUT_START_SECONDS)
+        return substitutions
+
+
+class RetentionSweepTimerArtifact(_SystemdArtifact):
+    """Render the persistent office-zoned retention sweep timer."""
+
+    name = "gideon-retention-sweep-timer"
+    relative_path = "systemd/gideon-retention-sweep.timer"
+    template_paths = (_RETENTION_SWEEP_TIMER_TEMPLATE,)
+
+    def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
+        substitutions = dict(super()._substitutions(inputs))
+        substitutions["calendar"] = _calendar_with_zone(RETENTION_SWEEP_CALENDAR, inputs)
         return substitutions

@@ -15,6 +15,7 @@ from gideon.host import (
     provision,
     registry,
     restore,
+    retention,
     rotate,
     tls,
     uninstall,
@@ -76,6 +77,10 @@ def run_tls_reload(args: argparse.Namespace) -> int:
 
 def run_users_reconcile(args: argparse.Namespace) -> int:
     return users.run_reconcile(args)
+
+
+def run_retention_sweep(args: argparse.Namespace) -> int:
+    return _guarded("retention sweep", retention.run_retention_sweep, args)
 
 
 def _guarded(command: str, run: Callable[[argparse.Namespace], int], args: argparse.Namespace) -> int:

@@ -122,7 +122,10 @@ def _panel_row(uid: str, reading: page.PanelReading) -> StageResult:
 
 
 def _board_row(
-    board: inventory.Board, readings: tuple[page.PanelReading, ...], width: int
+    board: inventory.Board,
+    readings: tuple[page.PanelReading, ...],
+    width: int,
+    capture_height: int | None,
 ) -> StageResult:
     counts = Counter(reading.state for reading in readings)
     opened = bool(readings) and counts["missing"] < len(readings)
@@ -137,6 +140,8 @@ def _board_row(
     if not opened:
         detail = f"{board.uid}: {board.title}; no expected panel mounted; {count_text}; screenshot {board.uid}.png"
     detail += f" at {width} px"
+    if capture_height is not None:
+        detail += f", {capture_height} px tall"
     return StageResult("board", ok, detail, "" if ok else _BOARD_PANELS_FIX)
 
 
@@ -385,13 +390,15 @@ def _run(
                     boards_ok = False
                     continue
                 screenshots.append(item.uid)
-                for reading in result:
+                for reading in result.panels:
                     counts[reading.state] += 1
                     panel_row = _panel_row(item.uid, reading)
                     print_stage(panel_row)
-                board_row = _board_row(item, result, options.width)
+                board_row = _board_row(
+                    item, result.panels, options.width, result.capture_height
+                )
                 print_stage(board_row)
-                opened += int(any(reading.state != "missing" for reading in result))
+                opened += int(any(reading.state != "missing" for reading in result.panels))
                 boards_ok &= board_row.ok
     finally:
         try:

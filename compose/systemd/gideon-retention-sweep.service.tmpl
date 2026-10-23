@@ -1,0 +1,13 @@
+[Unit]
+Description=Sweep expired GIDEON chats, uploads, and feedback
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$checkout
+ExecStart=/usr/bin/python3 -m gideon retention sweep
+TimeoutStartSec=$timeout_start_seconds
+StandardOutput=journal
+StandardError=journal

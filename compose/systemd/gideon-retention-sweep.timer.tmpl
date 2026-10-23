@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly GIDEON chat, upload, and feedback retention sweep
+
+[Timer]
+OnCalendar=$calendar
+Persistent=true
+
+[Install]
+WantedBy=timers.target

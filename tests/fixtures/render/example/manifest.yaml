@@ -15,7 +15,7 @@ inputs:
   build_box: true
 files:
   compose.yaml:
-    sha256: "cf5ea82ecdb931f5718a0952356365d8dbd49c812249cc2570b89b8a5af3a804"
+    sha256: "f66b94e026b77f69fc87e7eadc3cf5ea6d4997fe16b8aef02193bc64e5980646"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -89,7 +89,7 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/corpus.json":
-    sha256: "636d24c7e5bbc07f6e186a43ac264e611ece451bac174a7aa56d3489bb7427fa"
+    sha256: "d029b752c0dc7d0659e17970f8f8cefc89d58377dbc46ac6d6071295c9050a64"
     mode: "0644"
     owners:
       - "grafana"
@@ -113,7 +113,7 @@ files:
     mode: "0644"
     owners: []
   "gideon-api/instruction.txt":
-    sha256: "6ea8745db505465663d187749ba7e77d9e5cd6830d84499a5b9d9f04604cc50a"
+    sha256: "54740c9b23d63c1fb9bb0e8dea4ac198dd4e897ad730b61fa983e83956be84bc"
     mode: "0644"
     owners:
       - "gideon-api"
@@ -229,6 +229,14 @@ files:
     sha256: "0db0a8ee6fb0840167a07e04773b4180507b67e99392442d0269e8e5c4068b67"
     mode: "0644"
     owners: []
+  "systemd/gideon-retention-sweep.service":
+    sha256: "71497e83729ccc6c7badb2e8db3d208daf927497d5ff03bc738eec91c64b5fe7"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-retention-sweep.timer":
+    sha256: "56b6320b414afe18f65e280874ca4e0f150fce417e96b57d66dee422526564d6"
+    mode: "0644"
+    owners: []
   "dcgm-exporter/counters.csv":
     sha256: "6a1829a36a3f1a9846400c59f42be5568d030212086aa6e126e5af6366c4d1ff"
     mode: "0644"
@@ -239,7 +247,7 @@ services:
   prometheus: "1f72219e9341fcba75e1c0e24a9a5d7cc8298860f8d3bc13a2f01bd41f86a689"
   node-exporter: "372e640d7a5bc260c18cbd0a7cb48c5fd16fea5fc2f76ff1c0fa7b8eeb531134"
   grafana: "d960c1ceaa6a77defd2669c758bfc3e67f1be3b94a959adf04daaa72985c0cb2"
-  postgres: "3a9087c68e7c534f00aeec7b032e8dbcb5bad751cc1ff72e9a97629e1da47306"
+  postgres: "22a8e8b30a6d9eaabbee5c36f326b8860b0a06ee3d5ee1d6c95d9aca13fb059f"
   qdrant: "30030653744c6091cd90a6481d358924b2c1eb8e76f86d54f1f6c1d633b61b83"
   opensearch: "5e566c66fd1232f7aa18d184184fd5680bc9be63896810da914b763f9c387742"
   open-webui: "c77cd90569cc978835d67284a3d9eac17dc5e2e65303fffa50b27798f512452a"

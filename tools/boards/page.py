@@ -52,6 +52,10 @@ ROW_BUTTON_PREFIX: Final = "data-testid dashboard-row-toggle-for-"
 ROW_EXPAND_LABEL_PREFIX: Final = "Expand row"
 
 # Research note sections 5 and 9, Lazy loading and Playwright: grid and viewport.
+# Under the stack the summed height is the first resize, which mounts the
+# stack, and the document's height the second when taller, which the capture
+# follows: a full-page capture of a document taller than the viewport paints
+# Grafana's chrome alone, and one that fits paints every card.
 GRID_CELL_HEIGHT: Final = 30
 GRID_CELL_MARGIN: Final = 8
 VIEWPORT_WIDTH: Final = 1600
@@ -92,7 +96,9 @@ class BoardPage(Protocol):
 
     def resize(self, width: int, height: int) -> None: ...
 
-    def screenshot(self, path: Path) -> None: ...
+    def document_height(self) -> int: ...
+
+    def screenshot(self, path: Path, *, full_page: bool) -> None: ...
 
     def wait_until(
         self, predicate: Callable[[], bool], timeout_seconds: float
@@ -108,6 +114,14 @@ class PanelReading:
     title: str
     state: PanelState
     detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class BoardReadings:
+    """A board's panel readings and its capture height under the breakpoint."""
+
+    panels: tuple[PanelReading, ...]
+    capture_height: int | None
 
 
 _PAGE_FIX: Final = "Check the Grafana ingress and browser request log, then retry."
@@ -212,8 +226,8 @@ def _is_loading(page: BoardPage, section: str, content: str | None) -> bool:
     )
 
 
-def open_board(page: BoardPage, board: Board, *, width: int) -> None:
-    """Size the viewport to the width given and the grid's height, then navigate.
+def open_board(page: BoardPage, board: Board, *, width: int) -> int:
+    """Size the viewport, navigate, and return the viewport height set.
 
     At or above the stack breakpoint the height follows the lowest grid row.
     Under it the grid is one column, so the height follows every item's summed height.
@@ -226,8 +240,10 @@ def open_board(page: BoardPage, board: Board, *, width: int) -> None:
         else board.stacked_grid_rows
     )
     grid_height = grid_rows * row_height
-    page.resize(width, max(VIEWPORT_FLOOR, grid_height + VIEWPORT_ALLOWANCE))
+    height = max(VIEWPORT_FLOOR, grid_height + VIEWPORT_ALLOWANCE)
+    page.resize(width, height)
     page.goto(f"{GRAFANA_SUB_PATH}d/{quote(board.uid, safe='')}?{BOARD_QUERY}")
+    return height
 
 
 def _wait_for_selector(page: BoardPage, selector: str, timeout: float) -> bool:
@@ -342,11 +358,16 @@ def classify(page: BoardPage, panel: ExpectedPanel, *, timeout: float) -> PanelR
 
 def check_board(
     page: BoardPage, board: Board, screenshot: Path, *, timeout: float, width: int
-) -> tuple[PanelReading, ...] | Problem:
-    """Open, settle, capture, then read tooltip messages from one board."""
+) -> BoardReadings | Problem:
+    """Open, settle, capture, then read tooltip messages from one board.
+
+    Under the stack breakpoint the viewport grows to the document's height and
+    the board settles again, so the capture takes the viewport alone and never
+    a document taller than it.
+    """
 
     try:
-        open_board(page, board, width=width)
+        viewport_height = open_board(page, board, width=width)
         unopened = {
             title: row.title
             for row in _expand_rows(page, board, timeout=timeout)
@@ -354,13 +375,23 @@ def check_board(
         }
         # A row that did not open has no panels to wait for.
         reachable = tuple(panel for panel in board.panels if panel.title not in unopened)
-        settle(page, replace(board, panels=reachable))
-        page.screenshot(screenshot)
-        return tuple(
+        reachable_board = replace(board, panels=reachable)
+        settle(page, reachable_board)
+        capture_height = None
+        if width < STACK_BREAKPOINT_WIDTH:
+            document_height = page.document_height()
+            if document_height > viewport_height:
+                viewport_height = document_height
+                page.resize(width, viewport_height)
+                settle(page, reachable_board)
+            capture_height = viewport_height
+        page.screenshot(screenshot, full_page=width >= STACK_BREAKPOINT_WIDTH)
+        panels = tuple(
             PanelReading(panel.title, "missing", f"row {unopened[panel.title]} did not open")
             if panel.title in unopened
             else classify(page, panel, timeout=timeout)
             for panel in board.panels
         )
+        return BoardReadings(panels, capture_height)
     except PageError:
         return Problem("Grafana board could not be read", _PAGE_FIX)

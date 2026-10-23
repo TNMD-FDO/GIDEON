@@ -56,6 +56,9 @@ from gideon.host.render.services.open_webui import (
 from gideon.host.render.services.postgres import (
     POSTGRES_HEALTHCHECK as POSTGRES_HEALTHCHECK,
 )
+from gideon.host.render.services.postgres import (
+    POSTGRES_SHM_SIZE_BYTES as POSTGRES_SHM_SIZE_BYTES,
+)
 from gideon.host.render.services.searxng import (
     SEARXNG_HEALTHCHECK as SEARXNG_HEALTHCHECK,
 )

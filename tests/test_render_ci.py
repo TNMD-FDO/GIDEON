@@ -104,7 +104,10 @@ from gideon.host.render.qdrant import (
 from gideon.host.render.services import declared_sources
 from gideon.host.render.services.open_webui import OpenWebuiService
 from gideon.host.render.services.opensearch import OpensearchService
-from gideon.host.render.services.postgres import PostgresService
+from gideon.host.render.services.postgres import (
+    POSTGRES_SHM_SIZE_BYTES,
+    PostgresService,
+)
 from gideon.host.render.services.qdrant import QdrantService
 from gideon.host.render.services.worker import WorkerService
 from gideon.host.render.worker import METRICS_SECRET_NAME, WORKER_SERVICE_NAME
@@ -256,6 +259,7 @@ class Compose(unittest.TestCase):
         self.assertEqual(postgres["volumes"], [f"{CI_ROOT}/postgres:/var/lib/postgresql"])
         self.assertEqual(postgres["networks"], [NETWORK_NAME])
         self.assertNotIn("command", postgres)
+        self.assertEqual(postgres["shm_size"], POSTGRES_SHM_SIZE_BYTES)
 
         frontend = mapping(services[OpenWebuiService.name])
         definition_env_file = OpenWebuiService().block(render_inputs, target)["env_file"]

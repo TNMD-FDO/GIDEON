@@ -130,6 +130,9 @@ SYSTEMCTL_ACTIVE_PROPOSALS = ("systemctl", "is-active", "gideon-proposals-tally.
 SYSTEMCTL_LINK_UPSTREAM_WATCH = ("systemctl", "link", f"{RENDERED}/systemd/gideon-upstream-watch.service")
 SYSTEMCTL_ENABLE_UPSTREAM_WATCH = ("systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-upstream-watch.timer")
 SYSTEMCTL_ACTIVE_UPSTREAM_WATCH = ("systemctl", "is-active", "gideon-upstream-watch.timer")
+SYSTEMCTL_LINK_RETENTION_SWEEP = ("systemctl", "link", f"{RENDERED}/systemd/gideon-retention-sweep.service")
+SYSTEMCTL_ENABLE_RETENTION_SWEEP = ("systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-retention-sweep.timer")
+SYSTEMCTL_ACTIVE_RETENTION_SWEEP = ("systemctl", "is-active", "gideon-retention-sweep.timer")
 TIMER_STARTS = (
     (SYSTEMCTL_ENABLE, SYSTEMCTL_ACTIVE),
     (SYSTEMCTL_ENABLE_BACKUP, SYSTEMCTL_ACTIVE_BACKUP),
@@ -138,6 +141,7 @@ TIMER_STARTS = (
     (SYSTEMCTL_ENABLE_NIGHTLY, SYSTEMCTL_ACTIVE_NIGHTLY),
     (SYSTEMCTL_ENABLE_PROPOSALS, SYSTEMCTL_ACTIVE_PROPOSALS),
     (SYSTEMCTL_ENABLE_UPSTREAM_WATCH, SYSTEMCTL_ACTIVE_UPSTREAM_WATCH),
+    (SYSTEMCTL_ENABLE_RETENTION_SWEEP, SYSTEMCTL_ACTIVE_RETENTION_SWEEP),
 )
 
 
@@ -553,6 +557,9 @@ def healthy_commands(
         SYSTEMCTL_LINK_UPSTREAM_WATCH: done(SYSTEMCTL_LINK_UPSTREAM_WATCH),
         SYSTEMCTL_ENABLE_UPSTREAM_WATCH: done(SYSTEMCTL_ENABLE_UPSTREAM_WATCH),
         SYSTEMCTL_ACTIVE_UPSTREAM_WATCH: done(SYSTEMCTL_ACTIVE_UPSTREAM_WATCH, stdout="active\n"),
+        SYSTEMCTL_LINK_RETENTION_SWEEP: done(SYSTEMCTL_LINK_RETENTION_SWEEP),
+        SYSTEMCTL_ENABLE_RETENTION_SWEEP: done(SYSTEMCTL_ENABLE_RETENTION_SWEEP),
+        SYSTEMCTL_ACTIVE_RETENTION_SWEEP: done(SYSTEMCTL_ACTIVE_RETENTION_SWEEP, stdout="active\n"),
         PS: done(PS, stdout=running_rows(render_inputs=render_inputs)),
         INTEGRATION_READ: done(INTEGRATION_READ),
         PROJECT_READ: done(PROJECT_READ),
@@ -770,6 +777,10 @@ class HappyPath(unittest.TestCase):
         self.assertIn(SYSTEMCTL_LINK_UPSTREAM_WATCH, argv_calls(host))
         self.assertIn(SYSTEMCTL_ENABLE_UPSTREAM_WATCH, argv_calls(host))
         self.assertIn(SYSTEMCTL_ACTIVE_UPSTREAM_WATCH, argv_calls(host))
+        calls = argv_calls(host)
+        self.assertLess(calls.index(SYSTEMCTL_LINK_UPSTREAM_WATCH), calls.index(SYSTEMCTL_LINK_RETENTION_SWEEP))
+        self.assertLess(calls.index(SYSTEMCTL_LINK_RETENTION_SWEEP), calls.index(SYSTEMCTL_ENABLE_RETENTION_SWEEP))
+        self.assertLess(calls.index(SYSTEMCTL_ENABLE_RETENTION_SWEEP), calls.index(SYSTEMCTL_ACTIVE_RETENTION_SWEEP))
         started = ", ".join(
             service for service in service_names(_EXAMPLE_INPUTS)
             if service not in store_services()

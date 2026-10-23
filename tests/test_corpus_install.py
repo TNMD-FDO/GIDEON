@@ -124,6 +124,7 @@ class FakeHost(RealHost):
         self.agreement_jobs: dict[int, dict[str, Any]] = {}
         self.agreement_deferred: list[dict[str, Any]] = []
         self.agreement_failure: str | None = None
+        self.agreement_failure_error: str | None = None
         self.agreement_figures: dict[str, dict[str, int]] = {}
         self.agreement_events: list[tuple[str, str]] = []
         self.interrupt_agreement_job = False
@@ -334,7 +335,8 @@ class FakeHost(RealHost):
             (directory / f"{court}.{worker_identity.AGREEMENT_FAILURE_NAME}").write_text(
                 json.dumps({
                     "schema": 1, "job": job, "court": court,
-                    "reason": self.agreement_failure, "table": None, "error": None,
+                    "reason": self.agreement_failure, "table": None,
+                    "error": self.agreement_failure_error,
                     "at": NOW.isoformat(),
                 })
             )
@@ -2177,6 +2179,20 @@ class Install(unittest.TestCase):
         self.assertIn("agreement: refuse — ca6: agreement database failure", out)
         for command in ("host provision", "apply", "corpus install"):
             self.assertIn(report.command(command), out)
+        self.assertNotIn("retain: ok", out)
+
+    def test_database_disk_full_agreement_job_refuses_with_postgres_logs_fix(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        self.host.agreement_failure = "database"
+        self.host.agreement_failure_error = "DiskFull"
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("agreement: refuse — ca6: agreement database failure (DiskFull)", out)
+        self.assertIn(stack.logs_fix(RENDERED, "postgres"), out)
+        self.assertIn("/dev/shm", out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertNotIn("host provision", out)
         self.assertNotIn("retain: ok", out)
 
     def test_agreement_problem_refuses_with_its_fix(self) -> None:

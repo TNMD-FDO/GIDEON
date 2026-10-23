@@ -4,7 +4,7 @@ This is one page by situation: each item gives a command, when there is one, and
 
 ## 1. Every day
 
-- Nothing to start unless an email arrives. The timers handle nightly backup and push, Saturday drill, quarterly off-box re-hash, reconcile, nightly eval, and Monday's upstream watch; `systemctl list-timers 'gideon-*'` shows them. [docs/runbooks/backup-restore.md §1](backup-restore.md)
+- Nothing to start unless an email arrives. The timers handle nightly backup and push, Saturday drill, quarterly off-box re-hash, reconcile, nightly eval, the nightly retention sweep, and Monday's upstream watch; `systemctl list-timers 'gideon-*'` shows them. [docs/runbooks/backup-restore.md §1](backup-restore.md)
 
 ## 2. An email arrived
 

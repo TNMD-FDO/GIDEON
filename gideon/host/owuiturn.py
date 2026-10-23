@@ -33,7 +33,7 @@ COMPLETIONS_PATH: Final = "/api/chat/completions"
 # status the route gives whether the chat never existed or belongs to another
 # account; 404 is also admitted as a not-found response. The body's wording is
 # the frontend's own and is not read.
-_NOT_FOUND_STATUSES: Final = (401, 404)
+NOT_FOUND_STATUSES: Final = (401, 404)
 _DELETE_FIX: Final = "Delete the chat through the frontend, then retry."
 _FIND_FIX: Final = (
     "List the account's chats through the frontend and delete the turn's chat "
@@ -221,7 +221,7 @@ def candidate_messages(client: Client, chat_id: str) -> Mapping[str, object] | N
 
     path = _chat_path(chat_id)
     response = client.request("GET", path)
-    if response.status in _NOT_FOUND_STATUSES:
+    if response.status in NOT_FOUND_STATUSES:
         return None
     _history_value, messages = _record(path, _decoded(path, response))
     return messages

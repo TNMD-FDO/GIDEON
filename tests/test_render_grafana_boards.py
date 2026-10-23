@@ -285,8 +285,8 @@ def _leaf_panels(dashboard: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 class Dashboards(unittest.TestCase):
-    def test_backup_and_eval_columns_have_readable_display_names(self) -> None:
-        for artifact in (GrafanaBackupArtifact, GrafanaEvalArtifact):
+    def test_table_columns_have_readable_display_names(self) -> None:
+        for artifact in (GrafanaBackupArtifact, GrafanaEvalArtifact, GrafanaCorpusArtifact):
             board = json.loads(artifact.emit(inputs()))
             for panel in board["panels"]:
                 if panel["type"] != "table" and not (
@@ -978,6 +978,92 @@ class EvalBoard(unittest.TestCase):
 
 
 class CorpusBoard(unittest.TestCase):
+    def test_table_durations_are_numeric_and_use_clock_units(self) -> None:
+        """Corpus table durations retain integer seconds and display as clocks."""
+
+        board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        for title, source, key, column in (
+            ("Build wall clock", "wall_clock", "run_seconds", "run_seconds"),
+            ("Build wall clock", "wall_clock", "lexical_seconds", "lexical_seconds"),
+            ("Build wall clock", "wall_clock", "dense_seconds", "dense_seconds"),
+            ("Build wall clock", "wall_clock", "lifecycle_seconds", "lifecycle_seconds"),
+            ("Embedding progress", "counts", "dense_seconds", "seconds"),
+        ):
+            with self.subTest(panel=title, column=column):
+                panel = panels[title]
+                self.assertRegex(
+                    panel["targets"][0]["rawSql"],
+                    rf"(?i)\(\s*{source}\s*->>\s*'{key}'\s*\)\s*::\s*bigint\s+AS\s+{column}\b",
+                )
+                properties = column_overrides(panel)[column]
+                self.assertEqual(properties["unit"], "dthms")
+                self.assertNotIn("decimals", properties)
+        for panel in board["panels"]:
+            if panel["type"] != "table":
+                continue
+            overrides = column_overrides(panel)
+            for column in outer_select_columns(panel["targets"][0]["rawSql"]):
+                with self.subTest(panel=panel["title"], column=column):
+                    self.assertNotEqual(
+                        overrides.get(column, {}).get("unit", panel["fieldConfig"]["defaults"].get("unit")),
+                        "s",
+                    )
+        self.assertEqual(column_overrides(panels["Embedding progress"])["seconds"]["custom.width"], 94)
+
+    def test_heartbeat_age_shares_the_backup_duration_form(self) -> None:
+        """The worker heartbeat age uses the Backup table's duration form."""
+
+        board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
+        heartbeat = next(panel for panel in board["panels"] if panel["title"] == "Worker heartbeat and slots")
+        age = column_overrides(heartbeat)["heartbeat age"]
+        backup = json.loads(GrafanaBackupArtifact.emit(inputs()))
+        runs = next(panel for panel in backup["panels"] if panel["title"] == "Last ten backup and restore runs")
+        backup_duration = column_overrides(runs)["duration_s"]
+        self.assertEqual(age["unit"], backup_duration["unit"])
+        self.assertEqual(age["decimals"], backup_duration["decimals"])
+
+    def test_heartbeat_stat_draws_at_the_overview_stat_text_sizes(self) -> None:
+        """The heartbeat stat fixes its name and value sizes at the Overview stat's pair."""
+
+        board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
+        heartbeat = next(panel for panel in board["panels"] if panel["title"] == "Worker heartbeat and slots")
+        overview = json.loads(GrafanaOverviewArtifact().emit(inputs()))
+        services = next(panel for panel in _leaf_panels(overview) if panel["title"] == "Services and probes")
+        self.assertEqual(heartbeat["options"]["textMode"], services["options"]["textMode"])
+        self.assertEqual(heartbeat["options"]["text"], services["options"]["text"])
+        self.assertEqual(set(heartbeat["options"]["text"]), {"titleSize", "valueSize"})
+
+    def test_progress_counts_read_in_one_compact_unit(self) -> None:
+        """Embedding progress shows every count and its rate in the count unit, no decimals set."""
+
+        board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
+        progress = next(panel for panel in board["panels"] if panel["title"] == "Embedding progress")
+        overrides = column_overrides(progress)
+        columns = outer_select_columns(progress["targets"][0]["rawSql"])
+        counts = [column for column in columns if column not in ("lockfile", "space", "seconds")]
+        self.assertEqual(len(counts), 9)
+        for column in counts:
+            with self.subTest(column=column):
+                self.assertEqual(overrides[column]["unit"], "count:")
+                self.assertNotIn("decimals", overrides[column])
+
+    def test_chart_and_stat_legends_use_lowercase_words(self) -> None:
+        """Corpus chart and stat legends keep lowercase words outside templates."""
+
+        board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
+        for panel in board["panels"]:
+            if panel["type"] == "table":
+                continue
+            for target in panel["targets"]:
+                if "legendFormat" not in target:
+                    continue
+                with self.subTest(panel=panel["title"], target=target["refId"]):
+                    label = re.sub(r"\{\{.*?\}\}", "", target["legendFormat"]).strip()
+                    self.assertNotIn("_", label)
+                    if label:
+                        self.assertRegex(label, r"^[a-z]")
+
     def test_every_table_column_has_a_width_and_fits_at_1280(self) -> None:
         board = json.loads(GrafanaCorpusArtifact.emit(inputs()))
         for panel in board["panels"]:
@@ -1047,8 +1133,8 @@ class CorpusBoard(unittest.TestCase):
                     self.assertEqual(properties[name]["unit"], "time:YYYY-MM-DD HH:mm")
         progress = panels["Embedding progress"]
         rate = column_overrides(progress)["tokens_per_second"]
-        self.assertEqual(rate["displayName"], "tokens/s")
-        self.assertEqual(rate["unit"], "short")
+        self.assertEqual(rate["displayName"], "Tokens/s")
+        self.assertEqual(rate["unit"], "count:")
         self.assertNotIn("decimals", rate)
         self.assertNotIn("decimals", progress["fieldConfig"]["defaults"])
         for title, unit in (

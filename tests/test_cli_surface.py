@@ -35,7 +35,6 @@ STUBS = [
     (["host", "gpu"], "escape hatch"),
     (["registry", "gc"], "no slice scheduled"),
     (["audit", "query"], "no slice scheduled"),
-    (["retention", "sweep"], "slice 6"),
 ]
 
 
@@ -99,6 +98,34 @@ class Start(unittest.TestCase):
 
 
 class Help(unittest.TestCase):
+    def test_retention_sweep_help_names_its_work_and_remaining_work(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["retention", "sweep", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        help_text = collapsed(out.getvalue())
+        for phrase in (
+            "chats idle past the office's retention",
+            "the files their messages name",
+            "feedback rows past that interval or left on a swept chat",
+            "one audit row per swept chat",
+            "Bindings, index points, reference counts",
+            "the uploads-root walk",
+            "the files of a chat its user deleted",
+            "the partition drop remain for slice 6",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, help_text)
+        self.assertNotIn("not implemented", help_text)
+        self.assertNotIn("lands in", help_text)
+
+    def test_retention_group_has_no_landing(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertEqual(help_entries(out.getvalue())["retention"], "retention sweeps")
+
     def test_index_gc_help_names_the_hold(self) -> None:
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
