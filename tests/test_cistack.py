@@ -84,6 +84,8 @@ class FakeHost:
         self.job_id: int | None = None
         self.job_returncode = 0
         self.job_read_locks: list[bool] = []
+        self.engine_lock_reads: list[tuple[str, bool]] = []
+        self.failing_programs: set[str] = set()
         self.events: list[tuple[str, str]] = []
         self.files: dict[str, str] = {
             os.fspath(SITE_PATH): (ROOT / "config/site.example.yaml").read_text(
@@ -120,6 +122,11 @@ class FakeHost:
         del check, cwd, env, timeout, passthrough
         command = tuple(argv)
         self.commands.append(command)
+        self.engine_lock_reads.append(
+            (command[0], cistack_run.backuplock.ENGINE_LOCK.path in self.locks)
+        )
+        if command[0] in self.failing_programs:
+            return completed(command, returncode=1, stderr="fixture failure\n")
         if command[:3] == ("docker", "network", "inspect"):
             network = command[3]
             outcome = self.network_results.get(network, self.network_returncode)
@@ -176,6 +183,7 @@ class FakeHost:
 
     def exists(self, path: PathLike) -> bool:
         key = os.fspath(path)
+        self.engine_lock_reads.append(("exists", cistack_run.backuplock.ENGINE_LOCK.path in self.locks))
         return key in self.files or key in self.directories
 
     def listdir(self, path: PathLike) -> list[str]:
@@ -801,6 +809,103 @@ class DownAndSecrets(unittest.TestCase):
         self.assertNotIn(settings_path, host.files)
         wipe_commands = [command for command in host.commands if command[0] == "rm"]
         self.assertEqual(wipe_commands, [("rm", "-rf", path) for path in CI_WIPE_PATHS])
+
+    def test_down_holds_the_engine_lock_from_inspection_through_the_wipe(self) -> None:
+        lock_path = cistack_run.backuplock.ENGINE_LOCK.path
+        for wipe in (False, True):
+            with self.subTest(wipe=wipe):
+                host = FakeHost()
+                host.files[f"{CI_ROOT}/compose.yaml"] = "name: gideon-ci\n"
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    code = cistack_run.down(ci_stack(), host, wipe=wipe)
+
+                self.assertEqual(code, 0)
+                self.assertIn(
+                    "preconditions: ok — CI project is present; engine lock taken",
+                    output.getvalue(),
+                )
+                held = host.engine_lock_reads
+                self.assertEqual(held[0], ("exists", True))
+                self.assertIn(("docker", True), held)
+                self.assertEqual(("rm", True) in held, wipe)
+                self.assertTrue(all(locked for _, locked in held))
+                self.assertEqual(host.lock_events, [("take", lock_path), ("release", lock_path)])
+                self.assertNotIn(lock_path, host.locks)
+
+    def test_down_refuses_a_held_engine_lock_before_any_argv(self) -> None:
+        lock_path = cistack_run.backuplock.ENGINE_LOCK.path
+        for wipe in (False, True):
+            with self.subTest(wipe=wipe):
+                host = FakeHost()
+                compose_path = f"{CI_ROOT}/compose.yaml"
+                host.files[compose_path] = "name: gideon-ci\n"
+                host.directories.update(CI_WIPE_PATHS)
+                holder = json.dumps({
+                    "command": "tools.cistack smoke",
+                    "pid": os.getpid() + 1,
+                    "started": "2026-01-01T00:00:00+00:00",
+                })
+                host.locks[lock_path] = holder
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    code = cistack_run.down(ci_stack(), host, wipe=wipe)
+
+                self.assertEqual(code, 1)
+                self.assertIn("preconditions: refuse", output.getvalue())
+                self.assertIn("tools.cistack smoke", output.getvalue())
+                self.assertIn(f"pid {os.getpid() + 1}", output.getvalue())
+                self.assertIn(f"ps -p {os.getpid() + 1}", output.getvalue())
+                self.assertEqual(host.commands, [])
+                self.assertIn(compose_path, host.files)
+                self.assertTrue(set(CI_WIPE_PATHS) <= host.directories)
+                self.assertEqual(host.locks[lock_path], holder)
+
+    def test_down_passes_a_nested_holder_and_leaves_its_lock(self) -> None:
+        host = FakeHost()
+        lock_path = cistack_run.backuplock.ENGINE_LOCK.path
+        holder = json.dumps({
+            "command": "tools.cistack smoke",
+            "pid": os.getpid(),
+            "started": "2026-01-01T00:00:00+00:00",
+        })
+        host.locks[lock_path] = holder
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = cistack_run.down(ci_stack(), host, wipe=True)
+
+        self.assertEqual(code, 0)
+        self.assertIn("engine lock held by this process", output.getvalue())
+        self.assertEqual(host.locks[lock_path], holder)
+        self.assertEqual(host.lock_events, [("take", lock_path)])
+
+    def test_failed_stop_or_wipe_still_releases_the_engine_lock(self) -> None:
+        lock_path = cistack_run.backuplock.ENGINE_LOCK.path
+        for failing in ("docker", "rm"):
+            with self.subTest(failing=failing):
+                host = FakeHost()
+                host.files[f"{CI_ROOT}/compose.yaml"] = "name: gideon-ci\n"
+                host.failing_programs.add(failing)
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    code = cistack_run.down(ci_stack(), host, wipe=True)
+
+                self.assertEqual(code, 1)
+                stage = "down" if failing == "docker" else "wipe"
+                self.assertIn(f"{stage}: refuse", output.getvalue())
+                self.assertEqual(host.lock_events, [("take", lock_path), ("release", lock_path)])
+                self.assertNotIn(lock_path, host.locks)
+
+    def test_non_root_down_refuses_before_the_engine_lock(self) -> None:
+        host = FakeHost(euid=1000)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = cistack_run.down(ci_stack(), host, wipe=True)
+
+        self.assertEqual(code, 1)
+        self.assertIn("root is required", output.getvalue())
+        self.assertEqual(host.lock_events, [])
+        self.assertEqual(host.commands, [])
 
     def test_sibling_mints_lexical_store_secrets_and_skips_unused_keys(self) -> None:
         self.assertEqual(

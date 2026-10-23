@@ -153,9 +153,17 @@ gideon corpus cut
 
 Every full cut takes the newest dated capture. A quarterly cut after a new case-law dump needs a capture dated at or after that dump's snapshot date: save a new page today before running the cut. The cut commits the saved page beside the lockfile as `<label>/treatment.decisions-overruled.html`; that committed copy is what a receiving office installs from. The page's address is provenance and is never fetched by the command.
 
-The command's refusals and their fixes:
+**Selecting courts**
+
+`gideon corpus cut --courts <ids>` writes a lockfile whose case-law courts are the typed, comma-separated set, over the same snapshot and capture rules as the full cut. Never combine `--courts` with `--base` or `--add-courts`.
+
+Such a lockfile is committed in no release until a hardware profile names the lockfile it installs. Every reader of `corpus/lockfiles/` takes the newest file there as the product corpus, so move the new lockfile and companion files out of `corpus/lockfiles/` after the cut, as the command's Next line says.
+
+The command's refusals and their fixes follow. A refusal's “run again” means repeat the command as typed, flags included:
 
 - **Another cut is running**: wait for it to finish, then run the command again.
+- **A selection is given beside the derived flags**: run `gideon corpus cut --courts <ids>` alone, or `gideon corpus cut --base <label> --add-courts <ids>`.
+- **An ID is empty, repeated, or unknown**: correct the comma-separated list using `courts.yaml`; an unknown ID's refusal names the nearest ID. Run the command again.
 - **A source's host is outside the corpus allowlist**: add the host to the `corpus` group in `config/egress.yaml` in a release, then run the command again.
 - **A file disagrees with its fetch record or with its pinned sidecar**: remove the named file and its `.fetch.json` record from the snapshot directory, then run the command again: fetched sources are fetched anew, and captured files are reseeded from the saved page.
 - **The label already has a lockfile, or is already recorded**: a label is used once. Run the command on a later UTC date; never delete a lockfile or its record.

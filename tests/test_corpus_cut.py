@@ -308,6 +308,7 @@ class Cut(unittest.TestCase):
         record_path.write_text(json.dumps(record))
 
     def run_cut(self, *, base: str | None = None, add_courts: str | None = None,
+                courts: str | None = None,
                 now: list[float] | None = None,
                 cut_at: datetime = CUT_AT,
                 sources: tuple[SourceDefinition, ...] | None = None) -> tuple[int, str, str]:
@@ -319,7 +320,7 @@ class Cut(unittest.TestCase):
 
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cut.run_corpus_cut(
-                argparse.Namespace(base=base, add_courts=add_courts),
+                argparse.Namespace(base=base, add_courts=add_courts, courts=courts),
                 host=self.host, rendered_dir=RENDERED, checkout=self.checkout,
                 snapshots_root=self.snapshots, clock=lambda: cut_at,
                 sleep=advance, monotonic=lambda: elapsed[0],
@@ -560,7 +561,7 @@ class Cut(unittest.TestCase):
         built = cut._full_candidate(
             self.host, self.checkout, sources, resolved,
             {name: pin.entries for name, pin in newest.sources.items()},
-            newest, CUT_AT + timedelta(days=1),
+            newest, CUT_AT + timedelta(days=1), None, "corpus cut",
         )
         assert isinstance(built, cut.LockfileCandidate)
         self.assertEqual(built.index_bytes[source.name], {"saved.html": data})
@@ -634,6 +635,8 @@ class Cut(unittest.TestCase):
         self.assertIn("verify: ok", out)
         self.assertIn("lockfile: ok", out)
         self.assertIn(f"record: ok — corpus-{CUT_AT.date().isoformat()}: cut", out)
+        self.assertEqual([line for line in out.splitlines() if line.startswith("Next:")],
+                         ["Next: commit the new lockfile and companion files."])
         self.assertEqual(self.host.record_writes, 1)
         path = self.checkout / "corpus/lockfiles" / f"corpus-{CUT_AT.date().isoformat()}.yaml"
         loaded = load_lockfile(path, known_sources={self.source.name: self.source})
@@ -987,6 +990,149 @@ class Cut(unittest.TestCase):
         self.assertEqual(self.host.calls, [])
         self.assertEqual(self.host.lock_releases, 0)
 
+    def test_selection_replaces_carried_courts_and_keeps_snapshot_companions(self) -> None:
+        base = self.prepare_base()
+        next_cut = CUT_AT + timedelta(days=1)
+        self.host.index_bytes = b"<listing>fictitious changed listing</listing>\n"
+        releases = self.host.lock_releases
+        code, out, err = self.run_cut(courts="tenn, scotus", cut_at=next_cut)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(err, "")
+        selected = self.load_cut((self.source,), at=next_cut)
+        self.assertEqual(selected.sources[self.source.name].courts, ("scotus", "tenn"))
+        self.assertEqual(selected.reason, "tranche")
+        self.assertIsNone(selected.base)
+        directory = self.checkout / "corpus/lockfiles"
+        self.assertNotIn("base:", (directory / f"{selected.label}.yaml").read_text())
+        for name, pin in base.sources.items():
+            self.assertEqual(selected.sources[name], replace(pin, courts=("scotus", "tenn")))
+            for suffix in ("sha256", *(document.name for document in pin.index)):
+                self.assertEqual((directory / selected.label / f"{name}.{suffix}").read_bytes(),
+                                 (directory / base.label / f"{name}.{suffix}").read_bytes())
+        self.assertIn(f"lockfile: ok — wrote {selected.label}, courts scotus,tenn", out)
+        self.assertIn(f"fetch: ok — {self.source.name}: 1 files, {len(FILE_BYTES)} bytes; "
+                      "no fetches deferred", out)
+        self.assertTrue(all(destination.startswith("resolve/")
+                            for destination in self.host.job_destinations.values()))
+        self.assertEqual([line for line in out.splitlines() if line.startswith("Next:")], [
+            "Next: keep the new lockfile and companion files out of every release until "
+            "a hardware profile names it; move them out of corpus/lockfiles/ as "
+            "docs/runbooks/release-files.md §10 says.",
+        ])
+        self.assertNotIn("Next: commit the new lockfile", out)
+        self.assertEqual(self.host.lock_releases, releases + 1)
+        self.assertIsNone(self.host.lock_holder)
+
+    def test_selection_equal_to_carried_courts_is_unchanged(self) -> None:
+        base = self.prepare_base()
+        courts = base.sources[self.source.name].courts
+        assert courts is not None
+        next_cut = CUT_AT + timedelta(days=1)
+        code, out, err = self.run_cut(courts=",".join(courts), cut_at=next_cut)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(err, "")
+        self.assertIn(f"lockfile: ok — unchanged; {base.label} already pins this state", out)
+        self.assertEqual(self.host.writes, [])
+        self.assertEqual(self.load_cut((self.source,)), base)
+        self.assertFalse((self.checkout / "corpus/lockfiles" /
+                          f"corpus-{next_cut.date().isoformat()}.yaml").exists())
+        self.assertNotIn("Next:", out)
+        self.assertIsNone(self.host.lock_holder)
+
+    def test_selection_on_first_cut_replaces_first_courts(self) -> None:
+        code, out, err = self.run_cut(courts="scotus")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(err, "")
+        selected = self.load_cut((self.source,))
+        self.assertEqual(selected.sources[self.source.name].courts, ("scotus",))
+        self.assertNotEqual(selected.sources[self.source.name].courts, self.source.first_courts)
+        self.assertEqual(selected.reason, "tranche")
+        self.assertIsNone(selected.base)
+        self.assertIn(f"lockfile: ok — wrote {selected.label}, courts scotus", out)
+
+    def test_selection_refusals_leave_no_writes_or_held_lock(self) -> None:
+        label = "corpus-2099-01-01"
+        cases = (
+            ("scotus", label, None, "--courts was given beside --base", True),
+            ("scotus", None, "tenn", "--courts was given beside --add-courts", True),
+            ("scotus", label, "tenn", "--courts was given beside --base and --add-courts", True),
+            ("", None, None, "--courts has an empty court id", False),
+            ("scotus, scotus", None, None, "court id scotus is repeated", False),
+            ("scotu", None, None, "unknown court id scotu; nearest id is scotus", False),
+        )
+        for courts, base, added, detail, beside in cases:
+            with self.subTest(courts=courts, base=base, added=added):
+                self.host.euid = 1000 if beside else 0
+                releases = self.host.lock_releases
+                with mock.patch.object(self.host, "take_lock", wraps=self.host.take_lock) as take:
+                    code, out, err = self.run_cut(courts=courts, base=base, add_courts=added)
+                self.assertEqual(code, 1)
+                self.assertEqual(out, "")
+                problem, fix = err.split(" Fix: ", 1)
+                self.assertIn(detail, problem)
+                self.assertIn("--courts", fix)
+                if beside:
+                    self.assertEqual(fix.strip(),
+                                     f"Run {report.command('corpus cut')} --courts <ids> alone, or "
+                                     f"{report.command('corpus cut')} --base <label> --add-courts <ids>.")
+                    take.assert_not_called()
+                    self.assertEqual(self.host.lock_releases, releases)
+                    self.assertEqual(self.host.calls, [])
+                else:
+                    take.assert_called_once()
+                    self.assertEqual(self.host.lock_releases, releases + 1)
+                if courts == "scotu":
+                    self.assertIn("docs/runbooks/release-files.md §10", fix)
+                self.assertEqual(self.host.writes, [])
+                self.assertIsNone(self.host.lock_holder)
+                self.assertEqual(self.host.job_destinations, {})
+                self.assertEqual(self.host.sql_calls, [])
+        self.assertEqual(self.host.record_writes, 0)
+
+    def test_selection_capture_refusal_repeats_the_selection(self) -> None:
+        source = self.captured_source()
+        code, out, err = self.run_cut(courts="scotus", sources=(self.source, source))
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(err, "")
+        self.assertIn(f"{source.name}: no capture under", out)
+        self.assertIn(f"then run {report.command('corpus cut --courts scotus')} again",
+                      out.split(" Fix: ", 1)[1])
+        self.assert_capture_refusal(out)
+
+    def test_selection_interrupts_repeat_the_selection_and_release_the_lock(self) -> None:
+        for stage, action in (("fetch", "rejoin them"), ("verify", "start again")):
+            with self.subTest(stage=stage):
+                self.host.interrupt_at = stage
+                if stage == "fetch":
+                    self.file.unlink()
+                    (self.snapshots / f"{self.destination}{worker_identity.RECORD_SUFFIX}").unlink()
+                releases = self.host.lock_releases
+                code, out, err = self.run_cut(courts="scotus")
+                self.assertEqual(code, 1, out + err)
+                self.assertEqual(err, "")
+                self.assertIn(f"{stage}: refuse — interrupted;", out)
+                self.assertIn(f"Run {report.command('corpus cut --courts scotus')} again to {action}.",
+                              out.split(" Fix: ", 1)[1])
+                self.assertEqual(self.host.lock_releases, releases + 1)
+                self.assertIsNone(self.host.lock_holder)
+                self.assertEqual(self.host.writes, [])
+                self.assertEqual(self.host.record_writes, 0)
+
+    def test_derived_write_failure_repeats_the_validated_flags(self) -> None:
+        base = self.prepare_base()
+        releases = self.host.lock_releases
+        with mock.patch.object(self.host, "write_text", side_effect=PermissionError):
+            code, out, err = self.run_cut(base=base.label, add_courts="tenn, scotus",
+                                          cut_at=CUT_AT + timedelta(days=1))
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(err, "")
+        self.assertIn("could not be written (PermissionError)", out)
+        invocation = f"corpus cut --base {base.label} --add-courts tenn,scotus"
+        self.assertIn(f"then run {report.command(invocation)} again.", out.split(" Fix: ", 1)[1])
+        self.assertEqual(self.host.lock_releases, releases + 1)
+        self.assertIsNone(self.host.lock_holder)
+        self.assert_no_acquisition()
+
     def test_derived_preconditions_refuse_bad_base_and_court_ids(self) -> None:
         base = self.prepare_base()
         existing_court = (base.sources["example"].courts or ())[0]
@@ -1056,7 +1202,8 @@ class Cut(unittest.TestCase):
         self.assertIn("courts + tenn,scotus", out)
         self.assertIn("record: ok", out)
         self.assertIn(f"base {base.label}", out)
-        self.assertIn("Next: commit the new lockfile", out)
+        self.assertEqual([line for line in out.splitlines() if line.startswith("Next:")],
+                         ["Next: commit the new lockfile and companion files."])
         self.assertNotIn("resolve:", out)
         self.assertNotIn("fetch:", out)
         self.assertNotIn("verify:", out)
@@ -1190,7 +1337,26 @@ class Cut(unittest.TestCase):
 
 
 class Cli(unittest.TestCase):
-    """The public parser dispatches derived flags and explains both values."""
+    """The public parser dispatches court flags and explains their values."""
+
+    def test_selection_beside_base_reaches_corpus_cut(self) -> None:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(["corpus", "cut", "--courts", "scotus", "--base", "corpus-2099-01-01"])
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("--courts was given beside --base", err.getvalue())
+
+    def test_help_describes_selection_values(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as exit_result:
+            main(["corpus", "cut", "--help"])
+        self.assertEqual(exit_result.exception.code, 0)
+        help_text = " ".join(re.sub(r"-\n\s+", "-", out.getvalue()).split())
+        self.assertIn("--courts <ids>", help_text)
+        self.assertIn("comma-separated court ids that become this cut's case-law courts "
+                      "in place of the carried ones; not for use with --base or --add-courts",
+                      help_text)
 
     def test_derived_flags_reach_corpus_cut(self) -> None:
         for flag, value, missing in (

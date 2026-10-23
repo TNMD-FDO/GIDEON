@@ -47,3 +47,7 @@ index documents byte for byte, extends `courts[]`, names that lockfile in
 `base:`, and carries `reason: tranche`. The corpus cut command's
 `--base <label> --add-courts <ids>` form writes it. Its base must be a
 lockfile in this same directory with an earlier label date.
+
+The corpus cut command's `--courts <ids>` form writes a lockfile whose case-law
+courts are the typed set over the same pins, committed here only once a
+release's hardware profile names it.

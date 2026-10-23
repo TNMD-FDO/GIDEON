@@ -800,13 +800,29 @@ def _wipe(ci_stack: CiStack, io: Host) -> StageResult:
     return StageResult("wipe", True, "removed: " + ", ".join(CI_WIPE_PATHS), "")
 
 
-def down(ci_stack: CiStack, io: Host, *, wipe: bool = False) -> int:
-    """Stop the CI project and optionally remove only its named wipe paths."""
+def down(ci_stack: CiStack, io: LockingHost, *, wipe: bool = False) -> int:
+    """Stop the CI project and optionally remove only its named wipe paths.
+
+    A teardown stops the containers a sibling run is driving, so it runs under
+    the engine lock, held through the wipe, and refuses while another process
+    holds it.
+    """
 
     root = _root_row(io, "down")
     if root is not None:
         print_stage(root)
         return 1
+    claim, lock_row = _engine_lock(io, "tools.cistack down")
+    if not lock_row.ok:
+        print_stage(lock_row)
+        return 1
+    try:
+        return _down_stages(ci_stack, io, wipe=wipe, lock_detail=lock_row.detail)
+    finally:
+        _release_engine_lock(io, claim)
+
+
+def _down_stages(ci_stack: CiStack, io: Host, *, wipe: bool, lock_detail: str) -> int:
     try:
         present = io.exists(ci_stack.project_dir / "compose.yaml")
     except OSError as exc:
@@ -816,7 +832,8 @@ def down(ci_stack: CiStack, io: Host, *, wipe: bool = False) -> int:
     preconditions = StageResult(
         "preconditions",
         True,
-        "CI project is present" if present else "CI project is already absent",
+        ("CI project is present" if present else "CI project is already absent")
+        + f"; {lock_detail}",
         "",
     )
     print_stage(preconditions)

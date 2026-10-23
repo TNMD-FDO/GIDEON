@@ -1694,6 +1694,52 @@ class Install(unittest.TestCase):
         self.assertIn("overruled: ok — treatment: 7 rows over 0 clusters, 0 seconds", out)
         self.assertIn("retain: ok", out)
 
+    def test_one_court_lockfile_scopes_install_and_build_report(self) -> None:
+        source, _, _ = self._add_captured_source()
+        lock_path = self.checkout / "corpus/lockfiles" / f"{self.labels[0]}.yaml"
+        loaded = load_lockfile(lock_path, known_sources={self.source.name: self.source, source.name: source})
+        assert loaded.lockfile is not None
+        lockfile = loaded.lockfile
+        lock_path.write_text(render_lockfile(replace(
+            lockfile, sources={
+                **lockfile.sources,
+                self.source.name: replace(lockfile.sources[self.source.name], courts=("scotus",)),
+            },
+        )))
+        code, out, err = self.run_install(sources=(self.source, source))
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(err, "")
+        self.assertEqual(len(self.host.stage_deferred), 1)
+        self.assertEqual(self.host.stage_deferred[0]["courts"], ["scotus"])
+        job, args = next(iter(self.host.stage_jobs.items()))
+        staged = self.host.stage_record(job, args)
+        self.assertIn(f"stage: ok — {self.source.name}: 1 courts staged, "
+                      f"{sum(staged['records'].values())} records read, "
+                      f"{round(staged['seconds'])} seconds; counts recorded", out)
+        self.assertEqual(self.host.stage_counts_rows, {
+            (lockfile.label, self.source.name, "scotus"): {
+                "label": lockfile.label, "source": self.source.name, "court": "scotus",
+                **{table.replace("-", "_"): staged["counts"]["scotus"][table]
+                   for table in worker_identity.STAGE_TABLES[1:]},
+                "staged_at": staged["staged_at"],
+            },
+        })
+        self.assertEqual([args["court"] for args in self.host.caselaw_deferred], ["scotus"])
+        self.assertEqual([args["court"] for args in self.host.overruled_deferred], ["scotus"])
+        self.assertEqual([args["court"] for args in self.host.agreement_deferred], ["scotus"])
+        counts = self.host.overruled_counts
+        self.assertIn(f"overruled: ok — {source.name}: {counts['list_rows']} table rows, "
+                      f"{counts['rows']} listed decisions;", out)
+        self.assertIn(f"overruled: ok — {source.name}: {counts['rows']} rows over "
+                      f"{counts['clusters']} clusters, 0 seconds", out)
+        self.assertLess(out.index("ingest: ok"), out.index("overruled: ok"))
+        self.assertLess(out.index("overruled: ok"), out.index("agreement: ok"))
+        self.assertEqual(len(self.host.reports), 1)
+        build_report = self.host.reports[0]
+        self.assertEqual(tuple(build_report["courts"]), ("scotus",))
+        self.assertIn(f"report: ok — {build_report['gen_id']}: "
+                      f"written_at {build_report['written_at']}; courts 1;", out)
+
     def test_overruled_refuses_without_scotus_and_names_the_derived_cut(self) -> None:
         self._enable_stage()
         source, _, _ = self._add_captured_source()

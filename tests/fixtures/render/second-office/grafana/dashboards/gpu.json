@@ -10,15 +10,16 @@
       "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
       "targets": [{"expr": "max by (gpu) (DCGM_FI_DEV_GPU_UTIL)", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
-      "title": "GPU utilisation",
+      "title": "GPU utilization",
       "type": "timeseries"
     },
     {
-      "description": "This shows used and free memory on each graphics card, reported by the card monitor. Free space should remain available; very little free space can prevent the engine from serving work. Check docs/runbooks/observability.md §4.",
+      "description": "This shows each graphics card's used and free memory, with its current values in the legend. Free space should remain available; very little free space can prevent the engine from serving work. Check docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {"defaults": {"unit": "mbytes"}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "gbytes", "min": 0}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
-      "targets": [{"expr": "max by (gpu) (DCGM_FI_DEV_FB_USED)", "legendFormat": "GPU {{gpu}}", "refId": "A"}, {"expr": "max by (gpu) (DCGM_FI_DEV_FB_FREE)", "legendFormat": "GPU {{gpu}} free", "refId": "B"}],
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "max by (gpu) (DCGM_FI_DEV_FB_USED) / 1024", "legendFormat": "GPU {{gpu}} used", "refId": "A"}, {"expr": "max by (gpu) (DCGM_FI_DEV_FB_FREE) / 1024", "legendFormat": "GPU {{gpu}} free", "refId": "B"}],
       "title": "GPU memory",
       "type": "timeseries"
     },

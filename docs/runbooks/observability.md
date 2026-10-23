@@ -87,9 +87,10 @@ and the runbook section to follow.
   result and the share of sampled files reused: a run, push, or restore reads
   `completed` when it has no recorded result, and a drill shows its own result
   word.
-- **GPU** — per-GPU utilisation, memory in GiB, temperature, power, and the
-  driver version from DCGM. The temperature card's dashed line is each card's
-  own maximum operating temperature, read through the exporter; a card that
+- **GPU** — per-GPU utilization, each card's used and free memory in GiB with
+  its current figures in the legend, temperature, power, and the driver
+  version from DCGM. The temperature card's dashed line is each card's own
+  maximum operating temperature, read through the exporter; a card that
   reports no limit draws no line. At or above the line, the card slows itself:
   check the room's cooling and airflow. Temperature does not page. From the
   engine's own `/metrics`, the board shows KV-cache usage, requests waiting

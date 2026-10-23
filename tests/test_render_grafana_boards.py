@@ -46,7 +46,7 @@ HEADER_TEXT_INSET = 13  # a header cell's 6 px padding each side and its right b
 KIOSK_SIDE_PADDING = 32  # the kiosk page's 16 px padding on each side
 GRID_COLUMNS = 24  # the dashboard grid's columns
 HEADER_CHAR_WIDTH_BOUND = 9  # an upper bound per header character, not a glyph metric
-GPU_AGGREGATED_FIELD = re.compile(r"max by \(gpu\) \((DCGM_FI_[A-Z0-9_]+)\)")
+GPU_AGGREGATED_FIELD = re.compile(r"max by \(gpu\) \((DCGM_FI_[A-Z0-9_]+)\)(?: / 1024)?")
 
 # The time series legend note's bottom cap applies below 992 px, even when
 # placement is right. The 2026-10-17 copies measured at most 22 px per table
@@ -368,9 +368,9 @@ class Dashboards(unittest.TestCase):
         dashboard = json.loads(GrafanaGpuArtifact.emit(inputs()))
         panels = {panel["title"]: panel for panel in _leaf_panels(dashboard)}
         expected = {
-            "GPU utilisation": [("DCGM_FI_DEV_GPU_UTIL", "GPU {{gpu}}")],
+            "GPU utilization": [("DCGM_FI_DEV_GPU_UTIL", "GPU {{gpu}}")],
             "GPU memory": [
-                ("DCGM_FI_DEV_FB_USED", "GPU {{gpu}}"),
+                ("DCGM_FI_DEV_FB_USED", "GPU {{gpu}} used"),
                 ("DCGM_FI_DEV_FB_FREE", "GPU {{gpu}} free"),
             ],
             "GPU temperature": [
@@ -388,6 +388,13 @@ class Dashboards(unittest.TestCase):
                     ],
                     pairs,
                 )
+
+    def test_every_dashboard_uses_american_utilization_spelling(self) -> None:
+        paths = sorted((ROOT / "compose/grafana/dashboards").glob("*.json"))
+        self.assertTrue(paths)
+        for path in paths:
+            with self.subTest(dashboard=path.name):
+                self.assertNotIn("utilisation", path.read_text(encoding="utf-8").lower())
 
     def test_every_dashboard_has_a_fixed_uid_and_declared_datasources(self) -> None:
         site_inputs = inputs()
@@ -1642,7 +1649,7 @@ class GpuBoard(unittest.TestCase):
             self.assertEqual(panels[title]["type"], "timeseries")
 
 
-    def test_gpu_board_memory_uses_mebibyte_unit(self) -> None:
+    def test_gpu_board_memory_uses_gibibyte_unit(self) -> None:
         dashboard = json.loads(
             (ROOT / "compose/grafana/dashboards/gpu.json").read_text(encoding="utf-8")
         )
@@ -1653,10 +1660,21 @@ class GpuBoard(unittest.TestCase):
             {gpu_aggregated_field(target["expr"]) for target in memory["targets"]},
             {"DCGM_FI_DEV_FB_USED", "DCGM_FI_DEV_FB_FREE"},
         )
-        self.assertEqual(memory["fieldConfig"]["defaults"]["unit"], "mbytes")
+        self.assertEqual(memory["fieldConfig"]["defaults"]["unit"], "gbytes")
+        self.assertEqual(memory["fieldConfig"]["defaults"]["min"], 0)
+        self.assertEqual(
+            [target["legendFormat"] for target in memory["targets"]],
+            ["GPU {{gpu}} used", "GPU {{gpu}} free"],
+        )
+        corpus = json.loads(GrafanaCorpusArtifact.emit(inputs()))
+        collections = next(panel for panel in corpus["panels"] if panel["title"] == "Collections")
+        self.assertEqual(memory["options"]["legend"], collections["options"]["legend"])
         rows = dcgm_counter_rows()
         for target in memory["targets"]:
-            self.assertIn("MiB", rows[gpu_aggregated_field(target["expr"])][1])
+            with self.subTest(target=target["refId"]):
+                field = gpu_aggregated_field(target["expr"])
+                self.assertIn("MiB", rows[field][1])
+                self.assertEqual(target["expr"], f"max by (gpu) ({field}) / 1024")
 
 
     def test_gpu_board_temperature_limit_is_dashed(self) -> None:

@@ -349,6 +349,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="copy the pins of this committed lockfile label (a derived cut)")
     cut.add_argument("--add-courts", metavar="<ids>",
                      help="comma-separated court ids to add to the base's courts")
+    cut.add_argument("--courts", metavar="<ids>",
+                     help="comma-separated court ids that become this cut's case-law courts "
+                          "in place of the carried ones; not for use with --base or --add-courts")
     cut.set_defaults(handler=host_cli.run_corpus_cut, command_path="corpus cut")
     watch = corpus_sub.add_parser(
         "watch",
