@@ -1,6 +1,7 @@
 """The ordered host command for loading, running, and gating eval slices."""
 
 import argparse
+import signal
 import subprocess
 import sys
 import time
@@ -1874,6 +1875,7 @@ def run_eval(
     court_path: PathLike | None = None,
     models_path: PathLike | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    raise_signal: Callable[[int], None] = signal.raise_signal,
 ) -> int:
     """Run ``eval run``'s ordered stages and return the exit code.
 
@@ -1996,69 +1998,70 @@ def run_eval(
     )
 
     try:
-        if not mode.challenger:
-            if len(names) <= 1:
-                return _run_body(request, seams, _Pass(new_run_id())).exit_code
-            exit_code = 0
-            for index, name in enumerate(names, 1):
-                run_id = new_run_id()
-                print_stage(
-                    StageResult("suite", True, f"{index} of {len(names)}: {name}, run {run_id}", "")
-                )
-                exit_code = _run_body(
-                    replace(request, slice_name=name), seams, _Pass(run_id)
-                ).exit_code
-            return exit_code
+        with run.stopping(raise_signal=raise_signal):
+            if not mode.challenger:
+                if len(names) <= 1:
+                    return _run_body(request, seams, _Pass(new_run_id())).exit_code
+                exit_code = 0
+                for index, name in enumerate(names, 1):
+                    run_id = new_run_id()
+                    print_stage(
+                        StageResult("suite", True, f"{index} of {len(names)}: {name}, run {run_id}", "")
+                    )
+                    exit_code = _run_body(
+                        replace(request, slice_name=name), seams, _Pass(run_id)
+                    ).exit_code
+                return exit_code
 
-        assert entry is not None and subject is not None
-        release_id, challenger_id = new_run_id(), new_run_id()
-        print_stage(
-            StageResult(
-                "side", True, f"release run {release_id}: {entry.release}", ""
+            assert entry is not None and subject is not None
+            release_id, challenger_id = new_run_id(), new_run_id()
+            print_stage(
+                StageResult(
+                    "side", True, f"release run {release_id}: {entry.release}", ""
+                )
             )
-        )
-        release_outcome = _run_body(
-            request,
-            seams,
-            _Pass(
-                release_id,
-                prompt_id=entry.release,
-                overrides=_side_overrides(entry, challenger.RELEASE_SIDE, entry.release),
-            ),
-        )
-        if not release_outcome.written or release_outcome.partial:
+            release_outcome = _run_body(
+                request,
+                seams,
+                _Pass(
+                    release_id,
+                    prompt_id=entry.release,
+                    overrides=_side_overrides(entry, challenger.RELEASE_SIDE, entry.release),
+                ),
+            )
+            if not release_outcome.written or release_outcome.partial:
+                print_stage(
+                    StageResult(
+                        "side",
+                        False,
+                        f"challenger run {challenger_id} did not start: release run {release_id} "
+                        "was not recorded or was partial, so nothing can pair",
+                        request.engine_root_fix(),
+                    )
+                )
+                return 1
+
             print_stage(
                 StageResult(
                     "side",
-                    False,
-                    f"challenger run {challenger_id} did not start: release run {release_id} "
-                    "was not recorded or was partial, so nothing can pair",
-                    request.engine_root_fix(),
+                    True,
+                    f"challenger run {challenger_id}: {entry.challenger}, pairs {release_id}",
+                    "",
                 )
             )
-            return 1
-
-        print_stage(
-            StageResult(
-                "side",
-                True,
-                f"challenger run {challenger_id}: {entry.challenger}, pairs {release_id}",
-                "",
-            )
-        )
-        challenger_outcome = _run_body(
-            request,
-            seams,
-            _Pass(
-                challenger_id,
-                prompt_id=entry.challenger,
-                subject_change=subject.change,
-                overrides=_side_overrides(
-                    entry, challenger.CHALLENGER_SIDE, entry.challenger, pairs=release_id
+            challenger_outcome = _run_body(
+                request,
+                seams,
+                _Pass(
+                    challenger_id,
+                    prompt_id=entry.challenger,
+                    subject_change=subject.change,
+                    overrides=_side_overrides(
+                        entry, challenger.CHALLENGER_SIDE, entry.challenger, pairs=release_id
+                    ),
                 ),
-            ),
-        )
-        return 0 if release_outcome.exit_code == challenger_outcome.exit_code == 0 else 1
+            )
+            return 0 if release_outcome.exit_code == challenger_outcome.exit_code == 0 else 1
     finally:
         # A nested pass holds nothing of its own; the real host keys one descriptor per path.
         if seams.lock_claim.taken:

@@ -79,7 +79,7 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/corpus.json":
-    sha256: "d029b752c0dc7d0659e17970f8f8cefc89d58377dbc46ac6d6071295c9050a64"
+    sha256: "4eeca3e3c0ccdcceb53fe3d313a7c19f0db56c88bf947e08efb747e1df059dda"
     mode: "0644"
     owners:
       - "grafana"

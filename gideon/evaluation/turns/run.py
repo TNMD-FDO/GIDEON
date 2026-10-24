@@ -1,15 +1,19 @@
-"""Run each case through one of the harness's turn drivers."""
+"""Run each case through a turn driver and sweep in-flight API chats on stop."""
 
 import concurrent.futures
 import json
 import secrets
+import signal
+import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import FrameType
 from typing import Any, Final, Protocol, cast
 
 from gideon.evaluation.turns import browser, chromium, classify, door, session
@@ -30,6 +34,9 @@ from gideon.host.sysio import Host, PathLike, RealHost
 # the recorded rows' maximum latency and cut count per run, read from the run
 # record as the metrics role.
 TURN_TIMEOUT_SECONDS: Final[float] = 1200.0
+# Stay below the nightly unit's default TimeoutStopSec of 90 s, leaving
+# margin for the sudo relay and the interpreter's exit after the sweep.
+STOP_SWEEP_SECONDS: Final[float] = 60.0
 # A row the bound cut names the bound, so the operator reads the harness's
 # limit rather than the frontend's logs.
 CUT_AT: Final[str] = f"cut at {TURN_TIMEOUT_SECONDS:.0f} s"
@@ -69,6 +76,194 @@ def unverified_fix(account: str) -> str:
 _RECORD_FIX: Final[str] = "Check the --out directory's disk and permissions, then retry."
 _RENDERED_DIR: Final[str] = "/etc/gideon/rendered"
 
+
+@dataclass(frozen=True, slots=True)
+class _InFlightTurn:
+    """The identity and frontend session needed to delete one turn's chat."""
+
+    client: Client
+    ids_before: frozenset[str]
+    user_id: str
+    assistant_id: str
+    row_name: str
+    account: str
+    chat_id: str | None = None
+
+
+class _TurnAdmissionStopped(Exception):
+    """A test woke a turn that shutdown had held outside the frontend."""
+
+
+class _InFlightRegistry:
+    """Keep turn identities and confirmed releases across a process's drivers."""
+
+    def __init__(self) -> None:
+        # A main-thread signal can interrupt a registry operation and re-enter it.
+        self._lock = threading.RLock()
+        self._turns: dict[tuple[str, str], _InFlightTurn] = {}
+        self._stopping = False
+        self._admission = threading.Event()
+        self._releases: dict[tuple[str, str], bool] = {}
+
+    def register(self, turn: _InFlightTurn) -> None:
+        """Admit a turn, or wait for process death once stopping has begun."""
+
+        with self._lock:
+            if not self._stopping:
+                self._turns[turn.user_id, turn.assistant_id] = turn
+                return
+        self._admission.wait()
+        raise _TurnAdmissionStopped("the process is stopping; no new turn was admitted")
+
+    def name_chat(self, user_id: str, assistant_id: str, chat_id: str) -> None:
+        """Replace an entry once the driver's finder has identified its chat."""
+
+        with self._lock:
+            self._turns[user_id, assistant_id] = replace(
+                self._turns[user_id, assistant_id], chat_id=chat_id
+            )
+
+    def release(self, user_id: str, assistant_id: str, *, deleted: bool) -> None:
+        """Release a turn, retaining its deletion result while a sweep runs."""
+
+        with self._lock:
+            self._turns.pop((user_id, assistant_id), None)
+            if self._stopping:
+                self._releases[user_id, assistant_id] = deleted
+
+    def stop_and_snapshot(self) -> tuple[_InFlightTurn, ...]:
+        """Close admission and capture every admitted turn under the same lock."""
+
+        with self._lock:
+            self._stopping = True
+            return tuple(self._turns.values())
+
+    def released_deleted(self, user_id: str, assistant_id: str) -> bool | None:
+        """Read a turn's confirmed cleanup result, never infer it from absence."""
+
+        with self._lock:
+            return self._releases.get((user_id, assistant_id))
+
+    def admit_waiters(self) -> None:
+        """Wake held turns in tests whose signal seam returns instead of dying."""
+
+        self._admission.set()
+
+    def reset(self) -> None:
+        """Clear test state after the run and all its session threads return."""
+
+        with self._lock:
+            self._stopping = False
+            self._turns.clear()
+            self._releases.clear()
+            self._admission.clear()
+
+
+_in_flight = _InFlightRegistry()
+"""Process-wide because suites build drivers in managed.ManagedTurns and the
+harness builds them in run; one signal handler must see every driver's turn.
+"""
+
+
+@contextmanager
+def stopping(
+    *, raise_signal: Callable[[int], None] = signal.raise_signal
+) -> Iterator[None]:
+    """Install bounded chat cleanup for SIGTERM and SIGINT on the main thread.
+
+    Each entry saves and restores the previous handlers, including nested entries.
+    """
+
+    def stop(signum: int, frame: FrameType | None) -> None:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        turns = _in_flight.stop_and_snapshot()
+        if not turns:
+            raise_signal(signum)
+            return
+
+        outcomes: dict[tuple[str, str], StageResult] = {}
+
+        def sweep() -> None:
+            for turn in turns:
+                chat_id = turn.chat_id
+                if chat_id is None:
+                    try:
+                        found = owuiturn.find_turn_chat(
+                            turn.client,
+                            ids_before=turn.ids_before,
+                            user_id=turn.user_id,
+                            assistant_id=turn.assistant_id,
+                        )
+                    except owui.OwuiError as exc:
+                        problem = exc.problem
+                    except Exception:  # noqa: BLE001 - the stop row owns sweep failures.
+                        problem = "chat finder raised an internal error"
+                    else:
+                        chat_id = found.chat_id
+                        problem = found.refusal().problem if chat_id is None else ""
+                    if chat_id is None:
+                        outcomes[turn.user_id, turn.assistant_id] = StageResult(
+                            turn.row_name,
+                            False,
+                            f"chat left: {problem}",
+                            unverified_fix(turn.account),
+                        )
+                        continue
+                try:
+                    deletion = owuiturn.delete_chat(turn.client, chat_id)
+                except Exception:  # noqa: BLE001 - the stop row owns sweep failures.
+                    deletion = Problem(
+                        "chat deletion raised an internal error",
+                        _cleanup_fix(turn.account),
+                    )
+                outcomes[turn.user_id, turn.assistant_id] = StageResult(
+                    turn.row_name,
+                    deletion is None,
+                    "chat deleted" if deletion is None else f"deletion failed: {deletion.problem}",
+                    "" if deletion is None else _cleanup_fix(turn.account),
+                )
+
+        worker = threading.Thread(target=sweep, daemon=True)
+        worker.start()
+        worker.join(timeout=STOP_SWEEP_SECONDS)
+        details: list[str] = []
+        fixes: list[str] = []
+        for turn in turns:
+            outcome = outcomes.get(
+                (turn.user_id, turn.assistant_id),
+                StageResult(
+                    turn.row_name,
+                    False,
+                    "sweep timed out",
+                    unverified_fix(turn.account),
+                ),
+            )
+            if not outcome.ok and _in_flight.released_deleted(
+                turn.user_id, turn.assistant_id
+            ) is True:
+                outcome = StageResult(turn.row_name, True, "chat deleted by its turn", "")
+            details.append(f"{turn.row_name}: {outcome.detail}")
+            if outcome.fix and outcome.fix not in fixes:
+                fixes.append(outcome.fix)
+        print_stage(
+            StageResult(
+                "stop",
+                not fixes,
+                f"{signal.Signals(signum).name} during {', '.join(details)}",
+                " ".join(fixes),
+            )
+        )
+        sys.stdout.flush()
+        raise_signal(signum)
+
+    previous_term = signal.signal(signal.SIGTERM, stop)
+    previous_int = signal.signal(signal.SIGINT, stop)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
+        signal.signal(signal.SIGINT, previous_int)
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +342,7 @@ class TurnRow:
     stream_offset: int | None = None
     stream_withdrawn: tuple[classify.StreamTrip, ...] = ()
     answer: str | None = field(default=None, repr=False)
+    figures: tuple[str, ...] = ()
 
     @property
     def reported_pattern(self) -> str | None:
@@ -264,57 +460,73 @@ class ApiTurnDriver:
         ids_before: frozenset[str],
         row_name: str,
     ) -> TurnOutcome:
-        del row_name
         user_id = str(uuid.uuid4())
         assistant_id = str(uuid.uuid4())
-        started = monotonic()
-        # An unsearched case's body carries no features key.
-        managed_problem = owuiturn.managed_turn(
-            self.client,
-            model=self._model,
-            prompt=prompt,
-            user_id=user_id,
-            assistant_id=assistant_id,
-            timestamp=_timestamp(now),
-            features={"web_search": True} if case.search else None,
-        )
-        elapsed = (
-            None if isinstance(managed_problem, Timeout) else monotonic() - started
-        )
-
-        def find() -> owuiturn.TurnChat:
-            return owuiturn.find_turn_chat(
-                self.client,
+        _in_flight.register(
+            _InFlightTurn(
+                client=self.client,
                 ids_before=ids_before,
                 user_id=user_id,
                 assistant_id=assistant_id,
+                row_name=row_name,
+                account=self.account,
+            )
+        )
+        try:
+            started = monotonic()
+            # An unsearched case's body carries no features key.
+            managed_problem = owuiturn.managed_turn(
+                self.client,
+                model=self._model,
+                prompt=prompt,
+                user_id=user_id,
+                assistant_id=assistant_id,
+                timestamp=_timestamp(now),
+                features={"web_search": True} if case.search else None,
+            )
+            elapsed = (
+                None if isinstance(managed_problem, Timeout) else monotonic() - started
             )
 
-        # The turn is made whatever the finder answers, so a refused or failed
-        # turn's chat is identified and deleted too. One failed listing after
-        # the turn never leaves a chat behind: the finder runs once more, and
-        # the first failure is what the row reports. A second failure is the
-        # loop's to catch.
-        finder_problem: Problem | None = None
-        try:
-            found = find()
-        except owui.OwuiError as exc:
-            finder_problem = Problem(exc.problem, exc.fix)
-            found = find()
-        stored = found.stored
-        stored_problem = stored.problem if stored is not None else None
-        return TurnOutcome(
-            chat_id=found.chat_id,
-            assistant=stored.assistant if stored is not None else None,
-            user=stored.user if stored is not None else None,
-            elapsed=elapsed,
-            problem=managed_problem or finder_problem or stored_problem,
-            candidates=found.candidates,
-            unidentified=found.problem,
-            user_id=user_id,
-            assistant_id=assistant_id,
-            started=started,
-        )
+            def find() -> owuiturn.TurnChat:
+                return owuiturn.find_turn_chat(
+                    self.client,
+                    ids_before=ids_before,
+                    user_id=user_id,
+                    assistant_id=assistant_id,
+                )
+
+            # The turn is made whatever the finder answers, so a refused or failed
+            # turn's chat is identified and deleted too. One failed listing after
+            # the turn never leaves a chat behind: the finder runs once more, and
+            # the first failure is what the row reports. A second failure is the
+            # loop's to catch.
+            finder_problem: Problem | None = None
+            try:
+                found = find()
+            except owui.OwuiError as exc:
+                finder_problem = Problem(exc.problem, exc.fix)
+                found = find()
+            if found.chat_id is not None:
+                _in_flight.name_chat(user_id, assistant_id, found.chat_id)
+            stored = found.stored
+            stored_problem = stored.problem if stored is not None else None
+            return TurnOutcome(
+                chat_id=found.chat_id,
+                assistant=stored.assistant if stored is not None else None,
+                user=stored.user if stored is not None else None,
+                elapsed=elapsed,
+                problem=managed_problem or finder_problem or stored_problem,
+                candidates=found.candidates,
+                unidentified=found.problem,
+                user_id=user_id,
+                assistant_id=assistant_id,
+                started=started,
+            )
+        except BaseException:
+            # The loop cannot release a turn whose outcome never returned its ids.
+            _in_flight.release(user_id, assistant_id, deleted=False)
+            raise
 
 
 class UnfilteredTurnDriver:
@@ -783,6 +995,7 @@ def _case_record(
     user: Mapping[str, object] | None,
     verdict: classify.Verdict | None,
     checks: Mapping[str, bool],
+    figures: tuple[str, ...],
     elapsed: float | None,
     problem: Problem | None,
     cut: bool,
@@ -808,6 +1021,7 @@ def _case_record(
         "user": user,
         "verdict": _verdict_data(verdict),
         "checks": dict(checks),
+        "figures": list(figures),
         "elapsed": elapsed,
         "problem": _problem_data(problem),
         "cut": cut,
@@ -826,6 +1040,7 @@ def _service_record(
     assistant: Mapping[str, object] | None,
     verdict: classify.Verdict | None,
     checks: Mapping[str, bool],
+    figures: tuple[str, ...],
     elapsed: float | None,
     problem: Problem | None,
     cut: bool,
@@ -857,6 +1072,7 @@ def _service_record(
         "answer": answer,
         "verdict": _verdict_data(verdict),
         "checks": dict(checks),
+        "figures": list(figures),
         "elapsed": elapsed,
         "problem": _problem_data(problem),
         "cut": cut,
@@ -1255,6 +1471,7 @@ def service_turn(
     verdict: classify.Verdict | None = None
     verdict_kind: str | None = None
     checks: dict[str, bool] = {}
+    figures: tuple[str, ...] = ()
     problem: Problem | None = None
     elapsed: float | None = None
     started: float | None = None
@@ -1322,6 +1539,7 @@ def service_turn(
                 case, verdict, answer, record=_record_home(spec)
             )
             checks = dict(judgement.checks)
+            figures = judgement.figures
             verdict_kind = verdict.kind
             stream_detail = ""
             stream_failed = False
@@ -1362,6 +1580,7 @@ def service_turn(
             assistant=assistant,
             verdict=verdict,
             checks=checks,
+            figures=figures,
             elapsed=elapsed,
             problem=problem,
             cut=cut,
@@ -1385,6 +1604,7 @@ def service_turn(
         elapsed=elapsed,
         cut=cut,
         checks=checks,
+        figures=figures,
         pattern_id=verdict.pattern_id if verdict is not None else None,
         stream_pattern_id=(
             stream_verdict.pattern_id
@@ -1427,6 +1647,7 @@ def frontend_turn(
     verdict: classify.Verdict | None = None
     verdict_kind: str | None = None
     checks: dict[str, bool] = {}
+    figures: tuple[str, ...] = ()
     problem: Problem | None = None
     unidentified: Problem | None = None
     elapsed: float | None = None
@@ -1513,6 +1734,7 @@ def frontend_turn(
                 case, verdict, text, record=_record_home(spec)
             )
             checks = dict(judgement.checks)
+            figures = judgement.figures
             verdict_kind = verdict.kind
             row_ok, row_fix, stream_detail = judgement.ok, judgement.fix, ""
             if (
@@ -1568,6 +1790,8 @@ def frontend_turn(
                 )
             if deletion is None:
                 deleted = True
+        if user_id and assistant_id:
+            _in_flight.release(user_id, assistant_id, deleted=deleted)
 
     record = (
         _case_record(
@@ -1582,6 +1806,7 @@ def frontend_turn(
             user=user,
             verdict=verdict,
             checks=checks,
+            figures=figures,
             elapsed=elapsed,
             problem=problem,
             cut=cut,
@@ -1608,6 +1833,7 @@ def frontend_turn(
         elapsed=elapsed,
         cut=cut,
         checks=checks,
+        figures=figures,
         pattern_id=verdict.pattern_id if verdict is not None else None,
         stream_pattern_id=(
             stream_verdict.pattern_id
@@ -1993,6 +2219,7 @@ def run(
     instruction_text: str | None = None,
     browser_setup: BrowserSetup | None = None,
     hand_back: Callable[[Host, Path], None] | None = None,
+    raise_signal: Callable[[int], None] = signal.raise_signal,
 ) -> int:
     """Sign in, run every repeated case, record it, and hand ownership back.
 
@@ -2069,18 +2296,19 @@ def run(
                 ApiTurnDriver(client_factory, password, model=spec.model)
                 for _ in range(spec.concurrent)
             )
-        code = _run_cases(
-            spec,
-            cases=cases,
-            origin=origin,
-            window=window,
-            guardrail=guardrail,
-            now=now,
-            monotonic=monotonic,
-            host=io,
-            drivers=drivers,
-            browser_setup=browser_setup,
-        )
+        with stopping(raise_signal=raise_signal):
+            code = _run_cases(
+                spec,
+                cases=cases,
+                origin=origin,
+                window=window,
+                guardrail=guardrail,
+                now=now,
+                monotonic=monotonic,
+                host=io,
+                drivers=drivers,
+                browser_setup=browser_setup,
+            )
     finally:
         try:
             if browser_setup is not None:

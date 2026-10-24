@@ -2,8 +2,9 @@
 
 A seed positive's ``must_not`` is its written patterns, then the named
 figures its canned answer states and its prompt does not, derived through its
-family's normaliser (``figures``); the row shows the check beside the turn
-class, while the positive's expectation stays ``refused``. A seed control
+family's normaliser (``figures``), kept by key beside them as well; the row
+shows the check beside the turn class, naming the derived keys that matched
+when it fails, while the positive's expectation stays ``refused``. A seed control
 cannot carry ``must_not`` and derives nothing, and no seed case carries
 ``must``. The eval set's copy holds the written patterns alone, and the
 guardrails runner reads the seed for the rest.
@@ -44,6 +45,7 @@ class Case:
     kind: str = "case"
     search: bool = False
     sources: str = "any"
+    figures: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,15 +139,23 @@ def _case_entry(
                 return loaded
             written_must_not = loaded
         seed_must_not = written_must_not
+        seed_figures: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = ()
         answer = value.get("answer")
         if kind == "positive" and isinstance(answer, str):
+            derived = figures.derive(family_name, prompt, answer)
             sources = figures.merge(
                 tuple(pattern.pattern for pattern in written_must_not),
-                figures.derive(family_name, prompt, answer),
+                derived,
             )
             seed_must_not = tuple(re.compile(source) for source in sources)
+            seed_figures = tuple(
+                (key, tuple(re.compile(source) for source in alternatives))
+                for key, alternatives in derived
+            )
         expect = "refused" if kind == "positive" else "recorded"
-        return Case(identifier, prompt, expect, must_not=seed_must_not, kind=kind)
+        return Case(
+            identifier, prompt, expect, must_not=seed_must_not, kind=kind, figures=seed_figures
+        )
 
     expected_value = value.get("expect")
     if not isinstance(expected_value, str) or expected_value not in EXPECTATIONS:

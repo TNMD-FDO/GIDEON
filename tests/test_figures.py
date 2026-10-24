@@ -15,7 +15,6 @@ ROOT = Path(__file__).resolve().parents[1]
 class Rendering(unittest.TestCase):
     def test_key_shapes_render_each_form(self) -> None:
         cases = (
-            ("level-7", ("7", "seven")),
             ("7-point", ("7 points", "7 criminal history points", "seven points")),
             (
                 "23-day",
@@ -35,6 +34,62 @@ class Rendering(unittest.TestCase):
                     with self.subTest(example=example):
                         source = alternatives[index] if key == "57-71" else alternatives[0]
                         self.assertIsNotNone(re.search(source, example))
+
+    def test_level_forms(self) -> None:
+        examples = {
+            "level-18": (
+                "level 18",
+                "offense level of 18",
+                "OL 18",
+                "TOL 18",
+                "18/II",
+                "eighteen/II",
+                "level eighteen",
+                "the total offense level is therefore 18",
+                "total offense level at 18",
+                "puts him at level 18",
+                "Offense level 14, plus 4 for the firearm, for a total of 18.",
+                "**Total offense level → 18**",
+            ),
+            "level-14": ("base offense level 14",),
+            "level-21": (
+                "Offense level twenty, plus one, for a total of twenty-one.",
+                "Offense level twenty one, plus zero, for a total of twenty one.",
+                "**Total offense level at 21**,",
+                "Offense level 20, plus 2 for the firearm, plus 2 for role, "
+                "minus 3, for a total of 21.",
+                "Offense level 20, plus 1, for a total of **21**.",
+            ),
+        }
+        for key, forms in examples.items():
+            alternatives = figures._render(key)
+            for form in forms:
+                with self.subTest(key=key, form=form):
+                    self.assertTrue(any(re.search(source, form) for source in alternatives))
+
+    def test_level_forms_exclude_unrelated_numbers(self) -> None:
+        examples = {
+            "level-18": (
+                "18 U.S.C. § 922(g)",
+                "18",
+                "eighteen",
+                "the base offense level under 18 U.S.C. § 922(g) is 14.",
+                "a level 20 defendant faces 18 months",
+                "offense level 180",
+                "offense level eighteenfold",
+            ),
+            "level-21": (
+                "At a high level, nine exhibits plus twelve exhibits, for a total of 21.",
+                "Offense level 20, plus 2, for a total of 21 months.",
+                "Offense level 20. Plus 1, for a total of 21.",
+                "Offense level 20, plus 1, for a total of 21 under the guideline.",
+            ),
+        }
+        for key, forms in examples.items():
+            alternatives = figures._render(key)
+            for form in forms:
+                with self.subTest(key=key, form=form):
+                    self.assertFalse(any(re.search(source, form) for source in alternatives))
 
     def test_category_forms(self) -> None:
         roman, clause = figures._render("category-IV")
@@ -113,7 +168,7 @@ class Rendering(unittest.TestCase):
         }
         for digits, forms in examples.items():
             with self.subTest(number=digits):
-                source, = figures._render(f"level-{digits}")
+                source, = figures._render(f"{digits}-life")
                 for form in forms:
                     with self.subTest(form=form):
                         self.assertIsNotNone(re.search(source, form))
@@ -124,7 +179,7 @@ class Rendering(unittest.TestCase):
 class Derivation(unittest.TestCase):
     def test_prompt_subtraction_and_alternative_drop(self) -> None:
         answer = "Offense level 7 and category III."
-        derived = figures.derive("guidelines", "My offense level is 7.", answer)
+        derived = figures.derive("guidelines", "With offense level 7.", answer)
         self.assertEqual(tuple(key for key, _ in derived), ("category-III",))
 
         roman_omitted = figures.derive("guidelines", "The numeral III appears.", "category III")
@@ -132,7 +187,15 @@ class Derivation(unittest.TestCase):
         self.assertEqual(len(roman_omitted[0][1]), 1)
         self.assertIsNotNone(re.search(roman_omitted[0][1][0], "category 3"))
 
-        self.assertEqual(figures.derive("guidelines", "A bare 7 appears.", "offense level 7"), ())
+        prompt = "A bare 7 appears."
+        derived = figures.derive("guidelines", prompt, "offense level 7")
+        self.assertEqual(tuple(key for key, _ in derived), ("level-7",))
+        self.assertTrue(any(re.search(source, "level seven") for source in derived[0][1]))
+        self.assertFalse(any(re.search(source, prompt) for source in derived[0][1]))
+
+        answer = "The range is 30-37 months."
+        self.assertEqual(tuple(key for key, _ in figures.derive("guidelines", "", answer)), ("30-37",))
+        self.assertEqual(figures.derive("guidelines", "Exhibits 30 and 37 are attached.", answer), ())
 
     def test_merge_orders_sources_and_collapses_duplicates(self) -> None:
         derived = (("first", ("derived-a", "shared")), ("second", ("derived-b", "shared")))

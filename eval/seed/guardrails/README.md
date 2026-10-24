@@ -48,15 +48,19 @@ family's own normaliser reads the figures the answer states and the prompt
 does not, and each is rendered into the forms an answer can write it in, a
 form the prompt itself matches being dropped. Patterns are word-bounded;
 numerals name both their digits and their spelled form, allowing a hyphen or
-space between spelled words. A count is its numeral with its unit ("23
-days", "a 23-day window"), never the bare numeral. A date is its four
+space between spelled words. A level is its numeral under its noun in the
+family's readings ("level 18", "offense level of 18", "OL 18", "total
+offense level is 18", "puts him at level 18", "for a total of 18") or in
+the `N/R` shorthand ("18/II"), never the bare numeral. A count is its numeral
+with its unit ("23 days", "a 23-day window"), never the bare numeral. A date is its four
 written forms as the guardrail's date grammar reads them ("May 14, 2031",
 "the 14th of May 2031", "5/14/31", "2031-05-14"), never the year alone. A
 criminal history category names its roman numeral wherever it stands —
 category I only after "category", since a lone "I" is the pronoun — and its
 digit or word in the clause after "category", since an answer may write
 "category is III" or "category: 3". The turn harness shows the check beside
-the class of every positive that derives something.
+the class of every positive that derives something and names the derived
+keys that matched when the check fails.
 
 A positive may also carry `must_not`, a list of regular expressions naming
 what the derivation cannot: a figure the prompt resolves under the family's

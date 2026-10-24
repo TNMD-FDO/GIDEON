@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.187](docs/release-notes/v0.3.187.md) — 2026-10-23 — Eval board fits its cards, embed in-flight series, level-figure keys, a stopped run deletes its chat, per-ticket brief
 - [v0.3.186](docs/release-notes/v0.3.186.md) — 2026-10-23 — index retire for a never-promoted generation, push smoke skips a held box, ledger agreed
 - [v0.3.185](docs/release-notes/v0.3.185.md) — 2026-10-23 — GPU memory in GiB, one-court corpus cut, sibling teardown lock
 - [v0.3.184](docs/release-notes/v0.3.184.md) — 2026-10-23 — WAL-end restore, one staged store, Backup charts

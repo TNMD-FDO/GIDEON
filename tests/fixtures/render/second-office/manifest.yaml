@@ -84,12 +84,12 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/evaluation.json":
-    sha256: "ee81d90d0e37a167aed64ffa6a05ea854f6a43172ba25a61264c23fd2fb99011"
+    sha256: "e02775fbd7dcd7f08cc7979db63f5d93fb5788776ca9f1d2b9e38a37abc282ca"
     mode: "0644"
     owners:
       - "grafana"
   "grafana/dashboards/corpus.json":
-    sha256: "d029b752c0dc7d0659e17970f8f8cefc89d58377dbc46ac6d6071295c9050a64"
+    sha256: "4eeca3e3c0ccdcceb53fe3d313a7c19f0db56c88bf947e08efb747e1df059dda"
     mode: "0644"
     owners:
       - "grafana"

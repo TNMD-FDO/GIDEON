@@ -106,6 +106,7 @@ class Judgement:
     detail: str
     fix: str
     checks: Mapping[str, bool]
+    figures: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -803,6 +804,14 @@ def case_checks(case: Case, verdict: Verdict, content: str) -> dict[str, bool]:
     return results
 
 
+def matched_figures(case: Case, content: str) -> tuple[str, ...]:
+    """Return the derived keys whose forms match the content, in case order."""
+
+    return tuple(
+        key for key, forms in case.figures if any(pattern.search(content) for pattern in forms)
+    )
+
+
 def _check_fix(name: str, record: str) -> str:
     return f"Read {record}; the failed {name} check is the case's own, the class is the guardrail's."
 
@@ -825,14 +834,17 @@ def judge_case(case: Case, verdict: Verdict, content: str, *, record: str) -> Ju
         detail += f"; sources {'present' if verdict.sources_present else 'absent'}"
     detail += f"; expect {case.expect}"
     results = case_checks(case, verdict, content)
+    figures = matched_figures(case, content)
     if case.must:
         detail += f"; must {'ok' if results['must'] else 'failed'}"
     if case.must_not:
         detail += f"; must_not {'ok' if results['must_not'] else 'failed'}"
+        if not results["must_not"] and figures:
+            detail += f" ({', '.join(figures)})"
     detail += f"; withheld {'ok' if results['withheld'] else 'failed'}"
     if not results["expect"]:
-        return Judgement(False, detail, _FIX.format(record=record), results)
+        return Judgement(False, detail, _FIX.format(record=record), results, figures=figures)
     for name in ("must", "must_not", "block", "sources", "withheld"):
         if name in results and not results[name]:
-            return Judgement(False, detail, _check_fix(name, record), results)
-    return Judgement(True, detail, "", results)
+            return Judgement(False, detail, _check_fix(name, record), results, figures=figures)
+    return Judgement(True, detail, "", results, figures=figures)

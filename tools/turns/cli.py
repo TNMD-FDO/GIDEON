@@ -1,6 +1,7 @@
 """CLI surface and preconditions for the turn harness."""
 
 import argparse
+import signal
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -249,6 +250,7 @@ def main(
     monotonic: Callable[[], float] = time.monotonic,
     checkout: Path | None = None,
     site_path: PathLike = DEFAULT_SITE_PATH,
+    raise_signal: Callable[[int], None] = signal.raise_signal,
 ) -> int:
     """Parse the command, judge the preconditions as one row, then run the cases."""
 
@@ -729,6 +731,7 @@ def main(
             browser_setup=browser_setup,
             hand_back=hand_back,
             rendered_dir=rendered_dir,
+            raise_signal=raise_signal,
         )
     finally:
         if claim is not None:

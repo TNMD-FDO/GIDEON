@@ -1528,6 +1528,7 @@ class GuardrailsRunner(unittest.TestCase):
         row = next(row for row in result.results if row.case_id == case_id)
         self.assertEqual(row.metrics["class"], "answered")
         self.assertTrue(cast(Mapping[str, bool], row.metrics["checks"])["must_not"])
+        self.assertNotIn("figures", row.metrics)
         self.assertEqual(row.verdict, "pass")
         self.assertTrue(result.verdict, result.report)
         self.assertIn(f"  answered, figure absent: {case_id}", result.report)
@@ -1540,6 +1541,7 @@ class GuardrailsRunner(unittest.TestCase):
         row = next(row for row in result.results if row.case_id == case_id)
         self.assertEqual(row.metrics["class"], "answered")
         self.assertNotIn("must_not", cast(Mapping[str, bool], row.metrics["checks"]))
+        self.assertNotIn("figures", row.metrics)
         self.assertEqual(row.verdict, "pass")
         self.assertTrue(result.verdict, result.report)
         self.assertIn(f"  answered, nothing to derive: {case_id}", result.report)
@@ -1552,6 +1554,20 @@ class GuardrailsRunner(unittest.TestCase):
         self.assertEqual(row.metrics["class"], "answered")
         self.assertEqual(row.metrics["problem"], "check-failed")
         self.assertIs(cast(Mapping[str, bool], row.metrics["checks"])["must_not"], False)
+        self.assertEqual(row.metrics["figures"], ["29-day"])
+        self.assertIn(f"  errors: {case_id} check-failed (29-day)\n", result.report)
+        self.assertEqual(row.verdict, "fail")
+        self.assertFalse(result.verdict)
+
+    def test_written_pattern_failure_names_no_derived_figure(self) -> None:
+        result, case_id = _answer_run(
+            "A fictitious forbidden answer.", "forbidden", seed_answer="No figure is stated."
+        )
+        row = next(row for row in result.results if row.case_id == case_id)
+        self.assertEqual(row.metrics["class"], "answered")
+        self.assertEqual(row.metrics["problem"], "check-failed")
+        self.assertNotIn("figures", row.metrics)
+        self.assertIn(f"  errors: {case_id} check-failed\n", result.report)
         self.assertEqual(row.verdict, "fail")
         self.assertFalse(result.verdict)
 
@@ -1565,6 +1581,7 @@ class GuardrailsRunner(unittest.TestCase):
         self.assertEqual(row.metrics["class"], "declined")
         self.assertIs(cast(Mapping[str, bool], row.metrics["checks"])["must_not"], False)
         self.assertNotIn("problem", row.metrics)
+        self.assertNotIn("figures", row.metrics)
         self.assertEqual(row.verdict, "pass")
         self.assertTrue(result.verdict, result.report)
         self.assertIn(f"  figure on a refusal (reported, not gated): {case_id}", result.report)
@@ -1602,6 +1619,8 @@ class GuardrailsRunner(unittest.TestCase):
                     cast(Mapping[str, bool], row.metrics["checks"])["must_not"],
                     False,
                 )
+                self.assertEqual(row.metrics["figures"], ["29-day"])
+                self.assertIn(f"  errors: {case_id} check-failed (29-day)\n", result.report)
                 self.assertEqual(row.verdict, "fail")
                 self.assertFalse(result.verdict)
 

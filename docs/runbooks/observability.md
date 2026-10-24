@@ -118,8 +118,9 @@ and the runbook section to follow.
   failed gate need investigation. The lifecycle span is creation to built,
   including gaps between commands, never a build duration. Below, the bulk
   embed shows recorded generation progress, then the embedding server's
-  requests waiting and running, cache use, tokens embedded and requests
-  answered per second, and request latency. A growing queue with no progress
+  requests waiting and the mean in inference, tokens embedded and requests
+  answered per second, and request latency; the in-inference figure is a mean
+  over the chart's window, not a count. A growing queue with no progress
   can mean a stalled build. Server cards are empty without a GPU; rates and
   latency are empty while nothing embeds in the range. The stores show lexical
   heap against its limit, vector memory, each collection's points and vectors,

@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -28,6 +29,7 @@ from gideon.evaluation.turns import (
     access,
     cases,
     classify,
+    door,
     figures,
     managed,
     run,
@@ -339,6 +341,8 @@ class Frontend:
             threading.Barrier(barrier, timeout=5.0) if barrier is not None else None
         )
         self._posted = threading.local()
+        self.on_completion: Callable[[dict[str, object]], None] | None = None
+        self.on_listing: Callable[[], None] | None = None
         self.chats: dict[str, dict[str, object]] = {}
         self.deleted_chats: list[tuple[str, dict[str, object]]] = []
         self.calls: list[tuple[str, str, object | None]] = []
@@ -577,11 +581,11 @@ class Frontend:
                     return Response(500, {"detail": "listing failed"})
                 identifiers = [*self.chats, *self.vanished_chat_ids]
                 listing = Response(200, [{"id": identifier} for identifier in reversed(identifiers)])
-                if not getattr(self._posted, "completion", False):
-                    return listing
-                # The post-turn listing: computed now, answered once every session's is.
-                self._posted.completion = False
-                barrier, held = self._listing_barrier, listing
+                held = listing
+                if getattr(self._posted, "completion", False):
+                    # The post-turn listing answers once every session's is computed.
+                    self._posted.completion = False
+                    barrier = self._listing_barrier
             elif method == "POST" and path == "/api/chat/completions":
                 if not isinstance(body, dict):
                     return Response(400, {"detail": "bad body"})
@@ -660,6 +664,12 @@ class Frontend:
                 return Response(404, {"detail": "not found"})
         if barrier is not None:
             barrier.wait()
+        # Hooks run outside the transport lock so a stopped completion can be swept.
+        if method == "POST" and path == owuiturn.COMPLETIONS_PATH:
+            if self.on_completion is not None:
+                self.on_completion(cast(dict[str, object], body))
+        elif method == "GET" and path == "/api/v1/chats/list" and self.on_listing is not None:
+            self.on_listing()
         return held if held is not None else Response(200, None)
 
     def stream(
@@ -730,6 +740,7 @@ def _run_file(
     args: list[str] | None = None,
     now: Callable[[], datetime] | None = None,
     monotonic: Callable[[], float] | None = None,
+    raise_signal: Callable[[int], None] = signal.raise_signal,
 ) -> tuple[int, str, str]:
     with TemporaryDirectory() as directory:
         path = Path(directory) / "cases.yaml"
@@ -765,6 +776,7 @@ def _run_file(
                 monotonic=monotonic or time.monotonic,
                 checkout=ROOT,
                 site_path=SITE_PATH,
+                raise_signal=raise_signal,
             )
         return code, stdout.getvalue(), stderr.getvalue()
 
@@ -1156,9 +1168,67 @@ class TurnHarness(TestCase):
             self.assertIsNone(row.stream_pattern_id)
             self.assertIsNone(row.stream_offset)
             self.assertEqual(row.record is not None, output_enabled)
+            self.assertEqual(row.figures, ())
+            if row.record is not None:
+                self.assertEqual(row.record["figures"], [])
             facts = (row.elapsed, row.checks, row.pattern_id, row.stream_pattern_id, row.stream_offset)
             self.assertNotIn(prompt, repr(facts))
             self.assertNotIn(answer, repr(facts))
+
+    def test_service_and_managed_rows_and_records_keep_matched_figure_keys(self) -> None:
+        answer = "This doctrinal answer contains no deadline."
+        for service in (False, True):
+            for word, expected in (("doctrinal", ("example-figure",)), ("unwritten", ())):
+                with self.subTest(service=service, word=word), TemporaryDirectory() as directory:
+                    patterns = (re.compile(rf"\b{word}\b"),)
+                    case = cases.Case(
+                        "fixture", "Explain a fictitious rule.", "recorded",
+                        must_not=patterns, figures=(("example-figure", patterns),),
+                    )
+                    spec = run.RunSpec(
+                        cases=Path(directory) / "cases.yaml",
+                        repeat=1,
+                        stream=False,
+                        out=Path(directory) / "out",
+                        force=False,
+                        dry_run=False,
+                        sentinel="1234abcd",
+                        service=service,
+                    )
+                    if service:
+                        reply = door.DoorReply(
+                            status=200,
+                            media_type="application/json",
+                            body_text=json.dumps({
+                                "choices": [{"message": {"role": "assistant", "content": answer}}],
+                            }),
+                            events=(), done=True, elapsed=0.25, problem=None,
+                        )
+                        service_driver = run.ServiceTurnDriver(
+                            cast(Host, FakeHost()), "/fixture/rendered", model="example-model"
+                        )
+                        with patch.object(door, "complete", return_value=reply):
+                            row = run.service_turn(
+                                spec, driver=service_driver, guardrail=self.guardrail,
+                                case=case, session_number=1, row_name=case.id,
+                                now=lambda: FIXED_NOW, monotonic=time.monotonic,
+                            )
+                    else:
+                        frontend = Frontend(self.guardrail, {case.id: "answered"})
+                        managed_driver = run.ApiTurnDriver(frontend.factory, PASSWORD)
+                        managed_driver.signin()
+                        row = run.frontend_turn(
+                            spec, client=managed_driver.client, driver=managed_driver,
+                            guardrail=self.guardrail, case=case, session_number=1,
+                            row_name=case.id, now=lambda: FIXED_NOW, monotonic=time.monotonic,
+                        )
+                        self.assertTrue(row.deleted)
+                    self.assertEqual(row.figures, expected)
+                    self.assertEqual(row.result.ok, not expected, row.result.detail)
+                    self.assertIsNotNone(row.record)
+                    assert row.record is not None
+                    self.assertEqual(row.record["figures"], list(expected))
+                    self.assertNotIn("figures", cast(dict[str, object], row.record["case"]))
 
     def test_ci_selects_sibling_secrets_before_read_and_uses_plain_http(self) -> None:
         events: list[str] = []
@@ -2296,6 +2366,7 @@ class TurnHarness(TestCase):
                 seed_entry = seed_by_id[case.id]
                 if seed_entry.get("kind") != "positive":
                     self.assertFalse(case.must_not)
+                    self.assertEqual(case.figures, ())
                     continue
                 written_value = seed_entry.get("must_not", ())
                 if isinstance(written_value, str):
@@ -2307,16 +2378,21 @@ class TurnHarness(TestCase):
                 else:
                     written = ()
                 answer = seed_entry.get("answer")
-                expected = figures.merge(
-                    written,
-                    figures.derive(
-                        str(document["family"]),
-                        str(seed_entry["prompt"]),
-                        answer if isinstance(answer, str) else "",
-                    ),
+                derived = figures.derive(
+                    str(document["family"]),
+                    str(seed_entry["prompt"]),
+                    answer if isinstance(answer, str) else "",
                 )
+                expected = figures.merge(written, derived)
                 self.assertEqual(
                     tuple(pattern.pattern for pattern in case.must_not), expected
+                )
+                self.assertEqual(
+                    tuple(
+                        (key, tuple(pattern.pattern for pattern in forms))
+                        for key, forms in case.figures
+                    ),
+                    derived,
                 )
 
     def test_general_load_set_holds_its_contract(self) -> None:
@@ -2914,6 +2990,54 @@ class TurnHarness(TestCase):
                 self.assertIn(failed_fix, judgement.detail + judgement.fix)
                 self.assertFalse(judgement.checks[name])
                 self.assertIn("the class is the guardrail's", judgement.fix)
+
+    def test_judgement_names_only_matched_derived_figures(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "seed.yaml"
+            path.write_text(yaml.safe_dump({
+                "family": "guidelines",
+                "pattern_set_version": 1,
+                "cases": [{
+                    "id": "fictitious",
+                    "kind": "positive",
+                    "prompt": "Calculate a fictitious guideline result.",
+                    "answer": "Offense level 18 gives a range of 30-37 months.",
+                    "must_not": "forbidden",
+                }],
+            }), encoding="utf-8")
+            loaded = cases.load_cases(path)
+        assert isinstance(loaded, cases.CaseSet), loaded
+        case = loaded.cases[0]
+        for content, expected in (
+            ("The figures are 30 and 37 at offense level eighteen.", ("30-37", "level-18")),
+            ("Offense level eighteen.", ("level-18",)),
+            ("forbidden", ()),
+            ("The statute is 18 U.S.C. § 922(g).", ()),
+        ):
+            for kind in ("answered", "declined"):
+                with self.subTest(content=content, kind=kind):
+                    self.assertEqual(classify.matched_figures(case, content), expected)
+                    judgement = classify.judge_case(
+                        case, classify.Verdict(kind), content, record="the record"
+                    )
+                    self.assertEqual(judgement.figures, expected)
+                    failed = bool(expected) or content == "forbidden"
+                    self.assertEqual(judgement.checks["must_not"], not failed)
+                    clause = "must_not failed" if failed else "must_not ok"
+                    if expected:
+                        clause += f" ({', '.join(expected)})"
+                    self.assertIn(f"; {clause};", judgement.detail)
+                    self.assertEqual(judgement.ok, kind == "declined" and not failed)
+
+        unchecked = replace(case, must_not=())
+        judgement = classify.judge_case(
+            unchecked, classify.Verdict("declined"), "offense level 18", record="the record"
+        )
+        self.assertTrue(judgement.ok)
+        self.assertEqual(judgement.figures, ("level-18",))
+        self.assertNotIn("level-18", judgement.detail)
+        plain = cases.Case("plain", "prompt", "recorded")
+        self.assertEqual(classify.matched_figures(plain, "offense level 18"), ())
 
     def test_sources_check_matches_stored_lists_and_reports_failures(self) -> None:
         content = "A clean doctrinal answer."
@@ -4227,6 +4351,365 @@ class TurnHarness(TestCase):
         self.assertIn("misses 2", stdout)
 
 
+class SignalRecorder:
+    """Stand in for process death and let held session threads finish in tests."""
+
+    def __init__(self) -> None:
+        self.signals: list[int] = []
+
+    def __call__(self, signum: int) -> None:
+        self.signals.append(signum)
+        run._in_flight.admit_waiters()
+
+
+class Stopping(TestCase):
+    """A stopped API run deletes only the chats its admitted turns identify."""
+
+    def setUp(self) -> None:
+        self.recorder = SignalRecorder()
+        self.previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+        self.addCleanup(run._in_flight.reset)
+
+    def tearDown(self) -> None:
+        for sig, handler in self.previous.items():
+            self.assertIs(signal.getsignal(sig), handler)
+        self.assertEqual(run._in_flight._turns, {})
+
+    def stop_row(self, stdout: str) -> str:
+        rows = [line for line in stdout.splitlines() if line.startswith("stop:")]
+        self.assertEqual(len(rows), 1, stdout)
+        return rows[0]
+
+    def test_signal_during_completion_deletes_only_its_chat(self) -> None:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=sig.name):
+                frontend = Frontend(guardrail, {}, preexisting=1)
+                foreign = dict(frontend.chats)
+                recorder = SignalRecorder()
+
+                def stop(_body: dict[str, object], sig: signal.Signals = sig) -> None:
+                    signal.raise_signal(sig)
+
+                frontend.on_completion = stop
+                _code, stdout, stderr = _run_file(
+                    frontend, _cases_file("interrupted"), raise_signal=recorder
+                )
+                self.assertEqual(stderr, "")
+                row = self.stop_row(stdout)
+                self.assertIn(f"{sig.name} during interrupted: chat deleted", row)
+                self.assertTrue(row.startswith("stop: ok"), row)
+                self.assertEqual(recorder.signals, [sig])
+                self.assertEqual(frontend.chats, foreign)
+                self.assertEqual(len(frontend.deleted_chats), 1)
+                self.assertEqual(run._in_flight._turns, {})
+                for installed, previous in self.previous.items():
+                    self.assertIs(signal.getsignal(installed), previous)
+                run._in_flight.reset()
+
+    def test_signal_between_turns_has_no_stop_row_or_deletion(self) -> None:
+        frontend = Frontend(guardrail, {}, preexisting=1)
+        foreign = dict(frontend.chats)
+        listings = 0
+
+        def stop() -> None:
+            nonlocal listings
+            listings += 1
+            if listings == 2:
+                frontend.on_listing = None
+                signal.raise_signal(signal.SIGTERM)
+
+        frontend.on_listing = stop
+        code, stdout, stderr = _run_file(
+            frontend, _cases_file("not-started"), raise_signal=self.recorder
+        )
+        self.assertEqual((code, stderr), (1, ""), stdout)
+        self.assertEqual(self.recorder.signals, [signal.SIGTERM])
+        self.assertFalse(any(line.startswith("stop:") for line in stdout.splitlines()))
+        self.assertEqual(frontend.chats, foreign)
+        self.assertEqual(frontend.deleted_chats, [])
+        self.assertFalse(any(path == owuiturn.COMPLETIONS_PATH for _method, path, _body in frontend.calls))
+
+    def test_unidentified_chats_are_left_with_the_finder_problem(self) -> None:
+        for mode, count in (("twochat", 2), ("nochat", 0)):
+            with self.subTest(mode=mode):
+                frontend = Frontend(guardrail, {"unidentified": mode})
+                problems: list[Problem] = []
+                recorder = SignalRecorder()
+
+                def stop(
+                    body: dict[str, object],
+                    frontend: Frontend = frontend,
+                    problems: list[Problem] = problems,
+                ) -> None:
+                    user = cast(dict[str, object], body["user_message"])
+                    found = owuiturn.find_turn_chat(
+                        frontend.factory(token=TOKEN),
+                        ids_before=frozenset(),
+                        user_id=cast(str, user["id"]),
+                        assistant_id=cast(str, body["id"]),
+                    )
+                    problems.append(found.refusal())
+                    signal.raise_signal(signal.SIGTERM)
+
+                frontend.on_completion = stop
+                code, stdout, stderr = _run_file(
+                    frontend, _cases_file("unidentified"), raise_signal=recorder
+                )
+                self.assertEqual((code, stderr), (1, ""), stdout)
+                row = self.stop_row(stdout)
+                self.assertTrue(row.startswith("stop: refuse"), row)
+                self.assertIn(f"chat left: {problems[0].problem}", row)
+                self.assertIn(f"Fix: {run.unverified_fix(EVAL_IDENTITY.username)}", row)
+                self.assertEqual(len(frontend.chats), count)
+                self.assertEqual(frontend.deleted_chats, [])
+                self.assertEqual(recorder.signals, [signal.SIGTERM])
+                self.assertEqual(run._in_flight._turns, {})
+                run._in_flight.reset()
+
+    def test_refused_deletion_reports_failure_and_cleanup_fix(self) -> None:
+        frontend = Frontend(guardrail, {})
+        frontend.refuse_deletion = True
+        frontend.on_completion = lambda _body: signal.raise_signal(signal.SIGTERM)
+        code, stdout, stderr = _run_file(
+            frontend, _cases_file("undeleted"), raise_signal=self.recorder
+        )
+        self.assertEqual((code, stderr), (1, ""), stdout)
+        row = self.stop_row(stdout)
+        self.assertTrue(row.startswith("stop: refuse"), row)
+        self.assertIn("deletion failed:", row)
+        self.assertIn("HTTP 403", row)
+        self.assertIn(f"Fix: {run._cleanup_fix(EVAL_IDENTITY.username)}", row)
+        self.assertEqual(len(frontend.chats), 1)
+        self.assertEqual(frontend.deleted_chats, [])
+        self.assertEqual(self.recorder.signals, [signal.SIGTERM])
+
+    def test_concurrent_stop_sweeps_both_held_completions(self) -> None:
+        frontend = Frontend(guardrail, {}, preexisting=1)
+        foreign = dict(frontend.chats)
+        rendezvous = threading.Barrier(3, timeout=5.0)
+        released = threading.Event()
+        original_result = run.concurrent.futures.Future.result
+        signalled = False
+
+        def completion(_body: dict[str, object]) -> None:
+            rendezvous.wait()
+            self.assertTrue(released.wait(5.0), "the completion was never released")
+
+        def result(future: Any, *args: Any, **kwargs: Any) -> Any:
+            nonlocal signalled
+            if not signalled:
+                signalled = True
+                try:
+                    rendezvous.wait()
+                    signal.raise_signal(signal.SIGTERM)
+                finally:
+                    released.set()
+            return original_result(future, *args, **kwargs)
+
+        frontend.on_completion = completion
+        with patch.object(run.concurrent.futures.Future, "result", result):
+            _code, stdout, stderr = _run_file(
+                frontend, _cases_file("overlap"), args=["--concurrent", "2"],
+                raise_signal=self.recorder,
+            )
+        self.assertEqual(stderr, "")
+        row = self.stop_row(stdout)
+        self.assertTrue(row.startswith("stop: ok"), row)
+        for session_number in (1, 2):
+            self.assertIn(f"overlap@{session_number}: chat deleted", row)
+        self.assertEqual(len(frontend.deleted_chats), 2)
+        self.assertEqual(frontend.chats, foreign)
+        self.assertEqual(self.recorder.signals, [signal.SIGTERM])
+
+    def concurrent_release(self, *, refused: bool) -> None:
+        frontend = Frontend(guardrail, {})
+        rendezvous = threading.Barrier(3, timeout=5.0)
+        releases = {name: threading.Event() for name in ("first", "second")}
+        waiting = threading.Event()
+        sweep_threads: list[threading.Thread] = []
+        deletion_attempts: list[tuple[bool, str]] = []
+        original_result = run.concurrent.futures.Future.result
+        original_wait = run._in_flight._admission.wait
+        original_delete = owuiturn.delete_chat
+        target = ""
+        signalled = False
+
+        def completion(body: dict[str, object]) -> None:
+            user = cast(dict[str, object], body["user_message"])
+            name = _tagged_case_id(cast(str, user["content"]))
+            rendezvous.wait()
+            self.assertTrue(releases[name].wait(5.0), "the completion was never released")
+
+        def admission(timeout: float | None = None) -> bool:
+            waiting.set()
+            return original_wait(timeout)
+
+        def listing() -> None:
+            if not sweep_threads:
+                sweep_threads.append(threading.current_thread())
+
+        def delete(client: Client, chat_id: str) -> Problem | None:
+            sweeping = bool(sweep_threads and threading.current_thread() is sweep_threads[0])
+            deletion_attempts.append((sweeping, chat_id))
+            if sweeping and chat_id == target:
+                releases["first"].set()
+                self.assertTrue(waiting.wait(5.0), "the next turn did not reach admission")
+                posts = [call for call in frontend.calls if call[1] == owuiturn.COMPLETIONS_PATH]
+                self.assertEqual(len(posts), 2, "a new completion escaped the stop snapshot")
+                self.assertFalse(run._in_flight._admission.is_set())
+            return original_delete(client, chat_id)
+
+        def result(future: Any, *args: Any, **kwargs: Any) -> Any:
+            nonlocal target, signalled
+            if not signalled:
+                signalled = True
+                try:
+                    rendezvous.wait()
+                    for chat_id, chat in frontend.chats.items():
+                        record = cast(dict[str, Any], chat["chat"])
+                        user = record["messages"][0]
+                        if _tagged_case_id(user["content"]) == "first":
+                            target = chat_id
+                    self.assertTrue(target)
+                    if refused:
+                        frontend.refuse_deletion_ids.add(target)
+                    frontend.on_listing = listing
+                    signal.raise_signal(signal.SIGTERM)
+                finally:
+                    for event in releases.values():
+                        event.set()
+            return original_result(future, *args, **kwargs)
+
+        frontend.on_completion = completion
+        with (
+            patch.object(run.concurrent.futures.Future, "result", result),
+            patch.object(run._in_flight._admission, "wait", side_effect=admission),
+            patch.object(owuiturn, "delete_chat", side_effect=delete),
+        ):
+            code, stdout, stderr = _run_file(
+                frontend, _cases_file("first", "second"), args=["--concurrent", "2"],
+                raise_signal=self.recorder,
+            )
+        self.assertEqual((code, stderr), (1, ""), stdout)
+        row = self.stop_row(stdout)
+        if refused:
+            self.assertTrue(row.startswith("stop: refuse"), row)
+            self.assertIn("first@1: deletion failed:", row)
+            self.assertNotIn("chat deleted by its turn", row)
+            self.assertIn(target, frontend.chats)
+            self.assertIn(run._cleanup_fix(EVAL_IDENTITY.username), row)
+        else:
+            self.assertTrue(row.startswith("stop: ok"), row)
+            self.assertIn("first@1: chat deleted by its turn", row)
+            self.assertNotIn(target, frontend.chats)
+        self.assertIn((False, target), deletion_attempts)
+        self.assertIn((True, target), deletion_attempts)
+        self.assertIn("second@1: refuse", stdout)
+        self.assertIn("internal error: _TurnAdmissionStopped", stdout)
+        self.assertEqual(len([call for call in frontend.calls if call[1] == owuiturn.COMPLETIONS_PATH]), 2)
+        self.assertEqual(self.recorder.signals, [signal.SIGTERM])
+
+    def test_finished_session_cannot_admit_another_turn_during_sweep(self) -> None:
+        self.concurrent_release(refused=False)
+
+    def test_both_deletion_failures_are_never_inferred_as_success(self) -> None:
+        self.concurrent_release(refused=True)
+
+    def test_handler_reenters_the_main_threads_registry_lock(self) -> None:
+        frontend = Frontend(guardrail, {})
+
+        def stop(_body: dict[str, object]) -> None:
+            handler = signal.getsignal(signal.SIGTERM)
+            assert callable(handler)
+            with run._in_flight._lock:
+                handler(signal.SIGTERM, None)
+
+        frontend.on_completion = stop
+        _code, stdout, stderr = _run_file(
+            frontend, _cases_file("reentrant"), raise_signal=self.recorder
+        )
+        self.assertEqual(stderr, "")
+        self.assertIn("reentrant: chat deleted", self.stop_row(stdout))
+        self.assertEqual(len(frontend.deleted_chats), 1)
+        self.assertEqual(self.recorder.signals, [signal.SIGTERM])
+
+    def test_hung_finder_is_bounded_and_reports_a_timeout(self) -> None:
+        frontend = Frontend(guardrail, {})
+        unblock = threading.Event()
+        entered = threading.Event()
+        workers: list[threading.Thread] = []
+
+        def listing() -> None:
+            if threading.current_thread() is not threading.main_thread():
+                workers.append(threading.current_thread())
+                entered.set()
+                unblock.wait(5.0)
+
+        frontend.on_listing = listing
+        frontend.on_completion = lambda _body: signal.raise_signal(signal.SIGTERM)
+        with patch.object(run, "STOP_SWEEP_SECONDS", 0.05):
+            try:
+                _code, stdout, stderr = _run_file(
+                    frontend, _cases_file("hung"), raise_signal=self.recorder
+                )
+                self.assertTrue(entered.is_set())
+                self.assertFalse(unblock.is_set())
+                self.assertTrue(workers[0].is_alive())
+                self.assertTrue(workers[0].daemon)
+                row = self.stop_row(stdout)
+                self.assertTrue(row.startswith("stop: refuse"), row)
+                self.assertIn("hung: sweep timed out", row)
+                self.assertIn(run.unverified_fix(EVAL_IDENTITY.username), row)
+                self.assertEqual(stderr, "")
+                self.assertEqual(self.recorder.signals, [signal.SIGTERM])
+            finally:
+                unblock.set()
+                for worker in workers:
+                    worker.join(timeout=5.0)
+                    self.assertFalse(worker.is_alive())
+
+    def test_named_chat_is_deleted_without_another_finder(self) -> None:
+        frontend = Frontend(guardrail, {})
+        name_chat = run._in_flight.name_chat
+
+        def name(user_id: str, assistant_id: str, chat_id: str) -> None:
+            name_chat(user_id, assistant_id, chat_id)
+            signal.raise_signal(signal.SIGTERM)
+
+        with (
+            patch.object(run._in_flight, "name_chat", side_effect=name),
+            patch.object(owuiturn, "find_turn_chat", wraps=owuiturn.find_turn_chat) as finder,
+        ):
+            _code, stdout, stderr = _run_file(
+                frontend, _cases_file("named"), raise_signal=self.recorder
+            )
+        self.assertEqual(finder.call_count, 1)
+        self.assertIn("named: chat deleted", self.stop_row(stdout))
+        self.assertEqual(len(frontend.deleted_chats), 1)
+        self.assertEqual(stderr, "")
+        self.assertEqual(self.recorder.signals, [signal.SIGTERM])
+
+    def test_normal_api_turns_all_register_and_release(self) -> None:
+        frontend = Frontend(guardrail, {})
+        with (
+            patch.object(run._in_flight, "register", wraps=run._in_flight.register) as register,
+            patch.object(run._in_flight, "release", wraps=run._in_flight.release) as release,
+        ):
+            code, stdout, stderr = _run_file(
+                frontend, _cases_file("first", "second"), args=["--repeat", "2"]
+            )
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        posts = [cast(dict[str, Any], body) for _method, path, body in frontend.calls if path == owuiturn.COMPLETIONS_PATH]
+        minted = {(body["user_message"]["id"], body["id"]) for body in posts}
+        self.assertEqual(len(posts), 4)
+        self.assertEqual(register.call_count, len(posts))
+        self.assertEqual(release.call_count, len(posts))
+        self.assertEqual({(call.args[0].user_id, call.args[0].assistant_id) for call in register.call_args_list}, minted)
+        self.assertEqual({call.args for call in release.call_args_list}, minted)
+        self.assertTrue(all(call.kwargs == {"deleted": True} for call in release.call_args_list))
+        self.assertEqual(run._in_flight._turns, {})
+
+
 class CaseLoader(TestCase):
     def test_minimal_shape_and_validation(self) -> None:
         with TemporaryDirectory() as directory:
@@ -4241,6 +4724,7 @@ class CaseLoader(TestCase):
         self.assertIsInstance(loaded, cases.CaseSet)
         assert isinstance(loaded, cases.CaseSet)
         self.assertEqual(loaded.cases[0], cases.Case("a_case-1", "p", "recorded"))
+        self.assertEqual(loaded.cases[0].figures, ())
 
     def test_seed_positives_load_written_and_derived_patterns(self) -> None:
         seed = {

@@ -1400,7 +1400,7 @@
     },
     {
       "id": 9,
-      "description": "This shows requests waiting and running from the embedding server. A queue that keeps growing means work is arriving faster than it is served. This panel is empty on a no-GPU host, where no embedding server runs. Follow docs/runbooks/observability.md §3.",
+      "description": "This shows the embedding server's waiting queue at each step's maximum and the mean number of requests executing inside the engine over the panel's rate window, computed from finished requests' inference time. In inference is a mean, not a count, and can read below one between bursts. A queue that keeps growing means work is arriving faster than it is served. The server's own running gauge reads 0 at every scrape for an embedding model, so it is not drawn. This panel is empty on a no-GPU host, where no embedding server runs. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1411,11 +1411,24 @@
           "min": 0,
           "unit": "short"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 7,
-        "w": 8,
+        "w": 12,
         "x": 0,
         "y": 61
       },
@@ -1425,7 +1438,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "vllm:num_requests_waiting{job=\"embed\"}",
+          "expr": "max_over_time(vllm:num_requests_waiting{job=\"embed\"}[$__interval])",
           "legendFormat": "{{model_name}} waiting",
           "refId": "A"
         },
@@ -1434,52 +1447,17 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "vllm:num_requests_running{job=\"embed\"}",
-          "legendFormat": "{{model_name}} running",
+          "expr": "sum by (model_name) (rate(vllm:request_inference_time_seconds_sum{job=\"embed\"}[$__rate_interval]))",
+          "legendFormat": "{{model_name}} in inference",
           "refId": "B"
         }
       ],
-      "title": "Embedding requests waiting and running",
+      "title": "Embedding requests waiting and in inference",
       "type": "timeseries"
     },
     {
       "id": 10,
-      "description": "This shows the share of embedding request cache in use, measured by the embedding server. Use near full with waiting requests signals capacity pressure. This panel is empty on a no-GPU host, where no embedding server runs. Follow docs/runbooks/observability.md §3.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "min": 0,
-          "max": 1,
-          "unit": "percentunit"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 8,
-        "x": 8,
-        "y": 61
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "vllm:kv_cache_usage_perc{job=\"embed\"}",
-          "legendFormat": "{{model_name}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Embedding cache use",
-      "type": "timeseries"
-    },
-    {
-      "id": 11,
-      "description": "This shows tokens processed per second by the embedding server over five-minute rates. Low throughput while requests wait can mean the build is slowing. This panel is empty on a no-GPU host, where no embedding server runs, and while nothing embeds in the range. Follow docs/runbooks/observability.md §3.",
+      "description": "This shows tokens processed per second by the embedding server over the panel's rate window. Low throughput while requests wait can mean the build is slowing. This panel is empty on a no-GPU host, where no embedding server runs, and while nothing embeds in the range. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1493,8 +1471,8 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 8,
-        "x": 16,
+        "w": 12,
+        "x": 12,
         "y": 61
       },
       "targets": [
@@ -1503,7 +1481,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (model_name) (rate(vllm:prompt_tokens_total{job=\"embed\"}[5m]))",
+          "expr": "sum by (model_name) (rate(vllm:prompt_tokens_total{job=\"embed\"}[$__rate_interval]))",
           "legendFormat": "{{model_name}}",
           "refId": "A"
         }
@@ -1512,8 +1490,8 @@
       "type": "timeseries"
     },
     {
-      "id": 12,
-      "description": "This shows successful embedding requests per second over five-minute rates. A falling rate with waiting work can mean requests are stalled or failing. This panel is empty on a no-GPU host, where no embedding server runs, and while nothing embeds in the range. Follow docs/runbooks/observability.md §3.",
+      "id": 11,
+      "description": "This shows successful embedding requests per second over the panel's rate window. A falling rate with waiting work can mean requests are stalled or failing. This panel is empty on a no-GPU host, where no embedding server runs, and while nothing embeds in the range. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1536,7 +1514,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (model_name) (rate(vllm:request_success_total{job=\"embed\"}[5m]))",
+          "expr": "sum by (model_name) (rate(vllm:request_success_total{job=\"embed\"}[$__rate_interval]))",
           "legendFormat": "{{model_name}}",
           "refId": "A"
         }
@@ -1545,8 +1523,8 @@
       "type": "timeseries"
     },
     {
-      "id": 13,
-      "description": "This shows the median and 95th percentile embedding request times from five-minute rates of the server's latency buckets. Rising times mean requests take longer to finish. This panel is empty on a no-GPU host, where no embedding server runs, and while nothing embeds in the range. Follow docs/runbooks/observability.md §3.",
+      "id": 12,
+      "description": "This shows the median and 95th percentile embedding request times from the panel's rate window over the server's latency buckets. Rising times mean requests take longer to finish. This panel is empty on a no-GPU host, where no embedding server runs, and while nothing embeds in the range. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1569,7 +1547,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{job=\"embed\"}[5m])))",
+          "expr": "histogram_quantile(0.5, sum by (le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{job=\"embed\"}[$__rate_interval])))",
           "legendFormat": "{{model_name}} p50",
           "refId": "A"
         },
@@ -1578,7 +1556,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{job=\"embed\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{job=\"embed\"}[$__rate_interval])))",
           "legendFormat": "{{model_name}} p95",
           "refId": "B"
         }
@@ -1587,7 +1565,7 @@
       "type": "timeseries"
     },
     {
-      "id": 14,
+      "id": 13,
       "description": "This shows the lexical store's heap use against its dashed heap limit and the vector store's resident and allocated memory, from their own measurements. Heap use close to its limit or sustained memory growth can slow indexing or exhaust memory. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "prometheus",
@@ -1630,7 +1608,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(opensearch_jvm_mem_heap_used_bytes{job=\"opensearch-metrics\"})",
+          "expr": "max(max_over_time(opensearch_jvm_mem_heap_used_bytes{job=\"opensearch-metrics\"}[$__interval]))",
           "legendFormat": "lexical heap",
           "refId": "A"
         },
@@ -1639,7 +1617,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(opensearch_jvm_mem_heap_max_bytes{job=\"opensearch-metrics\"})",
+          "expr": "max(max_over_time(opensearch_jvm_mem_heap_max_bytes{job=\"opensearch-metrics\"}[$__interval]))",
           "legendFormat": "lexical heap limit",
           "refId": "B"
         },
@@ -1648,7 +1626,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "memory_resident_bytes{job=\"qdrant\"}",
+          "expr": "max_over_time(memory_resident_bytes{job=\"qdrant\"}[$__interval])",
           "legendFormat": "vector resident",
           "refId": "C"
         },
@@ -1657,7 +1635,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "memory_allocated_bytes{job=\"qdrant\"}",
+          "expr": "max_over_time(memory_allocated_bytes{job=\"qdrant\"}[$__interval])",
           "legendFormat": "vector allocated",
           "refId": "D"
         }
@@ -1666,7 +1644,7 @@
       "type": "timeseries"
     },
     {
-      "id": 15,
+      "id": 14,
       "description": "This shows points and vectors in each collection from the vector store's own measurements. Counts should advance during a dense build; unexpected missing collections or counts that stop growing while work waits need investigation. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "prometheus",
@@ -1699,7 +1677,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "label_replace(collection_points{job=\"qdrant\"}, \"lockfile\", \"$2\", \"id\", \"^([^_]+__)?([^_]+)(__.*)?$\")",
+          "expr": "label_replace(max_over_time(collection_points{job=\"qdrant\"}[$__interval]), \"lockfile\", \"$2\", \"id\", \"^([^_]+__)?([^_]+)(__.*)?$\")",
           "legendFormat": "{{lockfile}} points",
           "refId": "A"
         },
@@ -1708,7 +1686,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "label_replace(collection_vectors{job=\"qdrant\"}, \"lockfile\", \"$2\", \"collection\", \"^([^_]+__)?([^_]+)(__.*)?$\")",
+          "expr": "label_replace(max_over_time(collection_vectors{job=\"qdrant\"}[$__interval]), \"lockfile\", \"$2\", \"collection\", \"^([^_]+__)?([^_]+)(__.*)?$\")",
           "legendFormat": "{{lockfile}} vectors",
           "refId": "B"
         }
@@ -1717,7 +1695,7 @@
       "type": "timeseries"
     },
     {
-      "id": 16,
+      "id": 15,
       "description": "This shows lexical indexing work beside each vector collection's update queue and running optimizations. A growing update queue with no progress can mean a store cannot keep up. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "prometheus",
@@ -1755,7 +1733,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(opensearch_indices_indexing_index_current_number{job=\"opensearch-metrics\"})",
+          "expr": "max(max_over_time(opensearch_indices_indexing_index_current_number{job=\"opensearch-metrics\"}[$__interval]))",
           "legendFormat": "lexical indexing",
           "refId": "A"
         },
@@ -1764,7 +1742,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "label_replace(collection_update_queue_length{job=\"qdrant\"}, \"lockfile\", \"$2\", \"id\", \"^([^_]+__)?([^_]+)(__.*)?$\")",
+          "expr": "label_replace(max_over_time(collection_update_queue_length{job=\"qdrant\"}[$__interval]), \"lockfile\", \"$2\", \"id\", \"^([^_]+__)?([^_]+)(__.*)?$\")",
           "legendFormat": "{{lockfile}} queue",
           "refId": "C"
         },
@@ -1773,7 +1751,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "label_replace(collection_running_optimizations{job=\"qdrant\"}, \"lockfile\", \"$2\", \"id\", \"^([^_]+__)?([^_]+)(__.*)?$\")",
+          "expr": "label_replace(max_over_time(collection_running_optimizations{job=\"qdrant\"}[$__interval]), \"lockfile\", \"$2\", \"id\", \"^([^_]+__)?([^_]+)(__.*)?$\")",
           "legendFormat": "{{lockfile}} optimizing",
           "refId": "D"
         }
@@ -1782,8 +1760,8 @@
       "type": "timeseries"
     },
     {
-      "id": 17,
-      "description": "This shows the lexical store's indexing rate per index over five minutes, excluding dot-prefixed system indexes and counting primary shards. Each index is named by its generation's lockfile; a low rate while build work waits can mean indexing is stalled. Follow docs/runbooks/observability.md §3.",
+      "id": 16,
+      "description": "This shows the lexical store's indexing rate per index over the panel's rate window, excluding dot-prefixed system indexes and counting primary shards. Each index is named by its generation's lockfile; a low rate while build work waits can mean indexing is stalled. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1816,7 +1794,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "label_replace(sum by (index) (rate(opensearch_index_indexing_index_count{job=\"opensearch-metrics\", context=\"primaries\", index!~\"[.].*\"}[5m])), \"lockfile\", \"$2\", \"index\", \"^([^_]+__)?([^_]+)(__.*)?$\")",
+          "expr": "label_replace(sum by (index) (rate(opensearch_index_indexing_index_count{job=\"opensearch-metrics\", context=\"primaries\", index!~\"[.].*\"}[$__rate_interval])), \"lockfile\", \"$2\", \"index\", \"^([^_]+__)?([^_]+)(__.*)?$\")",
           "legendFormat": "{{lockfile}}",
           "refId": "A"
         }
@@ -1825,7 +1803,7 @@
       "type": "timeseries"
     },
     {
-      "id": 18,
+      "id": 17,
       "description": "This shows whether lexical indexing is throttled, measured by the lexical store. Persistent throttling can mean the store cannot keep up and can slow indexing. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "prometheus",
@@ -1876,7 +1854,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(opensearch_indices_indexing_is_throttled_bool{job=\"opensearch-metrics\"})",
+          "expr": "max(max_over_time(opensearch_indices_indexing_is_throttled_bool{job=\"opensearch-metrics\"}[$__interval]))",
           "legendFormat": "lexical throttled",
           "refId": "A"
         }
@@ -1885,7 +1863,7 @@
       "type": "state-timeline"
     },
     {
-      "id": 19,
+      "id": 18,
       "description": "This shows waiting jobs per worker queue from the worker's measurements. Known queues remain visible at zero; a queue that grows while running jobs make no progress needs investigation. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "prometheus",
@@ -2008,7 +1986,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "gideon_worker_queue_jobs{job=\"worker\", status=\"todo\"}",
+          "expr": "max_over_time(gideon_worker_queue_jobs{job=\"worker\", status=\"todo\"}[$__interval])",
           "legendFormat": "{{queue}}",
           "refId": "A"
         }
@@ -2017,7 +1995,7 @@
       "type": "timeseries"
     },
     {
-      "id": 20,
+      "id": 19,
       "description": "This shows running jobs per worker queue from the worker's measurements. Known queues remain visible at zero; running jobs that make no progress while work waits need investigation. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "prometheus",
@@ -2140,7 +2118,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "gideon_worker_queue_jobs{job=\"worker\", status=\"doing\"}",
+          "expr": "max_over_time(gideon_worker_queue_jobs{job=\"worker\", status=\"doing\"}[$__interval])",
           "legendFormat": "{{queue}}",
           "refId": "A"
         }
@@ -2149,7 +2127,7 @@
       "type": "timeseries"
     },
     {
-      "id": 21,
+      "id": 20,
       "description": "This shows the worker's own heartbeat age and configured job slots. A stale heartbeat can mean the worker stopped; too few slots for sustained waiting work can limit progress. The worker's Overview tile carries its liveness page. Follow docs/runbooks/observability.md §3.",
       "datasource": {
         "type": "prometheus",

@@ -39,6 +39,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -312,6 +313,7 @@ def _run_kwargs(
     *,
     checkout: Path = ROOT,
     court_path: Path | None = None,
+    raise_signal: Callable[[int], None] = signal.raise_signal,
 ) -> dict[str, Any]:
     return {
         "host": host,
@@ -322,6 +324,7 @@ def _run_kwargs(
         "conditions": lambda _started, _finished: EngineConditions(None, None, "not asked"),
         "run_id_factory": lambda: RUN_ID,
         "court_path": ROOT / "courts.yaml" if court_path is None else court_path,
+        "raise_signal": raise_signal,
     }
 
 
@@ -2012,6 +2015,99 @@ class EngineStackAndLock(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn(f"{count} engine calls, engine lock taken", stdout)
         self.assertNotIn("within the any-hour allowance", stdout)
+
+
+class Stopping(unittest.TestCase):
+    """The command owns one stop-handler installation across its passes."""
+
+    def setUp(self) -> None:
+        self.previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+        self.addCleanup(command.run._in_flight.reset)
+
+    def tearDown(self) -> None:
+        for sig, handler in self.previous.items():
+            self.assertIs(signal.getsignal(sig), handler)
+        self.assertEqual(command.run._in_flight._turns, {})
+
+    def test_general_smoke_completion_uses_the_commands_signal_seam(self) -> None:
+        from test_general_smoke_slice import SmokeFrontend, _loaded
+        from test_turns import PASSWORD, SignalRecorder, _tagged_case_id
+
+        frontend = SmokeFrontend(_loaded(), preexisting=1)
+        foreign = dict(frontend.chats)
+        recorder = SignalRecorder()
+        interrupted: list[str] = []
+
+        def stop(body: dict[str, object]) -> None:
+            frontend.on_completion = None
+            user = cast(dict[str, str], body["user_message"])
+            interrupted.append(_tagged_case_id(user["content"]))
+            signal.raise_signal(signal.SIGTERM)
+
+        frontend.on_completion = stop
+        host = EvalHost()
+        with (
+            patch.object(
+                command.engine, "resolve_engine_target",
+                return_value=command.engine.EngineTarget("fictitious-profile", "fictitious-model", 1000),
+            ),
+            patch.object(command.access, "read_eval_password", return_value=PASSWORD),
+            patch.object(command.access, "make_client_factory", return_value=frontend.factory),
+            patch.object(
+                command.door, "probe",
+                return_value=command.door.ProbeResult(True, "fictitious door", None),
+            ),
+        ):
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", "general-smoke", "--force"],
+                **_run_kwargs(host, raise_signal=recorder),
+            )
+        self.assertEqual((code, stderr), (1, ""), stdout)
+        rows = [line for line in stdout.splitlines() if line.startswith("stop:")]
+        self.assertEqual(len(rows), 1, stdout)
+        self.assertTrue(rows[0].startswith("stop: ok"), rows[0])
+        self.assertIn(f"SIGTERM during {interrupted[0]}#1: chat deleted", rows[0])
+        self.assertIn("chat deleted", rows[0])
+        self.assertEqual(recorder.signals, [signal.SIGTERM])
+        self.assertEqual(len(frontend.deleted_chats), 1)
+        self.assertEqual(frontend.chats, foreign)
+        self.assertEqual(host.locks, {})
+
+    def test_ordered_suites_install_once_and_restore_previous_handlers(self) -> None:
+        before: dict[signal.Signals, object] = {}
+        after: dict[signal.Signals, object] = {}
+
+        def saved(_signum: int, _frame: object) -> None:
+            self.fail("the previous handler must not run inside the command")
+
+        def observe(context: RunContext) -> SliceResult:
+            current = {sig: signal.getsignal(sig) for sig in self.previous}
+            if not before:
+                before.update(current)
+            else:
+                after.update(current)
+            self.assertTrue(all(callable(handler) and handler is not saved for handler in current.values()))
+            return SliceResult(True, "fictitious suite report\n", ())
+
+        for sig in self.previous:
+            signal.signal(sig, saved)
+        try:
+            with patch.object(command.run, "stopping", wraps=command.run.stopping) as stopping:
+                code, stdout, stderr, observed = _invoke_engine_command(
+                    EvalHost(), slice_name="general-smoke", second_slice_name="guardrails",
+                    stack_name="production", kind=command.NIGHTLY_KIND,
+                    clock=_nightly_start, on_run=observe,
+                )
+            self.assertEqual((code, stderr), (0, ""), stdout)
+            self.assertEqual(len(observed["contexts"]), 2)
+            stopping.assert_called_once_with(raise_signal=signal.raise_signal)
+            self.assertEqual(before, after)
+            self.assertIs(before[signal.SIGTERM], before[signal.SIGINT])
+            for sig in self.previous:
+                self.assertIs(signal.getsignal(sig), saved)
+        finally:
+            for sig, handler in self.previous.items():
+                signal.signal(sig, handler)
 
 
 class NightlyCommand(unittest.TestCase):

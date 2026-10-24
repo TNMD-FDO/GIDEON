@@ -15,8 +15,9 @@ and bounded in every quantifier:
   guardrail's word tables, a compound joined by a hyphen or a space; a hundred
   to 999 as the hundreds word, "hundred", an optional "and", and the rest —
   and zero or a thousand and more is digits alone;
-- a level ``level-N`` is the number; a range ``A-B`` its two bounds, and
-  ``A-life`` its numeric bound alone;
+- a level ``level-N`` is the number under its noun in the family's readings
+  or in the ``N/R`` shorthand, never bare; a range ``A-B`` its two bounds,
+  and ``A-life`` its numeric bound alone;
 - a category ``category-R`` is the roman numeral word-bounded wherever it
   stands, matched in capitals — category I's only after "category", since a
   lone "I" is the pronoun — or the digit or the word within forty characters
@@ -86,6 +87,39 @@ def _numeral(digits: str) -> str:
     return rf"(?i)\b{_number(digits)}\b"
 
 
+def _level(digits: str) -> tuple[str, ...]:
+    """A level's noun, total, placing, chained-total, and shorthand readings."""
+
+    prefixes = "|".join(grammar.GUIDELINES_LEVEL_PREFIXES)
+    noun = (
+        rf"(?:\b(?:(?:{prefixes}){grammar.GUIDELINES_WORD_SPACE})?"
+        rf"(?:offense{grammar.GUIDELINES_WORD_SPACE})?level"
+        rf"{grammar.GUIDELINES_WORD_SPACE}(?:of{grammar.GUIDELINES_WORD_SPACE})?"
+        rf"|\b(?:OL|TOL){grammar.GUIDELINES_OPTIONAL_SPACE})"
+    )
+    tail = rf"{grammar.MARK}{_number(digits)}{grammar.MARK}(?!\w)"
+    words = "|".join(
+        word.replace("-", "[- ]")
+        for word in (*grammar.NUMBER_WORDS, *grammar.NUMBER_COMPOUNDS)
+    )
+    units = "|".join(grammar.GUIDELINES_UNIT_WORDS)
+    chained = (
+        rf"{noun}{grammar.MARK}(?:\d{{1,2}}|{words}){grammar.MARK}(?!\w)"
+        rf"(?:(?!{grammar.GUIDELINES_SENTENCE_BREAK})[\s\S])"
+        rf"{{0,{grammar.GUIDELINES_CHAIN_GAP_CHARS}}}?"
+        rf"\bfor{_SP}a{_SP}total(?:{_SP}offense{_SP}level)?(?:{_SP}of)?{_SP}"
+        rf"(?={tail}(?!{_SP}\b(?:{units})\b)[ \t]{{0,3}}(?:[.!?,;:]|\n|$))"
+    )
+    return (
+        rf"(?i){noun}{tail}",
+        rf"(?i){grammar.GUIDELINES_TOTAL_WORD_PREFIX}{tail}",
+        rf"(?i){grammar.GUIDELINES_PLACING_PREFIX}{tail}",
+        rf"(?i){chained}{tail}",
+        rf"(?i)\b{tail}{grammar.GUIDELINES_OPTIONAL_SPACE}/"
+        rf"{grammar.GUIDELINES_OPTIONAL_SPACE}{grammar.GUIDELINES_ROMAN}\b",
+    )
+
+
 def _category(roman: str) -> tuple[str, ...]:
     value = _ROMAN_VALUES[roman]
     # A lone "I" is the pronoun, so category I's numeral counts only after its noun.
@@ -140,7 +174,7 @@ def _render(key: str) -> tuple[str, ...]:
     """A key's alternatives by its shape; an unknown shape renders nothing."""
 
     if match := re.fullmatch(r"level-(\d+)", key):
-        return (_numeral(match.group(1)),)
+        return _level(match.group(1))
     if match := re.fullmatch(r"category-(VI|IV|V|III|II|I)", key):
         return _category(match.group(1))
     if match := re.fullmatch(r"(\d+(?:\.\d+)?)-(point|day|month|year)", key):

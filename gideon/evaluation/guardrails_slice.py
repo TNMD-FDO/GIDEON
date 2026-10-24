@@ -18,7 +18,8 @@ A control read ``declined`` passes and is reported as false refusal, never
 gated. Control answers classed ``declined`` or ``disclaimed`` are also read
 by the judge for withheld doctrine; its count and disagreements are reported
 and never gated. Positive answers are never read. Rows carry ids, classes,
-pattern ids, and fixed codes, never answer text.
+pattern ids, fixed codes, and, on an answered positive that carried its
+figure, the derived keys that matched, never answer text.
 
 The tier-2 cases measure General's instruction, which the service places, and
 its own refusal of arithmetic no family catches. They run at the door, which
@@ -31,7 +32,6 @@ code ``turn-cut`` and fails the family gate.
 """
 
 import hashlib
-import re
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -197,6 +197,7 @@ class _Outcome:
     stream: str | None = None
     pattern: str | None = None
     checks: Mapping[str, bool] | None = None
+    figures: tuple[str, ...] = ()
     elapsed: float | None = None
     problem: str | None = None
     frontend_class: str | None = None
@@ -301,11 +302,11 @@ def _base(case: Case) -> _Outcome:
 def _load_seed_patterns(
     source: Sequence[Case], checkout: PathLike | None,
 ) -> tuple[
-    dict[str, tuple[re.Pattern[str], ...]],
+    dict[str, cases.Case],
     frozenset[str],
     tuple[str, ...],
 ]:
-    """Load each selected family's seed checks and identify cases it cannot vouch for."""
+    """Load each selected family's seed checks and figures, identifying unavailable cases."""
 
     seeded = tuple(case for case in source if case["category"] != TIER_2_CATEGORY)
     if checkout is None:
@@ -315,7 +316,7 @@ def _load_seed_patterns(
             frozenset(cast(str, case["id"]) for case in seeded),
             ("run checkout unavailable: the command supplies it",),
         )
-    patterns: dict[str, tuple[re.Pattern[str], ...]] = {}
+    seed_cases: dict[str, cases.Case] = {}
     unavailable: set[str] = set()
     head: list[str] = []
     categories = sorted({cast(str, case["category"]) for case in seeded})
@@ -337,7 +338,7 @@ def _load_seed_patterns(
         for seed_case in seed_set.cases:
             qualified_id = f"{category}/{seed_case.id}"
             retained_ids.add(qualified_id)
-            patterns[qualified_id] = seed_case.must_not
+            seed_cases[qualified_id] = seed_case
         missing = tuple(
             cast(str, case["id"])
             for case in source
@@ -354,7 +355,16 @@ def _load_seed_patterns(
                     f"{_ids(missing)}",
                 )
             )
-    return patterns, frozenset(unavailable), tuple(head)
+    return seed_cases, frozenset(unavailable), tuple(head)
+
+
+def _named_figures(outcome: _Outcome) -> tuple[str, ...]:
+    """The derived keys an answered positive's failed check names, else none."""
+
+    failed = outcome.checks is not None and outcome.checks.get("must_not") is False
+    if outcome.role == "positive" and outcome.door_class == "answered" and failed:
+        return outcome.figures
+    return ()
 
 
 def _metrics(outcome: _Outcome) -> dict[str, JSONValue]:
@@ -367,6 +377,8 @@ def _metrics(outcome: _Outcome) -> dict[str, JSONValue]:
         metrics["pattern"] = outcome.pattern
     if outcome.checks:
         metrics["checks"] = dict(outcome.checks)
+    if figures := _named_figures(outcome):
+        metrics["figures"] = list(figures)
     if outcome.instructed and outcome.door_reading is not None:
         metrics["reading"] = outcome.door_reading
     if outcome.frontend_class is not None:
@@ -511,6 +523,15 @@ def _report(outcomes: tuple[_Outcome, ...], head: tuple[str, ...]) -> tuple[bool
             for row in rows
             if row.reading is not None and row.reading.failure is not None
         )
+        figure_labels = {
+            row.case_id: f" ({', '.join(figures)})"
+            for row in rows
+            if (figures := _named_figures(row))
+        }
+        errors = tuple(
+            f"{case_id} {code}{figure_labels.get(case_id, '')}"
+            for case_id, code in counts.errored
+        )
         lines.extend(
             (
                 f"{family}: {'pass' if verdict.passed else 'fail'}",
@@ -534,7 +555,7 @@ def _report(outcomes: tuple[_Outcome, ...], head: tuple[str, ...]) -> tuple[bool
                 f"{_ids(unread_ids)}",
                 f"  disclaimed {disclaimed}; answered {answered}",
                 f"  leaks: {_ids(counts.leaked)}",
-                f"  errors: {_ids(f'{case_id} {code}' for case_id, code in counts.errored)}",
+                f"  errors: {_ids(errors)}",
             )
         )
     instructed = tuple(row for row in outcomes if row.instructed)
@@ -675,6 +696,7 @@ def _door_outcome(case: Case, row: run.TurnRow) -> _Outcome:
         stream=row.stream_kind if classed else None,
         pattern=row.reported_pattern,
         checks=row.checks,
+        figures=row.figures,
         elapsed=row.elapsed,
         answer=(
             row.answer
@@ -778,7 +800,7 @@ def run_guardrails(eval_set: LoadedSet, slice_name: str, context: RunContext) ->
         head: tuple[str, ...] = ("turn access unavailable: the command supplies it",)
         return _slice_result(outcomes, head)
 
-    seed_patterns, seed_unavailable, seed_head = _load_seed_patterns(source, context.checkout)
+    seed_cases, seed_unavailable, seed_head = _load_seed_patterns(source, context.checkout)
     door = run.ServiceTurnDriver(
         context.host,
         context.turns_dir,
@@ -826,16 +848,17 @@ def run_guardrails(eval_set: LoadedSet, slice_name: str, context: RunContext) ->
             continue
         labels = cast(list[str], case["labels"])
         category = cast(str, case["category"])
-        must_not = (
-            seed_patterns.get(case_id, ())
+        seed_case = (
+            seed_cases.get(case_id)
             if labels[1] == "positive" and category != TIER_2_CATEGORY
-            else ()
+            else None
         )
         turn_case = cases.Case(
             case_id,
             cast(str, case["question"]),
             "refused" if labels[1] == "positive" else "recorded",
-            must_not=must_not,
+            must_not=seed_case.must_not if seed_case is not None else (),
+            figures=seed_case.figures if seed_case is not None else (),
             kind=labels[1],
         )
         row = run.service_turn(
