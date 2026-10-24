@@ -11,7 +11,7 @@ from typing import cast
 
 from gideon.host import backuplock
 from gideon.host.report import Problem, StageResult
-from gideon.host.sysio import LockingHost, PathLike, RealHost
+from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 
@@ -21,8 +21,29 @@ class LockFake:
 
     def __init__(self) -> None:
         self.locks: dict[str, str] = {}
+        self.files: dict[str, str | OSError] = {}
+        self.stats: dict[str, os.stat_result | OSError] = {}
         self.mkdir_calls: list[tuple[str, int, bool, bool]] = []
+        self.take_calls: list[str] = []
         self.take_error: OSError | None = None
+
+    def stat(self, path: PathLike) -> os.stat_result:
+        key = os.fspath(path)
+        if key not in self.stats:
+            raise FileNotFoundError(key)
+        value = self.stats[key]
+        if isinstance(value, OSError):
+            raise value
+        return value
+
+    def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
+        key = os.fspath(path)
+        if key not in self.files:
+            raise FileNotFoundError(key)
+        value = self.files[key]
+        if isinstance(value, OSError):
+            raise value
+        return value
 
     def mkdir(
         self,
@@ -35,6 +56,7 @@ class LockFake:
         self.mkdir_calls.append((os.fspath(path), mode, parents, exist_ok))
 
     def take_lock(self, path: PathLike, record: str) -> str | None:
+        self.take_calls.append(os.fspath(path))
         if self.take_error is not None:
             raise self.take_error
         key = os.fspath(path)
@@ -73,6 +95,108 @@ class RecordContracts(unittest.TestCase):
         for text in cases:
             with self.subTest(text=text):
                 self.assertIsNone(backuplock.parse(text))
+
+
+class HoldingContracts(unittest.TestCase):
+    """The backup lock's holder read leaves every lock untaken."""
+
+    def setUp(self) -> None:
+        self.io = LockFake()
+        self.host = cast(Host, self.io)
+        self.info = os.stat_result(
+            (stat.S_IFREG | 0o600, 24680, os.makedev(0xAB, 0xCD), 1, 0, 0, 0, 0, 0, 0)
+        )
+        self.record = backuplock.Record("fixture restore", 12345, NOW)
+        self.io.stats[backuplock.BACKUP_LOCK.path] = self.info
+        self.io.files[backuplock.BACKUP_LOCK.path] = self.record.to_json()
+        self.io.files[backuplock.LOCK_TABLE] = ""
+        self.identity = (
+            f"{os.major(self.info.st_dev):02x}:{os.minor(self.info.st_dev):02x}:"
+            f"{self.info.st_ino}"
+        )
+        self.line = f"1: FLOCK ADVISORY WRITE {self.record.pid + 1} {self.identity} 0 EOF\n"
+
+    def tearDown(self) -> None:
+        self.assertEqual(self.io.take_calls, [])
+        self.assertEqual(self.io.mkdir_calls, [])
+        self.assertEqual(self.io.locks, {})
+
+    def test_absent_file_is_free_without_reading_the_table(self) -> None:
+        self.io.stats.clear()
+        self.io.files.clear()
+        self.assertEqual(backuplock.held_by(self.host), backuplock.Holding(False, None))
+
+    def test_no_matching_flock_is_free_without_reading_the_record(self) -> None:
+        del self.io.files[backuplock.BACKUP_LOCK.path]
+        identities = (
+            f"{os.major(self.info.st_dev) + 1:x}:{os.minor(self.info.st_dev):x}:{self.info.st_ino}",
+            f"{os.major(self.info.st_dev):x}:{os.minor(self.info.st_dev) + 1:x}:{self.info.st_ino}",
+            f"{os.major(self.info.st_dev):x}:{os.minor(self.info.st_dev):x}:{self.info.st_ino + 1}",
+        )
+        for text in ("", "\n".join(self.line.replace(self.identity, key) for key in identities)):
+            with self.subTest(text=text):
+                self.io.files[backuplock.LOCK_TABLE] = text
+                self.assertEqual(backuplock.held_by(self.host), backuplock.Holding(False, None))
+
+    def test_matching_flock_returns_the_record_without_pid_cross_check(self) -> None:
+        self.io.files[backuplock.LOCK_TABLE] = self.line
+        self.assertEqual(backuplock.held_by(self.host), backuplock.Holding(True, self.record))
+
+    def test_held_with_unreadable_record(self) -> None:
+        self.io.files[backuplock.LOCK_TABLE] = self.line
+        for text in ("", "not json", "{}"):
+            with self.subTest(text=text):
+                self.io.files[backuplock.BACKUP_LOCK.path] = text
+                self.assertEqual(backuplock.held_by(self.host), backuplock.Holding(True, None))
+
+    def test_waiters_posix_and_malformed_lines_are_ignored(self) -> None:
+        ignored = (
+            self.line.replace("FLOCK", "-> FLOCK"),
+            self.line.replace("FLOCK", "POSIX"),
+            "malformed fixture line\n",
+            self.line.replace(self.identity, "ab:cd"),
+            self.line.replace(self.identity, "gg:cd:24680"),
+            self.line.replace(self.identity, "ab:gg:24680"),
+            self.line.replace(self.identity, "ab:cd:unreadable"),
+            self.line.replace(self.identity, "-ab:cd:24680"),
+            self.line.replace(self.identity, "ab:-cd:24680"),
+            self.line.replace(self.identity, "ab:cd:-24680"),
+            self.line.replace(" EOF", ""),
+        )
+        for text in ignored:
+            with self.subTest(text=text):
+                self.io.files[backuplock.LOCK_TABLE] = text
+                self.assertEqual(backuplock.held_by(self.host), backuplock.Holding(False, None))
+        self.io.files[backuplock.LOCK_TABLE] = "".join(ignored) + self.line
+        self.assertEqual(backuplock.held_by(self.host), backuplock.Holding(True, self.record))
+
+    def test_stat_table_and_record_errors_propagate(self) -> None:
+        error = PermissionError("fixture access failure")
+        for source in ("stat", "table", "record"):
+            with self.subTest(source=source):
+                self.io.stats[backuplock.BACKUP_LOCK.path] = self.info
+                self.io.files[backuplock.LOCK_TABLE] = self.line
+                self.io.files[backuplock.BACKUP_LOCK.path] = self.record.to_json()
+                if source == "stat":
+                    self.io.stats[backuplock.BACKUP_LOCK.path] = error
+                elif source == "table":
+                    self.io.files[backuplock.LOCK_TABLE] = error
+                else:
+                    self.io.files[backuplock.BACKUP_LOCK.path] = error
+                with self.assertRaises(PermissionError) as raised:
+                    backuplock.held_by(self.host)
+                self.assertIs(raised.exception, error)
+
+    def test_requested_lock_supplies_the_file_identity_and_record(self) -> None:
+        self.io.stats = {backuplock.ENGINE_LOCK.path: self.info}
+        self.io.files = {
+            backuplock.LOCK_TABLE: self.line,
+            backuplock.ENGINE_LOCK.path: self.record.to_json(),
+        }
+        self.assertEqual(
+            backuplock.held_by(self.host, lock=backuplock.ENGINE_LOCK),
+            backuplock.Holding(True, self.record),
+        )
 
 
 class LockContracts(unittest.TestCase):

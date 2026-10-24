@@ -10,6 +10,8 @@ staging directory because restore's swap moves that directory as a whole.
 ``claim`` and ``release_claim`` are the shape a command holding a named
 lock uses: the claim carries its passing row's fragment or its failed
 ``preconditions`` row, and the release lets go only of a lock this claim took.
+``held_by`` reads the holder without taking the lock, for a command whose
+answer to a hold is a skip rather than a wait.
 """
 
 import dataclasses
@@ -21,6 +23,7 @@ import os
 from gideon.host import report, sysio
 
 LOCK_DIR = "/run/gideon"
+LOCK_TABLE = "/proc/locks"
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -102,6 +105,38 @@ def parse(text: str) -> Record | None:
     if instant.tzinfo is None or instant.utcoffset() is None:
         return None
     return Record(command, pid, instant)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Holding:
+    """Whether another process holds the lock, and its record when readable."""
+
+    held: bool
+    record: Record | None
+
+
+def held_by(io: sysio.Host, *, lock: Lock = BACKUP_LOCK) -> Holding:
+    """Read the kernel's held flocks and the matching lock's holder record."""
+
+    try:
+        info = io.stat(lock.path)
+    except FileNotFoundError:
+        return Holding(False, None)
+    identity = (os.major(info.st_dev), os.minor(info.st_dev), info.st_ino)
+    for line in io.read_text(LOCK_TABLE).splitlines():
+        fields = line.split()
+        if len(fields) != 8 or fields[1] != "FLOCK":
+            continue
+        device = fields[5].split(":")
+        if len(device) != 3:
+            continue
+        try:
+            major, minor, inode = int(device[0], 16), int(device[1], 16), int(device[2], 10)
+        except ValueError:
+            continue
+        if (major, minor, inode) == identity:
+            return Holding(True, parse(io.read_text(lock.path)))
+    return Holding(False, None)
 
 
 class State(enum.Enum):

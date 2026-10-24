@@ -80,6 +80,16 @@ class DemotionOutcome:
     dense_cleared: bool
 
 
+@dataclass(frozen=True, slots=True)
+class RetirementOutcome:
+    """A retired generation's prior state and reason, and its recorded time."""
+
+    name: str
+    previous_state: str
+    failure_reason: str | None
+    retired_at: str
+
+
 _WRITE_SQL = """BEGIN;
 SELECT set_config('gideon.generation_payload', :'v_payload', true) AS stored \\gset
 DO $generation$
@@ -213,6 +223,44 @@ BEGIN
 END
 $demotion$;
 SELECT current_setting('gideon.demotion_outcome')::jsonb;
+COMMIT;
+"""
+
+
+_NOT_RETIRABLE = "generation is no longer building, built, or failed"
+_RETIRE_SQL = f"""\\set QUIET on
+BEGIN;
+SELECT set_config('gideon.retirement_payload', :'v_payload', true) AS stored \\gset
+DO $retirement$
+DECLARE
+    payload jsonb := current_setting('gideon.retirement_payload')::jsonb;
+    retired text;
+    previous_state text;
+    previous_reason text;
+    retired_time timestamptz;
+BEGIN
+    WITH previous AS (
+        SELECT gen_id, state, failure_reason FROM public.index_generations
+        WHERE gen_id = payload->>'name' AND state IN ('building', 'built', 'failed')
+        FOR UPDATE
+    )
+    UPDATE public.index_generations AS generation
+    SET state = 'retired', retired_at = now(), failure_reason = NULL
+    FROM previous
+    WHERE generation.gen_id = previous.gen_id
+      AND generation.state IN ('building', 'built', 'failed')
+    RETURNING generation.gen_id, previous.state, previous.failure_reason, generation.retired_at
+    INTO retired, previous_state, previous_reason, retired_time;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION '{_NOT_RETIRABLE}';
+    END IF;
+    PERFORM set_config('gideon.retirement_outcome', jsonb_build_object(
+        'name', retired, 'previous_state', previous_state,
+        'failure_reason', previous_reason, 'retired_at', retired_time
+    )::text, true);
+END
+$retirement$;
+SELECT current_setting('gideon.retirement_outcome')::jsonb;
 COMMIT;
 """
 
@@ -532,6 +580,47 @@ def demote_generation(
         return Problem("generation demotion returned an invalid outcome", fix)
     return DemotionOutcome(
         value["name"], value["previous_state"], value["lexical_cleared"], value["dense_cleared"],
+    )
+
+
+def retire_generation(
+    host: Host, rendered_dir: PathLike, name: str, *, command_path: str,
+) -> RetirementOutcome | Problem:
+    """Retire a building, built, or failed row and return its prior reason atomically."""
+
+    payload = {"name": name}
+    sql = worker.bind("v_payload", json.dumps(payload, separators=(",", ":"))) + "\n" + _RETIRE_SQL
+    result = _run(host, rendered_dir, sql, command_path)
+    if isinstance(result, Problem):
+        return result
+    fix = database_fix(rendered_dir, command_path)
+    if result.returncode != 0:
+        if _NOT_RETIRABLE in result.stderr:
+            return Problem(
+                f"{name}: {_NOT_RETIRABLE}; nothing was retired",
+                f"Run {report.command(f'index report {name}')} to read its state, "
+                f"then run {report.command(command_path)} again.",
+            )
+        return Problem(f"generation retirement failed (exit {result.returncode})", fix)
+    try:
+        value = json.loads(result.stdout)
+    except ValueError:
+        value = None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"name", "previous_state", "failure_reason", "retired_at"}
+        or value["name"] != name
+        or value["previous_state"] not in ("building", "built", "failed")
+        or value["failure_reason"] is not None and (
+            not isinstance(value["failure_reason"], str)
+            or value["failure_reason"] not in GENERATION_FAILURE_REASONS
+        )
+        or (value["previous_state"] == "failed") != (value["failure_reason"] is not None)
+        or not isinstance(value["retired_at"], str) or not value["retired_at"]
+    ):
+        return Problem("generation retirement returned an invalid outcome", fix)
+    return RetirementOutcome(
+        value["name"], value["previous_state"], value["failure_reason"], value["retired_at"],
     )
 
 

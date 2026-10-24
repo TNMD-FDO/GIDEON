@@ -1,4 +1,4 @@
-"""Drop retired generations from both derived stores after their hold expires."""
+"""Drop retired generations from both derived stores, holding only promoted ones."""
 
 import argparse
 import re
@@ -28,7 +28,7 @@ RETIRED_HOLD_DAYS: Final = 7
 
 @dataclass(frozen=True, slots=True)
 class Candidates:
-    """The expired, held, and live generations in the record."""
+    """The droppable, held, and live generations in the record."""
 
     drop: tuple[record.GenerationRow, ...]
     held: tuple[tuple[record.GenerationRow, int], ...]
@@ -73,7 +73,7 @@ def _candidates(
                 return Problem("generation record retired_at is invalid", record.database_fix(rendered_dir, command_path))
             if retired_at.tzinfo is None or retired_at.utcoffset() is None:
                 return Problem("generation record retired_at is invalid", record.database_fix(rendered_dir, command_path))
-            if retired_at > cutoff:
+            if row.promoted_at is not None and retired_at > cutoff:
                 held.append((row, -((cutoff - retired_at) // timedelta(days=1))))
                 continue
             if re.fullmatch(GENERATION_PATTERN, row.gen_id) is None or len(row.gen_id.encode()) >= 255:
@@ -84,6 +84,10 @@ def _candidates(
         tuple(sorted(held, key=lambda item: item[0].gen_id)),
         tuple(sorted(live, key=lambda row: row.gen_id)),
     )
+
+
+def _drop_reason(row: record.GenerationRow) -> str:
+    return "never promoted" if row.promoted_at is None else "hold passed"
 
 
 def _drop(
@@ -124,7 +128,7 @@ def run_index_gc(
     args: argparse.Namespace, *, host: LockingHost | None = None,
     rendered_dir: PathLike = "/etc/gideon/rendered", clock: Callable[[], datetime] = _utc_now,
 ) -> int:
-    """Sweep the stack's expired generations without changing their record."""
+    """Sweep the stack's eligible retired generations without changing their record."""
 
     io = RealHost() if host is None else host
     stack_name = args.stack
@@ -208,14 +212,15 @@ def run_index_gc(
                         f"{row.gen_id}: {subject} job {job} is queued or running",
                         f"Wait for the job, then run {report.command(command_path)} again.",
                     ), command_path)
-        drop_names = ", ".join(row.gen_id for row in candidates.drop) or "none (nothing to drop)"
+        drop_names = ", ".join(f"{row.gen_id} ({_drop_reason(row)})" for row in candidates.drop) or "none (nothing to drop)"
         held_names = ", ".join(f"{row.gen_id} ({days} days left)" for row, days in candidates.held) or "none"
         live_names = ", ".join(row.gen_id for row in candidates.live) or "none"
         skipped = "; ".join(f"{state} {sum(row.state == state for row in rows)}" for state in ("building", "built", "failed"))
         report.print_stage(StageResult(
             active_stage, True,
             f"drop {len(candidates.drop)}: {drop_names}; held {len(candidates.held)}: {held_names}; "
-            f"live: {live_names} (never dropped); {skipped}", "",
+            f"live: {live_names} (never dropped); {skipped} "
+            f"(retire one with {report.command('index retire <generation>')})", "",
         ))
 
         active_stage = "aliases"

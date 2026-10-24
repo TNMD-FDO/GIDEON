@@ -37,7 +37,7 @@ This is one page by situation: each item gives a command, when there is one, and
 
 - Start with `gideon status` and follow the reported rule. [docs/runbooks/observability.md §4](observability.md)
 - To see what the corpus holds, run `gideon index report`; to read a generation still building, name its id with `gideon index report <generation>`. [docs/runbooks/install-upgrade.md §1](install-upgrade.md)
-- To serve a built generation, run `gideon index promote <generation>`, then `gideon backup run --full`; a week later, `gideon index gc` drops the retired generation from both stores. [docs/runbooks/install-upgrade.md §1](install-upgrade.md)
+- To serve a built generation, run `gideon index promote <generation>`, then `gideon backup run --full`; a week later, `gideon index gc` drops the retired generation from both stores. For a generation never promoted, run `gideon index retire <generation>`; the next `gideon index gc` drops its stores. [docs/runbooks/install-upgrade.md §1](install-upgrade.md)
 - After a site-file edit, run `gideon apply`; after an `alerts.*` change, also run `gideon alerts test`. For a renewed certificate, run `gideon tls reload`. [docs/runbooks/install-upgrade.md §4](install-upgrade.md); [docs/runbooks/office-services-setup.md §4](office-services-setup.md)
 - For backups by hand, run `gideon backup run`, `gideon backup push`, or `gideon backup drill`; read their rows. [docs/runbooks/backup-restore.md §3](backup-restore.md)
 - To go back in time, run `gideon restore --from staging` or `gideon restore --from target`; for a cluster that does not answer, `gideon restore --from staging --archive-end`. [docs/runbooks/backup-restore.md §4](backup-restore.md); for a rebuilt box, [docs/runbooks/backup-restore.md §5](backup-restore.md)

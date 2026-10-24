@@ -378,11 +378,14 @@ class Promote(unittest.TestCase):
                 opening, rest = fix.split("The live generation", 1)
                 self.assertTrue(opening.startswith("Other resident collections: "))
                 self.assertIn(f"retired: {retired_name}", opening)
-                self.assertIn(f"built: {built_name} (promotable, or droppable after retirement)", opening)
+                gc_command = report.command("index gc --stack ci" if sibling else "index gc")
+                self.assertIn(
+                    f"built: {built_name} (promotable, or retired with "
+                    f"{report.command('index retire <generation>')} and dropped by {gc_command})", opening,
+                )
                 self.assertIn("fictitious-outside (outside the record)", opening)
                 self.assertNotIn(self.host.name, opening)
                 self.assertNotIn(self.host.old, opening)
-                gc_command = report.command("index gc --stack ci" if sibling else "index gc")
                 self.assertIn(gc_command, opening)
                 self.assertIn(f"{self.host.old} retires at this flip and stays resident for seven days until {gc_command} drops it", rest)
                 self.assertIn("Select a larger hardware_profile in /etc/gideon/site.yaml", rest)

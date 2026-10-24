@@ -96,6 +96,8 @@ _SMOKE_ROOT_FIX: Final = "Run sudo python3 -B -m tools.cistack smoke, then retry
 _SMOKE_FAILED_FIX: Final = "Read the eval run rows above, the gate's first, then retry."
 _DATA_FIX: Final = "Run sudo python3 -m gideon host provision, then retry."
 _NETWORK_FIX: Final = "Run sudo python3 -m gideon apply, then retry."
+_NETWORK_ABSENT_MARK: Final = "network {} not found"
+_BACKUP_LOCK_READ_FIX: Final = "Repair access to the backup lock and the kernel lock table, then retry."
 _NOGPU_FIX: Final = (
     f"Remove {nogpu.NO_GPU_PATH} on a GPU host, then retry."
 )
@@ -165,6 +167,14 @@ class CiStack:
     checkout: Path
 
 
+@dataclass(frozen=True, slots=True)
+class _NetworkReading:
+    """The production network refusal and any network Docker reports absent."""
+
+    refusal: StageResult | None
+    absent: str | None
+
+
 def _error_row(name: str, errors: Sequence[object], fallback: str) -> StageResult:
     error = errors[0] if errors else None
     problem = getattr(error, "problem", None) or fallback
@@ -179,12 +189,39 @@ def _root_row(io: Host, command: str) -> StageResult | None:
     return StageResult("preconditions", False, "root is required", fix)
 
 
+def _inspect_networks(io: Host) -> _NetworkReading:
+    """Inspect production's networks, distinguishing absence from other failures."""
+
+    for key in (INTEGRATION_NETWORK_NAME, INTERNAL_NETWORK_NAME):
+        try:
+            network = io.run(["docker", "network", "inspect", network_name(key)])
+        except (OSError, subprocess.SubprocessError) as exc:
+            return _NetworkReading(
+                StageResult(
+                    "preconditions", False,
+                    f"{key} Docker network could not be inspected: {exc}", _NETWORK_FIX,
+                ),
+                None,
+            )
+        if network.returncode != 0:
+            detail = command_detail(network)
+            return _NetworkReading(
+                StageResult(
+                    "preconditions", False,
+                    f"{key} Docker network is unavailable: {detail}", _NETWORK_FIX,
+                ),
+                key if _NETWORK_ABSENT_MARK.format(network_name(key)) in detail else None,
+            )
+    return _NetworkReading(None, None)
+
+
 def _preconditions(
     ci_stack: CiStack,
     io: Host,
     *,
     site_path: PathLike,
     lock_detail: str = "",
+    inspect_networks: bool = True,
 ) -> StageResult:
     root = _root_row(io, "up")
     if root is not None:
@@ -229,19 +266,10 @@ def _preconditions(
     if models_result.errors or models_result.lock is None:
         return _error_row("preconditions", models_result.errors, "models.lock is unavailable")
 
-    for key in (INTEGRATION_NETWORK_NAME, INTERNAL_NETWORK_NAME):
-        try:
-            network = io.run(["docker", "network", "inspect", network_name(key)])
-        except (OSError, subprocess.SubprocessError) as exc:
-            return StageResult(
-                "preconditions", False,
-                f"{key} Docker network could not be inspected: {exc}", _NETWORK_FIX,
-            )
-        if network.returncode != 0:
-            return StageResult(
-                "preconditions", False,
-                f"{key} Docker network is unavailable: {command_detail(network)}", _NETWORK_FIX,
-            )
+    if inspect_networks:
+        reading = _inspect_networks(io)
+        if reading.refusal is not None:
+            return reading.refusal
     return StageResult(
         "preconditions",
         True,
@@ -284,6 +312,32 @@ def _engine_lock(
 def _release_engine_lock(io: LockingHost, outcome: backuplock.Outcome | None) -> None:
     if outcome is not None and outcome.state is backuplock.State.HELD:
         backuplock.release(io, lock=backuplock.ENGINE_LOCK)
+
+
+def _backup_lock_skip(io: Host) -> StageResult | None:
+    """Describe a backup hold's skip or a failure to read the holder."""
+
+    try:
+        holding = backuplock.held_by(io, lock=backuplock.BACKUP_LOCK)
+    except OSError as exc:
+        return StageResult(
+            "preconditions", False,
+            f"the backup lock could not be read: {exc}", _BACKUP_LOCK_READ_FIX,
+        )
+    if not holding.held:
+        return None
+    record = holding.record
+    detail = (
+        "the backup lock is held by another gideon command, its record unreadable"
+        if record is None
+        else f"the backup lock is held by {record.command} since {record.started.isoformat()} "
+        f"(pid {record.pid})"
+    )
+    return StageResult(
+        "skipped", True,
+        f"{detail}; the box is held, the sibling untouched, nothing evaluated, nothing recorded",
+        "",
+    )
 
 
 def _live_index_job(ci_stack: CiStack, io: Host, verb: str) -> int | None | StageResult:
@@ -603,11 +657,13 @@ def _up_stages(
     client_factory: Callable[..., owui.Client] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     lock_detail: str = "",
+    inspect_networks: bool = True,
 ) -> int:
     """Run the CI stack's ordered convergence and verification stages."""
 
     preconditions = _preconditions(
-        ci_stack, io, site_path=site_path, lock_detail=lock_detail
+        ci_stack, io, site_path=site_path, lock_detail=lock_detail,
+        inspect_networks=inspect_networks,
     )
     print_stage(preconditions)
     if not preconditions.ok:
@@ -707,10 +763,11 @@ def smoke(
     """Converge the sibling from the selected tree and run the push smoke on it.
 
     The engine lock is taken before anything of the sibling is touched and held
-    until the run ends. Held by another process, the push's result is neutral:
-    two ok rows and exit 0, the sibling untouched. The evaluation runs
-    in-process under the same lock, which it passes as nested, and reads its
-    cases, reference, and provenance from the selected checkout.
+    until the run ends. Four conditions skip in order: the engine lock held,
+    the backup lock held, a live sample job, and the production stack down.
+    Each prints two ok rows and exits 0, the sibling untouched. The evaluation
+    runs in-process under the same lock, which it passes as nested, and reads
+    its cases, reference, and provenance from the selected checkout.
     """
 
     root = _root_row(io, "smoke")
@@ -733,6 +790,14 @@ def smoke(
         )
         return 0
     try:
+        backup_skip = _backup_lock_skip(io)
+        if backup_skip is not None and not backup_skip.ok:
+            print_stage(backup_skip)
+            return 1
+        if backup_skip is not None:
+            print_stage(StageResult("preconditions", True, lock_row.detail, ""))
+            print_stage(backup_skip)
+            return 0
         job = _live_index_job(ci_stack, io, "smoke")
         if isinstance(job, StageResult):
             print_stage(job)
@@ -746,6 +811,19 @@ def smoke(
                 "",
             ))
             return 0
+        networks = _inspect_networks(io)
+        if networks.absent is not None:
+            print_stage(StageResult("preconditions", True, lock_row.detail, ""))
+            print_stage(StageResult(
+                "skipped", True,
+                f"the production stack is down: the {networks.absent} Docker network is absent; "
+                "the sibling untouched, nothing evaluated, nothing recorded",
+                "",
+            ))
+            return 0
+        if networks.refusal is not None:
+            print_stage(networks.refusal)
+            return 1
         result = _up_stages(
             ci_stack,
             io,
@@ -753,6 +831,7 @@ def smoke(
             client_factory=client_factory,
             sleep=sleep,
             lock_detail=lock_row.detail,
+            inspect_networks=False,
         )
         if result != 0:
             return result

@@ -399,7 +399,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     promote.add_argument("gen", help="generation to promote")
     promote.set_defaults(handler=_index_promote, command_path="index promote")
-    gc = index_sub.add_parser("gc", help="drop retired generations past their seven-day hold")
+    retire = index_sub.add_parser(
+        "retire", help="retire a generation that was never promoted",
+        description=(
+            "Retire a building, built, or failed generation so that index gc drops its index "
+            "and vectors. The record moves to retired; both stores stand until the next gc. "
+            "A live generation retires only when another is promoted. A name ending in __sample "
+            "targets the CI sibling. Run again on a retired generation to confirm it."
+        ),
+    )
+    retire.add_argument("gen", help="generation to retire")
+    retire.set_defaults(handler=host_cli.run_index_retire, command_path="index retire")
+    gc = index_sub.add_parser("gc", help="drop retired generations past their hold, never-promoted ones at once")
     gc.add_argument(
         "--stack", choices=STACKS, default=PRODUCTION_STACK,
         help="sweep the standing CI sibling's stores instead of production's",

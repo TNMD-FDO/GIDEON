@@ -259,9 +259,11 @@ class Guard(unittest.TestCase):
             with self.subTest(command_path=command_path):
                 fix = resident_fix(counted, live="fictitious-live", command_path=command_path)
                 self.assertEqual(fix, "Other resident collections: built: fictitious-built "
-                                 "(promotable, or droppable after retirement); retired: "
+                                 f"(promotable, or retired with {report.command('index retire <generation>')} "
+                                 f"and dropped by {report.command(gc_command)}); retired: "
                                  "fictitious-retired-a, fictitious-retired-z (reclaim with "
-                                 f"{report.command(gc_command)} after the retirement hold); unrecorded: "
+                                 f"{report.command(gc_command)} after the retirement hold, "
+                                 "at once for one never promoted); unrecorded: "
                                  "fictitious-outside (outside the record). ")
         self.assertEqual(resident_fix(counted[:1], live="fictitious-live", command_path=COMMAND_PATH), "")
         self.assertEqual(resident_fix((), live=None, command_path=COMMAND_PATH), "")

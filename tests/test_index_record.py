@@ -4,7 +4,7 @@ Writes and reads bind on stdin by name or by inputs: absent, foreign, malformed,
 failed reads; created, found, and appended outcomes; the parser's refusals and the
 reason union; ordered and promoted reads; the requested and whole manifest reads and
 their invalid rows; footprint bindings, halves and total, and older-row backfill; the
-promotion's and the demotion's statements, their outcomes, the no-row abort, the
+promotion's, demotion's, and retirement's statements, their outcomes, the no-row abort, the
 demotion's halves and no-flag refusal, and invalid replies; and the given-gold write's
 bindings, empty list, and refusals.
 """
@@ -24,6 +24,7 @@ from gideon.host.index.record import (
     GenerationRow,
     PromotedRow,
     PromotionOutcome,
+    RetirementOutcome,
     demote_generation,
     promote_generation,
     read_generation,
@@ -32,6 +33,7 @@ from gideon.host.index.record import (
     read_manifest,
     read_manifest_rows,
     read_promoted,
+    retire_generation,
     write_building,
     write_footprint,
     write_gold,
@@ -386,6 +388,125 @@ class DemotionWriter(unittest.TestCase):
                 else:
                     self.assertIn("Restore Docker Compose and psql", result.fix)
                 self.assertIn(report.command("restore"), result.fix)
+                self.assertNotIn(host.stderr, result.problem + result.fix)
+                self.assertEqual(len(host.calls), 1)
+
+
+class RetirementWriter(unittest.TestCase):
+    def test_each_previous_state_and_reason_with_stdin_only_payload(self) -> None:
+        stamp = "2099-01-03T12:00:00+00:00"
+        previous = (
+            ("building", None), ("built", None),
+            *(("failed", reason) for reason in sorted(GENERATION_FAILURE_REASONS)),
+        )
+        for state, reason in previous:
+            for directory in (RENDERED, "/fictitious-ci-rendered"):
+                with self.subTest(state=state, reason=reason, directory=directory):
+                    expected = RetirementOutcome(NAME, state, reason, stamp)
+                    host = FakeHost(stdout=json.dumps(asdict(expected)) + "\n")
+                    self.assertEqual(retire_generation(
+                        host, directory, NAME, command_path=f"index retire {NAME}",
+                    ), expected)
+                    self.assertEqual(len(host.calls), 1)
+                    argv, sql = host.calls[0]
+                    self.assertEqual(argv, worker.psql_argv(directory))
+                    self.assertIn("gideon_worker", argv)
+                    self.assertIn("ON_ERROR_STOP=1", argv)
+                    assert sql is not None
+                    self.assertTrue(sql.startswith(worker.bind(
+                        "v_payload", json.dumps({"name": NAME}, separators=(",", ":")),
+                    ) + "\n"))
+                    self.assertEqual(sql.count("\\set v_payload "), 1)
+                    for value in (NAME, "UPDATE", "v_payload", "retired_at"):
+                        self.assertNotIn(value, " ".join(argv))
+                    self.assertIn("\\set QUIET on\nBEGIN;", sql)
+                    self.assertIn("current_setting('gideon.retirement_payload')::jsonb", sql)
+                    self.assertIn("SELECT gen_id, state, failure_reason FROM public.index_generations", sql)
+                    self.assertIn("WHERE gen_id = payload->>'name' AND state IN ('building', 'built', 'failed')", sql)
+                    self.assertIn("FOR UPDATE", sql)
+                    self.assertEqual(sql.count("UPDATE public.index_generations"), 1)
+                    self.assertIn(
+                        "SET state = 'retired', retired_at = now(), failure_reason = NULL\n"
+                        "    FROM previous", sql,
+                    )
+                    self.assertIn("WHERE generation.gen_id = previous.gen_id", sql)
+                    self.assertIn("AND generation.state IN ('building', 'built', 'failed')", sql)
+                    self.assertIn(
+                        "RETURNING generation.gen_id, previous.state, previous.failure_reason, generation.retired_at",
+                        sql,
+                    )
+                    self.assertIn("'failure_reason', previous_reason, 'retired_at', retired_time", sql)
+                    for untouched in (
+                        "counts", "bytes", "lockfiles", "built_at", "promoted_at", "clustered_at",
+                        "cluster_treatment", "generation_documents", "embedding_ledger", "DELETE",
+                    ):
+                        self.assertNotIn(untouched, sql)
+                    self.assertTrue(sql.endswith("COMMIT;\n"))
+
+    def test_no_row_updated_aborts_and_refuses_with_report_and_retry_fix(self) -> None:
+        command_path = f"index retire {NAME}"
+        host = FakeHost(code=3, stderr="ERROR: generation is no longer building, built, or failed")
+        self.assertEqual(retire_generation(host, RENDERED, NAME, command_path=command_path), Problem(
+            f"{NAME}: generation is no longer building, built, or failed; nothing was retired",
+            f"Run {report.command(f'index report {NAME}')} to read its state, "
+            f"then run {report.command(command_path)} again.",
+        ))
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        self.assertIn("ON_ERROR_STOP=1", argv)
+        assert sql is not None
+        self.assertEqual(sql.count("BEGIN;"), 1)
+        self.assertEqual(sql.count("COMMIT;"), 1)
+        guard = sql.index("IF NOT FOUND THEN")
+        abort = sql.index("RAISE EXCEPTION 'generation is no longer building, built, or failed'")
+        outcome = sql.index("SELECT current_setting('gideon.retirement_outcome')::jsonb;")
+        self.assertLess(sql.index("BEGIN;"), sql.index("FOR UPDATE"))
+        self.assertLess(sql.index("FOR UPDATE"), sql.index("UPDATE public.index_generations"))
+        self.assertLess(sql.index("RETURNING generation.gen_id, previous.state"), guard)
+        self.assertLess(guard, abort)
+        self.assertLess(abort, outcome)
+        self.assertLess(outcome, sql.index("COMMIT;"))
+
+    def test_invalid_outcomes_refuse_with_database_fix(self) -> None:
+        valid = asdict(RetirementOutcome(NAME, "built", None, "2099-01-03T12:00:00+00:00"))
+        invalid_names: tuple[object, ...] = ("fictitious-other-name", None, True, [], {})
+        invalid_states: tuple[object, ...] = ("live", "retired", "unknown", None, True, [], {})
+        invalid_reasons: tuple[object, ...] = ("", "fictitious-reason", True, 17, [], {})
+        invalid_timestamps: tuple[object, ...] = (None, "", True, 17, [], {})
+        invalid: tuple[object, ...] = (
+            None, [], {},
+            *({key: value for key, value in valid.items() if key != missing} for missing in valid),
+            {**valid, "unexpected": "fictitious diagnostic"},
+            *({**valid, "name": name} for name in invalid_names),
+            *({**valid, "previous_state": state} for state in invalid_states),
+            {**valid, "previous_state": "failed"},
+            *({**valid, "previous_state": "failed", "failure_reason": reason} for reason in invalid_reasons),
+            *({**valid, "previous_state": state, "failure_reason": reason}
+              for state in ("building", "built") for reason in sorted(GENERATION_FAILURE_REASONS)),
+            *({**valid, "retired_at": stamp} for stamp in invalid_timestamps),
+        )
+        for stdout in ("", "broken", json.dumps(valid) + "\n" + json.dumps(valid),
+                       *(json.dumps(value) for value in invalid)):
+            with self.subTest(stdout=stdout):
+                host = FakeHost(stdout=stdout)
+                self.assertEqual(retire_generation(
+                    host, RENDERED, NAME, command_path="index retire",
+                ), Problem("generation retirement returned an invalid outcome", database_fix(RENDERED, "index retire")))
+                self.assertEqual(len(host.calls), 1)
+
+    def test_failed_exit_overrides_success_and_unavailable_tools_refuse_without_retry(self) -> None:
+        stdout = json.dumps(asdict(RetirementOutcome(NAME, "built", None, "2099-01-03T12:00:00+00:00")))
+        for code, error in ((3, None), (127, None), (0, FileNotFoundError()), (0, subprocess.SubprocessError())):
+            with self.subTest(code=code, error=error):
+                host = FakeHost(code=code, error=error, stdout=stdout, stderr="fictitious-private-diagnostic")
+                result = retire_generation(host, RENDERED, NAME, command_path="index retire")
+                assert isinstance(result, Problem)
+                if code == 3:
+                    self.assertEqual(result.problem, "generation retirement failed (exit 3)")
+                    self.assertEqual(result.fix, database_fix(RENDERED, "index retire"))
+                else:
+                    self.assertIn("Restore Docker Compose and psql", result.fix)
+                self.assertIn(report.command("index retire"), result.fix)
                 self.assertNotIn(host.stderr, result.problem + result.fix)
                 self.assertEqual(len(host.calls), 1)
 

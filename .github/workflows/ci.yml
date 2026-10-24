@@ -107,9 +107,11 @@ jobs:
     # the standing gideon-ci sibling, which the tool first converges from this
     # pushed tree, gating on a guardrail positive unblocked, a leak, an error,
     # a frontend sample disagreeing, or a case regressed against its committed
-    # reference. It takes the engine lock first, so a busy engine is a skip
-    # (exit 0, the sibling untouched), never a red push or a disrupted run.
-    # The Skipped on a busy engine step marks a skip: it concludes success on a
+    # reference. It skips when the engine lock is held elsewhere, the backup
+    # lock is held by a backup or restore, a sample job is live on the sibling,
+    # or the production stack is down with a network absent. Each skip exits 0
+    # with the sibling untouched. The Skipped on a busy engine step keeps its
+    # name because the dispatcher reads it by name. It concludes success on a
     # skip and skipped otherwise, so the run's jobs tell a skip from an
     # evaluated smoke without reading its log, and a reader of the run takes
     # its verdict from the newest evaluated one. The run still concludes success.
@@ -135,7 +137,7 @@ jobs:
       - name: Skipped on a busy engine
         if: steps.smoke.outputs.skipped == 'true'
         shell: bash
-        run: echo 'Smoke skipped; the verdict stands on the newest evaluated run.'
+        run: echo 'Smoke skipped — the engine busy, a sample job live, the backup lock held, or the stack down; the verdict stands on the newest evaluated run.'
       - name: Job summary
         if: always()
         shell: bash

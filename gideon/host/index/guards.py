@@ -224,9 +224,15 @@ def resident_fix(
     for state, names in sorted(grouped.items()):
         clause = f"{state}: {', '.join(sorted(names))}"
         if state == "retired":
-            clause += f" (reclaim with {report.command(gc_command)} after the retirement hold)"
+            clause += (
+                f" (reclaim with {report.command(gc_command)} after the retirement hold, "
+                "at once for one never promoted)"
+            )
         elif state == "built":
-            clause += " (promotable, or droppable after retirement)"
+            clause += (
+                f" (promotable, or retired with {report.command('index retire <generation>')} "
+                f"and dropped by {report.command(gc_command)})"
+            )
         elif state == "unrecorded":
             clause += " (outside the record)"
         clauses.append(clause)

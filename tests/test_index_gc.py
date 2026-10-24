@@ -265,7 +265,7 @@ class Sweep(unittest.TestCase):
     def assert_no_deletes(self) -> None:
         self.assertFalse(any(method == "DELETE" for _, method, _, _ in self.host.requests))
 
-    def test_clock_drops_only_expired_retired_rows_and_reports_the_partition(self) -> None:
+    def test_clock_drops_never_promoted_and_expired_retired_rows_and_reports_the_partition(self) -> None:
         for sibling in (False, True):
             with self.subTest(sibling=sibling):
                 self.host = FakeHost(sibling=sibling)
@@ -274,17 +274,29 @@ class Sweep(unittest.TestCase):
                     self.host.rows[row.gen_id] = row
                     for objects in self.host.objects.values():
                         objects.add(row.gen_id)
+                never_promoted = replace(
+                    generation_row(7, "retired", sibling=sibling, retired_at=NOW), promoted_at=None,
+                )
+                self.host.rows[never_promoted.gen_id] = never_promoted
+                for objects in self.host.objects.values():
+                    objects.add(never_promoted.gen_id)
+                self.assertIsNotNone(self.host.rows[self.host.expired].promoted_at)
+                self.assertIsNotNone(self.host.rows[self.host.held].promoted_at)
                 before = copy.deepcopy(self.host.objects)
                 code, out, err = self.run_gc()
                 self.assertEqual((code, err), (0, ""), out)
                 self.assertEqual([line.split(":", 1)[0] for line in out.splitlines()], list(STAGES))
                 for store in before:
-                    self.assertEqual(self.host.objects[store], before[store] - {self.host.expired})
-                self.assertIn(f"drop 1: {self.host.expired}", out)
-                self.assertIn(f"held 1: {self.host.held} (1 days left)", out)
-                self.assertIn(f"live: {self.host.live} (never dropped)", out)
-                self.assertIn("building 1; built 1; failed 1", out)
-                self.assertIn("summary: ok — lexical dropped 1, absent 0; dense dropped 1, absent 0; held 1; live 1", out)
+                    self.assertEqual(self.host.objects[store], before[store] - {self.host.expired, never_promoted.gen_id})
+                    self.assertIn(
+                        f"{store}: ok — dropped: {self.host.expired}, {never_promoted.gen_id}; absent: none", out,
+                    )
+                self.assertIn(
+                    f"candidates: ok — drop 2: {self.host.expired} (hold passed), {never_promoted.gen_id} (never promoted); "
+                    f"held 1: {self.host.held} (1 days left); live: {self.host.live} (never dropped); "
+                    f"building 1; built 1; failed 1 (retire one with {report.command('index retire <generation>')})", out,
+                )
+                self.assertIn("summary: ok — lexical dropped 2, absent 0; dense dropped 2, absent 0; held 1; live 1", out)
                 self.assertNotIn("Next:", out)
 
     def test_seven_day_boundary_offsets_and_fractional_days_left(self) -> None:
@@ -307,7 +319,7 @@ class Sweep(unittest.TestCase):
                     self.assertIn(f"{row.gen_id} ({days} days left)", out)
                     self.assertEqual(self.host.requests, [])
                 else:
-                    self.assertIn(f"drop 1: {row.gen_id}", out)
+                    self.assertIn(f"drop 1: {row.gen_id} (hold passed)", out)
 
     def test_advancing_the_injected_clock_expires_a_previously_held_row(self) -> None:
         self.host.rows = {self.host.held: self.host.rows[self.host.held]}
@@ -508,18 +520,27 @@ class Sweep(unittest.TestCase):
     def test_invalid_retirement_timestamps_and_unsafe_names_refuse_before_store_requests(self) -> None:
         for sibling in (False, True):
             for value in ("not-a-timestamp", "2099-01-01T12:00:00", ""):
-                with self.subTest(sibling=sibling, retired_at=value):
-                    self.host = FakeHost(sibling=sibling)
-                    self.host.rows[self.host.expired] = replace(self.host.rows[self.host.expired], retired_at=value)
-                    out = self.refuse("candidates", "retired_at is invalid")
-                    self.assertIn(stack.logs_fix(self.host.directory, "postgres"), out)
-                    self.assertEqual(self.host.requests, [])
+                for promoted in (False, True):
+                    with self.subTest(sibling=sibling, retired_at=value, promoted=promoted):
+                        self.host = FakeHost(sibling=sibling)
+                        row = self.host.rows[self.host.expired]
+                        self.host.rows[self.host.expired] = replace(
+                            row, retired_at=value, promoted_at=row.promoted_at if promoted else None,
+                        )
+                        out = self.refuse("candidates", "retired_at is invalid")
+                        self.assertIn(stack.logs_fix(self.host.directory, "postgres"), out)
+                        self.assertEqual(self.host.requests, [])
             for name in ("../../fictitious", "caselaw__invalid", generations.generation_name("caselaw", "corpus-2099-01-01", SPACE) + "x" * 255):
-                with self.subTest(sibling=sibling, name=name):
-                    self.host = FakeHost(sibling=sibling)
-                    self.host.rows[self.host.expired] = replace(self.host.rows[self.host.expired], gen_id=name)
-                    self.refuse("candidates", "generation record name is invalid")
-                    self.assertEqual(self.host.requests, [])
+                for promoted in (False, True):
+                    with self.subTest(sibling=sibling, name=name, promoted=promoted):
+                        self.host = FakeHost(sibling=sibling)
+                        row = self.host.rows[self.host.expired]
+                        self.host.rows[self.host.expired] = replace(
+                            row, gen_id=name, retired_at=row.retired_at if promoted else NOW.isoformat(),
+                            promoted_at=row.promoted_at if promoted else None,
+                        )
+                        self.refuse("candidates", "generation record name is invalid")
+                        self.assertEqual(self.host.requests, [])
 
     def test_empty_or_unexpired_records_print_nothing_to_drop_without_store_requests(self) -> None:
         for sibling in (False, True):

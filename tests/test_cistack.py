@@ -9,6 +9,7 @@ import subprocess
 import sys
 import unittest
 from collections.abc import Callable, Collection, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
@@ -79,7 +80,7 @@ class FakeHost:
     def __init__(self, *, euid: int = 0, network_returncode: int = 0) -> None:
         self.euid = euid
         self.network_returncode = network_returncode
-        self.network_results: dict[str, int | OSError] = {}
+        self.network_results: dict[str, int | OSError | subprocess.CompletedProcess[str]] = {}
         self.network_containers: dict[str, dict[str, object]] = {}
         self.job_id: int | None = None
         self.job_returncode = 0
@@ -88,10 +89,13 @@ class FakeHost:
         self.failing_programs: set[str] = set()
         self.events: list[tuple[str, str]] = []
         self.files: dict[str, str] = {
+            cistack_run.backuplock.LOCK_TABLE: "",
             os.fspath(SITE_PATH): (ROOT / "config/site.example.yaml").read_text(
                 encoding="utf-8"
             ),
         }
+        self.stats: dict[str, os.stat_result | OSError] = {}
+        self.read_errors: dict[str, OSError] = {}
         self.directories: set[str] = {CI_ROOT, CI_SECRETS_DIR, cistack_run.backuplock.LOCK_DIR}
         self.commands: list[tuple[str, ...]] = []
         self.locks: dict[str, str] = {}
@@ -132,6 +136,8 @@ class FakeHost:
             outcome = self.network_results.get(network, self.network_returncode)
             if isinstance(outcome, OSError):
                 raise outcome
+            if isinstance(outcome, subprocess.CompletedProcess):
+                return outcome
             return completed(
                 command,
                 returncode=outcome,
@@ -162,6 +168,8 @@ class FakeHost:
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
         del encoding
         key = os.fspath(path)
+        if key in self.read_errors:
+            raise self.read_errors[key]
         if key not in self.files:
             raise FileNotFoundError(key)
         return self.files[key]
@@ -205,9 +213,26 @@ class FakeHost:
         self.files.pop(os.fspath(path), None)
 
     def stat(self, path: PathLike) -> os.stat_result:
+        key = os.fspath(path)
+        if key in self.stats:
+            value = self.stats[key]
+            if isinstance(value, OSError):
+                raise value
+            return value
         if not self.exists(path):
             raise FileNotFoundError(os.fspath(path))
         return os.stat_result((0o040755 if os.fspath(path) in self.directories else 0o100644,))
+
+    def hold_backup_lock(self, record: str) -> None:
+        path = cistack_run.backuplock.BACKUP_LOCK.path
+        info = os.stat_result((0o100600, 24680, os.makedev(0xAB, 0xCD), 1, 0, 0, 0, 0, 0, 0))
+        self.stats[path] = info
+        self.files[path] = record
+        self.locks[path] = record
+        self.files[cistack_run.backuplock.LOCK_TABLE] = (
+            f"1: FLOCK ADVISORY WRITE 12345 "
+            f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino} 0 EOF\n"
+        )
 
     def chmod(self, path: PathLike, mode: int) -> None:
         self.chmods.append((os.fspath(path), mode))
@@ -450,6 +475,253 @@ class Preconditions(unittest.TestCase):
 
 
 class SmokeCommand(unittest.TestCase):
+    def test_backup_lock_skips_without_commands_or_a_take(self) -> None:
+        record = cistack_run.backuplock.Record(
+            "fixture restore", 12345, datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        for text in (record.to_json(), "unreadable fixture record"):
+            with self.subTest(record=text):
+                host = FakeHost()
+                host.hold_backup_lock(text)
+                before_files = host.files.copy()
+                before_directories = host.directories.copy()
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    code = cistack_run.smoke(
+                        ci_stack(), host, site_path=SITE_PATH,
+                        run_eval=lambda *args, **kwargs: self.fail("evaluated a held box"),
+                    )
+
+                holder = (
+                    f"{record.command} since {record.started.isoformat()} (pid {record.pid})"
+                    if text == record.to_json()
+                    else "another gideon command, its record unreadable"
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(output.getvalue().splitlines(), [
+                    "preconditions: ok — engine lock taken",
+                    f"skipped: ok — the backup lock is held by {holder}; the box is held, "
+                    "the sibling untouched, nothing evaluated, nothing recorded",
+                ])
+                self.assertEqual(host.commands, [])
+                self.assertEqual(host.writes, [])
+                self.assertEqual(host.files, before_files)
+                self.assertEqual(host.directories, before_directories)
+                engine_path = cistack_run.backuplock.ENGINE_LOCK.path
+                self.assertEqual(host.lock_events, [("take", engine_path), ("release", engine_path)])
+                self.assertEqual(host.locks, {cistack_run.backuplock.BACKUP_LOCK.path: text})
+
+    def test_backup_read_errors_refuse_and_release_before_any_command(self) -> None:
+        for source in ("stat", "table", "record"):
+            with self.subTest(source=source):
+                host = FakeHost()
+                host.hold_backup_lock("fixture record")
+                path = cistack_run.backuplock.BACKUP_LOCK.path
+                error = OSError("fixture lock read failure")
+                if source == "stat":
+                    host.stats[path] = error
+                else:
+                    host.read_errors[
+                        cistack_run.backuplock.LOCK_TABLE if source == "table" else path
+                    ] = error
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    code = cistack_run.smoke(
+                        ci_stack(), host, site_path=SITE_PATH,
+                        run_eval=lambda *args, **kwargs: self.fail("evaluated after a read failure"),
+                    )
+                self.assertEqual(code, 1)
+                self.assertEqual(output.getvalue().splitlines(), [
+                    "preconditions: refuse — the backup lock could not be read: fixture lock read failure "
+                    "Fix: Repair access to the backup lock and the kernel lock table, then retry.",
+                ])
+                self.assertEqual(host.commands, [])
+                self.assertEqual(host.writes, [])
+                engine_path = cistack_run.backuplock.ENGINE_LOCK.path
+                self.assertEqual(host.lock_events, [("take", engine_path), ("release", engine_path)])
+                self.assertNotIn(engine_path, host.locks)
+
+    def test_absent_network_skips_smoke_but_up_keeps_its_refusal(self) -> None:
+        for verb in ("smoke", "up"):
+            for key in (INTEGRATION_NETWORK_NAME, INTERNAL_NETWORK_NAME):
+                with self.subTest(verb=verb, network=key):
+                    host = FakeHost()
+                    network = network_name(key)
+                    host.network_results[network] = completed(
+                        ["docker", "network", "inspect", network], returncode=1,
+                        stderr=f"Error response from daemon: network {network} not found\n",
+                    )
+                    before_files = host.files.copy()
+                    before_directories = host.directories.copy()
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        if verb == "smoke":
+                            code = cistack_run.smoke(
+                                ci_stack(), host, site_path=SITE_PATH,
+                                run_eval=lambda *args, **kwargs: self.fail("evaluated a down stack"),
+                            )
+                        else:
+                            code = cistack_run.up(ci_stack(), host, site_path=SITE_PATH)
+
+                    if verb == "smoke":
+                        self.assertEqual(code, 0)
+                        self.assertEqual(output.getvalue().splitlines(), [
+                            "preconditions: ok — engine lock taken",
+                            f"skipped: ok — the production stack is down: the {key} Docker network is absent; "
+                            "the sibling untouched, nothing evaluated, nothing recorded",
+                        ])
+                    else:
+                        self.assertEqual(code, 1)
+                        self.assertEqual(output.getvalue().splitlines(), [
+                            f"preconditions: refuse — {key} Docker network is unavailable: "
+                            f"Error response from daemon: network {network} not found "
+                            "Fix: Run sudo python3 -m gideon apply, then retry.",
+                        ])
+                    self.assertEqual(host.commands, [
+                        ("docker", "network", "inspect", network_name(name))
+                        for name in (INTEGRATION_NETWORK_NAME, INTERNAL_NETWORK_NAME)
+                        if name == INTEGRATION_NETWORK_NAME or key == INTERNAL_NETWORK_NAME
+                    ])
+                    self.assertEqual(host.files, before_files)
+                    self.assertEqual(host.directories, before_directories)
+                    self.assertEqual(host.writes, [])
+                    engine_path = cistack_run.backuplock.ENGINE_LOCK.path
+                    self.assertEqual(host.lock_events, [("take", engine_path), ("release", engine_path)])
+                    self.assertEqual(host.locks, {})
+
+    def test_other_network_failures_refuse_smoke_with_the_apply_fix(self) -> None:
+        for key in (INTEGRATION_NETWORK_NAME, INTERNAL_NETWORK_NAME):
+            network = network_name(key)
+            failures = (
+                (1, f"{key} Docker network is unavailable: network unavailable | "
+                 + json.dumps([{"Containers": {}}])),
+                (OSError("docker unavailable"), f"{key} Docker network could not be inspected: docker unavailable"),
+                (
+                    completed(
+                        ["docker", "network", "inspect", network], returncode=1,
+                        stderr="network fixture-unrelated not found\n",
+                    ),
+                    f"{key} Docker network is unavailable: network fixture-unrelated not found",
+                ),
+            )
+            for outcome, detail in failures:
+                with self.subTest(network=key, outcome=outcome):
+                    host = FakeHost()
+                    host.network_results[network] = outcome
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        code = cistack_run.smoke(
+                            ci_stack(), host, site_path=SITE_PATH,
+                            run_eval=lambda *args, **kwargs: self.fail("evaluated after a network failure"),
+                        )
+                    self.assertEqual(code, 1)
+                    self.assertEqual(output.getvalue().splitlines(), [
+                        f"preconditions: refuse — {detail} Fix: Run sudo python3 -m gideon apply, then retry.",
+                    ])
+                    self.assertEqual(host.writes, [])
+                    engine_path = cistack_run.backuplock.ENGINE_LOCK.path
+                    self.assertEqual(host.lock_events, [("take", engine_path), ("release", engine_path)])
+                    self.assertEqual(host.locks, {})
+
+    def test_first_skip_wins_when_multiple_conditions_hold(self) -> None:
+        for engine, backup, job, reason in (
+            (True, True, True, "engine busy"),
+            (False, True, False, "the backup lock is held"),
+            (False, True, True, "the backup lock is held"),
+            (False, False, True, "a sample build is running"),
+        ):
+            with self.subTest(engine=engine, backup=backup, job=job):
+                host = FakeHost()
+                network = network_name(INTEGRATION_NETWORK_NAME)
+                host.network_results[network] = completed(
+                    ["docker", "network", "inspect", network], returncode=1,
+                    stderr=f"network {network} not found\n",
+                )
+                host.files[f"{CI_ROOT}/compose.yaml"] = "services: {}\n"
+                if backup:
+                    host.hold_backup_lock("unreadable fixture record")
+                engine_path = cistack_run.backuplock.ENGINE_LOCK.path
+                if engine:
+                    host.locks[engine_path] = cistack_run.backuplock.Record(
+                        "fixture evaluation", os.getpid() + 1, datetime(2026, 1, 1, tzinfo=UTC),
+                    ).to_json()
+                if job:
+                    host.job_id = 12345
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    code = cistack_run.smoke(
+                        ci_stack(), host, site_path=SITE_PATH,
+                        run_eval=lambda *args, **kwargs: self.fail("evaluated despite a skip"),
+                    )
+                self.assertEqual(code, 0)
+                self.assertEqual(len(output.getvalue().splitlines()), 2)
+                self.assertIn(f"skipped: ok — {reason}", output.getvalue())
+                self.assertEqual(host.job_read_locks, [] if engine or backup else [True])
+                self.assertEqual(len(host.commands), 0 if engine or backup else 1)
+                self.assertFalse(any(command[:3] == ("docker", "network", "inspect") for command in host.commands))
+                self.assertEqual(host.writes, [])
+                self.assertNotIn(("take", cistack_run.backuplock.BACKUP_LOCK.path), host.lock_events)
+
+    def test_smoke_inspects_once_and_up_keeps_its_rows_with_a_backup_hold(self) -> None:
+        outputs: list[list[str]] = []
+        evaluated: list[bool] = []
+
+        def run_eval(*args: object, **kwargs: object) -> int:
+            evaluated.append(True)
+            return 0
+
+        success = StageResult("fixture-stage", True, "fixture ready", "")
+        with (
+            patch.object(cistack_run, "_secrets_stage", return_value=(success, cast(RenderInputs, object()))),
+            patch.object(cistack_run, "_render_stage", return_value=success),
+            patch.object(cistack_run, "_stores_stage", return_value=success),
+            patch.object(cistack_run, "_start_stage", return_value=success),
+            patch.object(cistack_run, "_manifest_stage", return_value=success),
+            patch.object(cistack_run, "_verify_stage", return_value=success),
+        ):
+            for verb, backup_held in (("up", False), ("up", True), ("smoke", False)):
+                with self.subTest(verb=verb, backup_held=backup_held):
+                    host = FakeHost()
+                    host.files[f"{CI_ROOT}/compose.yaml"] = "services: {}\n"
+                    if backup_held:
+                        host.hold_backup_lock("unreadable fixture record")
+                        host.read_errors[cistack_run.backuplock.LOCK_TABLE] = OSError("must not read")
+                    if verb == "smoke":
+                        network = network_name(INTEGRATION_NETWORK_NAME)
+                        host.network_results[network] = completed(
+                            ["docker", "network", "inspect", network],
+                            stderr=f"network {network} not found\n",
+                        )
+                    evaluated.clear()
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        if verb == "smoke":
+                            code = cistack_run.smoke(
+                                ci_stack(), host, site_path=SITE_PATH, run_eval=run_eval,
+                            )
+                        else:
+                            code = cistack_run.up(ci_stack(), host, site_path=SITE_PATH)
+                    self.assertEqual(code, 0)
+                    rows = output.getvalue().splitlines()
+                    outputs.append(rows)
+                    self.assertEqual(rows[0],
+                        "preconditions: ok — root, render inputs, CI data root, integration network, "
+                        "and internal network are available; engine lock taken",
+                    )
+                    self.assertEqual(evaluated, [True] if verb == "smoke" else [])
+                    self.assertEqual(host.job_read_locks, [True])
+                    self.assertEqual(
+                        [command for command in host.commands if command[:3] == ("docker", "network", "inspect")],
+                        [("docker", "network", "inspect", network_name(key))
+                         for key in (INTEGRATION_NETWORK_NAME, INTERNAL_NETWORK_NAME)],
+                    )
+                    engine_path = cistack_run.backuplock.ENGINE_LOCK.path
+                    self.assertEqual(host.lock_events, [("take", engine_path), ("release", engine_path)])
+                    self.assertNotIn(engine_path, host.locks)
+        self.assertEqual(outputs[0], outputs[1])
+        self.assertEqual(outputs[2][:-1], outputs[0])
+        self.assertEqual(outputs[2][-1], "smoke: ok — eval run --slice smoke --stack ci --kind smoke exited 0")
+
     def test_busy_engine_skips_without_running_commands_or_touching_the_sibling(self) -> None:
         host = FakeHost()
         lock_path = cistack_run.backuplock.ENGINE_LOCK.path

@@ -126,12 +126,34 @@ class Help(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         self.assertEqual(help_entries(out.getvalue())["retention"], "retention sweeps")
 
-    def test_index_gc_help_names_the_hold(self) -> None:
+    def test_index_gc_help_names_the_hold_and_never_promoted_drop(self) -> None:
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
             main(["index", "--help"])
         self.assertEqual(ctx.exception.code, 0)
-        self.assertIn("drop retired generations past their seven-day hold", collapsed(out.getvalue()))
+        self.assertIn("drop retired generations past their hold, never-promoted ones at once", collapsed(out.getvalue()))
+
+    def test_index_retire_help_names_the_never_promoted_generation(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["index", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertEqual(help_entries(out.getvalue())["retire"], "retire a generation that was never promoted")
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["index", "retire", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        help_text = collapsed(out.getvalue())
+        for phrase in (
+            "gen", "generation to retire", "building, built, or failed generation",
+            "index gc drops its index and vectors", "both stores stand until the next gc",
+            "live generation retires only when another is promoted",
+            "name ending in __sample targets the CI sibling",
+            "Run again on a retired generation to confirm it",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, help_text)
 
     def test_index_promote_help_names_the_built_generation(self) -> None:
         out = io.StringIO()
