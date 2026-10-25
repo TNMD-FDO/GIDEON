@@ -314,6 +314,8 @@ def _newer_unfinished(
     # can go back further than the newest push; the row names that gap.
     newer: list[str] = []
     for snapshot in listed:
+        if snapshot.label.endswith(backupset.REMOVING_SUFFIX):
+            continue
         label = snapshot.label.removesuffix(backupset.PARTIAL_SUFFIX)
         if (
             not snapshot.complete

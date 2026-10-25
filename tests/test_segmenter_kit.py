@@ -6,13 +6,15 @@ import hashlib
 import io
 import json
 import os
+import random
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import unittest
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -62,7 +64,7 @@ def _stage(root: Path, *, large: bool = False, no_text: bool = False, orphan: bo
         counts[court] = {"opinions": len(rows)}
     stage_root.mkdir(parents=True, exist_ok=True)
     (stage_root / "stage.json").write_text(json.dumps({
-        "label": "corpus-2026-10-07", "snapshot": "caselaw-2026-09-30",
+        "label": draw.FROZEN_LABEL, "snapshot": "caselaw-2026-09-30",
         "courts": list(draw.REQUIRED_COURTS), "counts": counts,
     }), encoding="utf-8")
     return stage_root
@@ -72,6 +74,140 @@ def _run_draw(args: list[str], root: Path) -> tuple[int, str, str]:
     output, errors = io.StringIO(), io.StringIO()
     code = draw.main(args, root=root, stdout=output, stderr=errors)
     return code, output.getvalue(), errors.getvalue()
+
+
+SUCCESSOR_TEXT = "Fictitious successor opinion sentinel."
+SHADOW_TEXT = "Fictitious lower-priority source sentinel."
+# A cipher both lacks function words and marks its digit runs with a capital.
+CIPHER_TEXT = "qxzv 4K " * (opiniontext.LEGIBILITY_WORD_FLOOR + 1)
+EMPTY_HTML = "<p></p>"
+
+
+def _opinion_texts(stage: Path, replacements: Mapping[int, str]) -> None:
+    for court in draw.REQUIRED_COURTS:
+        path = stage / court / "opinions.csv"
+        header = ("id", "cluster_id", *draw.SOURCE_COLUMNS)
+        rows = list(draw._read_csv(path, header))
+        for row in rows:
+            if int(row["id"]) in replacements:
+                row["html"] = replacements[int(row["id"])]
+        _csv(path, header, [tuple(row[key] for key in header) for row in rows])
+
+
+@dataclass(frozen=True)
+class SuccessorFixture:
+    """A fictitious stage and minimal set, with independently shuffled cell orders."""
+
+    root: Path
+    stage: Path
+    set_root: Path
+    plain_sample: Path
+    seed: int
+    per_court: int
+    orders: Mapping[draw.Cell, tuple[int, ...]]
+    allocation: Mapping[draw.Cell, int]
+
+    def cases(self) -> list[dict[str, object]]:
+        return [json.loads(line) for line in (self.set_root / manifest.CASE_PATH).read_bytes().splitlines()]
+
+    def case_ids(self, cell: draw.Cell) -> tuple[str, ...]:
+        return tuple(cast(str, case["id"]) for case in self.cases()
+                     if (case["court"], case["text_source"], case["decade"]) == cell)
+
+    def candidates(self, cell: draw.Cell) -> tuple[int, ...]:
+        used = {case["opinion_id"] for case in self.cases()}
+        return tuple(opinion_id for opinion_id in self.orders[cell][self.allocation[cell]:] if opinion_id not in used)
+
+    def arguments(self, out: Path, retired: Sequence[str], *, seed: int | None = None) -> list[str]:
+        arguments = [str(self.stage), "--seed", str(self.seed if seed is None else seed),
+                     "--per-court", str(self.per_court), "--out", str(out)]
+        for case_id in retired:
+            arguments.extend(("--retire", case_id))
+        return arguments
+
+    def write_arguments(self, sample: Path) -> list[str]:
+        return ["--write", str(sample), "--reviewer", "CSA-1", "--on", "2001-02-03",
+                "--set", str(self.set_root)]
+
+    def append(self, opinion_id: int, cell: draw.Cell, *, supersedes: str | None = None,
+               ordinal: int | None = None) -> str:
+        cases = self.cases()
+        if ordinal is None:
+            ordinal = max(int(cast(str, case["id"]).split("-")[1]) for case in cases) + 1
+        case_id = f"segmenter-{ordinal:03d}"
+        case = _case(case_id, opinion_id)
+        case.update(court=cell[0], text_source=cell[1], decade=cell[2])
+        if supersedes is not None:
+            case["supersedes"] = supersedes
+        with (self.set_root / manifest.CASE_PATH).open("a", encoding="utf-8") as output:
+            output.write(json.dumps(case) + "\n")
+        for relative in (manifest.IDS_PATH, manifest.MIRROR_IDS_PATH):
+            with (self.set_root / relative).open("a", encoding="utf-8") as output:
+                output.write(case_id + "\n")
+        result = evalset.load_set(self.set_root)
+        assert result.ok, result.findings
+        return case_id
+
+
+def _successor_fixture(root: Path) -> SuccessorFixture:
+    stage = root / "stage"
+    seed, per_court = 17, 8
+    populations: dict[draw.Cell, tuple[int, ...]] = {}
+    counts: dict[str, dict[str, int]] = {}
+    for ordinal, court in enumerate(draw.REQUIRED_COURTS, 1):
+        clusters: list[tuple[str, ...]] = []
+        opinions: list[tuple[str, ...]] = []
+        next_id = ordinal * 10_000
+        for decade, population in ((1990, 8), (2000, draw.CHECK_WINDOW * 2 + 16), (2010, 8), (2020, 1)):
+            cluster = str(decade)
+            clusters.append((cluster, f"{decade + 1}-01-01"))
+            ids = tuple(range(next_id + 1, next_id + population + 1))
+            populations[(court, "html", decade)] = ids
+            next_id += population
+            for opinion_id in ids:
+                fields = dict.fromkeys(draw.SOURCE_COLUMNS, "")
+                fields.update(html=f"<p>{SUCCESSOR_TEXT}</p>", plain_text=SHADOW_TEXT)
+                opinions.append((str(opinion_id), cluster, *(fields[name] for name in draw.SOURCE_COLUMNS)))
+        _csv(stage / court / "opinion-clusters.csv", ("id", "date_filed"), clusters)
+        _csv(stage / court / "opinions.csv", ("id", "cluster_id", *draw.SOURCE_COLUMNS), opinions)
+        counts[court] = {"opinions": len(opinions)}
+    (stage / "stage.json").write_text(json.dumps({
+        "label": draw.FROZEN_LABEL, "snapshot": "fictitious-successor-snapshot",
+        "courts": list(draw.REQUIRED_COURTS), "counts": counts,
+    }), encoding="utf-8")
+    plain_sample = root / "draw.jsonl"
+    checkout = root / "checkout"
+    code, _output, errors = _run_draw([
+        str(stage), "--seed", str(seed), "--per-court", str(per_court), "--out", str(plain_sample),
+    ], checkout)
+    assert code == 0, errors
+    header, *samples = [json.loads(line) for line in plain_sample.read_bytes().splitlines()]
+    allocation = {(row["court"], row["text_source"], row["decade"]): row["count"] for row in header["allocation"]}
+    randomizer = random.Random(seed)
+    orders = {}
+    for cell in sorted(populations):
+        shuffled = list(populations[cell])
+        randomizer.shuffle(shuffled)
+        orders[cell] = tuple(shuffled)
+    set_root = checkout / evalset.SET_ROOT
+    case_path = set_root / manifest.CASE_PATH
+    case_path.parent.mkdir(parents=True)
+    cases = []
+    for ordinal, sample in enumerate(samples, 1):
+        case = _case(f"segmenter-{ordinal:03d}", sample["opinion_id"])
+        case.update({key: sample[key] for key in ("court", "decade", "text_source")})
+        cases.append(case)
+    case_path.write_text("".join(json.dumps(case) + "\n" for case in cases), encoding="utf-8")
+    for relative in (manifest.IDS_PATH, manifest.MIRROR_IDS_PATH):
+        path = set_root / relative
+        path.parent.mkdir(parents=True)
+        path.write_text("".join(f"{case['id']}\n" for case in cases), encoding="utf-8")
+    result = evalset.load_set(set_root)
+    assert result.ok, result.findings
+    fixture = SuccessorFixture(root, stage, set_root, plain_sample, seed, per_court, orders, allocation)
+    candidates = fixture.candidates(("ca6", "html", 2000))
+    _opinion_texts(stage, {candidates[0]: CIPHER_TEXT, candidates[1]: EMPTY_HTML})
+    return fixture
 
 
 class Draw(unittest.TestCase):
@@ -248,6 +384,371 @@ class Draw(unittest.TestCase):
             self.assertIn("Fix:", errors)
             self.assertFalse((failed_root / draw.CASE_PATH).exists())
             self.assertFalse((failed_root / draw.IDS_PATH).exists())
+
+    def _assert_content_free(self, *values: str) -> None:
+        for value in values:
+            for text in (SUCCESSOR_TEXT, SHADOW_TEXT, "qxzv", EMPTY_HTML):
+                self.assertNotIn(text, value)
+
+    def _assert_refused(self, result: tuple[int, str, str], stage: str) -> None:
+        code, output, errors = result
+        self.assertEqual(code, 1)
+        self.assertEqual(output, "")
+        self.assertTrue(errors.startswith(f"{stage}: refused"), errors)
+        self.assertIn("Fix:", errors)
+        self._assert_content_free(output, errors)
+
+    def _successor_sample(
+        self, fixture: SuccessorFixture, retired: Sequence[str], *, name: str = "successors.jsonl",
+    ) -> tuple[Path, dict, list[dict], str]:
+        out = fixture.root / name
+        code, output, errors = _run_draw(fixture.arguments(out, retired), fixture.root / "checkout")
+        self.assertEqual((code, errors), (0, ""), output)
+        self._assert_content_free(output, errors, out.read_text(encoding="utf-8"))
+        header, *rows = [json.loads(line) for line in out.read_bytes().splitlines()]
+        return out, header, rows, output
+
+    def test_plain_draw_keeps_the_legacy_shuffled_prefix_bytes(self) -> None:
+        """Successor support leaves the original draw's seeded bytes alone."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = _successor_fixture(Path(directory))
+            header = json.loads(fixture.plain_sample.read_bytes().splitlines()[0])
+            expected_rows = [
+                {"opinion_id": opinion_id, "court": court, "decade": decade, "text_source": source}
+                for (court, source, decade), ids in sorted(fixture.orders.items())
+                for opinion_id in sorted(ids[:fixture.allocation[(court, source, decade)]])
+            ]
+            expected = "".join(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n"
+                               for value in [header, *expected_rows]).encode("utf-8")
+            self.assertEqual(fixture.plain_sample.read_bytes(), expected)
+
+    def test_successor_sample_rank_checks_shape_ownership_and_content(self) -> None:
+        """The ingest rejects ciphers and empty text without exposing either."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = _successor_fixture(Path(directory))
+            cell = ("ca6", "html", 2000)
+            retired = fixture.case_ids(cell)[:2]
+            candidates = fixture.candidates(cell)
+            for raw, reason in ((CIPHER_TEXT, "illegible"), (EMPTY_HTML, "empty")):
+                with self.subTest(reason=reason), self.assertRaises(opiniontext.OpinionTextFailure) as caught:
+                    opiniontext.canonical_text("html", raw)
+                self.assertEqual(caught.exception.reason, reason)
+            with (
+                patch.object(opiniontext, "canonical_text", wraps=opiniontext.canonical_text) as canonical,
+                patch.object(opiniontext, "choose", wraps=opiniontext.choose) as choose,
+                patch.object(manifest, "write_atomic", wraps=manifest.write_atomic) as write_sample,
+            ):
+                out, header, rows, output = self._successor_sample(fixture, tuple(reversed(retired)))
+            expected_checked = dict.fromkeys(draw.REQUIRED_COURTS, 0)
+            expected_checked[cell[0]] = min(draw.CHECK_WINDOW, len(candidates))
+            stage = json.loads((fixture.stage / "stage.json").read_text(encoding="utf-8"))
+            expected_header = {
+                "seed": fixture.seed, "label": stage["label"], "snapshot": stage["snapshot"],
+                "per_court": fixture.per_court, "mode": "successors", "retired": [
+                    {"case_id": case_id, "court": cell[0], "text_source": cell[1], "decade": cell[2], "fallback": None}
+                    for case_id in retired
+                ], "checked": expected_checked,
+            }
+            expected_rows = [
+                {"opinion_id": opinion_id, "court": cell[0], "decade": cell[2], "text_source": cell[1], "supersedes": case_id}
+                for case_id, opinion_id in zip(retired, candidates[2:4], strict=True)
+            ]
+            self.assertEqual(header, expected_header)
+            self.assertEqual(tuple(header), tuple(expected_header))
+            self.assertEqual(rows, expected_rows)
+            for item, expected_item in zip(header["retired"], expected_header["retired"], strict=True):
+                self.assertEqual(tuple(item), tuple(expected_item))
+            self.assertEqual(out.read_bytes(), "".join(
+                json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n"
+                for value in [expected_header, *expected_rows]
+            ).encode("utf-8"))
+            self.assertEqual(output.splitlines(), [
+                *(f"{case_id}: ca6 html 2000; opinion: {opinion_id}; rank: {rank}; checked and failed: 2"
+                  for rank, (case_id, opinion_id) in enumerate(zip(retired, candidates[2:4], strict=True), 3)),
+                f"successors: {len(retired)}; checked: {sum(expected_checked.values())}",
+            ])
+            self.assertEqual(canonical.call_count, sum(expected_checked.values()))
+            self.assertEqual(choose.call_count, canonical.call_count)
+            for choice, check in zip(choose.call_args_list, canonical.call_args_list, strict=True):
+                self.assertEqual(check.args, opiniontext.choose(choice.args[0]))
+                self.assertEqual(check.args[0], cell[1])
+                self.assertNotEqual(check.args[1], SHADOW_TEXT)
+            write_sample.assert_called_once()
+            owner = fixture.root.stat()
+            self.assertEqual(write_sample.call_args.kwargs["owner"], (owner.st_uid, owner.st_gid))
+            self.assertEqual((out.stat().st_uid, out.stat().st_gid), (owner.st_uid, owner.st_gid))
+
+    def test_successors_check_rank_windows_once_per_needed_court_per_round(self) -> None:
+        """CSV row order cannot choose a higher-ranked passing candidate."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = _successor_fixture(Path(directory))
+            cell = ("ca6", "html", 2000)
+            candidates = fixture.candidates(cell)
+            failed = draw.CHECK_WINDOW + 2
+            _opinion_texts(fixture.stage, {
+                opinion_id: CIPHER_TEXT if index % 2 else EMPTY_HTML
+                for index, opinion_id in enumerate(candidates[:failed])
+            })
+            other_cell = ("ca6", "html", 1990)
+            other_court = ("scotus", "html", 2000)
+            retired = (*fixture.case_ids(cell)[:2], fixture.case_ids(other_cell)[0], fixture.case_ids(other_court)[0])
+            passes: list[str] = []
+            read_csv = draw._read_csv
+
+            def read(path: Path, required: tuple[str, ...], *, stage: str = "stage") -> Iterator[dict[str, str]]:
+                if stage == "check":
+                    passes.append(path.parent.name)
+                yield from read_csv(path, required, stage=stage)
+
+            with (
+                patch.object(draw, "_read_csv", side_effect=read),
+                patch.object(opiniontext, "canonical_text", wraps=opiniontext.canonical_text) as canonical,
+            ):
+                _, header, rows, output = self._successor_sample(fixture, retired)
+            by_retired = {row["supersedes"]: row for row in rows}
+            for rank, case_id in enumerate(fixture.case_ids(cell)[:2], failed + 1):
+                self.assertEqual(by_retired[case_id]["opinion_id"], candidates[rank - 1])
+                self.assertIn(f"rank: {rank}; checked and failed: {failed}", output)
+            self.assertEqual(by_retired[fixture.case_ids(other_cell)[0]]["opinion_id"], fixture.candidates(other_cell)[0])
+            self.assertEqual(by_retired[fixture.case_ids(other_court)[0]]["opinion_id"], fixture.candidates(other_court)[0])
+            rounds = (failed + 2 + draw.CHECK_WINDOW - 1) // draw.CHECK_WINDOW
+            self.assertEqual(passes, ["ca6", "scotus"] + ["ca6"] * (rounds - 1))
+            expected_checked = {
+                "ca6": min(rounds * draw.CHECK_WINDOW, len(candidates)) + min(draw.CHECK_WINDOW, len(fixture.candidates(other_cell))),
+                "scotus": min(draw.CHECK_WINDOW, len(fixture.candidates(other_court))),
+            }
+            self.assertEqual(header["checked"], expected_checked)
+            self.assertEqual(canonical.call_count, sum(expected_checked.values()))
+
+    def test_successor_skips_opinions_of_active_and_retired_cases(self) -> None:
+        """An opinion already represented by any case cannot be redrawn."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = _successor_fixture(Path(directory))
+            cell = ("ca6", "html", 2000)
+            candidates = fixture.candidates(cell)
+            active_id = fixture.append(candidates[2], cell)
+            retired_id = fixture.append(candidates[3], cell)
+            fixture.append(candidates[4], cell, supersedes=retired_id)
+            loaded = evalset.load_set(fixture.set_root).loaded
+            assert loaded is not None
+            self.assertIn(active_id, loaded.active_ids)
+            self.assertNotIn(retired_id, loaded.active_ids)
+            _, header, rows, output = self._successor_sample(fixture, fixture.case_ids(cell)[:1])
+            self.assertEqual(rows[0]["opinion_id"], candidates[5])
+            self.assertEqual(rows[0]["opinion_id"], fixture.candidates(cell)[2])
+            self.assertIn("rank: 3; checked and failed: 2", output)
+            self.assertEqual(header["checked"][cell[0]], min(draw.CHECK_WINDOW, len(fixture.candidates(cell))))
+
+    def test_successor_replay_refuses_changed_stage_and_seed(self) -> None:
+        """A different stage label, population, or seed cannot replace the draw."""
+
+        for change in ("label", "population", "seed"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                fixture = _successor_fixture(Path(directory))
+                retired = fixture.case_ids(("ca6", "html", 2000))[:1]
+                seed = fixture.seed
+                if change == "label":
+                    path = fixture.stage / "stage.json"
+                    stage = json.loads(path.read_text(encoding="utf-8"))
+                    stage["label"] = "fictitious-other-stage"
+                    path.write_text(json.dumps(stage), encoding="utf-8")
+                elif change == "population":
+                    path = fixture.stage / "ca6" / "opinions.csv"
+                    columns = ("id", "cluster_id", *draw.SOURCE_COLUMNS)
+                    rows = list(draw._read_csv(path, columns))
+                    original_id = next(case["opinion_id"] for case in fixture.cases() if case["id"] == retired[0])
+                    new_id = max(opinion_id for ids in fixture.orders.values() for opinion_id in ids) + 1
+                    for row in rows:
+                        if int(row["id"]) == original_id:
+                            row["id"] = str(new_id)
+                    _csv(path, columns, [tuple(row[key] for key in columns) for row in rows])
+                else:
+                    seed += 1
+                out = fixture.root / "refused.jsonl"
+                result = _run_draw(fixture.arguments(out, retired, seed=seed), fixture.root / "checkout")
+                self._assert_refused(result, "replay")
+                self.assertIn(draw.FROZEN_LABEL, result[2])
+                self.assertRegex(result[2], r"seed [0-9]+")
+                self.assertFalse(out.exists())
+
+    def test_successor_empty_cell_falls_back_to_nearest_decade(self) -> None:
+        """A cell drawn whole falls back within its own court and source."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = _successor_fixture(Path(directory))
+            original, fallback = ("ca6", "html", 2020), ("ca6", "html", 2010)
+            self.assertEqual(fixture.candidates(original), ())
+            _, header, rows, output = self._successor_sample(fixture, fixture.case_ids(original))
+            self.assertEqual(header["retired"][0]["fallback"], {"court": fallback[0], "text_source": fallback[1], "decade": fallback[2]})
+            self.assertEqual(rows[0]["opinion_id"], fixture.candidates(fallback)[0])
+            self.assertEqual((rows[0]["court"], rows[0]["text_source"], rows[0]["decade"]), fallback)
+            self.assertIn("fallback: ca6 html 2010", output)
+            self.assertIn("rank: 1; checked and failed: 0", output)
+            self.assertEqual(header["checked"]["ca6"], min(draw.CHECK_WINDOW, len(fixture.candidates(fallback))))
+
+    def test_successor_exhausted_cell_falls_back_to_earlier_decade_on_tie(self) -> None:
+        """Exhausted checks use distance, then the earlier decade."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = _successor_fixture(Path(directory))
+            original, fallback = ("ca6", "html", 2000), ("ca6", "html", 1990)
+            candidates = fixture.candidates(original)
+            _opinion_texts(fixture.stage, dict.fromkeys(candidates, EMPTY_HTML))
+            _, header, rows, output = self._successor_sample(fixture, fixture.case_ids(original)[:1])
+            self.assertEqual(header["retired"][0]["fallback"], {"court": fallback[0], "text_source": fallback[1], "decade": fallback[2]})
+            self.assertEqual(rows[0]["opinion_id"], fixture.candidates(fallback)[0])
+            self.assertEqual(rows[0]["decade"], fallback[2])
+            self.assertIn("rank: 1; checked and failed: 0", output)
+            self.assertEqual(header["checked"]["ca6"], len(candidates) + min(draw.CHECK_WINDOW, len(fixture.candidates(fallback))))
+
+    def test_successor_refuses_when_all_fallback_candidates_fail(self) -> None:
+        """Exhausted ingest checks refuse instead of admitting unreadable text."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = _successor_fixture(Path(directory))
+            candidates = [opinion_id for cell in fixture.orders if cell[0] == "ca6" for opinion_id in fixture.candidates(cell)]
+            _opinion_texts(fixture.stage, dict.fromkeys(candidates, EMPTY_HTML))
+            out = fixture.root / "refused.jsonl"
+            with patch.object(opiniontext, "canonical_text", wraps=opiniontext.canonical_text) as canonical:
+                result = _run_draw(fixture.arguments(out, fixture.case_ids(("ca6", "html", 2020))), fixture.root / "checkout")
+            self._assert_refused(result, "check")
+            self.assertEqual(canonical.call_count, len(candidates))
+            self.assertFalse(out.exists())
+
+    def test_successor_argument_and_retired_id_refusals(self) -> None:
+        """The new form accepts only distinct listed unsuperseded segmenter ids."""
+
+        for form in ("retire-write", "set-alone", "unknown", "repeated", "unlisted", "non-segmenter", "superseded"):
+            with self.subTest(form=form), tempfile.TemporaryDirectory() as directory:
+                fixture = _successor_fixture(Path(directory))
+                cell = ("ca6", "html", 2000)
+                retired = fixture.case_ids(cell)[0]
+                out = fixture.root / "refused.jsonl"
+                expected_stage = "retire"
+                if form == "retire-write":
+                    arguments = fixture.write_arguments(fixture.plain_sample) + ["--retire", retired]
+                    expected_stage = "write"
+                elif form == "set-alone":
+                    arguments = fixture.arguments(out, ()) + ["--set", str(fixture.set_root)]
+                    expected_stage = "draw"
+                else:
+                    requested = [retired]
+                    if form == "unknown":
+                        requested = [f"segmenter-{len(fixture.cases()) + 100:03d}"]
+                    elif form == "non-segmenter":
+                        requested = ["fictitious-other-case"]
+                    elif form == "repeated":
+                        requested *= 2
+                    elif form == "unlisted":
+                        for relative in (manifest.IDS_PATH, manifest.MIRROR_IDS_PATH):
+                            path = fixture.set_root / relative
+                            path.write_text("".join(case_id + "\n" for case_id in path.read_text(encoding="utf-8").splitlines()
+                                                    if case_id != retired), encoding="utf-8")
+                    elif form == "superseded":
+                        fixture.append(fixture.candidates(cell)[2], cell, supersedes=retired)
+                    arguments = fixture.arguments(out, requested)
+                previous = {relative: (fixture.set_root / relative).read_bytes()
+                            for relative in (manifest.CASE_PATH, manifest.IDS_PATH, manifest.MIRROR_IDS_PATH)}
+                self._assert_refused(_run_draw(arguments, fixture.root / "checkout"), expected_stage)
+                self.assertFalse(out.exists())
+                for relative, raw in previous.items():
+                    self.assertEqual((fixture.set_root / relative).read_bytes(), raw)
+
+    def test_successor_write_appends_three_files_and_refuses_a_second_write(self) -> None:
+        """Successor writes preserve every old byte and continue the highest id."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = _successor_fixture(Path(directory))
+            other_cell = ("ca6", "html", 1990)
+            highest = max(int(cast(str, case["id"]).split("-")[1]) for case in fixture.cases()) + 5
+            fixture.append(fixture.candidates(other_cell)[0], other_cell, ordinal=highest)
+            cell = ("ca6", "html", 2000)
+            sample, _, rows, _ = self._successor_sample(fixture, fixture.case_ids(cell)[:2])
+            paths = (manifest.CASE_PATH, manifest.IDS_PATH, manifest.MIRROR_IDS_PATH)
+            previous = {relative: (fixture.set_root / relative).read_bytes() for relative in paths}
+            code, output, errors = _run_draw(fixture.write_arguments(sample), fixture.root / "checkout")
+            self.assertEqual((code, errors), (0, ""), output)
+            self._assert_content_free(output, errors)
+            new_ids = [f"segmenter-{highest + index:03d}" for index in range(1, len(rows) + 1)]
+            expected_cases = []
+            for case_id, row in zip(new_ids, rows, strict=True):
+                case = _case(case_id, row["opinion_id"])
+                case.update({key: row[key] for key in ("court", "decade", "text_source")})
+                case["review"] = {"by": "CSA-1", "on": "2001-02-03"}
+                case["supersedes"] = row["supersedes"]
+                expected_cases.append(case)
+            case_bytes = (fixture.set_root / manifest.CASE_PATH).read_bytes()
+            appended = case_bytes[len(previous[manifest.CASE_PATH]):]
+            self.assertEqual(appended, "".join(json.dumps(case, ensure_ascii=False, separators=(",", ":")) + "\n"
+                                              for case in expected_cases).encode("utf-8"))
+            for raw, expected in zip(appended.splitlines(), expected_cases, strict=True):
+                self.assertEqual(tuple(json.loads(raw)), tuple(expected))
+                self.assertEqual(tuple(json.loads(raw))[-1], "supersedes")
+            appended_ids = "".join(case_id + "\n" for case_id in new_ids).encode("utf-8")
+            current = {relative: (fixture.set_root / relative).read_bytes() for relative in paths}
+            self.assertTrue(case_bytes.startswith(previous[manifest.CASE_PATH]))
+            for relative in paths[1:]:
+                self.assertEqual(current[relative], previous[relative] + appended_ids)
+            self.assertEqual(current[manifest.IDS_PATH], current[manifest.MIRROR_IDS_PATH])
+            self.assertEqual(output.splitlines(), [
+                f"{name}: {len(current[relative].splitlines())} lines sha256 {hashlib.sha256(current[relative]).hexdigest()}"
+                for name, relative in zip(("cases", "ids", "mirror ids"), paths, strict=True)
+            ])
+            loaded = evalset.load_set(fixture.set_root)
+            self.assertTrue(loaded.ok, loaded.findings)
+            self._assert_refused(_run_draw(fixture.write_arguments(sample), fixture.root / "checkout"), "retire")
+            for relative in paths:
+                self.assertEqual((fixture.set_root / relative).read_bytes(), current[relative])
+
+    def test_successor_write_refuses_missing_final_newlines(self) -> None:
+        """A malformed prefix must be restored before any append."""
+
+        paths = (manifest.CASE_PATH, manifest.IDS_PATH, manifest.MIRROR_IDS_PATH)
+        for relative in paths:
+            with self.subTest(path=relative), tempfile.TemporaryDirectory() as directory:
+                fixture = _successor_fixture(Path(directory))
+                sample, _, _, _ = self._successor_sample(fixture, fixture.case_ids(("ca6", "html", 2000))[:1])
+                path = fixture.set_root / relative
+                path.write_bytes(path.read_bytes()[:-1])
+                previous = {item: (fixture.set_root / item).read_bytes() for item in paths}
+                result = _run_draw(fixture.write_arguments(sample), fixture.root / "checkout")
+                self._assert_refused(result, "write")
+                self.assertIn("newline", result[2])
+                for item in paths:
+                    self.assertEqual((fixture.set_root / item).read_bytes(), previous[item])
+
+    def test_successor_failed_replacement_restores_every_file(self) -> None:
+        """A second or third replacement failure restores all previous bytes."""
+
+        atomic = manifest.write_atomic
+        for failed_call in (2, 3):
+            for after_replace in (False, True):
+                with self.subTest(call=failed_call, after=after_replace), tempfile.TemporaryDirectory() as directory:
+                    fixture = _successor_fixture(Path(directory))
+                    sample, _, _, _ = self._successor_sample(fixture, fixture.case_ids(("ca6", "html", 2000))[:2])
+                    previous = {relative: (fixture.set_root / relative).read_bytes()
+                                for relative in (manifest.CASE_PATH, manifest.IDS_PATH, manifest.MIRROR_IDS_PATH)}
+                    calls = 0
+
+                    def fail(path: Path, payload: bytes, *, failed_call: int = failed_call,
+                             after_replace: bool = after_replace) -> None:
+                        nonlocal calls
+                        calls += 1
+                        if calls == failed_call and not after_replace:
+                            raise OSError("fictitious replacement failure")
+                        atomic(path, payload)
+                        if calls == failed_call and after_replace:
+                            raise OSError("fictitious cleanup failure")
+
+                    with patch.object(manifest, "write_atomic", side_effect=fail):
+                        result = _run_draw(fixture.write_arguments(sample), fixture.root / "checkout")
+                    self._assert_refused(result, "write")
+                    for relative, raw in previous.items():
+                        self.assertEqual((fixture.set_root / relative).read_bytes(), raw)
 
 
 def _case(case_id: str, opinion_id: int) -> dict[str, object]:
@@ -919,6 +1420,28 @@ class Imports(unittest.TestCase):
                             or node.module == "tools.synthetic.manifest"
                         )
                         self.assertFalse((node.module or "").startswith("gideon.worker"))
+
+    def test_opiniontext_import_is_only_inside_a_draw_function(self) -> None:
+        """Plain draws and writes do not load the worker's parser dependencies."""
+
+        assert draw.__file__ is not None
+        tree = ast.parse(Path(draw.__file__).read_text(encoding="utf-8"))
+        imports: list[tuple[int, set[str]]] = []
+
+        def visit(node: ast.AST, function_depth: int = 0) -> None:
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                function_depth += 1
+            if isinstance(node, ast.ImportFrom) and node.module == "gideon.worker.opiniontext":
+                imports.append((function_depth, {name.name for name in node.names}))
+            elif isinstance(node, ast.Import) and any(name.name == "gideon.worker.opiniontext" for name in node.names):
+                imports.append((function_depth, set()))
+            for child in ast.iter_child_nodes(node):
+                visit(child, function_depth)
+
+        visit(tree)
+        self.assertTrue(imports, "draw must use the worker's own opinion-text check")
+        self.assertTrue(all(depth > 0 for depth, _ in imports), "worker imports must be inside a function")
+        self.assertTrue({"OpinionTextFailure", "canonical_text", "choose"} <= set().union(*(names for _, names in imports)))
 
 
 if __name__ == "__main__":

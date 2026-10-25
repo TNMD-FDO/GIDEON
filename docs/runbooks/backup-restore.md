@@ -124,11 +124,22 @@ nothing older is recoverable, and there is no monthly tier.
 - **`backup push`** — `record` (`push.json`, the snapshot's coverage record),
   `list`, `push` (`transferred x of y bytes`: with a previous snapshot, a
   transfer above 90 % of the total fails the push — snapshots must share one
-  path on one filesystem so they can use hard links), `finalize`, `prune`,
-  `check` (the newest set's manifest, `push.json`, the tarball, pgBackRest's
-  info files and the set's backup manifest, plus 1 % of every root — for the
-  store, every hundredth object the set's listing names, in the snapshot's
-  `data-bulk-cas/` — re-hashed on the target; `--verify-all` re-hashes every file), `audit`.
+  path on one filesystem so they can use hard links), `check` (the newest
+  set's manifest, `push.json`, the tarball, pgBackRest's info files and the
+  set's backup manifest, plus 1 % of every root — for the store, every
+  hundredth object the set's listing names, in the snapshot's `data-bulk-cas/`
+  — re-hashed on the target in `<label>.partial`; `--verify-all` re-hashes
+  every file; a failed check leaves the `.partial`, never a final name),
+  `finalize` (the rename), `audit` (the `backup_push` row), `prune`. The prune
+  renames each due snapshot to `<name>.removing` before removing it, so a
+  removal cut short is never read as a snapshot and is the first one the next
+  night's prune finishes; each removal prints `removed remote snapshot <name>
+  in <s> s`. It starts no removal past a deadline inside the unit's six hours
+  (the unit's start plus its `TimeoutStartSec`, less ten minutes; a hand run
+  counts from its own start), and a removal the deadline ends prints `left
+  remote snapshot <name> at the deadline`. The closing row is `pruned N remote
+  snapshot(s), M left[, deadline reached] (budget from <unit or this run>)`: a
+  deadline stop is `ok`, a removal that fails otherwise fails the stage.
 - **`backup drill`** — `teardown-before`, `prepare`, `tarball` (hash and age
   header, one recipient stanza per recipient the manifest names), `verify` (pgBackRest's own repository verification), `postgres`
   (the set's own backup restored to its consistency point, archiving off),

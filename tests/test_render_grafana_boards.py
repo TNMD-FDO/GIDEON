@@ -536,6 +536,24 @@ class TableLayout(unittest.TestCase):
 
 
 class BackupBoard(unittest.TestCase):
+    def test_verified_and_pruned_counts_read_their_own_rows(self) -> None:
+        board = json.loads(GrafanaBackupArtifact.emit(inputs()))
+        chart = next(
+            panel for panel in board["panels"]
+            if panel["title"] == "Verified and pruned counts"
+        )
+        sql = chart["targets"][0]["rawSql"]
+        self.assertEqual(sql.count("UNION ALL"), 1)
+        verified, pruned = sql.split(" UNION ALL ")
+        self.assertIn("(detail->>'verified')::double precision AS verified", verified)
+        self.assertIn("NULL::double precision AS pruned", verified)
+        self.assertIn("WHERE kind = 'backup_push'", verified)
+        self.assertIn("NULL::double precision AS verified", pruned)
+        self.assertIn("(detail->>'removed')::double precision AS pruned", pruned)
+        self.assertIn("WHERE kind = 'backup_prune'", pruned)
+        self.assertTrue(sql.startswith("SELECT at AS time, verified, pruned FROM ("))
+        self.assertTrue(sql.endswith("ORDER BY at"))
+
     def test_board_is_verbatim_and_applies_on_every_host(self) -> None:
         self.assertIn(GrafanaBackupArtifact, ARTIFACTS)
         self.assertIsInstance(GrafanaBackupArtifact, VerbatimArtifact)
@@ -592,7 +610,7 @@ class BackupBoard(unittest.TestCase):
         kinds = re.search(r"kind IN \(([^)]*)\)", runs_sql)
         self.assertIsNotNone(kinds)
         assert kinds is not None
-        self.assertEqual(set(re.findall(r"'([^']+)'", kinds.group(1))), {"backup_run", "backup_push", "backup_drill", "restore"})
+        self.assertEqual(set(re.findall(r"'([^']+)'", kinds.group(1))), {"backup_run", "backup_push", "backup_prune", "backup_drill", "restore"})
         self.assertIn("(kind <> 'backup_run' OR detail->>'phase' = 'applied')", runs_sql)
         overrides = column_overrides(runs)
         self.assertEqual(overrides["hard_link_ratio"]["unit"], chart["fieldConfig"]["defaults"]["unit"])
@@ -628,13 +646,15 @@ class BackupBoard(unittest.TestCase):
             ("transferred_bytes", "bigint"),
             ("total_bytes", "bigint"),
             ("verified", "integer"),
-            ("pruned", "integer"),
         ):
             with self.subTest(column=column):
                 self.assertRegex(
                     sql,
                     rf"(?i)\(\s*detail\s*->>\s*'{column}'\s*\)\s*::\s*{cast}\s+AS\s+{column}\b",
                 )
+        self.assertIn(
+            "COALESCE(detail->>'removed', detail->>'pruned')::integer AS pruned", sql
+        )
         self.assertEqual(overrides["duration_s"]["unit"], "dtdurations")
         self.assertEqual(overrides["duration_s"]["decimals"], 1)
         for column in ("set_bytes", "transferred_bytes", "total_bytes"):

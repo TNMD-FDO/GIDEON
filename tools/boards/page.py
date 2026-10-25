@@ -25,6 +25,16 @@ USERNAME_SELECTOR: Final = '[data-testid="data-testid Username input field"]'
 PASSWORD_SELECTOR: Final = '[data-testid="data-testid Password input field"]'
 LOGIN_SELECTOR: Final = '[data-testid="data-testid Login button"]'
 LOGIN_ERROR_SELECTOR: Final = '[data-testid="data-testid Alert error"]'
+# Research note section 1, Failed sign-in: the alert's messages at Grafana 13.0.2,
+# matched by containment since the alert box carries its title before them.
+LOGIN_INVALID_TEXT: Final = "Invalid username or password"
+LOGIN_BLOCKED_TEXT: Final = (
+    "You have exceeded the number of login attempts for this user. Please try again later."
+)
+SIGNIN_ATTEMPTS: Final = 2
+# The pause before the second submit, for a Grafana still starting: a
+# starting value, corrected by use.
+SIGNIN_RETRY_WAIT_SECONDS: Final = 15
 
 # Research note section 2, Opening a board: route and refresh.
 BOARD_QUERY: Final = "kiosk&refresh=1d"
@@ -124,6 +134,14 @@ class BoardReadings:
     capture_height: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class SignInOutcome:
+    """The sign-in problem and attempt count named by its row."""
+
+    problem: Problem | None
+    attempts: int
+
+
 _PAGE_FIX: Final = "Check the Grafana ingress and browser request log, then retry."
 
 
@@ -137,44 +155,90 @@ def _signin_fix() -> str:
     )
 
 
+_LOCKOUT_FIX: Final = (
+    "Wait five minutes for Grafana's login lockout, then rerun the board check."
+)
+_TRANSIENT_FIX: Final = (
+    "Grafana may still be starting: wait about a minute after its container's start, "
+    "then rerun the board check. If it refuses again, read Grafana's container log "
+    "for the POST /login line."
+)
+
+
 def _login_page(page: BoardPage) -> bool:
     return urlsplit(page.url()).path.rstrip("/") == LOGIN_PATH.rstrip("/")
 
 
+def _login_error_text(page: BoardPage) -> str | None:
+    if page.count(LOGIN_ERROR_SELECTOR) > 0:
+        return one_line(page.text(LOGIN_ERROR_SELECTOR) or "")[:MESSAGE_LENGTH]
+    return None
+
+
 def sign_in(
     page: BoardPage, username: str, password: str, *, timeout: float
-) -> Problem | None:
-    """Submit the local form once and wait for navigation away from login."""
+) -> SignInOutcome:
+    """Submit at most twice, with the alert's text deciding the refusal's fix."""
 
+    attempts = 0
+    text = None
     try:
         page.goto(LOGIN_PATH)
-        if not page.wait_until(
-            lambda: all(
-                page.count(selector) > 0
-                for selector in (USERNAME_SELECTOR, PASSWORD_SELECTOR, LOGIN_SELECTOR)
-            ),
-            timeout,
-        ):
-            return Problem("Grafana sign-in form did not appear", _PAGE_FIX)
-        page.fill(USERNAME_SELECTOR, username)
-        page.fill(PASSWORD_SELECTOR, password)
-        page.click(LOGIN_SELECTOR)
-        page.wait_until(
-            lambda: not _login_page(page) or page.count(LOGIN_ERROR_SELECTOR) > 0,
-            timeout,
+        for _ in range(SIGNIN_ATTEMPTS):
+            if attempts:
+                page.sleep(SIGNIN_RETRY_WAIT_SECONDS)
+                page.goto(LOGIN_PATH)
+                if not _login_page(page):
+                    return SignInOutcome(None, attempts + 1)
+            if not page.wait_until(
+                lambda: all(
+                    page.count(selector) > 0
+                    for selector in (USERNAME_SELECTOR, PASSWORD_SELECTOR, LOGIN_SELECTOR)
+                ),
+                timeout,
+            ):
+                return SignInOutcome(
+                    Problem("Grafana sign-in form did not appear", _PAGE_FIX), attempts
+                )
+            attempts += 1
+            page.fill(USERNAME_SELECTOR, username)
+            page.fill(PASSWORD_SELECTOR, password)
+            page.click(LOGIN_SELECTOR)
+            page.wait_until(
+                lambda: not _login_page(page) or page.count(LOGIN_ERROR_SELECTOR) > 0,
+                timeout,
+            )
+            if not _login_page(page):
+                return SignInOutcome(None, attempts)
+            text = _login_error_text(page)
+            if text is not None and LOGIN_INVALID_TEXT in text:
+                return SignInOutcome(
+                    Problem("Grafana refused the break-glass sign-in", _signin_fix()),
+                    attempts,
+                )
+            if text is not None and LOGIN_BLOCKED_TEXT in text:
+                return SignInOutcome(
+                    Problem("Grafana locked the break-glass sign-in", _LOCKOUT_FIX),
+                    attempts,
+                )
+        detail = (
+            f"Grafana did not accept the break-glass sign-in twice: {text}"
+            if text is not None
+            else "Grafana sign-in did not finish twice"
         )
-        if page.count(LOGIN_ERROR_SELECTOR) > 0:
-            return Problem("Grafana refused the break-glass sign-in", _signin_fix())
-        if _login_page(page):
-            return Problem("Grafana sign-in did not finish", _signin_fix())
-        return None
+        return SignInOutcome(Problem(detail, _TRANSIENT_FIX), attempts)
     except PageError as exc:
         if exc.certificate:
-            return Problem(
-                "the browser does not trust the site's certificate",
-                "Run with --trust-ca once, then retry.",
+            return SignInOutcome(
+                Problem(
+                    "the browser does not trust the site's certificate",
+                    "Run with --trust-ca once, then retry.",
+                ),
+                attempts,
             )
-        return Problem("Grafana sign-in page could not be read", _PAGE_FIX)
+        return SignInOutcome(
+            Problem("Grafana sign-in page could not be read", _PAGE_FIX), attempts
+        )
 
 
 def _css_attribute_value(value: str) -> str:

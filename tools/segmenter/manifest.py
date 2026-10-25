@@ -19,6 +19,7 @@ CASE_KEYS: Final[tuple[str, ...]] = (
 SHEET_PARAGRAPHS_HEADER: Final[str] = "Paragraphs:"
 CASE_PATH: Final[Path] = Path("build-gates/segmenter-300.jsonl")
 IDS_PATH: Final[Path] = Path("slices/segmenter-300/sample.ids")
+MIRROR_IDS_PATH: Final[Path] = Path("slices/build-gates/sample.ids")
 
 
 def pin_slice(set_root: Path) -> dict[str, tuple[int, str]]:

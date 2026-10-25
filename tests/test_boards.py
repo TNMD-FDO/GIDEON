@@ -29,6 +29,11 @@ SITE_PATH = Path("/example/site.yaml")
 RENDERED_ROOT = Path("/example/rendered")
 OUTPUT = Path("/example/output")
 PASSWORD = "fictitious-board-password"
+LOGIN_SERVER_ERROR_TEXT = (
+    "Login failed\nFictitious startup failure: "
+    + "x" * page.MESSAGE_LENGTH
+    + "\nFictitious trailing detail"
+)
 SITE_TEXT = (ROOT / "config/site.example.yaml").read_text()
 BOARD_PATH = next(
     RENDERED_ROOT / artifact.relative_path
@@ -201,6 +206,7 @@ class FakePage:
         password: str = PASSWORD,
         refuse_fill: bool = False,
         login_mode: str = "success",
+        login_first_failure: str = "server-error",
         boards: Mapping[str, list[tuple[str, str, str]]] | None = None,
         fail_navigation: set[str] | None = None,
         sections: Mapping[str, str] | None = None,
@@ -214,6 +220,7 @@ class FakePage:
         self.password = password
         self.refuse_fill = refuse_fill
         self.login_mode = login_mode
+        self.login_first_failure = login_first_failure
         self.boards = boards or {}
         self.fail_navigation = fail_navigation or set()
         self.sections = sections or {}
@@ -226,14 +233,15 @@ class FakePage:
         self.current_url = ""
         self.tooltip = ""
         self.hovered = False
-        self.login_error = False
+        self.login_error: str | None = None
         self.events: list[str] = []
+        self.goto_paths: list[str] = []
         self.fill_selectors: list[str] = []
         self.click_selectors: list[str] = []
         self.count_selectors: list[str] = []
         self.resizes: list[tuple[int, int]] = []
         self.screenshot_full_pages: list[bool] = []
-        self.sleep_count = 0
+        self.sleeps: list[float] = []
         self.closed = False
         self.values: dict[str, str] = {}
         self.present: set[str] = set()
@@ -268,8 +276,17 @@ class FakePage:
 
     def goto(self, path: str) -> None:
         self.events.append("goto")
+        self.goto_paths.append(path)
+        self.login_error = None
         if path == page.LOGIN_PATH and self.login_mode == "certificate":
             raise PageError(f"certificate error with {self.password}", certificate=True)
+        if (
+            path == page.LOGIN_PATH
+            and self.login_mode == "late"
+            and self.goto_paths.count(page.LOGIN_PATH) == 2
+        ):
+            self.current_url = "/grafana/"
+            return
         if "/d/" in urlsplit(path).path:
             uid = unquote(urlsplit(path).path.split("/d/", 1)[1])
             if uid in self.fail_navigation:
@@ -307,10 +324,19 @@ class FakePage:
             if title not in self.unopenable_rows:
                 self._add_panels(self.rows[title])
             return
-        if self.login_mode == "failed":
-            self.login_error = True
+        login_mode = self.login_mode
+        if login_mode == "recovers" and self.click_selectors.count(page.LOGIN_SELECTOR) == 1:
+            login_mode = self.login_first_failure
+        if login_mode == "failed":
+            self.login_error = f"Login failed\n{page.LOGIN_INVALID_TEXT}"
             return
-        if self.login_mode == "stalled":
+        if login_mode == "locked":
+            self.login_error = f"Login failed\n{page.LOGIN_BLOCKED_TEXT}"
+            return
+        if login_mode == "server-error":
+            self.login_error = LOGIN_SERVER_ERROR_TEXT
+            return
+        if login_mode in {"stalled", "late"}:
             return
         self.current_url = "/grafana/"
 
@@ -323,7 +349,7 @@ class FakePage:
         }:
             return 1
         if selector == page.LOGIN_ERROR_SELECTOR:
-            return int(self.login_error)
+            return int(self.login_error is not None)
         if selector == page.TOOLTIP_SELECTOR:
             return int(self.hovered)
         if selector in self.row_buttons:
@@ -335,6 +361,8 @@ class FakePage:
         return int(selector in self.present or selector in self.values)
 
     def text(self, selector: str) -> str | None:
+        if selector == page.LOGIN_ERROR_SELECTOR:
+            return self.login_error
         if selector == page.TOOLTIP_SELECTOR and self.hovered:
             return self.tooltip
         return self.values.get(selector)
@@ -374,7 +402,7 @@ class FakePage:
     def sleep(self, seconds: float) -> None:
         assert seconds > 0
         self.events.append("sleep")
-        self.sleep_count += 1
+        self.sleeps.append(seconds)
 
 
 class FakeClient:
@@ -505,6 +533,11 @@ class BoardRows(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
+        signin_row = next(row for row in stdout.splitlines() if row.startswith("signin:"))
+        self.assertEqual(signin_row, f"signin: ok — signed in as {GRAFANA_ADMIN_USER}")
+        self.assertNotIn("retry", signin_row)
+        self.assertEqual(browser_page.click_selectors, [page.LOGIN_SELECTOR])
+        self.assertEqual(browser_page.goto_paths.count(page.LOGIN_PATH), 1)
         self.assertIn(f"panel: ok — example-board: {expected[0][0]}: drawn", stdout)
         self.assertIn(f"panel: ok — example-board: {expected[1][0]}: empty", stdout)
         self.assertIn("board: ok", stdout)
@@ -594,21 +627,43 @@ class BoardRows(unittest.TestCase):
         )
         self.assertIn(str(OUTPUT / "example-board.png"), host.files)
 
-    def test_page_error_cannot_print_or_record_the_password(self) -> None:
-        code, stdout, stderr, host, browser_page = self.run_board(
-            [("Figure", "timeseries")], [], refuse_fill=True
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("signin: refuse", stdout)
-        self.assertNotIn("panel:", stdout)
-        self.assertTrue(browser_page.closed)
-        for value in (
-            stdout,
-            stderr,
-            host.files[str(OUTPUT / "requests.log")],
-            *(" ".join(cmd) for cmd in host.commands),
-        ):
-            self.assertNotIn(PASSWORD, value)
+    def test_password_is_absent_from_rows_logs_and_argv(self) -> None:
+        modes = [
+            ("success", "server-error"),
+            ("failed", "server-error"),
+            ("locked", "server-error"),
+            ("server-error", "server-error"),
+            ("stalled", "server-error"),
+            ("recovers", "server-error"),
+            ("recovers", "stalled"),
+            ("late", "server-error"),
+            ("certificate", "server-error"),
+        ]
+        for login_mode, first_failure in modes:
+            for refuse_fill in (False, True):
+                with self.subTest(
+                    login_mode=login_mode, first_failure=first_failure,
+                    refuse_fill=refuse_fill,
+                ):
+                    host = FakeHost(board_document("example-board", [("Figure", "timeseries")]))
+                    browser_page = FakePage(
+                        host, [("Figure", "drawn", "Fictitious points")],
+                        login_mode=login_mode, login_first_failure=first_failure,
+                        refuse_fill=refuse_fill,
+                    )
+                    code, stdout, stderr = self.invoke(host, browser_page)
+                    passed = not refuse_fill and login_mode in {"success", "recovers", "late"}
+                    self.assertEqual(code, 0 if passed else 1)
+                    self.assertEqual(stderr, "")
+                    self.assertIn("signin: ok" if passed else "signin: refuse", stdout)
+                    if not passed:
+                        self.assertNotIn("panel:", stdout)
+                    self.assertTrue(browser_page.closed)
+                    for value in (
+                        stdout, stderr, host.files[str(OUTPUT / "requests.log")],
+                        *(" ".join(cmd) for cmd in host.commands),
+                    ):
+                        self.assertNotIn(PASSWORD, value)
 
     def test_data_error_no_data_is_empty(self) -> None:
         code, stdout, _, _, _ = self.run_board(
@@ -669,7 +724,7 @@ class BoardRows(unittest.TestCase):
         self.assertIn("Slow figure: loading", stdout)
         self.assertIn("summary: refuse", stdout)
         self.assertEqual(
-            browser_page.sleep_count,
+            len(browser_page.sleeps),
             page.SETTLE_SECONDS // page.SETTLE_INTERVAL_SECONDS,
         )
 
@@ -867,6 +922,11 @@ class BoardRows(unittest.TestCase):
         self.assertEqual(browser_page.fill_selectors.count(page.USERNAME_SELECTOR), 1)
         self.assertEqual(browser_page.fill_selectors.count(page.PASSWORD_SELECTOR), 1)
         self.assertEqual(browser_page.click_selectors, [page.LOGIN_SELECTOR])
+        self.assertEqual(browser_page.sleeps, [])
+        self.assertEqual(
+            browser_page.text(page.LOGIN_ERROR_SELECTOR),
+            f"Login failed\n{page.LOGIN_INVALID_TEXT}",
+        )
 
     def test_failed_sign_in_alert_has_a_fix(self) -> None:
         rows = []
@@ -891,6 +951,12 @@ class BoardRows(unittest.TestCase):
                     self.assertIn(grafana.administrator_rotation_route(), row)
                     self.assertIn("After repeated failures wait five minutes for Grafana's login lockout, then retry.", row)
                     self.assertNotIn("/api/", row)
+                    self.assertEqual(browser_page.click_selectors, [page.LOGIN_SELECTOR])
+                    self.assertEqual(browser_page.sleeps, [])
+                    self.assertEqual(
+                        browser_page.text(page.LOGIN_ERROR_SELECTOR),
+                        f"Login failed\n{page.LOGIN_INVALID_TEXT}",
+                    )
                     if installed:
                         self.assertNotIn("python3 -m gideon", row)
                     for value in (
@@ -903,43 +969,138 @@ class BoardRows(unittest.TestCase):
             report.set_installed_form(False)
         self.assertNotEqual(rows[0], rows[1])
 
-    def test_sign_in_that_does_not_finish_has_a_fix(self) -> None:
-        rows = []
+    def test_locked_sign_in_waits_without_a_secret_fix(self) -> None:
         try:
             for installed in (False, True):
                 with self.subTest(installed=installed):
                     report.set_installed_form(installed)
                     host = FakeHost(board_document("example-board", [("Figure", "timeseries")]))
-                    browser_page = FakePage(host, [], login_mode="stalled")
+                    browser_page = FakePage(host, [], login_mode="locked")
                     code, stdout, stderr = self.invoke(host, browser_page)
                     self.assertEqual(code, 1)
                     self.assertEqual(stderr, "")
                     row = next(line for line in stdout.splitlines() if line.startswith("signin: refuse"))
-                    self.assertIn("Grafana sign-in did not finish Fix: ", row)
-                    self.assertIn(
-                        f"Rewrite {secret_path('grafana_admin_password')} in place from the office "
-                        "password manager if the file is wrong.",
+                    self.assertEqual(
                         row,
+                        "signin: refuse — Grafana locked the break-glass sign-in Fix: "
+                        "Wait five minutes for Grafana's login lockout, then rerun the board check.",
                     )
-                    self.assertIn("If Grafana's stored password is what differs, or is one nobody knows:", row)
-                    self.assertIn(report.command("secrets rotate grafana_admin_password"), row)
-                    self.assertIn(grafana.administrator_rotation_route(), row)
-                    self.assertIn("After repeated failures wait five minutes for Grafana's login lockout, then retry.", row)
-                    self.assertNotIn("/api/", row)
-                    if installed:
-                        self.assertNotIn("python3 -m gideon", row)
-                    for value in (
-                        stdout, stderr, host.files[str(OUTPUT / "requests.log")],
-                        *(" ".join(command) for command in host.commands),
+                    for forbidden in (
+                        str(secret_path("grafana_admin_password")),
+                        grafana.administrator_rotation_route(), "secrets rotate", "/api/",
                     ):
-                        self.assertNotIn(PASSWORD, value)
-                    self.assertEqual(browser_page.fill_selectors.count(page.USERNAME_SELECTOR), 1)
-                    self.assertEqual(browser_page.fill_selectors.count(page.PASSWORD_SELECTOR), 1)
+                        self.assertNotIn(forbidden, row)
+                    self.assertEqual(
+                        browser_page.text(page.LOGIN_ERROR_SELECTOR),
+                        f"Login failed\n{page.LOGIN_BLOCKED_TEXT}",
+                    )
+                    self.assertEqual(browser_page.fill_selectors, [page.USERNAME_SELECTOR, page.PASSWORD_SELECTOR])
                     self.assertEqual(browser_page.click_selectors, [page.LOGIN_SELECTOR])
-                    rows.append(row)
+                    self.assertEqual(browser_page.goto_paths, [page.LOGIN_PATH])
+                    self.assertEqual(browser_page.sleeps, [])
         finally:
             report.set_installed_form(False)
-        self.assertNotEqual(rows[0], rows[1])
+
+    def test_sign_in_that_does_not_finish_has_a_fix(self) -> None:
+        try:
+            for installed in (False, True):
+                for login_mode in ("server-error", "stalled"):
+                    with self.subTest(installed=installed, login_mode=login_mode):
+                        report.set_installed_form(installed)
+                        host = FakeHost(board_document("example-board", [("Figure", "timeseries")]))
+                        browser_page = FakePage(host, [], login_mode=login_mode)
+                        code, stdout, stderr = self.invoke(host, browser_page)
+                        self.assertEqual(code, 1)
+                        self.assertEqual(stderr, "")
+                        row = next(line for line in stdout.splitlines() if line.startswith("signin: refuse"))
+                        message, fix = row.split(" Fix: ", 1)
+                        if login_mode == "server-error":
+                            text = LOGIN_SERVER_ERROR_TEXT.replace("\n", " ")
+                            self.assertGreater(len(text), page.MESSAGE_LENGTH)
+                            self.assertEqual(
+                                message,
+                                "signin: refuse — Grafana did not accept the break-glass sign-in twice: "
+                                + text[:page.MESSAGE_LENGTH],
+                            )
+                            self.assertNotIn("Fictitious trailing detail", row)
+                        else:
+                            self.assertEqual(message, "signin: refuse — Grafana sign-in did not finish twice")
+                        self.assertIn("Grafana may still be starting", fix)
+                        self.assertIn("wait about a minute after its container's start", fix)
+                        self.assertIn("rerun the board check", fix)
+                        self.assertIn("Grafana's container log", fix)
+                        self.assertIn("POST /login", fix)
+                        for forbidden in (
+                            str(secret_path("grafana_admin_password")),
+                            grafana.administrator_rotation_route(), "secrets rotate", "/api/",
+                        ):
+                            self.assertNotIn(forbidden, row)
+                        self.assertEqual(browser_page.sleeps, [page.SIGNIN_RETRY_WAIT_SECONDS])
+                        self.assertEqual(browser_page.goto_paths, [page.LOGIN_PATH] * 2)
+                        self.assertEqual(browser_page.click_selectors, [page.LOGIN_SELECTOR] * 2)
+                        self.assertEqual(
+                            browser_page.fill_selectors,
+                            [page.USERNAME_SELECTOR, page.PASSWORD_SELECTOR] * 2,
+                        )
+                        self.assertNotIn("panel:", stdout)
+        finally:
+            report.set_installed_form(False)
+
+    def test_sign_in_recovers_after_one_retry(self) -> None:
+        for first_failure in ("server-error", "stalled"):
+            with self.subTest(first_failure=first_failure):
+                host = FakeHost(board_document("example-board", [("Figure", "timeseries")]))
+                browser_page = FakePage(
+                    host, [("Figure", "drawn", "Fictitious points")],
+                    login_mode="recovers", login_first_failure=first_failure,
+                )
+                code, stdout, stderr = self.invoke(host, browser_page)
+                self.assertEqual(code, 0)
+                self.assertEqual(stderr, "")
+                self.assertIn(
+                    f"signin: ok — signed in as {GRAFANA_ADMIN_USER} after one retry",
+                    stdout.splitlines(),
+                )
+                self.assertIn("panel: ok — example-board: Figure: drawn", stdout.splitlines())
+                self.assertIn("board: ok", stdout)
+                self.assertIn("summary: ok", stdout)
+                self.assertIn(str(OUTPUT / "example-board.png"), host.files)
+                self.assertEqual(browser_page.goto_paths[:2], [page.LOGIN_PATH] * 2)
+                self.assertEqual(browser_page.goto_paths.count(page.LOGIN_PATH), 2)
+                self.assertEqual(browser_page.click_selectors, [page.LOGIN_SELECTOR] * 2)
+                self.assertEqual(
+                    browser_page.fill_selectors,
+                    [page.USERNAME_SELECTOR, page.PASSWORD_SELECTOR] * 2,
+                )
+                self.assertEqual(
+                    browser_page.sleeps,
+                    [page.SIGNIN_RETRY_WAIT_SECONDS, page.SETTLE_INTERVAL_SECONDS],
+                )
+
+    def test_late_sign_in_passes_without_a_second_submit(self) -> None:
+        host = FakeHost(board_document("example-board", [("Figure", "timeseries")]))
+        browser_page = FakePage(
+            host, [("Figure", "drawn", "Fictitious points")], login_mode="late",
+        )
+        code, stdout, stderr = self.invoke(host, browser_page)
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertIn(
+            f"signin: ok — signed in as {GRAFANA_ADMIN_USER} after one retry",
+            stdout.splitlines(),
+        )
+        self.assertIn("panel: ok — example-board: Figure: drawn", stdout.splitlines())
+        self.assertIn("board: ok", stdout)
+        self.assertIn("summary: ok", stdout)
+        self.assertIn(str(OUTPUT / "example-board.png"), host.files)
+        self.assertEqual(browser_page.goto_paths[:2], [page.LOGIN_PATH] * 2)
+        self.assertEqual(browser_page.goto_paths.count(page.LOGIN_PATH), 2)
+        self.assertEqual(browser_page.click_selectors, [page.LOGIN_SELECTOR])
+        self.assertEqual(browser_page.fill_selectors, [page.USERNAME_SELECTOR, page.PASSWORD_SELECTOR])
+        self.assertEqual(
+            browser_page.sleeps,
+            [page.SIGNIN_RETRY_WAIT_SECONDS, page.SETTLE_INTERVAL_SECONDS],
+        )
 
     def test_certificate_page_error_has_trust_ca_fix(self) -> None:
         host = FakeHost(board_document("example-board", [("Figure", "timeseries")]))
@@ -1642,7 +1803,7 @@ class BoardRows(unittest.TestCase):
             [(390, first_height), (390, document_heights["example-board"])],
         )
         first_settle_sleeps = page.SETTLE_SECONDS // page.SETTLE_INTERVAL_SECONDS
-        self.assertEqual(browser_page.sleep_count, first_settle_sleeps + 1)
+        self.assertEqual(len(browser_page.sleeps), first_settle_sleeps + 1)
         height_read = browser_page.events.index("document height")
         self.assertEqual(browser_page.events[:height_read].count("sleep"), first_settle_sleeps)
         self.assertEqual(
@@ -1669,7 +1830,7 @@ class BoardRows(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
         self.assertEqual(browser_page.resizes, [(390, document_heights["example-board"])])
-        self.assertEqual(browser_page.sleep_count, 1)
+        self.assertEqual(len(browser_page.sleeps), 1)
         self.assertEqual(browser_page.screenshot_full_pages, [False])
         self.assertEqual(browser_page.events.count("document height"), 1)
         self.assertEqual(browser_page.events[-3:], ["sleep", "document height", "screenshot"])

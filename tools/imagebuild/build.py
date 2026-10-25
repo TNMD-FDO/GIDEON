@@ -2,10 +2,11 @@
 
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
@@ -120,6 +121,34 @@ class BuildPlan:
     labels: Mapping[str, str]
     smoke: Smoke
     environment: Mapping[str, str] = field(default_factory=dict)
+    usage_argv: tuple[str, ...] = field(kw_only=True)
+    prune_argv: tuple[str, ...] = field(kw_only=True)
+    owner: str = field(kw_only=True)
+
+
+@dataclass(frozen=True, slots=True)
+class CacheRecord:
+    """One cache record from the builder's JSON usage listing."""
+
+    id: str
+    description: str
+    parents: tuple[str, ...]
+    size: str
+
+
+@dataclass(frozen=True, slots=True)
+class PruneResult:
+    """The cache records named and removed, or a problem and operator fix."""
+
+    named: int
+    pruned: int
+    reclaimed: str
+    problem: str | None = None
+    fix: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.problem is None
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,7 +257,9 @@ def build_plan(
     )
     environment = dict(proxy_variables or {})
     labels = image_labels(pin)
-    argv: list[str] = ["docker", "build", "--provenance=false", "--sbom=false"]
+    argv: list[str] = [
+        "docker", "build", "--builder", "default", "--provenance=false", "--sbom=false",
+    ]
     argv.extend(
         item
         for name, value in build_args
@@ -263,7 +294,102 @@ def build_plan(
         labels=labels,
         smoke=smoke,
         environment=environment,
+        usage_argv=("docker", "buildx", "du", "--builder", "default", "--format", "json"),
+        prune_argv=("docker", "buildx", "prune", "--builder", "default", "--all", "--force", "--filter"),
+        owner=f"pulled from {target.authority}/{target.prefix}",
     )
+
+
+def parse_usage(text: str) -> tuple[CacheRecord, ...]:
+    """Parse the builder's JSON lines, refusing malformed cache records."""
+
+    records: list[CacheRecord] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        item = json.loads(line)
+        if not isinstance(item, dict) or "ID" not in item:
+            raise ValueError("cache usage line must be a JSON object with ID")
+        record_id = item["ID"]
+        description = item.get("Description", "")
+        # buildx prints a parentless record's Parents as null.
+        parents = item.get("Parents") or []
+        size = item.get("Size", "")
+        if (
+            not isinstance(record_id, str)
+            or not record_id
+            or not isinstance(description, str)
+            or not isinstance(parents, list)
+            or any(not isinstance(parent, str) for parent in parents)
+            or not isinstance(size, str)
+        ):
+            raise ValueError("cache usage record has invalid ID, Description, Parents, or Size")
+        records.append(CacheRecord(record_id, description, tuple(parents), size))
+    return tuple(records)
+
+
+def owned_records(records: Sequence[CacheRecord], owner: str) -> tuple[str, ...]:
+    """Select registry pulls and their wholly owned descendants in listing order."""
+
+    owned = {record.id for record in records if record.description.startswith(owner)}
+    while True:
+        descendants = {
+            record.id
+            for record in records
+            if record.parents and all(parent in owned for parent in record.parents)
+        }
+        if descendants <= owned:
+            return tuple(record.id for record in records if record.id in owned)
+        owned.update(descendants)
+
+
+def prune_filter(ids: Sequence[str]) -> str:
+    """Match exactly the named cache ids with one anchored BuildKit filter."""
+
+    if not ids:
+        raise ValueError("a cache prune filter requires at least one record id")
+    return f"id=^({'|'.join(ids)})$"
+
+
+def prune(host: Host, plan: BuildPlan) -> PruneResult:
+    """Read the default builder's cache and prune only this registry's records."""
+
+    fix = (
+        f"Run sudo {shlex.join((*plan.prune_argv, 'id=^(<GIDEON record ids>)$'))} "
+        "by hand, then re-run image build --check."
+    )
+    usage = host.run(plan.usage_argv, env=_child_env(plan.environment))
+    if usage.returncode != 0:
+        error = _docker_error("buildx du", usage, fix=fix)
+        return PruneResult(0, 0, "", error.problem, fix)
+    try:
+        records = parse_usage(usage.stdout)
+    except ValueError as exc:
+        return PruneResult(0, 0, "", f"Docker buildx du returned invalid cache usage: {one_line(exc)}", fix)
+    ids = owned_records(records, plan.owner)
+    if not ids:
+        return PruneResult(0, 0, "")
+    argv = (*plan.prune_argv, prune_filter(ids))
+    fix = f"Run sudo {shlex.join(argv)} by hand, then re-run image build --check."
+    result = host.run(argv, env=_child_env(plan.environment))
+    if result.returncode != 0:
+        error = _docker_error("buildx prune", result, fix=fix)
+        return PruneResult(len(ids), 0, "", error.problem, fix)
+    pruned = 0
+    reclaimed = "unreported"
+    in_table = False
+    for line in result.stdout.splitlines():
+        words = line.split()
+        if not words:
+            continue
+        if words[0] == "Total:":
+            reclaimed = line.partition(":")[2].strip() or "unreported"
+            break
+        if words[0] == "ID":
+            in_table = True
+        elif in_table:
+            pruned += 1
+    return PruneResult(len(ids), pruned, reclaimed)
 
 
 def _smoke_argv(image: str, smoke: Smoke) -> tuple[str, ...]:

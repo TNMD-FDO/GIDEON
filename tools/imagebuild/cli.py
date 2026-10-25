@@ -25,6 +25,7 @@ from tools.imagebuild.build import (
     build,
     build_plan,
     check,
+    prune,
     record,
 )
 from tools.pinwatch.fetch import Fetcher, FetchError, UrllibFetcher
@@ -172,6 +173,12 @@ def main(
         return 1
     if options.dry_run:
         print(_row(pin.name, "would build", " ".join(plan.build_argv)))
+        print(_row(
+            pin.name,
+            "would prune",
+            f"{' '.join(plan.usage_argv)}, then {' '.join(plan.prune_argv)} "
+            "id=^(<GIDEON's record ids>)$",
+        ))
         return 0
     if options.check:
         report = check(io, target, pin, plan.environment)
@@ -193,9 +200,20 @@ def main(
     if not built.ok:
         return _print_result(pin.name, built)
     assert built.digest is not None
+    pruned = prune(io, plan)
+    if not pruned.ok:
+        print(_row(pin.name, "prune failed", pruned.problem or "cache prune failed", pruned.fix))
+    elif pruned.named == 0:
+        print(_row(pin.name, "pruned", "nothing to prune"))
+    else:
+        print(_row(
+            pin.name,
+            "pruned",
+            f"{pruned.reclaimed} reclaimed from {pruned.pruned} of {pruned.named} records",
+        ))
     inputs_digest = compute_inputs_digest(pin.base_digest, pin.build_args, dockerfile)
     recorded = record(io, checkout, pin, built.digest, inputs_digest)
     if not recorded.ok:
         return _print_result(pin.name, recorded)
     print(_row(pin.name, "built", f"{plan.repository}@{built.digest}; images.lock and tests/fixtures/render updated: commit them"))
-    return 0
+    return 0 if pruned.ok else 1

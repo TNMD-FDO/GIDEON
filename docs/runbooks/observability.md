@@ -84,9 +84,9 @@ and the runbook section to follow.
   ratio, push transferred share, push duration, verified and pruned counts)
   and M26 (drill duration and result) as series over the rows. The drill table
   shows the five newest results. The last ten runs table shows each row's
-  result and the share of sampled files reused: a run, push, or restore reads
-  `completed` when it has no recorded result, and a drill shows its own result
-  word.
+  result and the share of sampled files reused: a run, push, prune, or restore
+  reads `completed` when it has no recorded result, and a drill shows its own
+  result word. The pruned counts read the prune's own `backup_prune` row.
 - **GPU** — per-GPU utilization, each card's used and free memory in GiB with
   its current figures in the legend, temperature, power, and the driver
   version from DCGM. The temperature card's dashed line is each card's own

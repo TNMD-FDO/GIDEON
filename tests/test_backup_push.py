@@ -3,7 +3,9 @@
 import argparse
 import contextlib
 import io
+import json
 import os
+import shlex
 import subprocess
 import unittest
 from collections.abc import Mapping, Sequence
@@ -21,6 +23,8 @@ LOCAL_SET = "20260902T110000Z"
 PUSH_LABEL = "20260902T120000Z"
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 RECIPIENT = "age1" + "a" * 58
+OLD_SNAPSHOTS = ("20260701T120000Z", "20260702T120000Z", "20260703T120000Z")
+OLD_LISTING = "".join(f"{name}\t1\n" for name in OLD_SNAPSHOTS)
 
 SITE = """\
 office:
@@ -100,6 +104,19 @@ def manifest(*, file_count: int = 1) -> backupset.Manifest:
     )
 
 
+class Clock:
+    """A monotonic clock advanced only by the fake host's operations."""
+
+    def __init__(self, seconds: float = 1000.0) -> None:
+        self.seconds = seconds
+
+    def __call__(self) -> float:
+        return self.seconds
+
+    def advance(self, seconds: float) -> None:
+        self.seconds += seconds
+
+
 class FakeHost:
     """A dict-backed Host that records argv, stdin, and writes."""
 
@@ -116,6 +133,13 @@ class FakeHost:
         euid: int = 0,
         fail_audit: bool = False,
         fail_target: bool = False,
+        clock: Clock | None = None,
+        environ: Mapping[str, str] | None = None,
+        systemctl_output: str | None = "0\n",
+        systemctl_returncode: int = 0,
+        removal_seconds: Mapping[str, float] | None = None,
+        removal_exits: Mapping[str, int] | None = None,
+        transfer_seconds: float = 0.0,
     ) -> None:
         self.files = dict(files)
         self.names = list(names)
@@ -127,6 +151,13 @@ class FakeHost:
         self.euid = euid
         self.fail_audit = fail_audit
         self.fail_target = fail_target
+        self.clock = clock or Clock()
+        self.environ = dict(environ or {})
+        self.systemctl_output = systemctl_output
+        self.systemctl_returncode = systemctl_returncode
+        self.removal_seconds = dict(removal_seconds or {})
+        self.removal_exits = dict(removal_exits or {})
+        self.transfer_seconds = transfer_seconds
         self.calls: list[tuple[tuple[str, ...], str | None, float | None]] = []
         self.writes: list[str] = []
         self.locks: dict[str, str] = {}
@@ -145,9 +176,16 @@ class FakeHost:
         del check, cwd, env
         command = tuple(argv)
         self.calls.append((command, input, timeout))
+        if command and command[0] == "systemctl":
+            if self.systemctl_output is None:
+                raise FileNotFoundError("systemctl")
+            return result(
+                command, returncode=self.systemctl_returncode, stdout=self.systemctl_output
+            )
         if command and command[0] == "docker" and "gideon_audit" in command:
             return result(command, returncode=int(self.fail_audit))
         if command and command[0] == "rsync":
+            self.clock.advance(self.transfer_seconds)
             return result(command, stdout=self.stats)
         if command and command[0] == "awk":
             if len(command) != 3 or command[1] != "NR % 100 == 1":
@@ -160,6 +198,22 @@ class FakeHost:
             if command[-1] == "true":
                 return result(command, returncode=int(self.fail_target))
             remote_word = command[-1]
+            if "rm -rf --" in remote_word:
+                script = shlex.split(shlex.split(remote_word)[2])
+                name = os.path.basename(script[script.index("rm") + 3])
+                original = os.path.basename(script[2]) if script[0] == "mv" else name
+                self.clock.advance(self.removal_seconds.get(name, 0.0))
+                returncode = self.removal_exits.get(name, 0)
+                remaining: list[str] = []
+                for line in self.remote_listing.splitlines():
+                    label, _, flag = line.partition("\t")
+                    if label in {original, name}:
+                        if returncode == 0:
+                            continue
+                        label = name
+                    remaining.append(f"{label}\t{flag}\n")
+                self.remote_listing = "".join(remaining)
+                return result(command, returncode=returncode)
             if "for directory in */" in remote_word:
                 return result(command, stdout=self.remote_listing)
             if len(command) >= 2 and command[-2] == "cat":
@@ -260,6 +314,14 @@ def host(
     fail_audit: bool = False,
     fail_target: bool = False,
     local_set_manifest: backupset.Manifest | None = None,
+    clock: Clock | None = None,
+    environ: Mapping[str, str] | None = None,
+    cgroup: str | None = "0::/system.slice/gideon-backup.service\n",
+    systemctl_output: str | None = "0\n",
+    systemctl_returncode: int = 0,
+    removal_seconds: Mapping[str, float] | None = None,
+    removal_exits: Mapping[str, int] | None = None,
+    transfer_seconds: float = 0.0,
 ) -> FakeHost:
     value = local_set_manifest or manifest()
     files = {
@@ -270,6 +332,8 @@ def host(
             backupset.set_dir(value.label), backupset.MANIFEST_NAME
         ): value.to_json(),
     }
+    if cgroup is not None:
+        files["/proc/self/cgroup"] = cgroup
     if listing_text is not None:
         for pin in value.listings.values():
             files[os.path.join(backupset.set_dir(value.label), pin.file)] = listing_text
@@ -291,7 +355,42 @@ def host(
         euid=euid,
         fail_audit=fail_audit,
         fail_target=fail_target,
+        clock=clock,
+        environ=environ,
+        systemctl_output=systemctl_output,
+        systemctl_returncode=systemctl_returncode,
+        removal_seconds=removal_seconds,
+        removal_exits=removal_exits,
+        transfer_seconds=transfer_seconds,
     )
+
+
+def push(fake: FakeHost) -> tuple[int, str]:
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = backup.run_backup_push(
+            argparse.Namespace(verify_all=False), host=fake, now=NOW,
+            clock=fake.clock, environ=fake.environ,
+        )
+    return code, out.getvalue()
+
+
+def audit_details(fake: FakeHost, kind: str) -> list[dict[str, object]]:
+    details = []
+    for _, request, _ in fake.calls:
+        if request is None or f"\\set v_kind '{kind}'" not in request:
+            continue
+        line = next(line for line in request.splitlines() if line.startswith("\\set v_detail '"))
+        details.append(json.loads(line.removeprefix("\\set v_detail '").removesuffix("'")))
+    return details
+
+
+def removal_scripts(fake: FakeHost) -> list[list[str]]:
+    return [
+        shlex.split(shlex.split(command[-1])[2])
+        for command, _, _ in fake.calls
+        if command[0] == "ssh" and "rm -rf --" in command[-1]
+    ]
 
 
 class Preconditions(unittest.TestCase):
@@ -314,7 +413,8 @@ class Preconditions(unittest.TestCase):
                 err = io.StringIO()
                 with contextlib.redirect_stderr(err):
                     code = backup.run_backup_push(
-                        argparse.Namespace(verify_all=False), host=fake, now=NOW
+                        argparse.Namespace(verify_all=False), host=fake, now=NOW,
+                        clock=fake.clock, environ=fake.environ,
                     )
                 self.assertEqual(code, 1)
                 self.assertIn(expected, err.getvalue())
@@ -330,7 +430,8 @@ class PushContracts(unittest.TestCase):
         err = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = backup.run_backup_push(
-                argparse.Namespace(verify_all=False), host=fake, now=NOW
+                argparse.Namespace(verify_all=False), host=fake, now=NOW,
+                clock=fake.clock, environ=fake.environ,
             )
         self.assertEqual(code, 1)
         self.assertEqual(out.getvalue(), "")
@@ -343,6 +444,9 @@ class PushContracts(unittest.TestCase):
         parsed = backup._parse_remote_listing(
             "20260901T120000Z\t1\n"
             "20260901T110000Z.partial\t1\n"
+            "20260901T100000Z.removing\t1\n"
+            "20260901T100000Z.partial.removing\t1\n"
+            "pre-example.removing\t1\n"
             "not-a-label\t1\n"
             "20260901T100000Z\t0\n"
         )
@@ -353,6 +457,9 @@ class PushContracts(unittest.TestCase):
             [
                 ("20260901T120000Z", True),
                 ("20260901T110000Z.partial", False),
+                ("20260901T100000Z.removing", False),
+                ("20260901T100000Z.partial.removing", False),
+                ("pre-example.removing", False),
                 ("not-a-label", False),
                 ("20260901T100000Z", False),
             ],
@@ -380,7 +487,8 @@ class PushContracts(unittest.TestCase):
             contextlib.redirect_stdout(out),
         ):
             code = backup.run_backup_push(
-                argparse.Namespace(verify_all=False), host=fake, now=NOW
+                argparse.Namespace(verify_all=False), host=fake, now=NOW,
+                clock=fake.clock, environ=fake.environ,
             )
         self.assertEqual(code, 0)
         self.assertEqual(len(records), 1)
@@ -392,7 +500,7 @@ class PushContracts(unittest.TestCase):
         self.assertNotIn(backuplock.BACKUP_LOCK.path, fake.locks)
         self.assertEqual(
             [line.split(":", 1)[0] for line in out.getvalue().splitlines()],
-            ["record", "list", "push", "finalize", "prune", "check", "audit"],
+            ["record", "list", "push", "check", "finalize", "audit", "prune"],
         )
         record_path = os.path.join(backupset.STAGING, backupset.PUSH_RECORD_NAME)
         parsed = backupset.parse_push_record(fake.files[record_path])
@@ -422,12 +530,24 @@ class PushContracts(unittest.TestCase):
             if call[0][0] == "ssh" and "mv --" in call[0][-1]
         ]
         self.assertEqual(len(finalize), 1)
+        manifest_call = next(
+            call for call in fake.calls
+            if call[0][0] == "ssh" and call[0][-2] == "cat"
+        )
+        self.assertEqual(
+            manifest_call[0][-1],
+            f"/backup/snapshots/{PUSH_LABEL}.partial/sets/{LOCAL_SET}/manifest.json",
+        )
         check_call = next(
             call for call in fake.calls if call[0][0] == "ssh" and "sha256sum -c -" in call[0][-1]
         )
         expected = check_call[1]
         self.assertIsNotNone(expected)
         assert expected is not None
+        self.assertIn(f"cd /backup/snapshots/{PUSH_LABEL}.partial &&", check_call[0][-1])
+        finalize_index = next(i for i, call in enumerate(fake.calls) if call[0] == finalize[0])
+        self.assertLess(fake.calls.index(manifest_call), finalize_index)
+        self.assertLess(fake.calls.index(check_call), finalize_index)
         self.assertIn("sets/20260902T110000Z/manifest.json", expected)
         self.assertIn("push.json", expected)
         self.assertIn("sets/20260902T110000Z/secrets.tar.age", expected)
@@ -458,6 +578,7 @@ class PushContracts(unittest.TestCase):
         ]
         self.assertTrue(any("backup_push" in value for value in audit_inputs if value))
         self.assertTrue(any('"verify_all": false' in value for value in audit_inputs if value))
+        self.assertNotIn("pruned", audit_details(fake, "backup_push")[0])
 
     def test_link_dest_and_full_copy_failure_only_follow_a_previous_snapshot(self) -> None:
         listing = "20260901T120000Z\t1\n"
@@ -469,7 +590,8 @@ class PushContracts(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = backup.run_backup_push(
-                argparse.Namespace(verify_all=False), host=failed, now=NOW
+                argparse.Namespace(verify_all=False), host=failed, now=NOW,
+                clock=failed.clock, environ=failed.environ,
             )
         self.assertEqual(code, 1)
         push_row = next(line for line in out.getvalue().splitlines() if line.startswith("push:"))
@@ -491,7 +613,8 @@ class PushContracts(unittest.TestCase):
         )
         self.assertEqual(
             backup.run_backup_push(
-                argparse.Namespace(verify_all=False), host=first, now=NOW
+                argparse.Namespace(verify_all=False), host=first, now=NOW,
+                clock=first.clock, environ=first.environ,
             ),
             0,
         )
@@ -584,7 +707,10 @@ class PushContracts(unittest.TestCase):
                 )
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
-                    code = backup.run_backup_push(argparse.Namespace(verify_all=False), host=fake, now=NOW)
+                    code = backup.run_backup_push(
+                        argparse.Namespace(verify_all=False), host=fake, now=NOW,
+                        clock=fake.clock, environ=fake.environ,
+                    )
                 self.assertEqual(code, expected_code)
                 push_row = next(line for line in out.getvalue().splitlines() if line.startswith("push:"))
                 if expected_code:
@@ -599,39 +725,69 @@ class PushContracts(unittest.TestCase):
         stale = backupset.RemoteSnapshot("20260901T110000Z.partial", None, False)
         fresh = backupset.RemoteSnapshot("20260902T110000Z.partial", None, False)
         current = backupset.RemoteSnapshot(PUSH_LABEL, None, True)
+        removing = backupset.RemoteSnapshot("20260902T113000Z.partial.removing", None, False)
+        labelled = backupset.RemoteSnapshot("pre-example.removing", None, False)
+        current_names = tuple(
+            backupset.RemoteSnapshot(f"{PUSH_LABEL}{suffix}", None, False)
+            for suffix in (".partial", ".removing", ".partial.removing")
+        )
+        snapshots = (old, stale, fresh, current, removing, labelled, *current_names)
         self.assertEqual(
             backup._push_prune_names(
-                (old, stale, fresh, current),
+                snapshots,
                 now=NOW,
                 remote_days=30,
                 current_label=PUSH_LABEL,
             ),
-            ("20260801T120000Z", "20260901T110000Z.partial"),
+            (removing.label, labelled.label, old.label, stale.label),
         )
         fake = host()
         loaded = site.load_site(SITE_PATH, host=fake)
         assert loaded.config is not None
-        self.assertIsNone(
-            backup._safe_remote_snapshot_path(loaded.config, PUSH_LABEL, PUSH_LABEL)
-        )
+        for name in (PUSH_LABEL, *(snapshot.label for snapshot in current_names)):
+            with self.subTest(current=name):
+                self.assertIsNone(
+                    backup._safe_remote_snapshot_path(loaded.config, name, PUSH_LABEL)
+                )
         self.assertIsNone(
             backup._safe_remote_snapshot_path(loaded.config, "/tmp/evil", "other")
         )
-        stage, removed = backup._push_prune_stage(
-            fake,
-            loaded.config,
-            snapshots=(old, stale, fresh, current),
-            now=NOW,
-            current_label=PUSH_LABEL,
-        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            stage = backup._push_prune_stage(
+                fake,
+                loaded.config,
+                snapshots=snapshots,
+                now=NOW,
+                current_label=PUSH_LABEL,
+                deadline=backup._PruneDeadline(fake.clock() + 10, "this run", "run"),
+                clock=fake.clock,
+                rendered_dir=RENDERED,
+                run_id="00000000-0000-0000-0000-000000000001",
+                now_was_supplied=True,
+            )
         self.assertTrue(stage.ok)
-        self.assertEqual(removed, 2)
+        self.assertEqual(audit_details(fake, "backup_prune")[0]["removed"], 4)
         removed_commands = [
             call[0][-1]
             for call in fake.calls
             if call[0][0] == "ssh" and "rm -rf --" in call[0][-1]
         ]
-        self.assertEqual(len(removed_commands), 2)
+        self.assertEqual(len(removed_commands), 4)
+        scripts = removal_scripts(fake)
+        self.assertEqual(
+            [os.path.basename(script[script.index("rm") + 3]) for script in scripts],
+            [removing.label, labelled.label, f"{old.label}.removing", f"{stale.label}.removing"],
+        )
+        self.assertTrue(all("mv" not in script for script in scripts[:2]))
+        for script, snapshot in zip(scripts[2:], (old, stale), strict=True):
+            with self.subTest(renamed=snapshot.label):
+                path = f"/backup/snapshots/{snapshot.label}"
+                self.assertEqual(script[:5], ["mv", "--", path, f"{path}.removing", "&&"])
+                self.assertEqual(script[-4:], ["rm", "-rf", "--", f"{path}.removing"])
+        self.assertTrue(all(int(script[script.index("timeout") + 2]) >= 1 for script in scripts))
+        self.assertTrue(all("in 0.0 s" in line for line in out.getvalue().splitlines()))
+        self.assertEqual(audit_details(fake, "backup_prune")[0]["duration_s"], 0.0)
         self.assertTrue(all("20260902T110000Z" not in command for command in removed_commands))
 
     def test_failed_checksum_row_names_only_the_count(self) -> None:
@@ -639,7 +795,8 @@ class PushContracts(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = backup.run_backup_push(
-                argparse.Namespace(verify_all=False), host=fake, now=NOW
+                argparse.Namespace(verify_all=False), host=fake, now=NOW,
+                clock=fake.clock, environ=fake.environ,
             )
         self.assertEqual(code, 1)
         self.assertNotIn(backuplock.BACKUP_LOCK.path, fake.locks)
@@ -652,6 +809,9 @@ class PushContracts(unittest.TestCase):
             "docs/runbooks/office-services-setup.md §3.",
             check_row,
         )
+        self.assertFalse(any(call[0][0] == "ssh" and "mv --" in call[0][-1] for call in fake.calls))
+        self.assertEqual(audit_details(fake, "backup_push"), [])
+        self.assertEqual(audit_details(fake, "backup_prune"), [])
 
     def test_verify_all_sends_every_inventory_file(self) -> None:
         value = manifest(file_count=500)
@@ -699,6 +859,212 @@ class PushContracts(unittest.TestCase):
             "Total transferred file size: 987,654 bytes\n"
         )
         self.assertEqual(parsed, backup.PushStats(1_234_567, 987_654))
+
+
+class PruneContracts(unittest.TestCase):
+    """The off-box prune reports each removal and ends inside its budget."""
+
+    def test_push_audit_precedes_removal_and_deadline_leaves_the_rest(self) -> None:
+        budget = backup.BACKUP_TIMEOUT_START_SECONDS - backup._PRUNE_MARGIN_SECONDS
+        fake = host(
+            remote_listing=OLD_LISTING,
+            removal_seconds={f"{OLD_SNAPSHOTS[0]}.removing": budget + 1},
+        )
+        code, output = push(fake)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(removal_scripts(fake)), 1)
+        push_index = next(
+            i for i, (_, request, _) in enumerate(fake.calls)
+            if request and "\\set v_kind 'backup_push'" in request
+        )
+        removal_index = next(
+            i for i, (argv, _, _) in enumerate(fake.calls)
+            if argv[0] == "ssh" and "rm -rf --" in argv[-1]
+        )
+        prune_index = next(
+            i for i, (_, request, _) in enumerate(fake.calls)
+            if request and "\\set v_kind 'backup_prune'" in request
+        )
+        self.assertLess(push_index, removal_index)
+        self.assertLess(removal_index, prune_index)
+        self.assertIn(f"removed remote snapshot {OLD_SNAPSHOTS[0]} in 0.0 s", output)
+        self.assertTrue(output.splitlines()[-1].startswith("prune: ok"))
+        self.assertIn("pruned 1 remote snapshot(s), 2 left, deadline reached", output)
+        self.assertEqual(audit_details(fake, "backup_prune"), [{
+            "label": PUSH_LABEL, "removed": 1, "left": 2,
+            "deadline_reached": True, "budget": "run", "duration_s": 0.0,
+        }])
+        self.assertNotIn(backuplock.BACKUP_LOCK.path, fake.locks)
+
+    def test_timeout_leaves_a_removing_snapshot_and_the_next_push_resumes_it_first(self) -> None:
+        for returncode in (124, 137):
+            with self.subTest(returncode=returncode):
+                removing_name = f"{OLD_SNAPSHOTS[0]}.removing"
+                first = host(remote_listing=OLD_LISTING, removal_exits={removing_name: returncode})
+                code, output = push(first)
+                self.assertEqual(code, 0)
+                self.assertEqual(len(removal_scripts(first)), 1)
+                self.assertIn(f"left remote snapshot {OLD_SNAPSHOTS[0]} at the deadline", output)
+                self.assertIn("pruned 0 remote snapshot(s), 3 left, deadline reached", output)
+                self.assertTrue(output.splitlines()[-1].startswith("prune: ok"))
+                first_detail = audit_details(first, "backup_prune")[0]
+                self.assertEqual(first_detail["removed"], 0)
+                self.assertEqual(first_detail["left"], 3)
+                self.assertTrue(first_detail["deadline_reached"])
+                self.assertIn(f"{removing_name}\t1\n", first.remote_listing)
+
+                # Put untouched names ahead of the interrupted one in the next listing.
+                second = host(remote_listing="\n".join(reversed(first.remote_listing.splitlines())) + "\n")
+                code, output = push(second)
+                self.assertEqual(code, 0)
+                scripts = removal_scripts(second)
+                self.assertEqual(len(scripts), 3)
+                self.assertNotIn("mv", scripts[0])
+                self.assertEqual(scripts[0][-1], f"/backup/snapshots/{removing_name}")
+                self.assertTrue(all("mv" in script for script in scripts[1:]))
+                self.assertIn(f"removed remote snapshot {removing_name} in 0.0 s", output)
+                self.assertIn("pruned 3 remote snapshot(s), 0 left", output)
+                self.assertFalse(audit_details(second, "backup_prune")[0]["deadline_reached"])
+                self.assertEqual(second.remote_listing, "")
+
+    def test_budget_source_and_seconds_follow_the_unit_start_or_fallback(self) -> None:
+        budget = backup.BACKUP_TIMEOUT_START_SECONDS - backup._PRUNE_MARGIN_SECONDS
+        for unit in ("gideon-backup.service", "gideon-backup-verify.service"):
+            with self.subTest(unit=unit):
+                clock = Clock()
+                elapsed = 30
+                fake = host(
+                    remote_listing=OLD_LISTING,
+                    clock=clock,
+                    environ={"INVOCATION_ID": "fictitious"},
+                    cgroup=f"0::/system.slice/outer.service/{unit}/payload\n",
+                    systemctl_output=f"{int((clock() - elapsed) * 1e6)}\n",
+                )
+                code, output = push(fake)
+                self.assertEqual(code, 0)
+                self.assertIn(f"(budget from {unit})", output.splitlines()[-1])
+                self.assertEqual(audit_details(fake, "backup_prune")[0]["budget"], "unit")
+                self.assertEqual(
+                    [argv for argv, _, _ in fake.calls if argv[0] == "systemctl"],
+                    [("systemctl", "show", "-p", "InactiveExitTimestampMonotonic", "--value", unit)],
+                )
+                for script in removal_scripts(fake):
+                    self.assertEqual(int(script[script.index("timeout") + 2]), int(budget - elapsed))
+
+        for name, cgroup, answer, returncode, invocation in (
+            ("hand run", None, "0\n", 0, False),
+            ("missing cgroup", None, "0\n", 0, True),
+            ("malformed cgroup", "invalid\n", "0\n", 0, True),
+            ("no service", "0::/user.slice\n", "0\n", 0, True),
+            ("failed systemctl", "0::/gideon-backup.service\n", "0\n", 1, True),
+            ("missing systemctl", "0::/gideon-backup.service\n", None, 0, True),
+            ("empty timestamp", "0::/gideon-backup.service\n", "", 0, True),
+            ("negative timestamp", "0::/gideon-backup.service\n", "-1\n", 0, True),
+            ("malformed timestamp", "0::/gideon-backup.service\n", "unknown\n", 0, True),
+            ("multiple timestamps", "0::/gideon-backup.service\n", "1\n2\n", 0, True),
+        ):
+            with self.subTest(fallback=name):
+                fake = host(
+                    remote_listing=OLD_LISTING,
+                    environ={"INVOCATION_ID": "fictitious"} if invocation else {},
+                    cgroup=cgroup,
+                    systemctl_output=answer,
+                    systemctl_returncode=returncode,
+                )
+                code, output = push(fake)
+                self.assertEqual(code, 0)
+                source = "this run (unit start unavailable)" if invocation else "this run"
+                self.assertIn(f"(budget from {source})", output.splitlines()[-1])
+                self.assertEqual(audit_details(fake, "backup_prune")[0]["budget"], "run")
+                scripts = removal_scripts(fake)
+                self.assertEqual(len(scripts), len(OLD_SNAPSHOTS))
+                for script in scripts:
+                    self.assertEqual(int(script[script.index("timeout") + 2]), int(budget))
+                if not invocation or not cgroup or ".service" not in cgroup:
+                    self.assertFalse(any(argv[0] == "systemctl" for argv, _, _ in fake.calls))
+
+    def test_transfer_consumes_the_fallback_budget_before_pruning(self) -> None:
+        budget = backup.BACKUP_TIMEOUT_START_SECONDS - backup._PRUNE_MARGIN_SECONDS
+        fake = host(
+            remote_listing=OLD_LISTING,
+            environ={"INVOCATION_ID": "fictitious"},
+            systemctl_returncode=1,
+            transfer_seconds=budget + 1,
+        )
+        code, output = push(fake)
+        self.assertEqual(code, 0)
+        self.assertEqual(removal_scripts(fake), [])
+        self.assertEqual(len(audit_details(fake, "backup_push")), 1)
+        self.assertIn("pruned 0 remote snapshot(s), 3 left, deadline reached", output)
+        self.assertIn("budget from this run (unit start unavailable)", output)
+        self.assertEqual(audit_details(fake, "backup_prune"), [{
+            "label": PUSH_LABEL, "removed": 0, "left": 3,
+            "deadline_reached": True, "budget": "run", "duration_s": 0.0,
+        }])
+
+    def test_removal_requires_a_whole_second_and_never_uses_timeout_zero(self) -> None:
+        budget = backup.BACKUP_TIMEOUT_START_SECONDS - backup._PRUNE_MARGIN_SECONDS
+        for remaining in (0.5, 1.0, 1.9):
+            with self.subTest(remaining=remaining):
+                fake = host(
+                    remote_listing=f"{OLD_SNAPSHOTS[0]}\t1\n",
+                    transfer_seconds=budget - remaining,
+                )
+                code, output = push(fake)
+                self.assertEqual(code, 0)
+                scripts = removal_scripts(fake)
+                self.assertEqual(len(scripts), int(remaining >= 1))
+                for script in scripts:
+                    timeout_index = script.index("timeout")
+                    self.assertEqual(script[timeout_index + 1], "--kill-after=30")
+                    self.assertEqual(int(script[timeout_index + 2]), int(remaining))
+                    self.assertGreaterEqual(int(script[timeout_index + 2]), 1)
+                detail = audit_details(fake, "backup_prune")[0]
+                self.assertEqual(detail["deadline_reached"], remaining < 1)
+                self.assertEqual(detail["removed"], int(remaining >= 1))
+                self.assertEqual(detail["left"], int(remaining < 1))
+                if remaining < 1:
+                    self.assertIn("deadline reached", output)
+
+    def test_failed_removal_refuses_after_the_push_row_was_written(self) -> None:
+        for returncode in (1, 127):
+            with self.subTest(returncode=returncode):
+                fake = host(
+                    remote_listing=OLD_LISTING,
+                    removal_exits={f"{OLD_SNAPSHOTS[0]}.removing": returncode},
+                )
+                code, output = push(fake)
+                self.assertEqual(code, 1)
+                self.assertEqual(len(removal_scripts(fake)), 1)
+                self.assertEqual(len(audit_details(fake, "backup_push")), 1)
+                self.assertEqual(audit_details(fake, "backup_prune"), [])
+                closing = output.splitlines()[-1]
+                self.assertTrue(closing.startswith("prune: refuse"))
+                self.assertIn("Fix:", closing)
+                self.assertIn("backup push", closing)
+                self.assertNotIn(backuplock.BACKUP_LOCK.path, fake.locks)
+
+    def test_prune_measures_seconds_when_now_was_not_supplied(self) -> None:
+        name = OLD_SNAPSHOTS[0]
+        fake = host(removal_seconds={f"{name}.removing": 2.5})
+        loaded = site.load_site(SITE_PATH, host=fake)
+        assert loaded.config is not None
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            stage = backup._push_prune_stage(
+                fake, loaded.config,
+                snapshots=(backupset.RemoteSnapshot(name, None, True),),
+                now=NOW,
+                current_label=PUSH_LABEL,
+                deadline=backup._PruneDeadline(fake.clock() + 10, "this run", "run"),
+                clock=fake.clock,
+                rendered_dir=RENDERED,
+                run_id="00000000-0000-0000-0000-000000000001",
+                now_was_supplied=False,
+            )
+        self.assertTrue(stage.ok)
+        self.assertIn(f"removed remote snapshot {name} in 2.5 s", out.getvalue())
+        self.assertEqual(audit_details(fake, "backup_prune")[0]["duration_s"], 2.5)
 
 
 if __name__ == "__main__":

@@ -1298,6 +1298,22 @@ class Core(unittest.TestCase):
             ["grafana-gpu", "grafana-eval", "api-instruction", "model-servers-route-guard", "gideon-egress-env", "gideon-eval-nightly-service", "gideon-eval-nightly-timer", "dcgm-counters"],
         )
 
+    def test_backup_services_carry_the_shared_timeout_on_every_host_kind(self) -> None:
+        for name, site_path, no_gpu, build_box in FIXTURE_CASES:
+            rendered = render_all(inputs(site_path, no_gpu=no_gpu, build_box=build_box))
+            for path in (
+                "systemd/gideon-backup.service",
+                "systemd/gideon-backup-verify.service",
+            ):
+                with self.subTest(host=name, service=path):
+                    self.assertEqual(
+                        [
+                            line for line in rendered.by_path[path].content.splitlines()
+                            if line.startswith("TimeoutStartSec=")
+                        ],
+                        [f"TimeoutStartSec={systemd.BACKUP_TIMEOUT_START_SECONDS}"],
+                    )
+
     def test_nightly_units_are_zoned_bounded_and_carry_no_secrets(self) -> None:
         self.assertEqual(systemd.NIGHTLY_CALENDAR, "*-*-* 21:00:00")
         for site_path in (EXAMPLE, SECOND):

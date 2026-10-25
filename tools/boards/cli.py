@@ -294,12 +294,13 @@ def _run(
     signin_ok = False
     try:
         try:
-            signin_problem = page.sign_in(
+            outcome = page.sign_in(
                 browser_page,
                 admin.user,
                 admin.password,
                 timeout=chromium.PAGE_TIMEOUT_SECONDS,
             )
+            signin_problem = outcome.problem
         except Exception:  # noqa: BLE001 - no page exception text may reach a row.
             signin_problem = Problem(
                 "Grafana sign-in page could not be read", _BOARD_OPEN_FIX
@@ -308,8 +309,14 @@ def _run(
             _refuse("signin", signin_problem)
         else:
             signin_ok = True
+            detail = f"signed in as {admin.user}"
+            if outcome.attempts > 1:
+                retries = outcome.attempts - 1
+                detail += (
+                    " after one retry" if retries == 1 else f" after {retries} retries"
+                )
             print_stage(
-                StageResult("signin", True, f"signed in as {admin.user}", "")
+                StageResult("signin", True, detail, "")
             )
             known_uids = sorted(
                 board.uid for board in available if isinstance(board, inventory.Board)

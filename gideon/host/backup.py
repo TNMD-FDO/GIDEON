@@ -34,6 +34,7 @@ from gideon.host import (
     sshtarget,
     stack,
 )
+from gideon.host.render.systemd import BACKUP_TIMEOUT_START_SECONDS
 from gideon.host.report import (
     Problem,
     StageResult,
@@ -62,6 +63,9 @@ _SECRET_STAGE_FIX: Final = (
 # Exempt operational constant: the bound on one pgBackRest backup, within the
 # timer unit's six-hour window for the run and the push together.
 _COMMAND_TIMEOUT: Final = 18000.0
+# Exempt operational constant: ten minutes for timeout's kill grace, SSH
+# teardown, closing and audit rows, and the unit's exit.
+_PRUNE_MARGIN_SECONDS: Final = 600.0
 _PUSH_TARGET_FIX: Final = (
     "Authorize the backup key and check the target per "
     "docs/runbooks/office-services-setup.md §3, then re-run backup push."
@@ -1214,6 +1218,13 @@ class _PushCheck:
     failed: int
 
 
+@dataclass(frozen=True, slots=True)
+class _PruneDeadline:
+    at: float
+    source: str
+    budget: str
+
+
 def _push_remote_root(config: SiteConfig) -> str:
     path = config.backup.target.path.rstrip("/")
     return path or "/"
@@ -1388,6 +1399,7 @@ def _parse_remote_listing(
         complete = (
             flag == "1"
             and not name.endswith(backupset.PARTIAL_SUFFIX)
+            and not name.endswith(backupset.REMOVING_SUFFIX)
             and backupset.LABEL.fullmatch(name) is not None
         )
         snapshots.append(backupset.RemoteSnapshot(name, None, complete))
@@ -1603,8 +1615,46 @@ def _remote_command_stage(
     return StageResult(name, True, detail, "")
 
 
+def _prune_deadline(
+    io: Host,
+    *,
+    started_monotonic: float,
+    environ: Mapping[str, str],
+) -> _PruneDeadline:
+    """Bound pruning by the unit's start, falling back to this run's start."""
+
+    budget = BACKUP_TIMEOUT_START_SECONDS - _PRUNE_MARGIN_SECONDS
+    fallback_deadline = started_monotonic + budget
+    if "INVOCATION_ID" not in environ:
+        return _PruneDeadline(fallback_deadline, "this run", "run")
+    fallback = _PruneDeadline(fallback_deadline, "this run (unit start unavailable)", "run")
+    try:
+        cgroup = io.read_text("/proc/self/cgroup")
+        unit = ""
+        for line in cgroup.splitlines():
+            fields = line.split(":", 2)
+            if len(fields) != 3:
+                continue
+            for component in fields[2].split("/"):
+                if component.endswith(".service"):
+                    unit = component
+        if not unit:
+            return fallback
+        result = io.run([
+            "systemctl", "show", "-p", "InactiveExitTimestampMonotonic", "--value", unit,
+        ])
+        if result.returncode != 0:
+            return fallback
+        timestamp = result.stdout.strip()
+        if re.fullmatch(r"[0-9]+", timestamp) is None:
+            return fallback
+        return _PruneDeadline(int(timestamp) / 1e6 + budget, unit, "unit")
+    except (OSError, UnicodeError, subprocess.SubprocessError, OverflowError):
+        return fallback
+
+
 def _push_prune_timestamp(name: str) -> datetime | None:
-    label = name.removesuffix(backupset.PARTIAL_SUFFIX)
+    label = backupset.remote_base_label(name)
     if backupset.kind_of(label) is not backupset.Kind.NIGHTLY:
         return None
     try:
@@ -1622,12 +1672,16 @@ def _push_prune_names(
 ) -> tuple[str, ...]:
     complete_cutoff = now - timedelta(days=remote_days)
     partial_cutoff = now - timedelta(days=1)
+    removing: list[str] = []
     names: list[str] = []
     for snapshot in snapshots:
+        if backupset.remote_base_label(snapshot.label) == current_label:
+            continue
+        if snapshot.label.endswith(backupset.REMOVING_SUFFIX):
+            removing.append(snapshot.label)
+            continue
         timestamp = _push_prune_timestamp(snapshot.label)
         if timestamp is None:
-            continue
-        if snapshot.label.removesuffix(backupset.PARTIAL_SUFFIX) == current_label:
             continue
         if (
             snapshot.complete and timestamp < complete_cutoff
@@ -1636,7 +1690,7 @@ def _push_prune_names(
             and timestamp < partial_cutoff
         ):
             names.append(snapshot.label)
-    return tuple(names)
+    return tuple(removing + names)
 
 
 def _safe_remote_snapshot_path(
@@ -1650,7 +1704,7 @@ def _safe_remote_snapshot_path(
         inside = path.startswith(os.sep) and path != root
     else:
         inside = path.startswith(root + os.sep)
-    if not inside or name.removesuffix(backupset.PARTIAL_SUFFIX) == current_label:
+    if not inside or backupset.remote_base_label(name) == current_label:
         return None
     return path
 
@@ -1662,7 +1716,13 @@ def _push_prune_stage(
     snapshots: Sequence[backupset.RemoteSnapshot],
     now: datetime,
     current_label: str,
-) -> tuple[StageResult, int]:
+    deadline: _PruneDeadline,
+    clock: Callable[[], float],
+    rendered_dir: PathLike,
+    run_id: str,
+    now_was_supplied: bool,
+) -> StageResult:
+    started = clock()
     names = _push_prune_names(
         snapshots,
         now=now,
@@ -1670,29 +1730,83 @@ def _push_prune_stage(
         current_label=current_label,
     )
     removed = 0
+    deadline_reached = False
     for name in names:
+        removal_started = clock()
+        remaining = deadline.at - removal_started
+        if remaining < 1:
+            deadline_reached = True
+            break
         path = _safe_remote_snapshot_path(config, name, current_label)
         if path is None:
-            return (
-                StageResult(
-                    "prune",
-                    False,
-                    f"refusing to remove an unsafe target snapshot: {name}",
-                    _push_stage_fix(),
-                ),
-                removed,
+            return StageResult(
+                "prune",
+                False,
+                f"refusing to remove an unsafe target snapshot: {name}",
+                _push_stage_fix(),
             )
-        result = _remote_command_stage(
-            io,
-            config,
-            name="prune",
-            detail=f"removed remote snapshot {name}",
-            script=f"rm -rf -- {shlex.quote(path)}",
+        removing_path = (
+            path if name.endswith(backupset.REMOVING_SUFFIX)
+            else f"{path}{backupset.REMOVING_SUFFIX}"
         )
-        if not result.ok:
-            return result, removed
+        script = (
+            f"timeout --kill-after=30 {int(remaining)} "
+            f"rm -rf -- {shlex.quote(removing_path)}"
+        )
+        if not name.endswith(backupset.REMOVING_SUFFIX):
+            script = f"mv -- {shlex.quote(path)} {shlex.quote(removing_path)} && {script}"
+        try:
+            result = io.run(sshtarget.ssh_argv(config, sshtarget.remote_script(script)))
+        except (OSError, subprocess.SubprocessError) as exc:
+            return StageResult(
+                "prune", False, f"remote snapshot removal failed: {exc}", _push_stage_fix()
+            )
+        if result.returncode in {124, 137}:
+            deadline_reached = True
+            print_stage(StageResult(
+                "prune", True, f"left remote snapshot {name} at the deadline", ""
+            ))
+            break
+        if result.returncode != 0:
+            return _run_failure(
+                "prune", f"remote snapshot removal failed for {name}", result, _push_stage_fix()
+            )
+        seconds = max(0.0, clock() - removal_started) if not now_was_supplied else 0.0
+        print_stage(StageResult(
+            "prune", True, f"removed remote snapshot {name} in {seconds:.1f} s", ""
+        ))
         removed += 1
-    return StageResult("prune", True, f"pruned {removed} remote snapshot(s)", ""), removed
+    left = len(names) - removed
+    duration_s = max(0.0, clock() - started) if not now_was_supplied else 0.0
+    detail = f"pruned {removed} remote snapshot(s), {left} left"
+    if deadline_reached:
+        detail += ", deadline reached"
+    detail += f" (budget from {deadline.source})"
+    row = audit.AuditRow(
+        run_id,
+        "backup_prune",
+        None,
+        None,
+        None,
+        (),
+        {
+            "label": current_label,
+            "removed": removed,
+            "left": left,
+            "deadline_reached": deadline_reached,
+            "budget": deadline.budget,
+            "duration_s": duration_s,
+        },
+    )
+    problem = audit.write_rows(io, rendered_dir, (row,))
+    if problem is not None:
+        return StageResult(
+            "prune",
+            False,
+            f"{detail}; backup prune audit write failed: {problem}",
+            stack.logs_fix(rendered_dir, "postgres"),
+        )
+    return StageResult("prune", True, detail, "")
 
 
 def _add_check_hash(
@@ -1860,7 +1974,6 @@ def _push_audit_stage(
     finished: datetime,
     stats: PushStats,
     checked: _PushCheck,
-    pruned: int,
     verify_all: bool,
 ) -> StageResult:
     row = audit.AuditRow(
@@ -1878,7 +1991,6 @@ def _push_audit_stage(
             "total_bytes": stats.total_bytes,
             "verified": checked.verified,
             "failed": checked.failed,
-            "pruned": pruned,
             "verify_all": verify_all,
         },
     )
@@ -1893,7 +2005,7 @@ def _push_audit_stage(
     return StageResult(
         "audit",
         True,
-        f"backup push {label} recorded ({checked.verified} verified, {pruned} pruned)",
+        f"backup push {label} recorded ({checked.verified} verified)",
         "",
     )
 
@@ -1905,6 +2017,8 @@ def run_backup_push(
     rendered_dir: PathLike = _RENDERED_DIR,
     site_path: PathLike = _SITE_PATH,
     now: datetime | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    environ: Mapping[str, str] = os.environ,
 ) -> int:
     """Push the complete local staging tree to the configured backup target."""
 
@@ -1918,6 +2032,7 @@ def run_backup_push(
             "Use an aware UTC time, then retry.",
             command="backup push",
         )
+    started_monotonic = clock()
     now_was_supplied = now is not None
     outcome = backuplock.take(io, command="backup push", now=started)
     if outcome.problem is not None:
@@ -1934,6 +2049,9 @@ def run_backup_push(
             site_path=site_path,
             started=started,
             now_was_supplied=now_was_supplied,
+            started_monotonic=started_monotonic,
+            clock=clock,
+            environ=environ,
         )
     finally:
         # A nested run is its holder's; the holder releases.
@@ -1949,6 +2067,9 @@ def _backup_push_body(
     site_path: PathLike,
     started: datetime,
     now_was_supplied: bool,
+    started_monotonic: float,
+    clock: Callable[[], float],
+    environ: Mapping[str, str],
 ) -> int:
     prerequisites = _push_preconditions(
         io, site_path=site_path, rendered_dir=rendered_dir
@@ -1987,6 +2108,18 @@ def _backup_push_body(
     if not push_result.ok or stats is None:
         return 1
 
+    check_result, checked = _push_check_stage(
+        io,
+        config,
+        local_set=local_set,
+        remote_label=f"{label}{backupset.PARTIAL_SUFFIX}",
+        record_text=record_text,
+        verify_all=verify_all,
+    )
+    print_stage(check_result)
+    if not check_result.ok:
+        return 1
+
     remote_partial = _push_remote_path(
         config, f"{label}{backupset.PARTIAL_SUFFIX}"
     )
@@ -2002,29 +2135,6 @@ def _backup_push_body(
     if not finalize.ok:
         return 1
 
-    prune_result, pruned = _push_prune_stage(
-        io,
-        config,
-        snapshots=snapshots,
-        now=started,
-        current_label=label,
-    )
-    print_stage(prune_result)
-    if not prune_result.ok:
-        return 1
-
-    check_result, checked = _push_check_stage(
-        io,
-        config,
-        local_set=local_set,
-        remote_label=label,
-        record_text=record_text,
-        verify_all=verify_all,
-    )
-    print_stage(check_result)
-    if not check_result.ok:
-        return 1
-
     finished = started if now_was_supplied else datetime.now(UTC)
     audit_result = _push_audit_stage(
         io,
@@ -2036,8 +2146,26 @@ def _backup_push_body(
         finished=finished,
         stats=stats,
         checked=checked,
-        pruned=pruned,
         verify_all=verify_all,
     )
     print_stage(audit_result)
-    return int(not audit_result.ok)
+    if not audit_result.ok:
+        return 1
+
+    deadline = _prune_deadline(
+        io, started_monotonic=started_monotonic, environ=environ
+    )
+    prune_result = _push_prune_stage(
+        io,
+        config,
+        snapshots=snapshots,
+        now=started,
+        current_label=label,
+        deadline=deadline,
+        clock=clock,
+        rendered_dir=rendered_dir,
+        run_id=run_id,
+        now_was_supplied=now_was_supplied,
+    )
+    print_stage(prune_result)
+    return int(not prune_result.ok)

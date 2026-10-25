@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -20,7 +21,16 @@ from gideon.host.images import (
     load_image_lock_text,
 )
 from gideon.host.sysio import Command, PathLike
-from tools.imagebuild.build import SMOKE, BuildPlan, Smoke, build_plan
+from tools.imagebuild.build import (
+    SMOKE,
+    BuildPlan,
+    CacheRecord,
+    Smoke,
+    build_plan,
+    owned_records,
+    parse_usage,
+    prune_filter,
+)
 from tools.imagebuild.cli import main
 from tools.pinwatch.fetch import FetchError, Response
 
@@ -60,6 +70,53 @@ MIRRORED_LOCK_TEXT = (
     "  postgres:\n"
     "    source: docker.io/library/example:18\n"
     f"    digest: {BUILT_DIGEST}\n"
+)
+
+
+# Fictitious cache records, with descendants listed before their registry pulls.
+USAGE_TEXT = "\n".join(
+    json.dumps({
+        "CreatedAt": "2001-01-01T00:00:00Z",
+        "Description": description,
+        "ID": letter * 25,
+        "LastUsedAt": "2001-01-02T00:00:00Z",
+        "Mutable": False,
+        "Parents": [parent * 25 for parent in parents] if parents else None,
+        "Reclaimable": True,
+        "Shared": True,
+        "Size": size,
+        "Type": "regular",
+        "UsageCount": 2,
+    })
+    for letter, description, parents, size in (
+        ("g", "COPY fictitious wheel", "f", "7MB"),
+        ("f", "mount / from exec fictitious install", "e", "6MB"),
+        ("e", "mount / from exec fictitious compile", "d", "5MB"),
+        ("d", f"pulled from 127.0.0.1:5000/python@{BASE_DIGEST}", "", "4MB"),
+        ("c", "COPY fictitious configuration", "b", "3MB"),
+        ("b", "mount / from exec fictitious packages", "a", "2MB"),
+        ("a", f"pulled from 127.0.0.1:5000/postgres@{BASE_DIGEST}", "", "1MB"),
+        ("h", f"pulled from docker.io/library/python@{BASE_DIGEST}", "", "8MB"),
+        ("i", "mount / from exec fictitious foreign packages", "h", "10.4GB"),
+        ("j", "local source for context", "", "9kB"),
+        ("k", "", "", "10MB"),
+        ("l", "", "k", "11MB"),
+        ("m", "mount / from exec fictitious image-store base", "l", "12MB"),
+        ("n", "COPY fictitious mixed parents", "ci", "13MB"),
+        ("o", "local source for dockerfile", "", "14kB"),
+    )
+) + "\n"
+OWNED_IDS = tuple(letter * 25 for letter in "gfedcba")
+USAGE_ARGV = ("docker", "buildx", "du", "--builder", "default", "--format", "json")
+PRUNE_ARGV = (
+    "docker", "buildx", "prune", "--builder", "default", "--all", "--force",
+    "--filter", f"id=^({'|'.join(OWNED_IDS)})$",
+)
+RECLAIMED = "71.25MB"
+PRUNE_OUTPUT = (
+    "ID\tRECLAIMABLE\tSIZE\tLAST ACCESSED\n"
+    + "".join(f"{record_id}\ttrue\t1.5MB\t3 minutes ago\n" for record_id in OWNED_IDS)
+    + f"Total:\t{RECLAIMED}\n"
 )
 
 
@@ -216,10 +273,12 @@ def build_commands(
     tag = f"{repository}:18-gideon"
     smoke_argv = ("docker", "run", "--rm", "--entrypoint", "pgbackrest", tag, "version")
     return {
-        ("docker", "build", "--provenance=false", "--sbom=false", "--build-arg", f"BASE={repository}@{BASE_DIGEST}", "--build-arg", f"PGBACKREST_VERSION={VERSION}", "--label", "org.opencontainers.image.base.name=docker.io/library/example:18", "--label", f"org.opencontainers.image.base.digest={BASE_DIGEST}", "--label", f"gideon.build-arg.PGBACKREST_VERSION={VERSION}", "--tag", tag, "/repo/images/postgres"): done(("docker", "build")),
+        ("docker", "build", "--builder", "default", "--provenance=false", "--sbom=false", "--build-arg", f"BASE={repository}@{BASE_DIGEST}", "--build-arg", f"PGBACKREST_VERSION={VERSION}", "--label", "org.opencontainers.image.base.name=docker.io/library/example:18", "--label", f"org.opencontainers.image.base.digest={BASE_DIGEST}", "--label", f"gideon.build-arg.PGBACKREST_VERSION={VERSION}", "--tag", tag, "/repo/images/postgres"): done(("docker", "build")),
         smoke_argv: smoke or done(smoke_argv, stdout=f"pgBackRest {VERSION.split('-', 1)[0]}\n"),
         ("docker", "push", tag): done(("docker", "push", tag)),
         ("docker", "image", "inspect", "--format", "{{json .RepoDigests}}", tag): done(("docker", "image", "inspect"), stdout=json.dumps([f"{repository}@{digest}"])),
+        USAGE_ARGV: done(USAGE_ARGV, stdout=USAGE_TEXT),
+        PRUNE_ARGV: done(PRUNE_ARGV, stdout=PRUNE_OUTPUT),
     }
 
 
@@ -281,6 +340,20 @@ class BuildPlans(unittest.TestCase):
             next(iter(build_commands())),
         )
         self.assertEqual(plan.smoke, Smoke(("pgbackrest", "version"), ("PGBACKREST_VERSION",)))
+        self.assertEqual(plan.usage_argv, USAGE_ARGV)
+        self.assertEqual(plan.prune_argv, PRUNE_ARGV[:-1])
+        self.assertEqual(plan.owner, "pulled from 127.0.0.1:5000/")
+
+    def test_cache_owner_follows_destination_registry_prefix(self) -> None:
+        result = load_image_lock_text(LOCK_TEXT)
+        assert result.lock is not None
+        pin = result.lock.images[0]
+        assert isinstance(pin, BuiltImagePin)
+        plan = build_plan(pin, RegistryTarget("https", "registry.example", "fictitious/"), REPO)
+        self.assertEqual(plan.owner, "pulled from registry.example/fictitious/")
+        records = parse_usage(USAGE_TEXT.replace("127.0.0.1:5000/", "registry.example/fictitious/"))
+        self.assertEqual(owned_records(records, plan.owner), OWNED_IDS)
+        self.assertEqual(owned_records(parse_usage(USAGE_TEXT), plan.owner), ())
 
     def test_gideon_smoke_imports_direct_packages_and_reports_all_versions(self) -> None:
         smoke = SMOKE["gideon"]
@@ -378,6 +451,65 @@ PROXY = {
 }
 
 
+class CacheOwnership(unittest.TestCase):
+    """Cache attribution uses registry pulls and wholly owned ancestry."""
+
+    def test_usage_preserves_record_fields_and_skips_blank_lines(self) -> None:
+        records = parse_usage("\n \n" + USAGE_TEXT + "\n")
+        source = [json.loads(line) for line in USAGE_TEXT.splitlines()]
+        self.assertEqual(len(records), len(source))
+        for record, item in zip(records, source, strict=True):
+            with self.subTest(record=record.id):
+                self.assertEqual(record.id, item["ID"])
+                self.assertEqual(record.description, item["Description"])
+                self.assertEqual(record.size, item["Size"])
+                self.assertEqual(record.parents, tuple(item["Parents"] or ()))
+
+    def test_null_parents_parse_as_no_parents(self) -> None:
+        line = next(line for line in USAGE_TEXT.splitlines() if json.loads(line)["ID"] == "k" * 25)
+        self.assertIsNone(json.loads(line)["Parents"])
+        self.assertEqual(parse_usage(line), (CacheRecord("k" * 25, "", (), "10MB"),))
+
+    def test_missing_parents_parse_as_no_parents(self) -> None:
+        item = json.loads(USAGE_TEXT.splitlines()[0])
+        del item["Parents"]
+        self.assertEqual(parse_usage(json.dumps(item))[0].parents, ())
+
+    def test_ownership_reaches_fixpoint_and_keeps_listing_order(self) -> None:
+        records = parse_usage(USAGE_TEXT)
+        self.assertEqual(owned_records(records, "pulled from 127.0.0.1:5000/"), OWNED_IDS)
+        self.assertEqual(
+            owned_records(tuple(reversed(records)), "pulled from 127.0.0.1:5000/"),
+            tuple(reversed(OWNED_IDS)),
+        )
+
+    def test_foreign_parentless_anonymous_chains_and_mixed_parents_stay_unowned(self) -> None:
+        records = parse_usage(USAGE_TEXT)
+        owned = owned_records(records, "pulled from 127.0.0.1:5000/")
+        for letter in "hijklmno":
+            with self.subTest(record=letter):
+                self.assertNotIn(letter * 25, owned)
+
+    def test_filter_is_anchored_and_matches_only_owned_ids(self) -> None:
+        value = prune_filter(OWNED_IDS)
+        self.assertEqual(value, PRUNE_ARGV[-1])
+        expression = re.compile(value.removeprefix("id="))
+        for record in parse_usage(USAGE_TEXT):
+            with self.subTest(record=record.id):
+                self.assertEqual(expression.search(record.id) is not None, record.id in OWNED_IDS)
+        self.assertIsNone(expression.search("z" + OWNED_IDS[0]))
+        self.assertIsNone(expression.search(OWNED_IDS[0] + "z"))
+
+    def test_empty_filter_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            prune_filter(())
+
+    def test_malformed_usage_is_refused(self) -> None:
+        for text in ("not json", "[]", "null", '{"Description": "fictitious"}'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                parse_usage(text)
+
+
 class ProxyPlans(unittest.TestCase):
 
     def test_proxy_reaches_the_build_by_environment_never_argv(self) -> None:
@@ -407,6 +539,9 @@ class BuildTool(unittest.TestCase):
         code, out, err = run_tool(host)
         self.assertEqual((code, err), (0, ""), out)
         self.assertIn("postgres: built — 127.0.0.1:5000/postgres@" + PUSHED_DIGEST, out)
+        prune_row = f"postgres: pruned — {RECLAIMED} reclaimed from {len(OWNED_IDS)} of {len(OWNED_IDS)} records"
+        self.assertIn(prune_row, out)
+        self.assertLess(out.index(prune_row), out.index("postgres: built"))
         self.assertEqual(
             [call[0] for call in host.calls],
             [
@@ -415,6 +550,12 @@ class BuildTool(unittest.TestCase):
             ],
         )
         self.assertEqual(host.calls[-1][2], REPO)
+        for argv, _, _ in host.calls:
+            if argv[:2] == ("docker", "build") or argv[:2] == ("docker", "buildx"):
+                with self.subTest(argv=argv):
+                    self.assertEqual(argv[argv.index("--builder") + 1], "default")
+            if argv[:3] == ("docker", "buildx", "prune"):
+                self.assertEqual(argv, PRUNE_ARGV)
         lock = load_image_lock_text(host.files[LOCK_PATH]).lock
         assert lock is not None
         pin = lock.images[0]
@@ -424,6 +565,109 @@ class BuildTool(unittest.TestCase):
             pin.inputs_digest,
             compute_inputs_digest(BASE_DIGEST, {"PGBACKREST_VERSION": VERSION}, DOCKERFILE.encode()),
         )
+
+    def test_prune_shortfall_reports_removed_and_named_counts(self) -> None:
+        commands = build_commands()
+        output = PRUNE_OUTPUT.replace(f"{OWNED_IDS[-1]}\ttrue\t1.5MB\t3 minutes ago\n", "")
+        commands[PRUNE_ARGV] = done(PRUNE_ARGV, stdout=output)
+        host = FakeHost(commands, files=files())
+        code, out, err = run_tool(host)
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn(
+            f"postgres: pruned — {RECLAIMED} reclaimed from {len(OWNED_IDS) - 1} of {len(OWNED_IDS)} records",
+            out,
+        )
+
+    def test_prune_without_total_reports_unreported_size(self) -> None:
+        commands = build_commands()
+        commands[PRUNE_ARGV] = done(PRUNE_ARGV, stdout=PRUNE_OUTPUT.rsplit("Total:", 1)[0])
+        host = FakeHost(commands, files=files())
+        code, out, err = run_tool(host)
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn(
+            f"postgres: pruned — unreported reclaimed from {len(OWNED_IDS)} of {len(OWNED_IDS)} records",
+            out,
+        )
+
+    def test_no_owned_records_skips_prune_and_still_records_digest(self) -> None:
+        commands = build_commands()
+        usage = "\n".join(
+            line for line in USAGE_TEXT.splitlines() if json.loads(line)["ID"] not in OWNED_IDS
+        )
+        commands[USAGE_ARGV] = done(USAGE_ARGV, stdout=usage)
+        host = FakeHost(commands, files=files())
+        code, out, err = run_tool(host)
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("postgres: pruned — nothing to prune", out)
+        self.assertEqual(
+            [call[0] for call in host.calls],
+            [*(argv for argv in commands if argv != PRUNE_ARGV),
+             (sys.executable, "tests/regenerate_render_fixtures.py")],
+        )
+        lock = load_image_lock_text(host.files[LOCK_PATH]).lock
+        assert lock is not None
+        self.assertEqual(lock.images[0].digest, PUSHED_DIGEST)
+
+    def test_cache_failure_still_records_digest_regenerates_fixtures_and_prints_built(self) -> None:
+        cases = (
+            (
+                PRUNE_ARGV,
+                done(PRUNE_ARGV, 1, stdout=PRUNE_OUTPUT, stderr="fictitious prune failure"),
+                "Docker buildx prune failed: fictitious prune failure",
+            ),
+            (
+                USAGE_ARGV,
+                done(USAGE_ARGV, 1, stdout=USAGE_TEXT, stderr="fictitious usage failure"),
+                "Docker buildx du failed: fictitious usage failure",
+            ),
+            (
+                USAGE_ARGV,
+                done(USAGE_ARGV, 127, stderr="fictitious unavailable buildx"),
+                "Docker buildx du is not available",
+            ),
+            (
+                USAGE_ARGV,
+                done(USAGE_ARGV, 1, stderr="permission denied"),
+                "Docker refused buildx du: permission denied",
+            ),
+            (
+                USAGE_ARGV,
+                done(USAGE_ARGV, stdout="not JSON"),
+                "Docker buildx du returned invalid cache usage",
+            ),
+        )
+        for failed_argv, failure, problem in cases:
+            with self.subTest(problem=problem):
+                commands = build_commands()
+                commands[failed_argv] = failure
+                host = FakeHost(commands, files=files())
+                code, out, err = run_tool(host)
+                self.assertEqual((code, err), (1, ""), out)
+                self.assertIn(f"postgres: prune failed — {problem}", out)
+                self.assertIn(
+                    "Fix: Run sudo docker buildx prune --builder default --all --force --filter '",
+                    out,
+                )
+                if failed_argv == PRUNE_ARGV:
+                    self.assertIn(PRUNE_ARGV[-1], out)
+                self.assertIn("by hand, then re-run image build --check", out)
+                self.assertIn("postgres: built — 127.0.0.1:5000/postgres@" + PUSHED_DIGEST, out)
+                self.assertLess(out.index("postgres: prune failed"), out.index("postgres: built"))
+                expected_calls = [argv for argv in commands if failed_argv == PRUNE_ARGV or argv != PRUNE_ARGV]
+                self.assertEqual(
+                    [call[0] for call in host.calls],
+                    [*expected_calls, (sys.executable, "tests/regenerate_render_fixtures.py")],
+                )
+                self.assertIn(LOCK_PATH, host.writes)
+                lock = load_image_lock_text(host.files[LOCK_PATH]).lock
+                assert lock is not None
+                pin = lock.images[0]
+                assert isinstance(pin, BuiltImagePin)
+                self.assertEqual(pin.digest, PUSHED_DIGEST)
+                self.assertEqual(
+                    pin.inputs_digest,
+                    compute_inputs_digest(BASE_DIGEST, {"PGBACKREST_VERSION": VERSION}, DOCKERFILE.encode()),
+                )
 
     def test_failed_smoke_does_not_push_or_write_lock(self) -> None:
         commands = build_commands(smoke=done(("docker", "run"), 1, stdout="wrong output"))
@@ -435,6 +679,19 @@ class BuildTool(unittest.TestCase):
         self.assertIn("the push did not happen", out)
         self.assertEqual(host.files[LOCK_PATH], original)
         self.assertNotIn(("docker", "push", "127.0.0.1:5000/postgres:18-gideon"), [call[0] for call in host.calls])
+        self.assertFalse(any("buildx" in call[0] for call in host.calls))
+
+    def test_failed_push_does_not_prune_or_write_lock(self) -> None:
+        commands = build_commands()
+        push = ("docker", "push", "127.0.0.1:5000/postgres:18-gideon")
+        commands[push] = done(push, 1, stderr="fictitious registry failure")
+        host = FakeHost(commands, files=files())
+        code, out, err = run_tool(host)
+        self.assertEqual((code, err), (1, ""))
+        self.assertIn("Docker push failed", out)
+        self.assertFalse(any("buildx" in call[0] for call in host.calls))
+        self.assertEqual(host.writes, [])
+        self.assertEqual(host.files[LOCK_PATH], LOCK_TEXT)
 
     def test_sudo_ownership_is_restored_for_lock_and_fixture_files(self) -> None:
         fixture = "/repo/tests/fixtures/render/example/compose.yaml"
@@ -469,6 +726,8 @@ class CheckTool(unittest.TestCase):
         code, out, err = run_tool(host, argv=["postgres", "--to", "127.0.0.1:5000", "--check"])
         self.assertEqual((code, err), (0, ""), out)
         self.assertIn("postgres: ok — 127.0.0.1:5000/postgres@", out)
+        self.assertEqual([call[0] for call in host.calls], list(self.check_commands()))
+        self.assertFalse(any("buildx" in call[0] for call in host.calls))
 
     def test_check_label_mismatch_names_the_label(self) -> None:
         host = FakeHost(
@@ -478,6 +737,7 @@ class CheckTool(unittest.TestCase):
         code, out, err = run_tool(host, argv=["postgres", "--to", "127.0.0.1:5000", "--check"])
         self.assertEqual((code, err), (1, ""))
         self.assertIn("label org.opencontainers.image.base.name", out)
+        self.assertFalse(any("buildx" in call[0] for call in host.calls))
 
 
 class Refusals(unittest.TestCase):
@@ -506,6 +766,12 @@ class Refusals(unittest.TestCase):
         code, out, err = run_tool(host, fetcher, ["postgres", "--to", "127.0.0.1:5000", "--dry-run"])
         self.assertEqual((code, err), (0, ""))
         self.assertIn("postgres: would build — docker build", out)
+        self.assertIn(
+            "postgres: would prune — docker buildx du --builder default --format json, "
+            "then docker buildx prune --builder default --all --force --filter "
+            "id=^(<GIDEON's record ids>)$",
+            out,
+        )
         self.assertEqual(fetcher.calls, [])
         self.assertEqual(host.calls, [])
         self.assertEqual(host.writes, [])

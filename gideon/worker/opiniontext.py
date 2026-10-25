@@ -18,7 +18,10 @@ TEXT_SOURCES: Final = (
 LEGIBILITY_WORD_FLOOR: Final = 100
 # exempt: the share floor is a starting value, corrected by later snapshots' failure counts.
 LEGIBILITY_SHARE_FLOOR: Final = 0.05
+# exempt: the mark floor is a starting value between the measured ciphers' and lists' marks.
+LEGIBILITY_MARK_FLOOR: Final = 0.10
 _LETTER_RUN: Final = re.compile(r"[A-Za-z]+")
+_DIGIT_RUN: Final = re.compile(r"[0-9]+(?P<capital>[A-Z])?")
 FUNCTION_WORDS: Final = frozenset({
     "the", "a", "an", "this", "that", "these", "those",
     "of", "to", "in", "for", "on", "by", "with", "at", "from", "as", "into",
@@ -83,6 +86,15 @@ class Parsed:
     blocks: tuple[Block, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class LegibilityVerdict:
+    """The function-word share, digit-run mark, and resulting failure reason."""
+
+    share: float | None
+    mark: float | None
+    reason: FailureReason | None
+
+
 class OpinionTextFailure(Exception):
     """An opinion text read or check failed with a reason for a document row."""
 
@@ -110,10 +122,36 @@ def legibility(text: str) -> float | None:
     return sum(word.casefold() in FUNCTION_WORDS for word in words) / len(words)
 
 
-def _check_legible(text: str) -> None:
+def legibility_mark(text: str) -> float | None:
+    """Return the share of ASCII digit runs immediately followed by an ASCII capital."""
+
+    runs = list(_DIGIT_RUN.finditer(text))
+    if not runs:
+        return None
+    return sum(run["capital"] is not None for run in runs) / len(runs)
+
+
+def legibility_verdict(text: str) -> LegibilityVerdict:
+    """Judge the function-word share and the digit-run mark together.
+
+    A text of at least the word floor's letter runs is illegible when its
+    share is under the share floor and its mark is at or above the mark
+    floor; a text without a share or without a mark is never failed.
+    """
+
     share = legibility(text)
-    if share is not None and share < LEGIBILITY_SHARE_FLOOR:
-        raise OpinionTextFailure("illegible")
+    mark = legibility_mark(text)
+    reason: FailureReason | None = None
+    if (share is not None and share < LEGIBILITY_SHARE_FLOOR
+            and mark is not None and mark >= LEGIBILITY_MARK_FLOOR):
+        reason = "illegible"
+    return LegibilityVerdict(share, mark, reason)
+
+
+def _check_legible(text: str) -> None:
+    verdict = legibility_verdict(text)
+    if verdict.reason is not None:
+        raise OpinionTextFailure(verdict.reason)
 
 
 def _normalized_segment(

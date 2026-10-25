@@ -74,7 +74,7 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/backup.json":
-    sha256: "f8b1a0abc183da5ff48c0351d2c048dbb00c3bc7c1e260ad3bce5cbdce9d4787"
+    sha256: "a912d5510dc6638897cbdf08f0fd953cfcd11cd261a38d4cc121fa480d6f5eed"
     mode: "0644"
     owners:
       - "grafana"

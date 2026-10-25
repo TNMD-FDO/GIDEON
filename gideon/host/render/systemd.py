@@ -25,6 +25,9 @@ _RETENTION_SWEEP_TIMER_TEMPLATE = "systemd/gideon-retention-sweep.timer.tmpl"
 
 RECONCILE_CALENDAR: Final = "*-*-* 03:00:00"
 BACKUP_CALENDAR: Final = "*-*-* 01:00:00"
+# Exempt operational starting value: six hours for the run, push, and prune
+# to its deadline; the budget backup.py's prune deadline reads.
+BACKUP_TIMEOUT_START_SECONDS: Final = 21600
 VERIFY_ALL_CALENDAR: Final = "Sat *-01,04,07,10-8..14 04:00:00"
 # The box ledger's earliest GIDEON hour: general-smoke's measured nine minutes
 # and guardrails' four hours end near 01:30, the 01:00 backup shares the disk
@@ -118,6 +121,11 @@ class BackupServiceArtifact(_SystemdArtifact):
     relative_path = "systemd/gideon-backup.service"
     template_paths = (_BACKUP_SERVICE_TEMPLATE,)
 
+    def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
+        substitutions = dict(super()._substitutions(inputs))
+        substitutions["timeout_start_seconds"] = str(BACKUP_TIMEOUT_START_SECONDS)
+        return substitutions
+
 
 class BackupTimerArtifact(_SystemdArtifact):
     """Render the persistent daily backup timer."""
@@ -166,6 +174,11 @@ class VerifyServiceArtifact(_SystemdArtifact):
     name = "gideon-backup-verify-service"
     relative_path = "systemd/gideon-backup-verify.service"
     template_paths = (_VERIFY_SERVICE_TEMPLATE,)
+
+    def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
+        substitutions = dict(super()._substitutions(inputs))
+        substitutions["timeout_start_seconds"] = str(BACKUP_TIMEOUT_START_SECONDS)
+        return substitutions
 
 
 class VerifyTimerArtifact(_SystemdArtifact):

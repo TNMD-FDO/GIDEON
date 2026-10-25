@@ -34,6 +34,8 @@ FRONTEND_UPLOADS: Final = "/data/bulk/openwebui"
 REGISTRY_ROOT: Final = "data-registry"
 PUSH_RECORD_NAME: Final = "push.json"
 PARTIAL_SUFFIX: Final = ".partial"
+REMOVING_SUFFIX: Final = ".removing"
+"""A target snapshot's name from prune's rename to removal: never complete, always due."""
 # The system account provision creates for the host services; the one name
 # a restore resolves on the host it runs on.
 SERVICE_ACCOUNT: Final = "gideon"
@@ -53,6 +55,12 @@ def partial_dir(label: str) -> str:
     """Return the in-flight staging directory for *label*."""
 
     return f"{set_dir(label)}{PARTIAL_SUFFIX}"
+
+
+def remote_base_label(name: str) -> str:
+    """Strip the removing suffix, then the partial suffix, from a remote name."""
+
+    return name.removesuffix(REMOVING_SUFFIX).removesuffix(PARTIAL_SUFFIX)
 
 
 class RootKind(StrEnum):

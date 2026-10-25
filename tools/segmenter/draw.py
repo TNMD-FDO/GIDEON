@@ -1,4 +1,4 @@
-"""Draw a frozen segmenter sample from staged court opinions."""
+"""Draw frozen segmenter samples and checked successors from staged court opinions."""
 
 import argparse
 import csv
@@ -11,11 +11,11 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Final, TextIO
+from typing import Final, TextIO, cast
 
 from gideon.evaluation import evalset
 from tools.segmenter import manifest
-from tools.segmenter.manifest import CASE_PATH, IDS_PATH
+from tools.segmenter.manifest import CASE_PATH, IDS_PATH, MIRROR_IDS_PATH
 
 DEFAULT_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 REQUIRED_COURTS: Final[tuple[str, ...]] = ("ca6", "scotus")
@@ -26,6 +26,9 @@ CSV_OPTIONS: Final[Mapping[str, object]] = {
 }
 # The staged dump has opinion text fields measured in megabytes.
 CSV_FIELD_LIMIT: Final[int] = sys.maxsize
+CHECK_WINDOW: Final[int] = 64
+# The stage the frozen draw was taken from, which a successor draw replays.
+FROZEN_LABEL: Final[str] = "corpus-2026-10-07"
 csv.field_size_limit(CSV_FIELD_LIMIT)
 
 
@@ -50,6 +53,17 @@ class Sample:
 
 
 Cell = tuple[str, str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class Successor:
+    """A retired case's replacement and its candidate check coordinates."""
+
+    retired: str
+    sample: Sample
+    fallback: Cell | None
+    rank: int
+    checked: int
 
 
 def _read_csv(path: Path, required: tuple[str, ...], *, stage: str = "stage") -> Iterator[dict[str, str]]:
@@ -200,12 +214,24 @@ def allocate(cells: Mapping[Cell, Sequence[int]], per_court: int) -> dict[Cell, 
     return allocation
 
 
-def _draw(cells: Mapping[Cell, Sequence[int]], allocation: Mapping[Cell, int], seed: int) -> tuple[Sample, ...]:
+def _shuffled(
+    cells: Mapping[Cell, Sequence[int]], allocation: Mapping[Cell, int], seed: int,
+) -> Mapping[Cell, tuple[int, ...]]:
     randomizer = random.Random(seed)
+    orders: dict[Cell, tuple[int, ...]] = {}
+    # Keep the original draw's RNG sequence. Cells allocated no seats follow
+    # that sequence so their fallback candidates cannot move the drawn prefix.
+    for cell in (*sorted(allocation), *sorted(cells.keys() - allocation.keys())):
+        ids = sorted(cells[cell])
+        randomizer.shuffle(ids)
+        orders[cell] = tuple(ids)
+    return orders
+
+
+def _draw(orders: Mapping[Cell, Sequence[int]], allocation: Mapping[Cell, int]) -> tuple[Sample, ...]:
     drawn: list[Sample] = []
     for court, source, decade in sorted(allocation):
-        ids = sorted(cells[(court, source, decade)])
-        randomizer.shuffle(ids)
+        ids = orders[(court, source, decade)]
         drawn.extend(Sample(opinion_id, court, decade, source) for opinion_id in ids[:allocation[(court, source, decade)]])
     return tuple(sorted(drawn, key=lambda sample: (sample.court, sample.text_source, sample.decade, sample.opinion_id)))
 
@@ -214,7 +240,145 @@ def _json_line(value: Mapping[str, object]) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
-def draw(stage_root: Path, *, seed: int, out: Path, per_court: int, root: Path, stdout: TextIO) -> None:
+def _cell(case: Mapping[str, object]) -> Cell:
+    return cast(str, case["court"]), cast(str, case["text_source"]), cast(int, case["decade"])
+
+
+def _cell_row(cell: Cell) -> dict[str, object]:
+    return {"court": cell[0], "text_source": cell[1], "decade": cell[2]}
+
+
+def _load_set(set_root: Path) -> evalset.LoadedSet:
+    result = evalset.load_set(set_root)
+    if result.findings or result.loaded is None:
+        fix = result.findings[0].fix if result.findings else "Restore the eval set, then retry."
+        raise DrawError("retire", "eval set cannot be loaded", fix)
+    return result.loaded
+
+
+def _retired_cases(loaded: evalset.LoadedSet, requested: Sequence[str]) -> dict[str, evalset.Case]:
+    listed = set(loaded.slices.get("segmenter-300", ()))
+    superseded = {case.get("supersedes") for case in loaded.cases_by_id.values()}
+    retired: dict[str, evalset.Case] = {}
+    for case_id in requested:
+        case = loaded.cases_by_id.get(case_id)
+        if (
+            evalset.SEGMENTER_ID_PATTERN.fullmatch(case_id) is None
+            or case_id not in listed or case is None
+            or (case.get("suite"), case.get("category")) != ("build-gates", "segmenter-300")
+            or case_id in superseded or case_id in retired
+        ):
+            location = f" {case_id}" if evalset.SEGMENTER_ID_PATTERN.fullmatch(case_id) else ""
+            raise DrawError(
+                "retire", f"retired id{location} is unlisted, not segmenter, superseded, or repeated",
+                "Name each listed, unsuperseded segmenter case once with --retire, then retry.",
+            )
+        retired[case_id] = case
+    return dict(sorted(retired.items()))
+
+
+def _successors(
+    stage_root: Path, *, orders: Mapping[Cell, tuple[int, ...]], allocation: Mapping[Cell, int],
+    drawn: Sequence[Sample], label: str, per_court: int, loaded: evalset.LoadedSet,
+    retired: Mapping[str, evalset.Case],
+) -> tuple[tuple[Successor, ...], dict[str, int]]:
+    """Replay the draw and check ranked candidate windows with the ingest's parser."""
+
+    listed = set(loaded.slices.get("segmenter-300", ()))
+    frozen = [case for case in loaded.cases_by_file.get(CASE_PATH.as_posix(), ()) if case["id"] in listed]
+    prefix = frozen[:per_court * len(REQUIRED_COURTS)]
+    if (
+        label != FROZEN_LABEL or len(prefix) != len(drawn)
+        or {(*_cell(case), case["opinion_id"]) for case in prefix}
+        != {(sample.court, sample.text_source, sample.decade, sample.opinion_id) for sample in drawn}
+    ):
+        raise DrawError(
+            "replay", "stage does not reproduce the frozen draw",
+            f"Use stage {FROZEN_LABEL} and seed 20261008 as recorded in the build-gates README, then retry.",
+        )
+    try:
+        from gideon.worker.opiniontext import OpinionTextFailure, canonical_text, choose
+    except ImportError as error:
+        raise DrawError(
+            "check", "ingest check cannot be loaded",
+            "Use an interpreter with the pinned worker dependencies installed, then retry.",
+        ) from error
+    used = {case.get("opinion_id") for case in loaded.cases_by_id.values()}
+    candidates = {
+        cell: tuple(opinion_id for opinion_id in ids[allocation.get(cell, 0):] if opinion_id not in used)
+        for cell, ids in orders.items()
+    }
+    outcomes: dict[int, bool] = {}
+    visited = dict.fromkeys(candidates, 0)
+    checked = dict.fromkeys(REQUIRED_COURTS, 0)
+    while True:
+        selected: list[Successor] = []
+        taken: set[int] = set()
+        needed: set[Cell] = set()
+        for case_id, case in retired.items():
+            original = _cell(case)
+            alternatives = sorted(
+                (cell for cell in candidates if cell[:2] == original[:2] and cell != original),
+                key=lambda cell: (abs(cell[2] - original[2]), cell[2]),
+            )
+            for cell in (original, *alternatives):
+                failed = 0
+                for rank, opinion_id in enumerate(candidates.get(cell, ()), 1):
+                    if opinion_id in taken:
+                        continue
+                    if opinion_id not in outcomes:
+                        needed.add(cell)
+                        break
+                    if outcomes[opinion_id]:
+                        selected.append(Successor(
+                            case_id, Sample(opinion_id, cell[0], cell[2], cell[1]),
+                            None if cell == original else cell, rank, failed,
+                        ))
+                        taken.add(opinion_id)
+                        break
+                    failed += 1
+                else:
+                    continue
+                break
+            else:
+                raise DrawError(
+                    "check", f"no passing successor for {case_id}",
+                    "Restore eligible staged opinions for this court and source, then retry.",
+                )
+        if not needed:
+            return tuple(selected), checked
+        windows = {cell: candidates[cell][visited[cell]:visited[cell] + CHECK_WINDOW] for cell in sorted(needed)}
+        for court in REQUIRED_COURTS:
+            window_ids = {opinion_id for cell, ids in windows.items() if cell[0] == court for opinion_id in ids}
+            if not window_ids:
+                continue
+            found: set[int] = set()
+            for row in _read_csv(stage_root / court / "opinions.csv", ("id", *SOURCE_COLUMNS), stage="check"):
+                try:
+                    opinion_id = int(row["id"])
+                except ValueError as error:
+                    raise DrawError("check", "candidate id is invalid", "Restore the staged opinions, then retry.") from error
+                if opinion_id not in window_ids:
+                    continue
+                choice = choose(row)
+                if choice is None or opinion_id in found:
+                    raise DrawError("check", "candidate source is missing or repeated", "Restore the staged opinions, then retry.")
+                found.add(opinion_id)
+                checked[court] += 1
+                try:
+                    canonical_text(*choice)
+                except OpinionTextFailure:
+                    outcomes[opinion_id] = False
+                else:
+                    outcomes[opinion_id] = True
+            if found != window_ids:
+                raise DrawError("check", "candidate rows are missing", "Restore the staged opinions, then retry.")
+        for cell, ids in windows.items():
+            visited[cell] += len(ids)
+
+
+def draw(stage_root: Path, *, seed: int, out: Path, per_court: int, root: Path, stdout: TextIO,
+         retire: Sequence[str] = (), set_root: Path | None = None) -> None:
     """Read the staged population and write a content-free sample outside the checkout."""
 
     if per_court <= 0:
@@ -228,7 +392,21 @@ def draw(stage_root: Path, *, seed: int, out: Path, per_court: int, root: Path, 
     label, snapshot, counts = _stage(stage_root)
     cells, skipped, no_cluster = _population(stage_root, counts)
     allocation = allocate(cells, per_court)
-    drawn = _draw(cells, allocation, seed)
+    orders = _shuffled(cells, allocation, seed)
+    drawn = _draw(orders, allocation)
+    if retire:
+        loaded = _load_set(root / evalset.SET_ROOT if set_root is None else set_root)
+        retired = _retired_cases(loaded, retire)
+        successors, checked = _successors(
+            stage_root, orders=orders, allocation=allocation, drawn=drawn, label=label,
+            per_court=per_court, loaded=loaded, retired=retired,
+        )
+        _write_successor_sample(
+            out, seed=seed, label=label, snapshot=snapshot, per_court=per_court,
+            successors=successors, checked=checked,
+            retired=retired, stdout=stdout,
+        )
+        return
     population_rows = [
         {"court": court, "text_source": source, "decade": decade, "count": len(ids)}
         for (court, source, decade), ids in sorted(cells.items())
@@ -263,8 +441,166 @@ def draw(stage_root: Path, *, seed: int, out: Path, per_court: int, root: Path, 
     )
 
 
+def _write_successor_sample(
+    out: Path, *, seed: int, label: str, snapshot: str, per_court: int,
+    successors: Sequence[Successor], checked: Mapping[str, int],
+    retired: Mapping[str, evalset.Case], stdout: TextIO,
+) -> None:
+    header = {
+        "seed": seed, "label": label, "snapshot": snapshot, "per_court": per_court,
+        "mode": "successors", "retired": [
+            {"case_id": item.retired, **_cell_row(_cell(retired[item.retired])),
+             "fallback": None if item.fallback is None else _cell_row(item.fallback)}
+            for item in successors
+        ], "checked": checked,
+    }
+    payload = _json_line(header) + "".join(_json_line({
+        "opinion_id": item.sample.opinion_id, "court": item.sample.court,
+        "decade": item.sample.decade, "text_source": item.sample.text_source,
+        "supersedes": item.retired,
+    }) for item in successors)
+    try:
+        owner = manifest.owner_of(out.parent)
+        manifest.make_directory(out.parent, owner)
+        manifest.write_atomic(out, payload.encode("utf-8"), owner=owner)
+    except OSError as error:
+        raise DrawError("write", "sample cannot be written", "Choose a writable --out path, then retry.") from error
+    for item in successors:
+        court, source, decade = _cell(retired[item.retired])
+        fallback = "" if item.fallback is None else f"; fallback: {item.fallback[0]} {item.fallback[1]} {item.fallback[2]}"
+        print(
+            f"{item.retired}: {court} {source} {decade}{fallback}; opinion: {item.sample.opinion_id}; "
+            f"rank: {item.rank}; checked and failed: {item.checked}", file=stdout,
+        )
+    print(f"successors: {len(successors)}; checked: {sum(checked.values())}", file=stdout)
+
+
+def _case_line(case_id: str, sample: Sample, reviewer: str, on: str, supersedes: str | None = None) -> str:
+    record: dict[str, object] = {
+        "id": case_id, "suite": "build-gates", "category": "segmenter-300", "branch": "legal",
+        "opinion_id": sample.opinion_id, "court": sample.court, "decade": sample.decade,
+        "text_source": sample.text_source, "labels": ["drawn"], "cluster_id": case_id,
+        "review": {"by": reviewer, "on": on}, "notes": "",
+    }
+    if supersedes is not None:
+        record["supersedes"] = supersedes
+    return _json_line(record)
+
+
+def _validated_cell(item: Mapping[str, object]) -> Cell:
+    court, source, decade = item.get("court"), item.get("text_source"), item.get("decade")
+    if (
+        court not in REQUIRED_COURTS or source not in SOURCE_COLUMNS
+        or type(decade) is not int or decade % 10
+    ):
+        raise DrawError("write", "successor cell is invalid", "Re-run the successor draw, then retry.")
+    return cast(str, court), cast(str, source), decade
+
+
+def _write_successors(
+    header: Mapping[str, object], rows: Sequence[object], *, reviewer: str, on: str,
+    set_root: Path, stdout: TextIO,
+) -> None:
+    """Validate replacements and append all three files, restoring replaced bytes on failure."""
+
+    fix = "Re-run the successor draw against this set, then retry."
+    per_court, retired_rows, checked = header.get("per_court"), header.get("retired"), header.get("checked")
+    if (
+        tuple(header) != ("seed", "label", "snapshot", "per_court", "mode", "retired", "checked")
+        or type(header.get("seed")) is not int
+        or not isinstance(header.get("label"), str) or not isinstance(header.get("snapshot"), str)
+        or type(per_court) is not int or per_court <= 0
+        or not isinstance(retired_rows, list) or len(retired_rows) != len(rows)
+        or not isinstance(checked, dict) or set(checked) != set(REQUIRED_COURTS)
+        or any(type(count) is not int or count < 0 for count in checked.values())
+    ):
+        raise DrawError("write", "successor header is invalid", fix)
+    samples: list[Sample] = []
+    requested: list[str] = []
+    for item in rows:
+        if not isinstance(item, dict) or tuple(item) != ("opinion_id", "court", "decade", "text_source", "supersedes"):
+            raise DrawError("write", "successor row is invalid", fix)
+        opinion_id, supersedes = item["opinion_id"], item["supersedes"]
+        if (
+            type(opinion_id) is not int or opinion_id <= 0 or not isinstance(supersedes, str)
+            or evalset.SEGMENTER_ID_PATTERN.fullmatch(supersedes) is None
+        ):
+            raise DrawError("write", "successor opinion or retired id is invalid", fix)
+        court, source, decade = _validated_cell(item)
+        samples.append(Sample(opinion_id, court, decade, source))
+        requested.append(supersedes)
+    if requested != sorted(requested) or len({sample.opinion_id for sample in samples}) != len(samples):
+        raise DrawError("write", "successor rows are repeated or unordered", fix)
+    paths = (set_root / CASE_PATH, set_root / IDS_PATH, set_root / MIRROR_IDS_PATH)
+    try:
+        previous = {path: path.read_bytes() for path in paths}
+    except OSError as error:
+        raise DrawError("write", "successor files cannot be read", "Restore all three frozen sample files, then retry.") from error
+    if any(not raw.endswith(b"\n") for raw in previous.values()):
+        raise DrawError("write", "successor files lack a final newline", "Restore newline-terminated frozen sample files, then retry.")
+    if previous[paths[1]] != previous[paths[2]]:
+        raise DrawError("write", "slice and mirror id lists differ", "Restore the byte-equal slice and mirror lists, then retry.")
+    loaded = _load_set(set_root)
+    retired = _retired_cases(loaded, requested)
+    used = {case.get("opinion_id") for case in loaded.cases_by_id.values()}
+    for case_id, sample, metadata in zip(requested, samples, retired_rows, strict=True):
+        if (
+            not isinstance(metadata, dict)
+            or tuple(metadata) != ("case_id", "court", "text_source", "decade", "fallback")
+            or metadata["case_id"] != case_id
+        ):
+            raise DrawError("write", "retirement record is invalid", fix)
+        original = _cell(retired[case_id])
+        if _validated_cell(metadata) != original:
+            raise DrawError("write", "retired cell differs from the set", fix)
+        fallback = metadata["fallback"]
+        expected = original
+        if fallback is not None:
+            if not isinstance(fallback, dict) or tuple(fallback) != ("court", "text_source", "decade"):
+                raise DrawError("write", "fallback record is invalid", fix)
+            expected = _validated_cell(fallback)
+            if expected[:2] != original[:2] or expected == original:
+                raise DrawError("write", "fallback court, source, or decade is invalid", fix)
+        if (sample.court, sample.text_source, sample.decade) != expected or sample.opinion_id in used:
+            raise DrawError("write", "successor cell differs or opinion is already a case", fix)
+    highest = max(
+        int(cast(str, case["id"]).removeprefix("segmenter-"))
+        for case in loaded.cases_by_file[CASE_PATH.as_posix()]
+        if evalset.SEGMENTER_ID_PATTERN.fullmatch(cast(str, case["id"]))
+    )
+    ids = [f"segmenter-{highest + index:03d}" for index in range(1, len(samples) + 1)]
+    case_bytes = "".join(
+        _case_line(case_id, sample, reviewer, on, supersedes)
+        for case_id, sample, supersedes in zip(ids, samples, requested, strict=True)
+    ).encode("utf-8")
+    ids_bytes = ("\n".join(ids) + "\n").encode("utf-8")
+    payloads = {
+        paths[0]: previous[paths[0]] + case_bytes,
+        paths[1]: previous[paths[1]] + ids_bytes,
+        paths[2]: previous[paths[2]] + ids_bytes,
+    }
+    replaced: list[Path] = []
+    try:
+        for path, payload in payloads.items():
+            # Include this attempt in the restore: an OSError can follow the
+            # replacement itself during write_atomic's final cleanup.
+            replaced.append(path)
+            manifest.write_atomic(path, payload)
+    except OSError as error:
+        restore_failed = False
+        for path in reversed(replaced):
+            try:
+                manifest.write_atomic(path, previous[path])
+            except OSError:
+                restore_failed = True
+        problem = "successor files cannot be restored" if restore_failed else "successor files cannot be written"
+        raise DrawError("write", problem, "Restore all three frozen sample files to their previous bytes, then retry.") from error
+    for name, payload in zip(("cases", "ids", "mirror ids"), payloads.values(), strict=True):
+        print(f"{name}: {len(payload.splitlines())} lines sha256 {hashlib.sha256(payload).hexdigest()}", file=stdout)
+
+
 def write(sample_path: Path, *, reviewer: str, on: str, set_root: Path, stdout: TextIO) -> None:
-    """Append the frozen case lines and their one id list from a drawn sample."""
+    """Write a plain sample or append successor cases and their mirrored id lists."""
 
     if evalset.ROLE_PATTERN.fullmatch(reviewer) is None or not evalset.valid_iso_date(on):
         raise DrawError("write", "review stamp is invalid", "Provide a role id and ISO date, then retry.")
@@ -276,6 +612,9 @@ def write(sample_path: Path, *, reviewer: str, on: str, set_root: Path, stdout: 
     if not documents or not isinstance(documents[0], dict) or len(documents) < 2:
         raise DrawError("write", "sample is incomplete", "Provide a drawn sample file, then retry.")
     header = documents[0]
+    if header.get("mode") == "successors":
+        _write_successors(header, documents[1:], reviewer=reviewer, on=on, set_root=set_root, stdout=stdout)
+        return
     per_court = header.get("per_court")
     if type(per_court) is not int or per_court <= 0 or set(header.get("skipped_no_text", {})) != set(REQUIRED_COURTS):
         raise DrawError("write", "sample header is invalid", "Re-run the draw, then retry.")
@@ -303,12 +642,7 @@ def write(sample_path: Path, *, reviewer: str, on: str, set_root: Path, stdout: 
     for ordinal, sample in enumerate(samples, 1):
         case_id = f"segmenter-{ordinal:03d}"
         ids.append(case_id)
-        cases.append(_json_line({
-            "id": case_id, "suite": "build-gates", "category": "segmenter-300", "branch": "legal",
-            "opinion_id": sample.opinion_id, "court": sample.court, "decade": sample.decade,
-            "text_source": sample.text_source, "labels": ["drawn"], "cluster_id": case_id,
-            "review": {"by": reviewer, "on": on}, "notes": "",
-        }))
+        cases.append(_case_line(case_id, sample, reviewer, on))
     case_bytes = "".join(cases).encode("utf-8")
     ids_bytes = ("\n".join(ids) + "\n").encode("utf-8")
     case_existed = case_path.exists()
@@ -338,6 +672,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--reviewer")
     parser.add_argument("--on")
     parser.add_argument("--set", dest="set_root", type=Path)
+    parser.add_argument("--retire", action="append", default=[])
     return parser
 
 
@@ -355,12 +690,15 @@ def main(argv: Sequence[str] | None = None, *, root: Path | None = None,
     try:
         if args.write is None:
             if (args.stage_root is None or args.seed is None or args.out is None
-                or args.reviewer is not None or args.on is not None or args.set_root is not None):
-                raise DrawError("draw", "draw arguments are incomplete", "Provide a stage root, --seed, and --out.")
-            draw(args.stage_root, seed=args.seed, out=args.out, per_court=args.per_court, root=checkout, stdout=output)
+                or args.reviewer is not None or args.on is not None
+                or (args.set_root is not None and not args.retire)):
+                raise DrawError("draw", "draw arguments are incomplete", "Provide a stage root, --seed, and --out; use --set only with --retire.")
+            draw(args.stage_root, seed=args.seed, out=args.out, per_court=args.per_court,
+                 root=checkout, stdout=output, retire=args.retire, set_root=args.set_root)
         else:
-            if args.stage_root is not None or args.seed is not None or args.out is not None or args.reviewer is None or args.on is None:
-                raise DrawError("write", "write arguments are incomplete", "Provide --write, --reviewer, and --on.")
+            if (args.stage_root is not None or args.seed is not None or args.out is not None
+                or args.reviewer is None or args.on is None or args.retire):
+                raise DrawError("write", "write arguments are incomplete", "Provide --write, --reviewer, and --on; use --retire only on the draw side.")
             write(args.write, reviewer=args.reviewer, on=args.on,
                   set_root=args.set_root if args.set_root is not None else checkout / evalset.SET_ROOT,
                   stdout=output)
@@ -368,7 +706,7 @@ def main(argv: Sequence[str] | None = None, *, root: Path | None = None,
         print(f"{error.stage}: refused — {error.problem}. Fix: {error.fix}", file=errors)
         return 1
     except Exception as error:  # noqa: BLE001 - command boundary keeps staged text out of diagnostics
-        print(f"segmenter draw: internal error ({type(error).__name__})", file=errors)
+        print(f"segmenter draw: internal error ({type(error).__name__}). Fix: Repair the draw inputs or tool, then retry.", file=errors)
         return 1
     return 0
 

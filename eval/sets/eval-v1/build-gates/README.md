@@ -120,6 +120,9 @@ Case lines are ordered by court, text source, decade, and opinion id.
 
 The seed is `20261008`, 150 per court, over stage `corpus-2026-10-07`, snapshot `caselaw-2026-09-30`. Rows with no text column: ca6 6, scotus 2; opinions with no dated cluster: ca6 0, scotus 0. Each cell is the staged opinions, then the drawn cases, as `population / drawn`; a blank cell is an empty stratum.
 
+The tables are the draw as run. A case retired since is recorded under
+"Retirements" below with its successor, and the active cases stay 300.
+
 **ca6**
 
 | Decade | `xml_harvard` | `html_lawbox` | `html` | `plain_text` |
@@ -274,6 +277,8 @@ The labels follow these conventions, so the set stays consistent:
 ```text
 sudo python3 -B -m tools.segmenter.draw <stage-root> --seed <seed> --out <sample-file>
 python3 -m tools.segmenter.draw --write <sample-file> --reviewer <role-id> --on <date>
+sudo .venv/bin/python -B -m tools.segmenter.draw <stage-root> --seed <seed> --out <successor-file> --retire <case-id> [--retire <case-id> ...]
+python3 -m tools.segmenter.draw --write <successor-file> --reviewer <role-id> --on <date>
 sudo python3 -B -m tools.segmenter.draft --out <sheets-dir>
 python3 -m tools.segmenter.intake <manifest> <sheets-dir> --signer <role-id> --on <date> [--case <id> ...]
 ```
@@ -283,8 +288,37 @@ python3 -m tools.segmenter.intake <manifest> <sheets-dir> --signer <role-id> --o
 `tests/test_segmenter_set.py` pins committed case, id-list, and label bytes by
 line count and SHA-256 prefix (`PINNED_PREFIXES`). A case or label line is never
 edited. Correct a case with a new case line whose `supersedes` names the old id,
-and a new label line for the new id; keep the old pair unchanged. The id list
-changes only by append.
+and a new label line for the new id; keep the old pair unchanged. The id lists
+change only by append.
+
+A retired case's successor is the next opinion in its cell's seeded order that
+is no case's, active or retired, and that the ingest's legibility check
+accepts. The successor form of the draw replays the draw over the same stage
+and seed, refusing when the replay differs from the first 300 case lines, and
+walks the cell's shuffled ids past the drawn prefix. A cell with no such
+opinion falls back to the same court and text source at the nearest decade
+that has one, the earlier on a tie. Its `--write` appends the successor case
+lines, `slices/segmenter-300/sample.ids`, and its `build-gates` mirror
+together, the new ids continuing the series. The successor form runs the
+ingest's own parser, so it runs under the checkout's development interpreter,
+`.venv/bin/python`, which carries the parser's dependencies.
+
+## Retirements
+
+Each row is a retired case, its successor, and the successor's cell. The six
+retired cases held no readable opinion: a glyph cipher, one also a two-up
+booklet, or a scraped error page. The Supreme Court's 2010s `html` cell held
+one staged opinion, the retired case itself, so its successor came from the
+nearest decade.
+
+| Retired | Successor | Opinion | Court | Source | Decade | Why |
+|---|---|---:|---|---|---|---|
+| `segmenter-077` | `segmenter-301` | 2977285 | ca6 | `plain_text` | 2000s | cipher |
+| `segmenter-078` | `segmenter-302` | 2971020 | ca6 | `plain_text` | 2000s | cipher |
+| `segmenter-079` | `segmenter-303` | 2971183 | ca6 | `plain_text` | 2000s | cipher |
+| `segmenter-080` | `segmenter-304` | 2978260 | ca6 | `plain_text` | 2000s | cipher, two-up booklet |
+| `segmenter-081` | `segmenter-305` | 2969299 | ca6 | `plain_text` | 2000s | cipher |
+| `segmenter-188` | `segmenter-306` | 139875 | scotus | `html` | 2000s | error page; fallback from 2010s |
 
 # The `count-gates` cases
 

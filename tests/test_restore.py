@@ -1864,13 +1864,21 @@ class RestoreContracts(RenderedRestoreCase):
 
     def test_target_select_row_names_the_boundary_and_newer_unfinished_snapshots(self) -> None:
         boundary = manifest().archive_through.isoformat()
+        removing_names = (
+            "20260902T150000Z.removing",
+            "20260902T160000Z.partial.removing",
+            "pre-example.removing",
+        )
+        removing_listing = "".join(f"{name}\t1\n" for name in removing_names)
         listings = {
             "unfinished": (
                 f"{REMOTE_SNAPSHOT}\t1\n20260902T130000Z\t0\n"
                 "20260902T140000Z.partial\t1\n20260901T120000Z.partial\t0\n"
             ),
             "complete": f"{REMOTE_SNAPSHOT}\t1\n",
+            "removing": f"{REMOTE_SNAPSHOT}\t1\n" + removing_listing,
         }
+        listings["mixed"] = listings["unfinished"] + removing_listing
         for name, listing in listings.items():
             with self.subTest(listing=name):
                 fake = make_host(
@@ -1893,12 +1901,14 @@ class RestoreContracts(RenderedRestoreCase):
                     f"source=target; snapshot={REMOTE_SNAPSHOT}; set=chosen after fetch; "
                     f"at=latest; archive_through={boundary}"
                 )
-                if name == "unfinished":
+                if name in {"unfinished", "mixed"}:
                     expected += (
                         "; 2 newer unfinished snapshot(s): "
                         "20260902T130000Z, 20260902T140000Z.partial"
                     )
                 self.assertTrue(row.endswith(expected), row)
+                for removing_name in removing_names:
+                    self.assertNotIn(removing_name, row)
 
     def test_target_select_runs_before_pre_restore_and_never_takes_its_push(self) -> None:
         fake = make_host(

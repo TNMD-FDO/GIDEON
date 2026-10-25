@@ -40,10 +40,16 @@ pull request: `git fetch origin && git checkout pin-watch/<pin id>`):
    digest the registry does not hold yet.
 2. `sudo python3 -m tools.imagebuild postgres --to 127.0.0.1:5000` — probes the
    build's egress, builds from the mirrored base by digest, runs the smoke
-   check (`pgbackrest version`), pushes, records `digest` and `inputs_digest`
-   in `images.lock`, and regenerates `tests/fixtures/render/`. Files it writes
+   check (`pgbackrest version`), pushes, then prunes GIDEON's own records from
+   the shared build cache: the base pulls from the release registry and the
+   steps built on them, by one filter over their ids, never a bare prune,
+   since the cache is shared with the box's other tenant and each project
+   removes only its own. It then records `digest` and `inputs_digest`
+   in `images.lock` and regenerates `tests/fixtures/render/`. Files it writes
    stay owned by you (ownership is restored after `sudo`). A failed smoke
-   check pushes nothing and leaves the lock untouched.
+   check pushes nothing and leaves the lock untouched. Every build after a
+   prune is cold: the base comes from the loopback registry, apt and pip
+   through the `image-build` egress group (§4).
 3. `sudo python3 -m tools.imagebuild postgres --to 127.0.0.1:5000 --check` — proves
    the registry's image against the lock: digest present, labels equal the
    lock's inputs, smoke check passes. It pulls, so it needs the Docker access the
@@ -113,6 +119,21 @@ once, one pull request each. Complete them with one build:
   meanings for the service image and its built digest.
 - `opensearch/base: present | mirrored` and `opensearch: present` have the same
   meanings for the server image and its built digest.
+- `postgres: pruned — <size> reclaimed from <n> of <m> records` — the cache
+  removed after the push. Fewer pruned than named means a build running at
+  that moment held the rest, which the next build's prune takes.
+- `postgres: pruned — nothing to prune` — no owned cache records were found;
+  no prune command ran. A base whose layers the daemon's image store already
+  held enters the cache without a `pulled from` description, so its layers and
+  the steps above them are not GIDEON's by the tool's rule and stay; the
+  `postgres` and `opensearch` builds can print this row. Those records are
+  shared with the images the box keeps, so pruning them would free little.
+- `postgres: prune failed — … Fix: Run sudo docker buildx prune --builder default --all --force --filter … by hand`
+  — the lock and fixtures are still written and the `built` row still prints,
+  but the run exits 1. Run the printed command, then re-run image build with
+  `--check`. Its `--all` reaches only the named ids and lets records shared
+  with the image store go. The `gideon` and `opensearch` prune rows have the
+  same meanings.
 - `postgres: failed — … Fix: Build and push it with …` or the same row for
   `opensearch` — build as above, or,
   after a `/data/registry` loss, restore the registry from the backup set
@@ -142,7 +163,8 @@ the image history and cache.
 
 The tool needs Docker: run it with `sudo` (it restores ownership of the files
 it writes to you) or as a member of the docker group. Nothing it does needs
-root otherwise.
+root otherwise. The prune needs the same Docker access as the build and
+touches no record of another project's.
 
 ## 6. A Procrastinate bump
 

@@ -22,13 +22,30 @@ FICTIONAL_OPINION = (
     "from the cabinet. The parties may address that question on remand."
 )
 
+FICTIONAL_ORDERS = "\n".join(
+    f"Docket 24-{1000 + index}. Elara Finch v. Beryl Vale. Certiorari denied."
+    for index in range(20)
+)
+FICTIONAL_CITES = "; ".join(
+    f"{700 + index} Fict. App. Rep. {100 + index}, {200 + index} ({1980 + index})"
+    for index in range(40)
+)
+FICTIONAL_HEADMATTER = (
+    "Fictional Supreme Court\nElara Finch v. Beryl Vale\nOctober 12, 2099\n"
+    + "\n".join(
+        f"Docket 24-{1000 + index}. Rowan Lark, Senior Counsel, Petitioner. "
+        "Briar Wren, Deputy Counsel, Respondent."
+        for index in range(12)
+    )
+)
+
 
 def cipher_text(text: str) -> str:
-    """Shift ASCII letters three places within each alphabet and remove digits."""
+    """Model the glyph cipher observed in ca6 plain_text with a fixed code-point offset."""
 
     return text.translate(str.maketrans(
         ascii_lowercase + ascii_uppercase,
-        ascii_lowercase[3:] + ascii_lowercase[:3] + ascii_uppercase[3:] + ascii_uppercase[:3],
+        "".join(chr(ord(letter) - 29) for letter in ascii_lowercase + ascii_uppercase),
         digits,
     ))
 
@@ -282,16 +299,39 @@ class OpinionText(unittest.TestCase):
 
 
 class Legibility(unittest.TestCase):
+    def assert_low_share_passes(self, text: str) -> None:
+        self.assertGreaterEqual(len(re.findall(r"[A-Za-z]+", text)),
+                                opiniontext.LEGIBILITY_WORD_FLOOR)
+        share = opiniontext.legibility(text)
+        self.assertIsNotNone(share)
+        assert share is not None
+        self.assertLess(share, opiniontext.LEGIBILITY_SHARE_FLOOR)
+        mark = opiniontext.legibility_mark(text)
+        if mark is not None:
+            self.assertLess(mark, opiniontext.LEGIBILITY_MARK_FLOOR)
+        for column in opiniontext.TEXT_SOURCES:
+            with self.subTest(column=column):
+                parsed = opiniontext.canonical_text(column, _source(column, text))
+                expected = text if column == "plain_text" else " ".join(text.split())
+                self.assertEqual(parsed.text, unicodedata.normalize("NFC", expected))
+
+    def test_cipher_uses_one_code_point_offset_and_drops_original_digits(self) -> None:
+        self.assertEqual(cipher_text("the The MNVW xyz 0123456789"), "WKH 7KH 019: [\\] ")
+
     def test_plain_opinion_passes_and_its_cipher_fails_in_every_source(self) -> None:
         cipher = cipher_text(FICTIONAL_OPINION)
-        self.assertEqual(
-            len(re.findall(r"[A-Za-z]+", cipher)),
-            len(re.findall(r"[A-Za-z]+", FICTIONAL_OPINION)),
-        )
         self.assertGreaterEqual(len(re.findall(r"[A-Za-z]+", cipher)),
                                 opiniontext.LEGIBILITY_WORD_FLOOR)
         self.assertNotEqual(cipher, FICTIONAL_OPINION)
-        self.assertNotRegex(cipher, r"[0-9]")
+        self.assertRegex(cipher, r"[0-9]+")
+        mark = opiniontext.legibility_mark(cipher)
+        self.assertIsNotNone(mark)
+        assert mark is not None
+        self.assertGreaterEqual(mark, opiniontext.LEGIBILITY_MARK_FLOOR)
+        cipher_share = opiniontext.legibility(cipher)
+        self.assertIsNotNone(cipher_share)
+        assert cipher_share is not None
+        self.assertLess(cipher_share, opiniontext.LEGIBILITY_SHARE_FLOOR)
         for column in opiniontext.TEXT_SOURCES:
             with self.subTest(column=column):
                 parsed = opiniontext.canonical_text(column, _source(column, FICTIONAL_OPINION))
@@ -303,6 +343,81 @@ class Legibility(unittest.TestCase):
                 with self.assertRaises(opiniontext.OpinionTextFailure) as raised:
                     opiniontext.canonical_text(column, _source(column, cipher))
                 self.assertEqual(raised.exception.reason, "illegible")
+
+    def test_fictitious_lists_pass_in_every_source(self) -> None:
+        for name, text in (
+            ("orders", FICTIONAL_ORDERS),
+            ("cites", FICTIONAL_CITES),
+            ("headmatter", FICTIONAL_HEADMATTER),
+        ):
+            with self.subTest(name=name):
+                self.assert_low_share_passes(text)
+
+    def test_list_with_a_few_digit_before_capital_forms_passes(self) -> None:
+        text = FICTIONAL_ORDERS + "\n12A345. Motion denied. 2255A. Application dismissed."
+        mark = opiniontext.legibility_mark(text)
+        self.assertIsNotNone(mark)
+        assert mark is not None
+        self.assertGreater(mark, 0)
+        self.assertLess(mark, opiniontext.LEGIBILITY_MARK_FLOOR)
+        self.assert_low_share_passes(text)
+
+    def test_low_share_text_without_digits_passes(self) -> None:
+        text = " ".join(["Elara Finch Beryl Vale Rowan Lark Briar Wren"] * 20)
+        self.assertNotRegex(text, r"[0-9]")
+        self.assertIsNone(opiniontext.legibility_mark(text))
+        self.assert_low_share_passes(text)
+
+    def test_non_english_prose_passes(self) -> None:
+        paragraph = (
+            "Durante esta audiencia ficticia, varios vecinos describieron una biblioteca "
+            "cerrada cuyas ventanas permanecieron cubiertas durante toda aquella noche. "
+            "Ninguna persona entregó permiso para registrar esos muebles privados. "
+            "Nuestro tribunal devuelve este expediente porque las pruebas disponibles "
+            "resultan insuficientes para sostener semejante medida judicial."
+        )
+        self.assert_low_share_passes(" ".join([paragraph] * 4))
+
+    def test_mark_counts_maximal_ascii_digit_runs_and_immediate_ascii_capitals(self) -> None:
+        for text, expected in (
+            ("", None),
+            ("Elara Finch", None),
+            ("１２A ١٢A", None),
+            ("123A", 1.0),
+            ("123A45B", 1.0),
+            ("123A 45b 67 A 89, 90É 12\nA 34", 1 / 7),
+            ("12 34. 56, 78\nA", 0.0),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(opiniontext.legibility_mark(text), expected)
+
+    def test_verdict_fields_for_cipher_list_and_short_text(self) -> None:
+        cipher = cipher_text(FICTIONAL_OPINION)
+        for text, share, mark, reason in (
+            (cipher, opiniontext.legibility(cipher), opiniontext.legibility_mark(cipher),
+             "illegible"),
+            (FICTIONAL_CITES, 0.0, 0.0, None),
+            ("7KH", None, 1.0, None),
+        ):
+            with self.subTest(text=text):
+                verdict = opiniontext.legibility_verdict(text)
+                self.assertEqual((verdict.share, verdict.mark, verdict.reason),
+                                 (share, mark, reason))
+
+    def test_verdict_requires_both_signals_at_their_floors(self) -> None:
+        words = ["Finch"] * opiniontext.LEGIBILITY_WORD_FLOOR
+        at_mark_floor = " ".join(words + ["12A"] + ["34"] * 9)
+        below_mark_floor = at_mark_floor + " 56"
+        at_share_floor = " ".join(
+            ["the"] * 6 + ["Finch"] * 113 + ["12B"],
+        )
+        self.assertEqual(opiniontext.legibility_mark(at_mark_floor),
+                         opiniontext.LEGIBILITY_MARK_FLOOR)
+        self.assertEqual(opiniontext.legibility(at_share_floor),
+                         opiniontext.LEGIBILITY_SHARE_FLOOR)
+        self.assertEqual(opiniontext.legibility_verdict(at_mark_floor).reason, "illegible")
+        self.assertIsNone(opiniontext.legibility_verdict(below_mark_floor).reason)
+        self.assertIsNone(opiniontext.legibility_verdict(at_share_floor).reason)
 
     def test_cipher_below_word_floor_is_unjudged_in_every_source(self) -> None:
         words = re.findall(r"[A-Za-z]+", cipher_text(FICTIONAL_OPINION))

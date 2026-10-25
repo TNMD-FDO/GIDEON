@@ -9,6 +9,6 @@ Type=oneshot
 WorkingDirectory=$checkout
 ExecStart=/usr/bin/python3 -m gideon backup run
 ExecStart=/usr/bin/python3 -m gideon backup push
-TimeoutStartSec=21600
+TimeoutStartSec=$timeout_start_seconds
 StandardOutput=journal
 StandardError=journal

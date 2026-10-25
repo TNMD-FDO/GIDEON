@@ -997,11 +997,12 @@ class OrderAndProvenance(unittest.TestCase):
                 )
             )
             self.assertEqual(research_ids, tuple(f"research-qa-{i:03d}" for i in range(1, 39)))
-            # A drawn segmenter case stays unsigned until its checked label lands.
+            # An active drawn segmenter case stays unsigned until its checked
+            # label lands; a superseded one is neither counted nor unsigned.
             segmenter_ids = frozenset(
                 case["id"]
                 for case in result.loaded.cases_by_file["build-gates/segmenter-300.jsonl"]
-                if isinstance(case["id"], str)
+                if isinstance(case["id"], str) and case["id"] in result.loaded.active_ids
             ) - {label.case_id for label in result.loaded.segmenter_labels}
             self.assertEqual(result.loaded.unsigned_ids, frozenset(research_ids) | segmenter_ids)
 
