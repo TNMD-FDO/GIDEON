@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from gideon.host import backuplock, report, stack
+from gideon.host import backuplock, nogpu, report, stack
 from gideon.host.corpus import artifacts, record, resolve, snapshots
 from gideon.host.corpus.lockfile import (
     LABEL,
@@ -829,6 +829,9 @@ def _record_stage(
                   "docs/runbooks/release-files.md §10 says.")
         else:
             print("Next: commit the new lockfile and companion files.")
+        if nogpu.is_build_box(io):
+            print(f"Next: run {report.command('archive push')} to send the new lockfile "
+                  "and its snapshot to the source archive.")
     return 0
 
 

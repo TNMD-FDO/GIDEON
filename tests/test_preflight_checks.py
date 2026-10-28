@@ -183,6 +183,7 @@ ALLOWLIST = EgressAllowlist(
             (EgressHost("b.example", "https://b.example/"),),
         ),
         EgressGroup("corpus", (EgressHost("c.example", "https://c.example/"),)),
+        EgressGroup("archive", (EgressHost("archive.example", "https://archive.example/"),)),
     ),
 )
 
@@ -601,6 +602,14 @@ class Egress(unittest.TestCase):
         self.check.run(context(host))
         probed = [call for call in host.calls if call[0] == "run"]
         self.assertNotIn(("run", probe_argv("https://c.example/")), probed)
+
+    def test_archive_group_is_not_probed_pre_install(self) -> None:
+        host = FakeHost(commands=self.outcomes())
+        report = self.check.run(context(host))
+        self.assertEqual(report.severity, Severity.PASS, report.detail)
+        probed = [call[1] for call in host.calls if call[0] == "run"]
+        self.assertCountEqual(probed, self.outcomes())
+        self.assertNotIn(probe_argv("https://archive.example/"), probed)
 
     def test_loopback_registry_is_probed_over_http(self) -> None:
         site = make_site(extra="registry: 127.0.0.1:5000\n")

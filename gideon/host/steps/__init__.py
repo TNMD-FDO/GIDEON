@@ -483,7 +483,7 @@ class Step:
     summary: str = ""
     needs_site: bool = False
     gpu_host_only: bool = False
-    # The kvm, registry, and gh-runner roles run only on the declared build box.
+    # The kvm, registry, gh-runner, and archive-tools roles run only on the declared build box.
     build_box_only: bool = False
     requires: tuple[str, ...] = ()
     settings: tuple[BoxWideSetting, ...] = ()
@@ -518,7 +518,7 @@ def _registered_steps() -> tuple[Step, ...]:
         SecretsDirsStep,
     )
     from gideon.host.steps.timezone import TimezoneStep
-    from gideon.host.steps.tools import HostToolsStep
+    from gideon.host.steps.tools import ArchiveToolsStep, HostToolsStep
 
     return (
         PlatformStep(),
@@ -543,6 +543,7 @@ def _registered_steps() -> tuple[Step, ...]:
         KvmStep(),
         RegistryStep(),
         GhRunnerStep(),
+        ArchiveToolsStep(),
     )
 
 

@@ -50,6 +50,11 @@ CORPUS_LOCK = Lock(
     "corpus",
     "Wait for the running corpus cut or install to finish, then retry.",
 )
+ARCHIVE_LOCK = Lock(
+    f"{LOCK_DIR}/archive.lock",
+    "archive push",
+    "Wait for the running archive push to finish, then retry.",
+)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

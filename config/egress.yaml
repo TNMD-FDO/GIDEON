@@ -3,7 +3,7 @@
 # An entry's optional `expect` lists HTTP statuses that count as the host
 # answering, beyond the global rule (2xx/3xx, 401, 404) — e.g. signed-URL
 # CDNs answer 403 to every unsigned probe.
-version: 7
+version: 8
 
 groups:
   host-provisioning:
@@ -111,3 +111,13 @@ groups:
       probe_url: https://github.com/
     - host: release-assets.githubusercontent.com
       probe_url: https://release-assets.githubusercontent.com/
+
+  # The build box's archive push alone probes these before any copy;
+  # preflight never does, since an office has no archive. Live-verified
+  # 2026-10-24 with the preflight wget argv and no proxy: the API answers
+  # 401 and the upload endpoint 404, both counted by the global rule.
+  archive:
+    - host: api.box.com
+      probe_url: https://api.box.com/2.0/
+    - host: upload.box.com
+      probe_url: https://upload.box.com/api/2.0/

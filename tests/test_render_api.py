@@ -30,7 +30,7 @@ from gideon.host.render.command import (
     gather_sources_digest,
     recreate_judgment,
 )
-from gideon.host.render.compose import engine_service, service_names
+from gideon.host.render.compose import service_names
 from gideon.host.render.engine import (
     EMBED_SERVICE_NAME,
     ENGINE_SECRET_NAME,
@@ -38,6 +38,7 @@ from gideon.host.render.engine import (
 )
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_MODEL_ID
 from gideon.host.render.services.api import api_service
+from gideon.host.render.services.generator import engine_service
 from gideon.host.sysio import PathLike
 
 ROOT = Path(__file__).resolve().parent.parent

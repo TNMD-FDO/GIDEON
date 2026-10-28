@@ -6,61 +6,12 @@ from typing import Final
 from gideon.host.images import parse_registry
 from gideon.host.models import GIGABYTE, HardwareProfile
 from gideon.host.render import Artifact, RenderInputs
-from gideon.host.render.engine import ENGINE_READY_SECONDS as ENGINE_READY_SECONDS
 from gideon.host.render.engine import INTEGRATION_NETWORK_NAME
 from gideon.host.render.owui import PERMISSIONS_TEMPLATE
 from gideon.host.render.services import (
     all_service_names,
     applying_services,
     store_services,
-)
-from gideon.host.render.services import (
-    image_pin as image_pin,
-)
-from gideon.host.render.services.generator import (
-    ENGINE_ACCESS_LOG_EXCLUDED_PATHS as ENGINE_ACCESS_LOG_EXCLUDED_PATHS,
-)
-from gideon.host.render.services.generator import (
-    ENGINE_HEALTHCHECK as ENGINE_HEALTHCHECK,
-)
-from gideon.host.render.services.generator import (
-    ENGINE_USAGE_SWITCHES as ENGINE_USAGE_SWITCHES,
-)
-from gideon.host.render.services.generator import (
-    engine_command as engine_command,
-)
-from gideon.host.render.services.generator import (
-    engine_service as engine_service,
-)
-from gideon.host.render.services.generator import (
-    engine_wrapper as engine_wrapper,
-)
-from gideon.host.render.services.grafana import (
-    grafana_environment as grafana_environment,
-)
-from gideon.host.render.services.node_exporter import (
-    BUILD_BOX_UNIT_PATTERN as BUILD_BOX_UNIT_PATTERN,
-)
-from gideon.host.render.services.node_exporter import (
-    UNIT_PATTERN as UNIT_PATTERN,
-)
-from gideon.host.render.services.open_webui import (
-    OWUI_COMMAND as OWUI_COMMAND,
-)
-from gideon.host.render.services.open_webui import (
-    OWUI_ENV_FILE as OWUI_ENV_FILE,
-)
-from gideon.host.render.services.open_webui import (
-    OWUI_HEALTHCHECK as OWUI_HEALTHCHECK,
-)
-from gideon.host.render.services.postgres import (
-    POSTGRES_HEALTHCHECK as POSTGRES_HEALTHCHECK,
-)
-from gideon.host.render.services.postgres import (
-    POSTGRES_SHM_SIZE_BYTES as POSTGRES_SHM_SIZE_BYTES,
-)
-from gideon.host.render.services.searxng import (
-    SEARXNG_HEALTHCHECK as SEARXNG_HEALTHCHECK,
 )
 from gideon.host.render.yamlout import dump
 

@@ -26,7 +26,6 @@ from gideon.host.render.command import (
     recreate_services,
 )
 from gideon.host.render.compose import (
-    SEARXNG_HEALTHCHECK,
     _compose_document,
     service_images,
     service_names,
@@ -52,6 +51,7 @@ from gideon.host.render.searxng import (
     searxng_settings_document,
 )
 from gideon.host.render.services import declared_sources
+from gideon.host.render.services.searxng import SEARXNG_HEALTHCHECK
 from gideon.host.render.worker import WORKER_SERVICE_NAME
 from gideon.host.site import WEB_ENGINE_VALUES, load_site
 

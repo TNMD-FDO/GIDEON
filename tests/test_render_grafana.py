@@ -22,6 +22,7 @@ from typing import Any
 import yaml  # type: ignore[import-untyped]
 from test_render import render_templates
 
+from gideon.host.archive import AUDIT_KIND as ARCHIVE_AUDIT_KIND
 from gideon.host.corpus import record
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import load_image_lock
@@ -35,14 +36,17 @@ from gideon.host.models import (
 )
 from gideon.host.render import ARTIFACTS, RenderInputs, VerbatimArtifact
 from gideon.host.render.api import API_JOB_NAME
-from gideon.host.render.compose import service_blocks
+from gideon.host.render.compose import PROJECT_NAME, service_blocks
 from gideon.host.render.engine import ENGINE_JOB_NAME
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.grafana import (
+    ARCHIVE_PUSH_OVERDUE_SECONDS,
     BACKUP_PUSH_AGE_TITLE,
     BACKUP_SET_AGE_TITLE,
     BACKUP_TEMPLATE,
     CERTIFICATE_DAYS_LEFT_TITLE,
+    CONTAINER_MEMORY_TITLE,
+    CONTAINER_SHARE_TITLE,
     DASHBOARDS_MOUNT,
     DATASOURCES_TEMPLATE,
     DRILL_MAX_GAP_DAYS,
@@ -51,6 +55,7 @@ from gideon.host.render.grafana import (
     FRONT_DOOR_BOARDS,
     GRAFANA_SILENCES_ROUTE,
     GRAFANA_SUB_PATH,
+    HOST_DETAIL_TITLE,
     NIGHTLY_OVERDUE_SECONDS,
     NOTIFICATION_LOG_RETENTION,
     OVERVIEW_TEMPLATE,
@@ -76,7 +81,7 @@ from gideon.host.render.grafana import (
 from gideon.host.render.prometheus import DCGM_JOB_NAME, PrometheusConfigArtifact
 from gideon.host.render.searxng import search_enabled
 from gideon.host.render.services import declared_sources
-from gideon.host.render.systemd import NIGHTLY_SUITES
+from gideon.host.render.systemd import NIGHTLY_SUITES, ArchivePushServiceArtifact
 from gideon.host.render.worker import WORKER_JOB_NAME
 from gideon.host.site import load_site
 from gideon.host.steps.command import INSTALL_HOME
@@ -89,7 +94,8 @@ SECOND = ROOT / "tests/fixtures/site/second-office.yaml"
 FULL_DN = ROOT / "tests/fixtures/site/dn-groups.yaml"
 ESCAPED_DN = ROOT / "tests/fixtures/site/dn-groups-escaping.yaml"
 OVERVIEW_TOP_ROW_HEIGHT = 10
-CONTAINER_MEMORY_HEIGHT = 26
+CONTAINER_MEMORY_HEIGHT = 22
+CONTAINER_SHARE_HEIGHT = 14
 OVERVIEW_HOST_KINDS = ((EXAMPLE, False, True), (SECOND, False, False), (EXAMPLE, True, False))
 
 
@@ -293,7 +299,8 @@ class Overview(unittest.TestCase):
                     self.assertEqual(right, 24)
                     self.assertEqual(len(bottoms), 1)
                     bottom = bottoms.pop()
-                for left, right_panel in combinations(panels, 2):
+                row = next(panel for panel in panels if panel["type"] == "row")
+                for left, right_panel in combinations((*panels, *row["panels"]), 2):
                     a = left["gridPos"]
                     b = right_panel["gridPos"]
                     overlap = (
@@ -303,9 +310,10 @@ class Overview(unittest.TestCase):
                         and b["y"] < a["y"] + a["h"]
                     )
                     self.assertFalse(overlap, (left["title"], right_panel["title"]))
-                row = next(panel for panel in panels if panel["type"] == "row")
-                for panel in row["panels"]:
-                    self.assertEqual(panel["gridPos"]["y"], row["gridPos"]["y"] + 1)
+                self.assertEqual(
+                    min(panel["gridPos"]["y"] for panel in row["panels"]),
+                    row["gridPos"]["y"] + 1,
+                )
 
     def test_no_gpu_start_here_lines_are_a_subsequence_at_the_same_height(self) -> None:
         for site_path in (EXAMPLE, SECOND):
@@ -320,23 +328,17 @@ class Overview(unittest.TestCase):
                 for line in no_gpu_card["options"]["content"].splitlines():
                     self.assertTrue(any(candidate == line for candidate in gpu_lines), line)
 
-    def test_container_memory_legend_shows_last_values_and_hides_foreign_names_only(self) -> None:
+    def test_container_memory_legends_show_last_values_without_overrides(self) -> None:
         dashboard = json.loads(GrafanaOverviewArtifact().emit(inputs()))
-        row = next(panel for panel in dashboard["panels"] if panel["title"] == "Host detail")
-        panel = next(panel for panel in row["panels"] if panel["title"] == "Container memory")
-        self.assertEqual(
-            panel["options"]["legend"],
-            {"placement": "right", "displayMode": "table", "calcs": ["lastNotNull"]},
-        )
-        override = panel["fieldConfig"]["overrides"][1]
-        self.assertEqual(
-            override["matcher"],
-            {"id": "byRegexp", "options": "/^(gideon-ci-|transcribe-|buildx_)/"},
-        )
-        self.assertEqual(
-            override["properties"],
-            [{"id": "custom.hideFrom", "value": {"legend": True, "tooltip": False, "viz": False}}],
-        )
+        row = next(panel for panel in dashboard["panels"] if panel["title"] == HOST_DETAIL_TITLE)
+        panels = {panel["title"]: panel for panel in row["panels"]}
+        for title in (CONTAINER_MEMORY_TITLE, CONTAINER_SHARE_TITLE):
+            with self.subTest(panel=title):
+                self.assertEqual(
+                    panels[title]["options"]["legend"],
+                    {"placement": "right", "displayMode": "table", "calcs": ["lastNotNull"]},
+                )
+                self.assertEqual(panels[title]["fieldConfig"]["overrides"], [])
 
     def test_guardrail_trips_use_whole_counts_from_zero_with_filled_bars(self) -> None:
         dashboard = json.loads(GrafanaOverviewArtifact().emit(inputs()))
@@ -370,14 +372,14 @@ class Overview(unittest.TestCase):
                         PASSING_DRILL_AGE_TITLE,
                         "Last drill result",
                         "Guardrail trips",
-                        "Host detail",
+                        HOST_DETAIL_TITLE,
                     },
                 )
                 self.assertEqual(len(dashboard["panels"]), 11)
                 row = next(panel for panel in dashboard["panels"] if panel["type"] == "row")
                 self.assertEqual(
                     [panel["title"] for panel in row["panels"]],
-                    ["Host load", "Host memory", "Container memory"],
+                    ["Host load", "Host memory", CONTAINER_MEMORY_TITLE, CONTAINER_SHARE_TITLE],
                 )
                 self.assertTrue(
                     all("id" not in panel for panel in (*dashboard["panels"], *row["panels"]))
@@ -393,7 +395,6 @@ class Overview(unittest.TestCase):
                 for board_text in (text, template_text):
                     self.assertIn("$__timeFilter(at)", board_text)
                     self.assertIn("/^result$/", board_text)
-                    self.assertIn("/ limit$/", board_text)
                     self.assertNotIn("$$", board_text)
                 template = json.loads(template_text)
                 expected = {panel["title"]: panel for panel in template["panels"]}
@@ -421,6 +422,21 @@ class Overview(unittest.TestCase):
                         expected[title]["description"] = description.replace(
                             f"${description_name}", str(value // divisor)
                         )
+                expected_cards = {
+                    panel["title"]: panel for panel in expected[HOST_DETAIL_TITLE]["panels"]
+                }
+                rendered_cards = {
+                    panel["title"]: panel for panel in rendered[HOST_DETAIL_TITLE]["panels"]
+                }
+                for title in (CONTAINER_MEMORY_TITLE, CONTAINER_SHARE_TITLE):
+                    for target, filled in zip(
+                        expected_cards[title]["targets"], rendered_cards[title]["targets"], strict=True
+                    ):
+                        self.assertIn("$compose_project", target["expr"])
+                        self.assertEqual(
+                            filled["expr"], target["expr"].replace("$compose_project", PROJECT_NAME)
+                        )
+                        target["expr"] = filled["expr"]
                 self.assertEqual(dashboard, template)
 
     def test_overview_refuses_renamed_panel_or_missing_sentinel(self) -> None:
@@ -432,16 +448,28 @@ class Overview(unittest.TestCase):
             (BACKUP_PUSH_AGE_TITLE, "description", "backup_hours"),
             (FILESYSTEMS_FREE_TITLE, "step", "filesystem_percent"),
             (CERTIFICATE_DAYS_LEFT_TITLE, "description", "certificate_days"),
+            (HOST_DETAIL_TITLE, "title", "compose_project"),
+            (CONTAINER_SHARE_TITLE, "title", "compose_project"),
+            (CONTAINER_MEMORY_TITLE, "expr", "compose_project"),
         ):
             with self.subTest(panel=title, change=change):
                 template = json.loads(site_inputs.templates[OVERVIEW_TEMPLATE])
-                panel = next(panel for panel in template["panels"] if panel["title"] == title)
+                panels = template["panels"]
+                if title in (CONTAINER_MEMORY_TITLE, CONTAINER_SHARE_TITLE):
+                    panels = next(
+                        panel for panel in panels if panel["title"] == HOST_DETAIL_TITLE
+                    )["panels"]
+                panel = next(panel for panel in panels if panel["title"] == title)
                 if change == "title":
                     panel["title"] = "Fictitious renamed card"
                 elif change == "step":
                     panel["fieldConfig"]["defaults"]["thresholds"]["steps"][-1][
                         "value"
                     ] = "fictitious"
+                elif change == "expr":
+                    panel["targets"][0]["expr"] = panel["targets"][0]["expr"].replace(
+                        f"${placeholder}", "fictitious"
+                    )
                 else:
                     panel["description"] = panel["description"].replace(
                         f"${placeholder}", "fictitious"
@@ -795,18 +823,19 @@ class Overview(unittest.TestCase):
     def test_collapsed_row_holds_host_detail_and_grid_positions(self) -> None:
         """A collapsed row saves its children at their absolute open positions."""
 
+        self.assertEqual(CONTAINER_MEMORY_HEIGHT, CONTAINER_SHARE_HEIGHT + 8)
         for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
             with self.subTest(site=site_path.name, no_gpu=no_gpu):
                 site_inputs = inputs(site_path, no_gpu=no_gpu)
                 overview = json.loads(GrafanaOverviewArtifact().emit(site_inputs))
                 row = next(item for item in overview["panels"] if item["type"] == "row")
-                self.assertEqual(row["title"], "Host detail")
+                self.assertEqual(row["title"], HOST_DETAIL_TITLE)
                 self.assertNotIn("$", row["title"])
                 self.assertTrue(row["collapsed"])
                 self.assertEqual(row["gridPos"], {"h": 1, "w": 24, "x": 0, "y": OVERVIEW_TOP_ROW_HEIGHT + 29})
                 self.assertEqual(
                     [panel["title"] for panel in row["panels"]],
-                    ["Host load", "Host memory", "Container memory"],
+                    ["Host load", "Host memory", CONTAINER_MEMORY_TITLE, CONTAINER_SHARE_TITLE],
                 )
                 self.assertEqual(
                     [panel["gridPos"] for panel in row["panels"]],
@@ -814,6 +843,7 @@ class Overview(unittest.TestCase):
                         {"h": 8, "w": 6, "x": 0, "y": OVERVIEW_TOP_ROW_HEIGHT + 30},
                         {"h": 8, "w": 6, "x": 6, "y": OVERVIEW_TOP_ROW_HEIGHT + 30},
                         {"h": CONTAINER_MEMORY_HEIGHT, "w": 12, "x": 12, "y": OVERVIEW_TOP_ROW_HEIGHT + 30},
+                        {"h": CONTAINER_SHARE_HEIGHT, "w": 12, "x": 0, "y": OVERVIEW_TOP_ROW_HEIGHT + 38},
                     ],
                 )
                 for panel in row["panels"]:
@@ -831,26 +861,40 @@ class Overview(unittest.TestCase):
                                     item["gridPos"]["y"] + 1,
                                 )
 
-    def test_container_memory_compares_working_set_with_positive_limits(self) -> None:
-        dashboard = json.loads(GrafanaOverviewArtifact().emit(inputs()))
-        row = next(panel for panel in dashboard["panels"] if panel["title"] == "Host detail")
-        panel = next(panel for panel in row["panels"] if panel["title"] == "Container memory")
-        targets = {target["refId"]: target for target in panel["targets"]}
-        self.assertEqual(set(targets), {"A", "B"})
-        self.assertEqual(
-            targets["A"]["expr"],
-            'sum by (name) (container_memory_working_set_bytes{name!=""})',
-        )
-        self.assertIn('container_spec_memory_limit_bytes{name!=""}', targets["B"]["expr"])
-        self.assertIn("> 0", targets["B"]["expr"])
-        self.assertTrue(targets["B"]["legendFormat"].endswith(" limit"))
-        overrides = panel["fieldConfig"]["overrides"]
-        self.assertEqual(len(overrides), 2)
-        self.assertEqual(overrides[0]["matcher"], {"id": "byRegexp", "options": "/ limit$/"})
-        self.assertEqual(
-            overrides[0]["properties"],
-            [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}],
-        )
+    def test_container_memory_filters_project_usage_and_shares_of_positive_limits(self) -> None:
+        for site_path, no_gpu, build_box in OVERVIEW_HOST_KINDS:
+            with self.subTest(site=site_path.name, no_gpu=no_gpu, build_box=build_box):
+                site_inputs = inputs(site_path, no_gpu=no_gpu, build_box=build_box)
+                dashboard = json.loads(GrafanaOverviewArtifact().emit(site_inputs))
+                row = next(panel for panel in dashboard["panels"] if panel["title"] == HOST_DETAIL_TITLE)
+                panels = {panel["title"]: panel for panel in row["panels"]}
+                usage = panels[CONTAINER_MEMORY_TITLE]
+                share = panels[CONTAINER_SHARE_TITLE]
+                for panel in (usage, share):
+                    self.assertEqual(panel["type"], "timeseries")
+                    self.assertEqual(panel["datasource"], {"type": "prometheus", "uid": "prometheus"})
+                    self.assertEqual(len(panel["targets"]), 1)
+                    self.assertEqual(panel["targets"][0]["refId"], "A")
+                    self.assertEqual(panel["targets"][0]["legendFormat"], "{{name}}")
+                    self.assertNotIn("$compose_project", panel["targets"][0]["expr"])
+                project = f'{{container_label_com_docker_compose_project="{PROJECT_NAME}"}}'
+                registry = '{name="gideon-registry"}'
+                working_set = "container_memory_working_set_bytes"
+                limit = "container_spec_memory_limit_bytes"
+                selected_usage = f"{working_set}{project} or {working_set}{registry}"
+                selected_limit = f"{limit}{project} or {limit}{registry}"
+                usage_expr = usage["targets"][0]["expr"]
+                self.assertEqual(usage_expr, f"sum by (name) ({selected_usage})")
+                self.assertNotIn(limit, usage_expr)
+                self.assertEqual(usage["fieldConfig"]["defaults"]["unit"], "bytes")
+                self.assertEqual(
+                    share["targets"][0]["expr"],
+                    f"{usage_expr} / sum by (name) (({selected_limit}) > 0)",
+                )
+                defaults = share["fieldConfig"]["defaults"]
+                self.assertEqual(defaults["unit"], "percentunit")
+                self.assertEqual(defaults["min"], 0)
+                self.assertEqual(defaults["max"], 1)
 
     def test_trip_panels_use_their_own_boards_and_source_filters(self) -> None:
         overview = json.loads(GrafanaOverviewArtifact().emit(inputs()))
@@ -886,6 +930,46 @@ class Overview(unittest.TestCase):
 
 
 class Alerting(unittest.TestCase):
+    def test_archive_pages_follow_build_box_mode_record_kind_threshold_and_service(self) -> None:
+        service_name = Path(ArchivePushServiceArtifact.relative_path).name
+        archive_uids = {"gideon-archive-push-overdue", "gideon-archive-push-failed"}
+        for site_path, no_gpu, build_box in (
+            (EXAMPLE, False, True), (SECOND, False, True),
+            (EXAMPLE, False, False), (SECOND, False, False), (EXAMPLE, True, False),
+        ):
+            with self.subTest(site=site_path.name, no_gpu=no_gpu, build_box=build_box):
+                document = yaml.safe_load(GrafanaRulesArtifact().emit(
+                    inputs(site_path, no_gpu=no_gpu, build_box=build_box),
+                ))
+                rules = {rule["uid"]: rule for group in document["groups"] for rule in group["rules"]}
+                self.assertEqual(set(rules) & archive_uids, archive_uids if build_box else set())
+                if not build_box:
+                    continue
+                overdue, failed = (rules[uid] for uid in ("gideon-archive-push-overdue", "gideon-archive-push-failed"))
+                self.assertEqual(overdue["title"], "Archive push overdue")
+                self.assertEqual(overdue["condition"], "C")
+                query = overdue["data"][0]["model"]["rawSql"]
+                self.assertEqual(re.findall(r"WHERE kind = '([^']+)'", query), [ARCHIVE_AUDIT_KIND])
+                self.assertEqual(
+                    overdue["data"][-1]["model"]["conditions"][0]["evaluator"]["params"],
+                    [ARCHIVE_PUSH_OVERDUE_SECONDS],
+                )
+                self.assertEqual(overdue["noDataState"], "Alerting")
+                self.assertEqual(overdue["execErrState"], "Alerting")
+                self.assertEqual(failed["title"], "Archive push failed")
+                expression = failed["data"][0]["model"]["expr"]
+                self.assertEqual(
+                    re.findall(r'node_systemd_unit_state\{name="([^"]+)",state="failed"\}', expression),
+                    [service_name],
+                )
+                self.assertEqual(failed["noDataState"], "OK")
+                self.assertEqual(failed["execErrState"], "OK")
+                for rule, group_name in ((overdue, "rows"), (failed, "metrics")):
+                    self.assertEqual(next(group["name"] for group in document["groups"] if rule in group["rules"]), group_name)
+                    self.assertEqual(rule["labels"], {"class": "page"})
+                    self.assertEqual(rule["annotations"]["runbook"], "docs/runbooks/observability.md §4")
+                    self.assertEqual(rule["for"], "0s")
+
     def test_contact_point_uses_each_sites_recipients_and_subject(self) -> None:
         for site_path, no_gpu in (
             (EXAMPLE, False), (SECOND, False), (EXAMPLE, True), (SECOND, True)
@@ -1097,7 +1181,9 @@ class Alerting(unittest.TestCase):
                 rules = {rule["uid"]: rule for group in groups for rule in group["rules"]}
                 # The search probe's rule exists only where SearXNG does (web.search on).
                 search_rule = {"gideon-search-probe-failing"} if search_enabled(site_inputs) else set()
-                expected_host_rule = {"gideon-host-unit-inactive"} if build_box else set()
+                expected_host_rule = {
+                    "gideon-host-unit-inactive", "gideon-archive-push-overdue", "gideon-archive-push-failed",
+                } if build_box else set()
                 self.assertEqual(set(rules), expected_uids | expected_host_rule | search_rule)
                 if search_rule:
                     self.assertIn('probe_success{job="search"}', rules["gideon-search-probe-failing"]["data"][0]["model"]["expr"])

@@ -20,8 +20,8 @@ from test_render import artifact_source_files
 
 from gideon.host import backupset, cas, drill, owui, stack
 from gideon.host.render import ARTIFACTS
-from gideon.host.render.compose import POSTGRES_SHM_SIZE_BYTES
 from gideon.host.render.drill import DRILL_ROOT
+from gideon.host.render.services.postgres import POSTGRES_SHM_SIZE_BYTES
 from gideon.host.report import StageResult
 from gideon.host.sysio import Command, Host, PathLike
 

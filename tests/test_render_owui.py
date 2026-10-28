@@ -7,12 +7,13 @@ from dataclasses import replace
 from pathlib import Path
 from string import Template
 from typing import cast
+from unittest import mock
 
 import yaml  # type: ignore[import-untyped]
 from test_render import artifact_source_files, declared_source_files, render_templates
 
 from gideon.host.egress import load_egress_allowlist
-from gideon.host.images import load_image_lock
+from gideon.host.images import load_image_lock, parse_registry
 from gideon.host.lock import load_host_lock
 from gideon.host.models import (
     GIGABYTE,
@@ -22,7 +23,7 @@ from gideon.host.models import (
 )
 from gideon.host.render import ARTIFACTS, RenderInputs, render_all
 from gideon.host.render.api import API_INSTRUCTION_PATH, API_SERVICE_NAME, api_base_url
-from gideon.host.render.compose import STORE_SERVICES, service_names
+from gideon.host.render.compose import NETWORK_NAME, STORE_SERVICES, service_names
 from gideon.host.render.drill import (
     DRILL_PORT,
     DRILL_PROJECT,
@@ -67,6 +68,7 @@ from gideon.host.render.owui import (
     owui_secret_names,
     permission_tree,
 )
+from gideon.host.render.pgbackrest import PG_BACKREST_CONF_PATH, REPOSITORY_PATH
 from gideon.host.render.qdrant import (
     QDRANT_READ_ONLY_SECRET_NAME,
     QDRANT_SERVICE_NAME,
@@ -74,6 +76,11 @@ from gideon.host.render.qdrant import (
 )
 from gideon.host.render.searxng import searxng_query_url
 from gideon.host.render.services import declared_sources
+from gideon.host.render.services.open_webui import OpenWebuiService
+from gideon.host.render.services.postgres import (
+    POSTGRES_SHM_SIZE_BYTES,
+    PostgresService,
+)
 from gideon.host.render.systemd import (
     BACKUP_CALENDAR,
     DRILL_CALENDAR,
@@ -956,6 +963,90 @@ class ComposeShape(unittest.TestCase):
                             service["environment"]["TZ"],
                             site_inputs.site.office.timezone,
                         )
+
+    def test_drill_blocks_differ_from_definitions_only_at_drill_keys(self) -> None:
+        rendered_inputs = inputs(SECOND)
+        target = parse_registry(rendered_inputs.site.registry)
+        assert target is not None
+        document = drill_compose_document(rendered_inputs)
+        services = cast(Mapping[str, object], document["services"])
+        cases = (
+            (PostgresService(), {"volumes", "command", "networks"}),
+            (OpenWebuiService(), {"environment", "volumes", "ports"}),
+        )
+        for definition, differences in cases:
+            with self.subTest(service=definition.name):
+                drill = cast(Mapping[str, object], services[definition.name])
+                production = definition.block(rendered_inputs, target)
+                excluded = differences | {"mem_limit", "memswap_limit"}
+                self.assertEqual(
+                    {key: value for key, value in drill.items() if key not in excluded},
+                    {key: value for key, value in production.items() if key not in excluded},
+                )
+                row = rendered_inputs.profile.memory_row(definition.name)
+                assert row is not None
+                self.assertEqual(drill["mem_limit"], row.gb * GIGABYTE)
+                self.assertEqual(list(drill)[-1], "mem_limit")
+
+        postgres = cast(Mapping[str, object], services[PostgresService.name])
+        self.assertEqual(
+            postgres["volumes"],
+            [
+                f"{DRILL_ROOT}/postgres:/var/lib/postgresql",
+                f"{REPOSITORY_PATH}:{REPOSITORY_PATH}:ro",
+                f"/etc/gideon/rendered/postgres/pgbackrest.conf:{PG_BACKREST_CONF_PATH}:ro",
+            ],
+        )
+        self.assertEqual(postgres["networks"], [NETWORK_NAME])
+        self.assertNotIn("command", postgres)
+        self.assertEqual(postgres["shm_size"], POSTGRES_SHM_SIZE_BYTES)
+
+        frontend = cast(Mapping[str, object], services[OpenWebuiService.name])
+        self.assertEqual(
+            frontend["environment"],
+            {
+                **owui_environment(rendered_inputs, engine=False, store=False),
+                "WEBUI_URL": f"http://127.0.0.1:{DRILL_PORT}",
+            },
+        )
+        self.assertEqual(frontend["ports"], [f"127.0.0.1:{DRILL_PORT}:8080"])
+        self.assertEqual(
+            frontend["volumes"],
+            [
+                f"{DRILL_ROOT}/openwebui:/app/backend/data",
+                "/etc/gideon/ca.pem:/etc/gideon/ca.pem:ro",
+            ],
+        )
+        self.assertEqual(
+            document["secrets"],
+            {
+                "postgres_superuser_password": {
+                    "file": "/etc/gideon/secrets/postgres_superuser_password"
+                },
+                "webui_secret_key": {"file": "/etc/gideon/secrets/webui_secret_key"},
+            },
+        )
+
+    def test_drill_secrets_follow_the_definitions_mounted_lists(self) -> None:
+        rendered_inputs = inputs(SECOND)
+        target = parse_registry(rendered_inputs.site.registry)
+        assert target is not None
+        frontend = dict(OpenWebuiService().block(rendered_inputs, target))
+        mounted = cast(list[str], frontend["secrets"])
+        extra_secret = "fictitious_drill_secret"
+        frontend["secrets"] = [*mounted, extra_secret]
+        with mock.patch.object(OpenWebuiService, "block", return_value=frontend):
+            document = drill_compose_document(rendered_inputs)
+
+        secrets = cast(Mapping[str, object], document["secrets"])
+        self.assertEqual(
+            list(secrets),
+            ["postgres_superuser_password", "webui_secret_key", extra_secret],
+        )
+        self.assertEqual(secrets[extra_secret], {"file": f"/etc/gideon/secrets/{extra_secret}"})
+        services = cast(Mapping[str, object], document["services"])
+        drill_frontend = cast(Mapping[str, object], services[OpenWebuiService.name])
+        self.assertEqual(drill_frontend["secrets"], [*mounted, extra_secret])
 
     def test_drill_document_is_isolated_and_does_not_archive(self) -> None:
         document = drill_compose_document(inputs(SECOND))

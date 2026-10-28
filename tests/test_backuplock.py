@@ -389,6 +389,36 @@ class LockContracts(unittest.TestCase):
             ),
         )
 
+    def test_archive_lock_names_its_path_holder_and_wait(self) -> None:
+        self.assertEqual(
+            backuplock.ARCHIVE_LOCK,
+            backuplock.Lock(
+                "/run/gideon/archive.lock", "archive push",
+                "Wait for the running archive push to finish, then retry.",
+            ),
+        )
+        io = LockFake()
+        host = cast(LockingHost, io)
+        taken = backuplock.claim(
+            host, command="gideon archive push", now=NOW, lock=backuplock.ARCHIVE_LOCK,
+        )
+        self.assertTrue(taken.taken)
+        self.assertIn(backuplock.ARCHIVE_LOCK.path, io.locks)
+        backuplock.release_claim(host, taken, lock=backuplock.ARCHIVE_LOCK)
+        self.assertNotIn(backuplock.ARCHIVE_LOCK.path, io.locks)
+        holder = backuplock.Record("gideon archive push", os.getpid() + 1, NOW)
+        io.locks[backuplock.ARCHIVE_LOCK.path] = holder.to_json()
+        refused = backuplock.claim(
+            host, command="gideon archive push", now=NOW, lock=backuplock.ARCHIVE_LOCK,
+        )
+        self.assertEqual(refused.holder, holder)
+        assert refused.refusal is not None
+        self.assertIn("archive push lock", refused.refusal.detail)
+        self.assertIn(holder.command, refused.refusal.detail)
+        self.assertIn(f"ps -p {holder.pid}", refused.refusal.fix)
+        backuplock.release_claim(host, refused, lock=backuplock.ARCHIVE_LOCK)
+        self.assertIn(backuplock.ARCHIVE_LOCK.path, io.locks)
+
     def test_corpus_claim_names_holder_and_releases(self) -> None:
         io = LockFake()
         host = cast(LockingHost, io)

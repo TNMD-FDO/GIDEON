@@ -605,7 +605,7 @@
           "type": "timeseries"
         },
         {
-          "description": "This compares each service container's memory in use with its configured limit, from the container monitor. Use below the limit is normal; use near the limit leaves little room and may interrupt service. Check docs/runbooks/observability.md §4.",
+          "description": "This shows each project container's memory in use, from the container monitor. The card beside it shows the share of each container's limit in use. Check docs/runbooks/observability.md §4.",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -614,45 +614,10 @@
             "defaults": {
               "unit": "bytes"
             },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "/ limit$/"
-                },
-                "properties": [
-                  {
-                    "id": "custom.lineStyle",
-                    "value": {
-                      "fill": "dash",
-                      "dash": [
-                        10,
-                        10
-                      ]
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "/^(gideon-ci-|transcribe-|buildx_)/"
-                },
-                "properties": [
-                  {
-                    "id": "custom.hideFrom",
-                    "value": {
-                      "legend": true,
-                      "tooltip": false,
-                      "viz": false
-                    }
-                  }
-                ]
-              }
-            ]
+            "overrides": []
           },
           "gridPos": {
-            "h": 26,
+            "h": 22,
             "w": 12,
             "x": 12,
             "y": 40
@@ -668,17 +633,51 @@
           },
           "targets": [
             {
-              "expr": "sum by (name) (container_memory_working_set_bytes{name!=\"\"})",
+              "expr": "sum by (name) (container_memory_working_set_bytes{container_label_com_docker_compose_project=\"gideon\"} or container_memory_working_set_bytes{name=\"gideon-registry\"})",
               "legendFormat": "{{name}}",
               "refId": "A"
-            },
-            {
-              "expr": "sum by (name) (container_spec_memory_limit_bytes{name!=\"\"} > 0)",
-              "legendFormat": "{{name}} limit",
-              "refId": "B"
             }
           ],
           "title": "Container memory",
+          "type": "timeseries"
+        },
+        {
+          "description": "This shows each container's memory in use as a share of its configured limit. A share near 100 % leaves no room and the container may be killed and restarted. The registry has no limit and is absent here. Check docs/runbooks/observability.md §4.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 14,
+            "w": 12,
+            "x": 0,
+            "y": 48
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "right",
+              "calcs": [
+                "lastNotNull"
+              ]
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (name) (container_memory_working_set_bytes{container_label_com_docker_compose_project=\"gideon\"} or container_memory_working_set_bytes{name=\"gideon-registry\"}) / sum by (name) ((container_spec_memory_limit_bytes{container_label_com_docker_compose_project=\"gideon\"} or container_spec_memory_limit_bytes{name=\"gideon-registry\"}) > 0)",
+              "legendFormat": "{{name}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Container memory share of limit",
           "type": "timeseries"
         }
       ],

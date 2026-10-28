@@ -4,7 +4,7 @@ inputs:
   site_sha256: "3032cbc05ff6133992600e2f7b9f12e8488f068b2a747e88a45159753d250cb1"
   host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
   models_lock_sha256: "386574fee11ddd25adb0021f82c644dd1694ede0fa997f2bb9943d0b7b3e03c4"
-  egress_sha256: "d41c0ffb68aef4e1e677f53cca1fbe102e1f61c17e41e2173226b1db993064f8"
+  egress_sha256: "e22abee0f29547aedd38bb2ca9ca9f0d2cd3dc4b28c9d6df72ae4fad53d0d3af"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
   source_digests:
@@ -59,7 +59,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/rules.yaml":
-    sha256: "194a2f8abb760daa052b2dc77e0d962c875cb4a22622503b6ec8e626d7f6c7c4"
+    sha256: "fd17659026a68797ea2115c07d539c9f430a6f8e4a08b876fa131d2ddd61b172"
     mode: "0644"
     owners:
       - "grafana"
@@ -69,7 +69,7 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/overview.json":
-    sha256: "728b8226fcdd0895e40ae7e1fce17e9b5204ed0c2cbd3fd981d01263dba3e818"
+    sha256: "782f010c2da9982e312087e3e7e8e45fa51403587818cb7c10189421f692d001"
     mode: "0644"
     owners:
       - "grafana"

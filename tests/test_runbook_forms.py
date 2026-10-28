@@ -30,14 +30,11 @@ LONG_FORM_ENTRIES = (
     ("install-upgrade.md", "Run sudo python3 -m gideon backup drill", "the install script prints its phase fix in the long form"),
     ("install-upgrade.md", "# On a first-provision box, use instead: sudo python3 -m gideon host provision", "the first provision has no installed command"),
     ("install-upgrade.md", "sudo python3 -m gideon uninstall", "the first removal run took the installed command away"),
-    ("ci-runner.md", "sudo python3 -m gideon host provision`. The step", "the checkout holding the merged runner pin runs provision"),
     ("ci-runner.md", "sudo python3 -B -m gideon host provision --only gh-runner` from a tree at", "the repair runs from a checkout at main"),
-    ("pin-watch-app-setup.md", "sudo python3 -m gideon host provision`, which moves both runner", "the checkout holding the merged runner pin runs provision"),
 )
 
 UPGRADE_SCRIPT_ENTRIES = (
     (INSTALL, "sudo ./upgrade.sh <tag>` from the checkout", "the checkout script is the same upgrade command"),
-    ("ci-runner.md", "./upgrade.sh <tag>` once ticket 08 lands", "the runner path describes a checkout before the installed upgrade"),
 )
 
 _LONG_FORM = re.compile(r"(?<![\w/])(?:/usr/bin/)?python3(?:[ \t]+-[^\s`]+)*[ \t\n]+-m[ \t\n]+gideon(?![\w-])")

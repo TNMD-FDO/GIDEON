@@ -32,7 +32,6 @@ from gideon.host.images import load_image_lock, parse_registry, reference
 from gideon.host.lock import load_host_lock
 from gideon.host.models import HardwareProfile, load_models_lock, select_profile
 from gideon.host.render import ARTIFACTS, RenderInputs
-from gideon.host.render.compose import OWUI_COMMAND
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.owui import (
     ALLOWED_ENDPOINTS,
@@ -51,6 +50,7 @@ from gideon.host.render.searxng import (
     searxng_settings_document,
 )
 from gideon.host.render.services import declared_sources
+from gideon.host.render.services.open_webui import OWUI_COMMAND
 from gideon.host.render.yamlout import dump
 from gideon.host.site import load_site
 from gideon.host.sysio import RealHost

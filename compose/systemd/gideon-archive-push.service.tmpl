@@ -1,0 +1,13 @@
+[Unit]
+Description=Push GIDEON pinned sources to the archive
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$checkout
+ExecStart=/usr/bin/python3 -m gideon archive push
+TimeoutStartSec=$timeout_start_seconds
+StandardOutput=journal
+StandardError=journal

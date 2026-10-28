@@ -434,6 +434,45 @@ groups:
         annotations: {summary: 'The nightly run for {{ $labels.slice }} is overdue', runbook: docs/runbooks/observability.md §4}
         labels: {class: page}
         isPaused: false
+      - uid: gideon-archive-push-overdue
+        title: Archive push overdue
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: gideon-rows
+            model:
+              datasource: {type: postgres, uid: gideon-rows}
+              format: table
+              rawQuery: true
+              rawSql: |
+                SELECT EXTRACT(EPOCH FROM (now() - at)) AS value
+                FROM audit_log
+                WHERE kind = 'archive_push'
+                ORDER BY at DESC LIMIT 1
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model: {datasource: {type: __expr__, uid: __expr__}, expression: A, reducer: last, refId: B, type: reduce}
+          - refId: C
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [691200], type: gt}, operator: {type: and}, query: {params: [B, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        for: 0s
+        noDataState: Alerting
+        execErrState: Alerting
+        annotations: {summary: The newest source-archive push is overdue, runbook: docs/runbooks/observability.md §4}
+        labels: {class: page}
+        isPaused: false
   - orgId: 1
     name: metrics
     folder: GIDEON
@@ -619,6 +658,32 @@ groups:
         noDataState: OK
         execErrState: OK
         annotations: {summary: A required host unit is inactive, runbook: docs/runbooks/observability.md §4}
+        labels: {class: page}
+        isPaused: false
+      - uid: gideon-archive-push-failed
+        title: Archive push failed
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: prometheus
+            model: {datasource: {type: prometheus, uid: prometheus}, expr: 'max(node_systemd_unit_state{name="gideon-archive-push.service",state="failed"})', instant: true, intervalMs: 1000, maxDataPoints: 43200, refId: A}
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [0], type: gt}, operator: {type: and}, query: {params: [A, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: threshold
+        for: 0s
+        noDataState: OK
+        execErrState: OK
+        annotations: {summary: The source-archive push unit is failed, runbook: docs/runbooks/observability.md §4}
         labels: {class: page}
         isPaused: false
       - uid: gideon-systemd-collector-failed

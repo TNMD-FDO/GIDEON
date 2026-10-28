@@ -201,7 +201,7 @@ _REACHABLE_ERROR_STATUSES = frozenset({401, 404})
 _NO_RESPONSE = "no response"
 
 
-def _probe_verdict(
+def probe_verdict(
     returncode: int, stderr: str, expect: tuple[int, ...] = ()
 ) -> str | None:
     """``None`` when the origin answered, else a short miss description."""
@@ -261,7 +261,7 @@ class EgressCheck(PreflightCheck):
 
             def probe(entry: EgressHost, argv: list[str]) -> str | None:
                 result = context.host.run(argv)
-                return _probe_verdict(result.returncode, result.stderr, entry.expect)
+                return probe_verdict(result.returncode, result.stderr, entry.expect)
 
             first_misses: list[tuple[EgressHost, list[str], str]] = []
             for entry in entries:

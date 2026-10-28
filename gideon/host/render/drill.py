@@ -1,25 +1,26 @@
-"""Pure Compose document rendering for the throwaway backup drill project."""
+"""Pure Compose document rendering for the throwaway backup drill project.
+
+The blocks are the service definitions' with the drill's differences stated.
+"""
 
 from collections.abc import Mapping
 from typing import Final
 
-from gideon.host.images import parse_registry, reference
+from gideon.host.images import parse_registry
 from gideon.host.render import RenderInputs
 from gideon.host.render.compose import (
-    OWUI_COMMAND,
-    OWUI_ENV_FILE,
-    OWUI_HEALTHCHECK,
-    POSTGRES_HEALTHCHECK,
-    POSTGRES_SHM_SIZE_BYTES,
-    image_pin,
+    NETWORK_NAME,
     memory_limit_bytes,
+    mounted_secret_names,
+    with_memory_limit,
 )
 from gideon.host.render.owui import owui_environment
 from gideon.host.render.pgbackrest import (
     PG_BACKREST_CONF_PATH,
-    PGDATA,
     REPOSITORY_PATH,
 )
+from gideon.host.render.services.open_webui import OpenWebuiService
+from gideon.host.render.services.postgres import PostgresService
 
 DRILL_PROJECT: Final = "gideon-drill"
 DRILL_ROOT: Final = "/data/drill"
@@ -36,58 +37,47 @@ def drill_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
             "Correct registry in /etc/gideon/site.yaml, then re-run render."
         )
 
-    postgres_pin = image_pin(inputs, "postgres")
-    open_webui_pin = image_pin(inputs, "open-webui")
-    environment = dict(owui_environment(inputs, engine=False, store=False))
-    environment["WEBUI_URL"] = f"http://127.0.0.1:{DRILL_PORT}"
+    postgres = dict(PostgresService().block(inputs, target))
+    postgres["volumes"] = [
+        f"{DRILL_ROOT}/postgres:/var/lib/postgresql",
+        f"{REPOSITORY_PATH}:{REPOSITORY_PATH}:ro",
+        f"/etc/gideon/rendered/postgres/pgbackrest.conf:{PG_BACKREST_CONF_PATH}:ro",
+    ]
+    postgres["networks"] = [NETWORK_NAME]
+    del postgres["command"]
+
+    open_webui = dict(OpenWebuiService().block(inputs, target))
+    open_webui["environment"] = {
+        **owui_environment(inputs, engine=False, store=False),
+        "WEBUI_URL": f"http://127.0.0.1:{DRILL_PORT}",
+    }
+    open_webui["volumes"] = [
+        f"{DRILL_ROOT}/openwebui:/app/backend/data",
+        "/etc/gideon/ca.pem:/etc/gideon/ca.pem:ro",
+    ]
+    open_webui["ports"] = [f"127.0.0.1:{DRILL_PORT}:8080"]
+
+    services: dict[str, object] = {
+        PostgresService.name: with_memory_limit(
+            postgres,
+            memory_limit_bytes(inputs.profile, PostgresService.name),
+            swap=PostgresService.swap,
+        ),
+        OpenWebuiService.name: with_memory_limit(
+            open_webui,
+            memory_limit_bytes(inputs.profile, OpenWebuiService.name),
+            swap=OpenWebuiService.swap,
+        ),
+    }
+
+    secrets = {
+        name: {"file": f"/etc/gideon/secrets/{name}"}
+        for name in mounted_secret_names(services)
+    }
 
     return {
         "name": DRILL_PROJECT,
-        "services": {
-            "postgres": {
-                "image": reference(target, postgres_pin),
-                "restart": "unless-stopped",
-                "environment": {
-                    "POSTGRES_PASSWORD_FILE": "/run/secrets/postgres_superuser_password",
-                    "PGDATA": PGDATA,
-                    "TZ": inputs.site.office.timezone,
-                },
-                "volumes": [
-                    f"{DRILL_ROOT}/postgres:/var/lib/postgresql",
-                    f"{REPOSITORY_PATH}:{REPOSITORY_PATH}:ro",
-                    f"/etc/gideon/rendered/postgres/pgbackrest.conf:{PG_BACKREST_CONF_PATH}:ro",
-                ],
-                "secrets": ["postgres_superuser_password"],
-                "healthcheck": dict(POSTGRES_HEALTHCHECK),
-                "shm_size": POSTGRES_SHM_SIZE_BYTES,
-                "networks": ["gideon"],
-                "mem_limit": memory_limit_bytes(inputs.profile, "postgres"),
-            },
-            "open-webui": {
-                "image": reference(target, open_webui_pin),
-                "restart": "unless-stopped",
-                "depends_on": {
-                    "postgres": {"condition": "service_healthy"},
-                },
-                "env_file": [dict(entry) for entry in OWUI_ENV_FILE],
-                "environment": environment,
-                "command": list(OWUI_COMMAND),
-                "ports": [f"127.0.0.1:{DRILL_PORT}:8080"],
-                "volumes": [
-                    f"{DRILL_ROOT}/openwebui:/app/backend/data",
-                    "/etc/gideon/ca.pem:/etc/gideon/ca.pem:ro",
-                ],
-                "secrets": ["webui_secret_key"],
-                "healthcheck": dict(OWUI_HEALTHCHECK),
-                "networks": ["gideon"],
-                "mem_limit": memory_limit_bytes(inputs.profile, "open-webui"),
-            },
-        },
-        "networks": {"gideon": {}},
-        "secrets": {
-            "postgres_superuser_password": {
-                "file": "/etc/gideon/secrets/postgres_superuser_password"
-            },
-            "webui_secret_key": {"file": "/etc/gideon/secrets/webui_secret_key"},
-        },
+        "services": services,
+        "networks": {NETWORK_NAME: {}},
+        "secrets": secrets,
     }

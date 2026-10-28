@@ -26,7 +26,7 @@ from gideon.host.steps import STEPS
 TOP_LEVEL = [
     "host", "render", "apply", "preflight", "install", "upgrade", "uninstall", "tls",
     "users", "secrets", "engine", "worker", "models", "corpus", "index", "registry", "eval", "proposals", "status",
-    "backup", "restore", "audit", "retention", "alerts",
+    "backup", "archive", "restore", "audit", "retention", "alerts",
 ]
 
 # Each stub with the phrase its help and refusal must carry: the slice it
@@ -98,6 +98,35 @@ class Start(unittest.TestCase):
 
 
 class Help(unittest.TestCase):
+    def test_archive_group_is_plain_and_push_help_is_reachable(self) -> None:
+        top = io.StringIO()
+        with contextlib.redirect_stdout(top), self.assertRaises(SystemExit) as ctx:
+            main(["--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertEqual(
+            help_entries(top.getvalue())["archive"],
+            "the source archive: what the releases pin, copied off the box",
+        )
+        group = io.StringIO()
+        with contextlib.redirect_stdout(group), self.assertRaises(SystemExit) as ctx:
+            main(["archive", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertEqual(set(help_entries(group.getvalue())), {"push"})
+        command = io.StringIO()
+        with contextlib.redirect_stdout(command), self.assertRaises(SystemExit) as ctx:
+            main(["archive", "push", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        text = collapsed(command.getvalue())
+        for phrase in ("pinned snapshot file", "lockfiles directory", "model revision", "hash", "record row", "build box alone"):
+            self.assertIn(phrase, text)
+        for output in (top.getvalue(), group.getvalue(), text):
+            self.assertNotIn("archive (not implemented", output)
+        self.assertNotIn("lands in", text)
+        self.assertNotIn("not implemented", text)
+        args = build_parser().parse_args(["archive", "push"])
+        self.assertEqual(args.command_path, "archive push")
+        self.assertIsNot(args.handler, _stub)
+
     def test_retention_sweep_help_names_its_work_and_remaining_work(self) -> None:
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:

@@ -164,7 +164,7 @@ from gideon.host.steps.site_dirs import (
     age_identity_fix,
 )
 from gideon.host.steps.timezone import TimezoneStep
-from gideon.host.steps.tools import HostToolsStep
+from gideon.host.steps.tools import ArchiveToolsStep, HostToolsStep
 from gideon.host.sysio import Command, PathLike
 from tools.exportboundary import absent_from_export
 from tools.mask import WRAPPER_PATH, wrap
@@ -538,14 +538,14 @@ class RegistryContract(unittest.TestCase):
             [step.name for step in STEPS[:5]],
             ["platform", "wait-online", "egress-proxy", "host-tools", "gideon-command"],
         )
-        self.assertEqual(len(STEPS), 22)
+        self.assertEqual(len(STEPS), 23)
         self.assertEqual(
             {step.name for step in STEPS if step.gpu_host_only},
             {"nvidia-driver", "nvidia-toolkit"},
         )
         self.assertEqual(
             {step.name for step in STEPS if step.build_box_only},
-            {"kvm", "registry", "gh-runner"},
+            {"kvm", "registry", "gh-runner", "archive-tools"},
         )
         self.assertTrue(
             {
@@ -5417,6 +5417,45 @@ class HostToolsStepTests(unittest.TestCase):
         self.assertIn(("run", (install, True)), host.calls)
 
 
+class ArchiveToolsStepTests(unittest.TestCase):
+    RCLONE = ("dpkg-query", "-W", "-f=${Status} ${Version}\\n", "rclone")
+
+    def test_absent_rclone_is_the_only_package_installed_then_present_apply_is_inert(self) -> None:
+        host = FakeHost(commands=dict(apt_command_results(("rclone",))))
+        step = ArchiveToolsStep()
+        self.assertTrue(step.build_box_only)
+        self.assertFalse(step.needs_site)
+        checked = step.check(context(host, no_site=True))
+        self.assertEqual(checked.disposition, Disposition.DRIFT)
+        self.assertIn("rclone not installed", checked.detail)
+        self.assertIn("apt-get install -y rclone", checked.fix)
+        step.apply(context(host, no_site=True))
+        commands = [command for command, _cwd, _env in host.runs]
+        self.assertEqual([command for command in commands if command[0] == "apt-get"], [
+            ("apt-get", "update"), ("apt-get", "-s", "install", "-y", "rclone"),
+            ("apt-get", "install", "-y", "rclone"),
+        ])
+        self.assertTrue(all(command == self.RCLONE for command in commands if command[0] == "dpkg-query"))
+        self.assertIn(("run", (("apt-get", "install", "-y", "rclone"), True)), host.calls)
+        host.commands[self.RCLONE] = completed(self.RCLONE, "install ok installed 1000.0.0\n")
+        host.runs.clear()
+        checked = step.check(context(host, no_site=True))
+        self.assertEqual(checked.disposition, Disposition.CONVERGED)
+        self.assertEqual(checked.detail, "rclone is installed")
+        step.apply(context(host, no_site=True))
+        self.assertTrue(all(command == self.RCLONE for command, _cwd, _env in host.runs))
+
+    def test_present_or_held_rclone_needs_no_apt_call(self) -> None:
+        for status in ("install ok", "hold ok"):
+            with self.subTest(status=status):
+                host = FakeHost(commands={self.RCLONE: completed(self.RCLONE, f"{status} installed 1000.0.0\n")})
+                step = ArchiveToolsStep()
+                self.assertEqual(step.check(context(host)).disposition, Disposition.CONVERGED)
+                step.apply(context(host))
+                self.assertTrue(host.runs)
+                self.assertTrue(all(command == self.RCLONE for command, _cwd, _env in host.runs))
+
+
 class AgeRecipientStepTests(unittest.TestCase):
     RECIPIENT = "age1" + "a" * 58
     IDENTITY = "AGE-SECRET-KEY-1" + "a" * 58
@@ -6736,6 +6775,7 @@ class BaselineCheckPass(unittest.TestCase):
             "kvm": Disposition.DRIFT,
             "registry": Disposition.DRIFT,
             "gh-runner": Disposition.DRIFT,
+            "archive-tools": Disposition.DRIFT,
         }
         host = baseline_host()
         for step in STEPS:

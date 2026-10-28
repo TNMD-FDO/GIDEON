@@ -689,6 +689,18 @@ def healthy_commands(
         commands[manifest] = done(manifest, stdout="{}")
         inspect = image_inspect(image_reference)
         commands[inspect] = done(inspect, stdout=json.dumps([image_reference]) + "\n")
+        repository, digest = image_reference.rsplit("@", 1)
+        listing = (
+            "docker", "image", "ls", "--digests", "--format", "{{json .}}",
+            "--filter", f"reference={repository}",
+        )
+        commands[listing] = done(listing, stdout=json.dumps({
+            "Repository": repository,
+            "Tag": "<none>",
+            "Digest": digest,
+            "ID": digest.removeprefix("sha256:")[:12],
+            "Size": "1GB",
+        }) + "\n")
     return commands
 
 
@@ -894,6 +906,8 @@ class EngineRotation(RealStack):
         self.assertLess(calls.index(SYSTEMCTL_LINK_UPSTREAM_WATCH), calls.index(SYSTEMCTL_LINK_RETENTION_SWEEP))
         self.assertLess(calls.index(SYSTEMCTL_LINK_RETENTION_SWEEP), calls.index(SYSTEMCTL_ENABLE_RETENTION_SWEEP))
         self.assertLess(calls.index(SYSTEMCTL_ENABLE_RETENTION_SWEEP), calls.index(SYSTEMCTL_ACTIVE_RETENTION_SWEEP))
+        # Rotation shares apply's converge but prunes no image.
+        self.assertFalse(any(call[:3] in {("docker", "image", "ls"), ("docker", "image", "rm")} for call in calls))
         self.assertEqual(calls.count(force_recreate(ENGINE_SERVICE_NAME)), 1)
         self.assertEqual(calls.count(force_recreate(API_SERVICE_NAME)), 1)
         self.assertEqual(calls.count(force_recreate("open-webui")), 0)

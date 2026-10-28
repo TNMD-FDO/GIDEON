@@ -14,8 +14,7 @@ from gideon.host.render.pgbackrest import (
 )
 from gideon.host.render.services import ServiceDefinition, image_pin
 
-# Service fragments the drill document (render/drill.py) shares with the
-# production project, so the two never drift apart.
+# The drill and the sibling inherit this healthcheck through the block.
 POSTGRES_HEALTHCHECK: Mapping[str, object] = {
     "test": ["CMD", "pg_isready", "-U", "postgres", "-h", "127.0.0.1"],
     "interval": "10s",
@@ -24,7 +23,7 @@ POSTGRES_HEALTHCHECK: Mapping[str, object] = {
     "start_period": "30s",
 }
 # Docker's default 64 MB /dev/shm cannot hold a parallel plan's dynamic
-# shared memory. The drill shares this; the sibling inherits it.
+# shared memory. The drill and the sibling inherit this through the block.
 POSTGRES_SHM_SIZE_BYTES: Final[int] = 1 << 30
 
 

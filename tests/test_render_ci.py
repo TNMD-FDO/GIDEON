@@ -63,7 +63,6 @@ from gideon.host.render.compose import (
     NETWORK_NAME,
     SWAP_CEILING_BYTES,
     container_name,
-    image_pin,
     integration_network_name,
     memory_limit_bytes,
     mounted_secret_names,
@@ -101,7 +100,7 @@ from gideon.host.render.qdrant import (
     QDRANT_SNAPSHOTS_ROOT,
     QDRANT_STORAGE_MOUNT,
 )
-from gideon.host.render.services import declared_sources
+from gideon.host.render.services import declared_sources, image_pin
 from gideon.host.render.services.open_webui import OpenWebuiService
 from gideon.host.render.services.opensearch import OpensearchService
 from gideon.host.render.services.postgres import (

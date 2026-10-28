@@ -19,7 +19,7 @@ from gideon.host.render.engine import ENGINE_JOB_NAME
 from gideon.host.render.opensearch import OPENSEARCH_JOB_NAME
 from gideon.host.render.prometheus import DCGM_JOB_NAME
 from gideon.host.render.searxng import SEARXNG_JOB_NAME, search_enabled
-from gideon.host.render.systemd import NIGHTLY_SUITES
+from gideon.host.render.systemd import NIGHTLY_SUITES, ArchivePushServiceArtifact
 from gideon.host.steps.command import INSTALL_HOME
 
 LDAP_TEMPLATE: Final = "grafana/ldap.toml.tmpl"
@@ -45,8 +45,8 @@ ENGINE_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/engine-down-rule.ya
 # zero with every card gone, nothing when the exporter is down, leaving that
 # page to Target down alone; both rules keep no data OK.
 PROFILE_FLOOR_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/profile-floor-rules.yaml.tmpl"
-# The host-unit rule pages on the registry and runner units, which only the
-# build box runs.
+# The host-unit rules page on the registry, runner, and archive push units,
+# which only the build box runs.
 HOST_UNIT_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/host-unit-rule.yaml.tmpl"
 # The search probe's rule: its own template like the two
 # GPU-host rules, rendered only while SearXNG is; "Target down" reads a scrape's
@@ -56,6 +56,7 @@ SEARCH_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/search-probe-rule.y
 # The API probe's rule, rendered while the GPU-only API service is present.
 API_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/api-probe-rule.yaml.tmpl"
 NIGHTLY_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/nightly-run-rules.yaml.tmpl"
+ARCHIVE_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/archive-push-rule.yaml.tmpl"
 # The local break-glass administrator; the password is the generated
 # print-once secret `grafana_admin_password`.
 GRAFANA_ADMIN_USER: Final = "grafana-admin"
@@ -75,6 +76,9 @@ BACKUP_PUSH_AGE_TITLE: Final = "Backup push age"
 FILESYSTEMS_FREE_TITLE: Final = "Filesystems free"
 CERTIFICATE_DAYS_LEFT_TITLE: Final = "Certificate days left"
 PASSING_DRILL_AGE_TITLE: Final = "Passing drill age"
+HOST_DETAIL_TITLE: Final = "Host detail"
+CONTAINER_MEMORY_TITLE: Final = "Container memory"
+CONTAINER_SHARE_TITLE: Final = "Container memory share of limit"
 OVERVIEW_SENTINELS: Final = (
     "start_here",
     "drill_threshold",
@@ -83,6 +87,7 @@ OVERVIEW_SENTINELS: Final = (
     "backup_hours",
     "filesystem_percent",
     "certificate_days",
+    "compose_project",
 )
 # The Overview's home dashboard path inside the container.
 HOME_DASHBOARD_PATH: Final = DASHBOARDS_MOUNT + "/" + PurePosixPath(OVERVIEW_PATH).name
@@ -125,6 +130,8 @@ ENGINE_PENDING_PERIOD: Final = "5m"
 # Consecutive starts can be 33 hours apart; 36 hours leaves room for that
 # wait and pages a missed night at about 09:00. This is a starting value.
 NIGHTLY_OVERDUE_SECONDS: Final = 36 * 3600
+# exempt: schedule — the weekly archive push plus one day's grace.
+ARCHIVE_PUSH_OVERDUE_SECONDS: Final = 8 * 86400
 # exempt: schedule — a new upstream notice pages for one full weekly interval.
 UPSTREAM_NOTICE_DAYS: Final = 7
 # exempt: schedule — longer than the notice's window, so its email is sent once.
@@ -268,6 +275,7 @@ class GrafanaRulesArtifact(Artifact):
         SEARCH_RULE_TEMPLATE,
         API_RULE_TEMPLATE,
         NIGHTLY_RULE_TEMPLATE,
+        ARCHIVE_RULE_TEMPLATE,
         PROFILE_FLOOR_RULE_TEMPLATE,
     )
 
@@ -320,10 +328,12 @@ class GrafanaRulesArtifact(Artifact):
             if api_enabled(inputs.no_gpu)
             else ""
         )
-        # The placeholder's own line ends the block, so the build box's file
-        # keeps today's bytes; every other host carries an empty line there.
+        # The placeholder's own line ends the block; other hosts carry an empty line.
         host_unit_rule = (
-            substitute_template(inputs, HOST_UNIT_RULE_TEMPLATE, {}).removesuffix("\n")
+            substitute_template(
+                inputs, HOST_UNIT_RULE_TEMPLATE,
+                {"archive_unit": PurePosixPath(ArchivePushServiceArtifact.relative_path).name},
+            ).removesuffix("\n")
             if inputs.build_box
             else ""
         )
@@ -338,6 +348,14 @@ class GrafanaRulesArtifact(Artifact):
                 },
             ).removesuffix("\n")
             if not inputs.no_gpu
+            else ""
+        )
+        archive_rules = (
+            substitute_template(
+                inputs, ARCHIVE_RULE_TEMPLATE,
+                {"archive_threshold": ARCHIVE_PUSH_OVERDUE_SECONDS},
+            ).removesuffix("\n")
+            if inputs.build_box
             else ""
         )
         return substitute_template(
@@ -355,6 +373,7 @@ class GrafanaRulesArtifact(Artifact):
                 "gpu_rules": engine_rule + driver_rule + profile_rules,
                 "host_unit_rules": host_unit_rule,
                 "nightly_rules": nightly_rules,
+                "archive_rules": archive_rules,
                 "engine_job": ENGINE_JOB_NAME,
                 "opensearch_job": OPENSEARCH_JOB_NAME,
                 "upstream_notice_days": UPSTREAM_NOTICE_DAYS,
@@ -363,7 +382,7 @@ class GrafanaRulesArtifact(Artifact):
 
 
 class GrafanaOverviewArtifact(Artifact):
-    """Render the Overview's board links and page-rule threshold cards."""
+    """Render the Overview's board links, page-rule thresholds, and project queries."""
 
     name = "grafana-overview"
     relative_path = OVERVIEW_PATH
@@ -371,6 +390,9 @@ class GrafanaOverviewArtifact(Artifact):
     template_paths = (OVERVIEW_TEMPLATE, BACKUP_TEMPLATE, GPU_TEMPLATE, EVAL_TEMPLATE, CORPUS_TEMPLATE)
 
     def emit(self, inputs: RenderInputs) -> str:
+        # Defer the compose -> services.grafana -> grafana import cycle.
+        from gideon.host.render.compose import PROJECT_NAME
+
         document = json.loads(template_text(inputs, OVERVIEW_TEMPLATE))
         panels = {panel.get("title"): panel for panel in document["panels"]}
         start = panels.get(START_HERE_TITLE, {}).get("options", {})
@@ -390,6 +412,14 @@ class GrafanaOverviewArtifact(Artifact):
         certificate_days = CERTIFICATE_EXPIRING_SECONDS // 86400
         _fill(_last_step(certificate), "value", "certificate_days", certificate_days)
         _fill(certificate, "description", "certificate_days", certificate_days)
+        detail = panels.get(HOST_DETAIL_TITLE, {})
+        memory_cards = {panel.get("title"): panel for panel in detail.get("panels", [])}
+        for title in (CONTAINER_MEMORY_TITLE, CONTAINER_SHARE_TITLE):
+            targets = memory_cards.get(title, {}).get("targets")
+            if not targets:
+                raise unfilled_placeholder(OVERVIEW_TEMPLATE, "compose_project")
+            for target in targets:
+                _fill(target, "expr", "compose_project", PROJECT_NAME)
         rendered = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
         for name in OVERVIEW_SENTINELS:
             if f"${name}" in rendered:

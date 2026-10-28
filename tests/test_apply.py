@@ -16,10 +16,20 @@ from unittest.mock import patch
 from urllib.parse import unquote
 
 import yaml  # type: ignore[import-untyped]
+from test_imagestore import image_listing
 from test_render import artifact_source_files, declared_source_files, inputs
 from test_secrets import answer_pair_command
 
-from gideon.host import backuplock, grafana, nogpu, owui, pgbackrest, report, weights
+from gideon.host import (
+    backuplock,
+    grafana,
+    imagestore,
+    nogpu,
+    owui,
+    pgbackrest,
+    report,
+    weights,
+)
 from gideon.host.apply import (
     _VERIFY_ATTEMPTS,
     _VERIFY_SLEEP_SECONDS,
@@ -32,7 +42,7 @@ from gideon.host.apply import (
 )
 from gideon.host.cotenants import network_ps_argv
 from gideon.host.egress import EgressAllowlist, load_egress_allowlist
-from gideon.host.images import load_image_lock
+from gideon.host.images import BuiltImagePin, load_image_lock, parse_registry
 from gideon.host.models import (
     CandidatePin,
     HardwareProfile,
@@ -43,13 +53,16 @@ from gideon.host.owui import Response
 from gideon.host.render import ARTIFACTS, RenderInputs
 from gideon.host.render.command import run_render
 from gideon.host.render.compose import (
-    ENGINE_READY_SECONDS,
     NETWORK_NAME,
     network_name,
     service_blocks,
     service_names,
 )
-from gideon.host.render.engine import ENGINE_SERVICE_NAME, INTEGRATION_NETWORK_NAME
+from gideon.host.render.engine import (
+    ENGINE_READY_SECONDS,
+    ENGINE_SERVICE_NAME,
+    INTEGRATION_NETWORK_NAME,
+)
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.render.owui import GENERAL_MODEL_ID
 from gideon.host.render.services import all_service_names, store_services
@@ -588,6 +601,18 @@ def healthy_commands(
         commands[manifest] = done(manifest, stdout="{}")
         inspect = image_inspect(image_reference)
         commands[inspect] = done(inspect, stdout=json.dumps([image_reference]) + "\n")
+        repository, digest = image_reference.rsplit("@", 1)
+        listing = (
+            "docker", "image", "ls", "--digests", "--format", "{{json .}}",
+            "--filter", f"reference={repository}",
+        )
+        commands[listing] = done(listing, stdout=json.dumps({
+            "Repository": repository,
+            "Tag": "<none>",
+            "Digest": digest,
+            "ID": digest.removeprefix("sha256:")[:12],
+            "Size": "1GB",
+        }) + "\n")
     return commands
 
 
@@ -762,6 +787,7 @@ class HappyPath(unittest.TestCase):
                 "verify",
                 "timers",
                 "record",
+                "prune",
             ],
         )
         self.assertIn("network: ok — no network definition moved", out)
@@ -1000,6 +1026,153 @@ class HappyPath(unittest.TestCase):
         code, out, _ = apply(host)
         self.assertEqual(code, 0, out)
         self.assertIn(manifest_inspect(hostname_ref, insecure=False), argv_calls(host))
+
+
+class PruneStage(unittest.TestCase):
+    """Apply prunes only superseded, unused lock references, after the record."""
+
+    def setUp(self) -> None:
+        target = parse_registry(_EXAMPLE_INPUTS.site.registry)
+        assert target is not None
+        self.target = target
+        self.old_digest = "sha256:" + "e" * 64
+
+    def row(self, name: str, digest: str) -> imagestore.ImageRow:
+        return imagestore.ImageRow(
+            imagestore.repository(self.target, name), None, digest, "b" * 12, "7.16GB"
+        )
+
+    def listing(
+        self, host: ApplyHost, name: str, *rows: imagestore.ImageRow,
+    ) -> tuple[str, ...]:
+        argv = imagestore.list_argv(self.target, name)
+        host.commands[argv] = done(argv, stdout=image_listing(*rows))
+        return argv
+
+    def test_two_digests_remove_only_the_unnamed_one_with_its_size(self) -> None:
+        host = ApplyHost(healthy_commands(), base_files())
+        old = self.row("caddy", self.old_digest)
+        self.listing(host, "caddy", self.row("caddy", _DIGESTS["caddy"]), old)
+        containers = imagestore.containers_argv()
+        remove = imagestore.remove_argv(f"{old.repository}@{old.digest}")
+        host.commands[containers] = done(containers)
+        host.commands[remove] = done(remove)
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (0, ""), out)
+        prune_line = next(line for line in out.splitlines() if line.startswith("prune:"))
+        self.assertEqual(prune_line, f"prune: ok — removed {remove[-1]} ({old.size})")
+        self.assertNotIn(_DIGESTS["caddy"], prune_line)
+        self.assertEqual([call for call in argv_calls(host) if call[:3] == ("docker", "image", "rm")], [remove])
+
+    def test_built_pin_base_is_kept_and_unnamed(self) -> None:
+        assert _COMMITTED_LOCK is not None
+        pin = next(pin for pin in _COMMITTED_LOCK.images if isinstance(pin, BuiltImagePin))
+        host = ApplyHost(healthy_commands(), base_files())
+        self.listing(host, pin.name, self.row(pin.name, pin.digest), self.row(pin.name, pin.base_digest))
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (0, ""), out)
+        prune_line = next(line for line in out.splitlines() if line.startswith("prune:"))
+        self.assertEqual(prune_line, "prune: ok — nothing to remove")
+        self.assertNotIn(pin.base_digest, prune_line)
+        self.assertNotIn(imagestore.containers_argv(), argv_calls(host))
+        self.assertFalse(any(call[:3] == ("docker", "image", "rm") for call in argv_calls(host)))
+
+    def test_in_use_image_is_kept_and_named_after_one_container_read(self) -> None:
+        host = ApplyHost(healthy_commands(), base_files())
+        old = self.row("caddy", self.old_digest)
+        self.listing(host, "caddy", self.row("caddy", _DIGESTS["caddy"]), old)
+        reference = f"{old.repository}@{old.digest}"
+        containers = imagestore.containers_argv()
+        host.commands[containers] = done(containers, stdout=json.dumps({
+            "Names": "gideon-ci-caddy", "Image": reference,
+        }) + "\n")
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn(f"prune: ok — kept in use {reference} by gideon-ci-caddy", out)
+        self.assertEqual(argv_calls(host).count(containers), 1)
+        self.assertFalse(any(call[:3] == ("docker", "image", "rm") for call in argv_calls(host)))
+
+    def test_every_listing_and_removal_stays_in_the_prefixed_lock_repositories(self) -> None:
+        host = ApplyHost(healthy_commands(), base_files())
+        old = self.row("caddy", self.old_digest)
+        foreign = imagestore.ImageRow(
+            old.repository + "-other", None, self.old_digest, old.id, old.size,
+        )
+        self.listing(host, "caddy", self.row("caddy", _DIGESTS["caddy"]), old, foreign)
+        containers = imagestore.containers_argv()
+        remove = imagestore.remove_argv(f"{old.repository}@{old.digest}")
+        host.commands[containers] = done(containers)
+        host.commands[remove] = done(remove)
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertTrue(self.target.prefix)
+        allowed = {
+            f"{self.target.authority}/{self.target.prefix}{name}" for name in _DIGESTS
+        }
+        listings = [call for call in argv_calls(host) if call[:3] == ("docker", "image", "ls")]
+        self.assertEqual(len(listings), len(_DIGESTS))
+        self.assertEqual({call[-1] for call in listings}, {f"reference={name}" for name in allowed})
+        for call in listings:
+            self.assertEqual(call[-2], "--filter")
+            self.assertTrue(call[-1].startswith(f"reference={self.target.authority}/{self.target.prefix}"))
+        removals = [call for call in argv_calls(host) if call[:3] == ("docker", "image", "rm")]
+        self.assertEqual(removals, [remove])
+        for call in removals:
+            self.assertEqual(len(call), 4)
+            self.assertIn(call[-1].split("@", 1)[0], allowed)
+
+    def test_removal_refusal_reports_daemon_message_after_manifest_is_written(self) -> None:
+        host = ApplyHost(healthy_commands(), base_files())
+        old = self.row("caddy", self.old_digest)
+        self.listing(host, "caddy", old)
+        containers = imagestore.containers_argv()
+        remove = imagestore.remove_argv(f"{old.repository}@{old.digest}")
+        host.commands[containers] = done(containers)
+        host.commands[remove] = done(remove, 1, stderr="fixture image is still in use")
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (1, ""))
+        self.assertIn("prune: refuse", out)
+        self.assertIn("fixture image is still in use", out)
+        self.assertIn(report.command("apply"), out.split("prune: refuse", 1)[1])
+        self.assertIn("record: ok — applied manifest recorded", out)
+        self.assertIn(f"{RENDERED}/applied.yaml", host.writes)
+        self.assertEqual(host.files[f"{RENDERED}/applied.yaml"], host.files[f"{RENDERED}/manifest.yaml"])
+
+    def test_malformed_listing_refuses_before_any_container_read_or_removal(self) -> None:
+        host = ApplyHost(healthy_commands(), base_files())
+        listing = imagestore.list_argv(self.target, "caddy")
+        host.commands[listing] = done(listing, stdout="not a JSON row\n")
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (1, ""))
+        self.assertIn("prune: refuse", out)
+        self.assertIn("malformed image row", out)
+        self.assertIn("Fix:", out.split("prune: refuse", 1)[1])
+        self.assertIn(f"{RENDERED}/applied.yaml", host.files)
+        self.assertNotIn(imagestore.containers_argv(), argv_calls(host))
+        self.assertFalse(any(call[:3] == ("docker", "image", "rm") for call in argv_calls(host)))
+
+    def test_prune_is_the_last_row_after_record(self) -> None:
+        host = ApplyHost(healthy_commands(), base_files())
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (0, ""), out)
+        rows = stages(out)
+        self.assertEqual(rows[-2:], ["record", "prune"])
+        self.assertEqual(rows.count("prune"), 1)
+        self.assertIn("prune: ok — nothing to remove", out)
 
 
 class NetworkChanges(unittest.TestCase):

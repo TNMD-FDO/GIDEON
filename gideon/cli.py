@@ -572,6 +572,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     drill.set_defaults(handler=host_cli.run_backup_drill, command_path="backup drill")
 
+    archive = commands.add_parser(
+        "archive", help="the source archive: what the releases pin, copied off the box"
+    )
+    archive_sub = archive.add_subparsers(
+        dest="subcommand", metavar="<subcommand>", required=True
+    )
+    archive_push_help = (
+        "send every pinned snapshot file, the lockfiles directory, and every pinned "
+        "model revision the box holds to the office's source archive; check each "
+        "copy by hash and write one record row; the build box alone"
+    )
+    archive_push = archive_sub.add_parser(
+        "push", help=archive_push_help, description=archive_push_help
+    )
+    archive_push.set_defaults(handler=host_cli.run_archive_push, command_path="archive push")
+
     restore = commands.add_parser(
         "restore", help="restore from a backup set"
     )

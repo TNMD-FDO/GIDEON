@@ -22,6 +22,7 @@ from gideon.host.nogpu import (
 )
 from gideon.host.provision import run_provision
 from gideon.host.steps import (
+    STEPS,
     CheckResult,
     Disposition,
     ProvisionContext,
@@ -458,6 +459,15 @@ class RunnerTests(unittest.TestCase):
         code, _, error = self.run_steps([step], host=FakeHost(euid=1000))
         self.assertEqual(code, 1)
         self.assertIn("root is required", error)
+
+    def test_archive_tools_list_entry_is_marked_build_box_only(self) -> None:
+        host = FakeHost(euid=1000)
+        code, output, error = self.run_steps(STEPS, args=arguments(listing=True), host=host)
+        self.assertEqual(code, 0)
+        self.assertEqual(error, "")
+        archive_step = next(step for step in STEPS if step.name == "archive-tools")
+        self.assertIn(f"archive-tools: {archive_step.summary} [build-box-only]", output.splitlines())
+        self.assertEqual(host.calls, [])
 
     def test_root_fix_follows_the_invoked_form(self) -> None:
         self.addCleanup(report.set_form_from_environment, os.environ.copy())

@@ -28,7 +28,7 @@ OWUI_HEALTHCHECK: Mapping[str, object] = {
 # ``AUDIT_UVICORN_LOGGER_NAMES`` (render/owui.py) keeps the frontend's startup
 # from re-attaching a handler there — each connection asks that logger for
 # handlers once, when it opens. The frontend details are re-read at a frontend
-# bump, and the drill's frontend shares the command.
+# bump, and the drill and the sibling inherit the command through the block.
 # exempt: no figure — a decision.
 OWUI_COMMAND: Final[tuple[str, ...]] = (
     "bash",

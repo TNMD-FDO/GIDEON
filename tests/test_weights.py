@@ -7,6 +7,7 @@ import unittest
 from collections.abc import Callable, Mapping
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
+from functools import partial
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +17,8 @@ from urllib.parse import quote
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.host import report
+from gideon.cli import main
+from gideon.host import nogpu, report
 from gideon.host.egress import EgressAllowlist, load_egress_allowlist
 from gideon.host.models import (
     CandidatePin,
@@ -37,7 +39,9 @@ from gideon.host.weights import (
     MODELS_ROOT,
     PULL_RECORD_PATH,
     CandidateEntry,
+    FileOutcome,
     FileState,
+    ModelOutcome,
     ProcessIdentity,
     PullEntry,
     PullOutcome,
@@ -1045,6 +1049,9 @@ groups:
   image-build:
     - host: build.invalid
       probe_url: https://build.invalid/
+  archive:
+    - host: archive.invalid
+      probe_url: https://archive.invalid/
 """
 
 FICTITIOUS_SITE_TEXT = """\
@@ -1299,6 +1306,93 @@ class CandidateReconciliation(unittest.TestCase):
         self.assertEqual(record.retiring, ())
         self.assertEqual(record.current.models if record.current else (), snapshot_refs(promoted_profile.models))
         self.assertTrue(host.exists(snapshot_path(promoted_pin.repo, promoted_pin.revision, promoted_pin.files[0].path)))
+
+
+class ArchiveNextStep(unittest.TestCase):
+    def setUp(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+
+    def host(self, *, build_box: bool) -> FakeHost:
+        host = FakeHost({
+            "/fixture/site.yaml": FICTITIOUS_SITE_TEXT,
+            "/fixture/models.lock": FICTITIOUS_LOCK_TEXT + FICTITIOUS_CANDIDATE_TEXT,
+            "/fixture/egress.yaml": FICTITIOUS_EGRESS_TEXT,
+            **({str(nogpu.BUILD_BOX_PATH): "Fictitious build box\n"} if build_box else {}),
+        }, wget=_successful_wget)
+        _add_process_files(host)
+        return host
+
+    def run_pull(self, host: FakeHost, *, installed: bool, candidate: str | None = None) -> tuple[int, str, str]:
+        runner = partial(
+            run_models_pull, host=host, site_path="/fixture/site.yaml",
+            models_path="/fixture/models.lock", egress_path="/fixture/egress.yaml", root="/fixture",
+        )
+        environment = {report.GIDEON_INSTALLED_COMMAND: "1"} if installed else {}
+        output, error = StringIO(), StringIO()
+        with (
+            mock.patch.dict(os.environ, environment, clear=True),
+            mock.patch("gideon.host.weights.run_models_pull", wraps=runner),
+            redirect_stdout(output), redirect_stderr(error),
+        ):
+            code = main(["models", "pull", *([candidate] if candidate is not None else [])])
+        return code, output.getvalue(), error.getvalue()
+
+    def test_archive_next_step_follows_fetched_rows_on_the_build_box_in_both_forms(self) -> None:
+        for installed in (False, True):
+            for build_box in (False, True):
+                for candidate in (None, FICTITIOUS_CANDIDATE.name):
+                    with self.subTest(installed=installed, build_box=build_box, candidate=candidate):
+                        host = self.host(build_box=build_box)
+                        code, out, err = self.run_pull(host, installed=installed, candidate=candidate)
+                        self.assertEqual(code, 0, out + err)
+                        self.assertEqual(err, "")
+                        row_name = candidate or FICTITIOUS_PIN.role
+                        self.assertIn(f"{row_name}: ok — fetched ", out)
+                        prefix = "gideon" if installed else "sudo python3 -m gideon"
+                        expected = (
+                            f"Next: run {prefix} archive push to send the fetched revision "
+                            "to the source archive."
+                        )
+                        lines = out.splitlines()
+                        self.assertEqual(
+                            [line for line in lines if line.startswith("Next:")],
+                            [expected] if build_box else [],
+                        )
+                        if build_box:
+                            self.assertEqual(lines[-1], expected)
+                            self.assertLess(
+                                next(index for index, line in enumerate(lines) if line.startswith(f"{row_name}: ok")),
+                                lines.index(expected),
+                            )
+                        downloads = [command for command in host.runs if command[0] == "wget"]
+                        self.assertTrue(downloads)
+                        code, out, err = self.run_pull(host, installed=installed, candidate=candidate)
+                        self.assertEqual(code, 0, out + err)
+                        self.assertIn(f"{row_name}: ok — present:", out)
+                        self.assertNotIn("Next:", out)
+                        self.assertEqual([command for command in host.runs if command[0] == "wget"], downloads)
+
+    def test_a_failed_pull_after_a_fetched_row_never_prints_the_archive_next_step(self) -> None:
+        entry = FICTITIOUS_PIN.files[0]
+        fetched = ModelOutcome(
+            FICTITIOUS_PIN.role, "fetched", (FileOutcome(entry.path, "fetched", entry.size),),
+        )
+        failed = ModelOutcome("fictitious-second-model", "failed", (), problem="Fictitious refusal", fix="Fictitious fix")
+        for installed in (False, True):
+            for candidate in (None, FICTITIOUS_CANDIDATE.name):
+                with self.subTest(installed=installed, candidate=candidate):
+                    host = self.host(build_box=True)
+
+                    def fail_after_fetch(*args: object, **kwargs: object) -> PullOutcome:
+                        report.print_stage(model_row(fetched))
+                        report.print_stage(model_row(failed))
+                        return PullOutcome((fetched, failed), (), False)
+
+                    with mock.patch("gideon.host.weights.pull_profile", side_effect=fail_after_fetch):
+                        code, out, err = self.run_pull(host, installed=installed, candidate=candidate)
+                    self.assertEqual(code, 1, out + err)
+                    self.assertIn("fetched", out)
+                    self.assertNotIn("Next:", out)
 
 
 class PullProfileContracts(unittest.TestCase):

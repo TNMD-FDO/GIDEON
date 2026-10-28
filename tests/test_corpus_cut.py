@@ -14,12 +14,13 @@ import unittest
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from unittest import mock
 from urllib.parse import urlsplit
 
 from gideon.cli import main
-from gideon.host import backuplock, fetch, report, stack, worker
+from gideon.host import backuplock, fetch, nogpu, report, stack, worker
 from gideon.host.corpus import cut, resolve, snapshots
 from gideon.host.corpus.lockfile import (
     Lockfile,
@@ -78,6 +79,12 @@ class FakeHost(RealHost):
         self.owner_override: tuple[int, int] | None = None
         self.ownership: dict[str, tuple[int, int]] = {}
         self.chown_calls: list[tuple[str, int, int]] = []
+        self.markers: set[Path] = set()
+
+    def exists(self, path: PathLike) -> bool:
+        if Path(path) in (nogpu.BUILD_BOX_PATH, nogpu.NO_GPU_PATH):
+            return Path(path) in self.markers
+        return super().exists(path)
 
     def mkdir(
         self, path: PathLike, *, mode: int = 0o755,
@@ -311,21 +318,34 @@ class Cut(unittest.TestCase):
                 courts: str | None = None,
                 now: list[float] | None = None,
                 cut_at: datetime = CUT_AT,
-                sources: tuple[SourceDefinition, ...] | None = None) -> tuple[int, str, str]:
+                sources: tuple[SourceDefinition, ...] | None = None,
+                installed: bool | None = None) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         elapsed = now if now is not None else [0.0]
 
         def advance(seconds: float) -> None:
             elapsed[0] += seconds
 
+        runner = partial(
+            cut.run_corpus_cut, host=self.host, rendered_dir=RENDERED, checkout=self.checkout,
+            snapshots_root=self.snapshots, clock=lambda: cut_at,
+            sleep=advance, monotonic=lambda: elapsed[0],
+            sources=sources if sources is not None else (self.source,),
+        )
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cut.run_corpus_cut(
-                argparse.Namespace(base=base, add_courts=add_courts, courts=courts),
-                host=self.host, rendered_dir=RENDERED, checkout=self.checkout,
-                snapshots_root=self.snapshots, clock=lambda: cut_at,
-                sleep=advance, monotonic=lambda: elapsed[0],
-                sources=sources if sources is not None else (self.source,),
-            )
+            if installed is None:
+                code = runner(argparse.Namespace(base=base, add_courts=add_courts, courts=courts))
+            else:
+                argv = ["corpus", "cut"]
+                for name, value in (("--base", base), ("--add-courts", add_courts), ("--courts", courts)):
+                    if value is not None:
+                        argv.extend((name, value))
+                environment = {report.GIDEON_INSTALLED_COMMAND: "1"} if installed else {}
+                with (
+                    mock.patch.dict(os.environ, environment, clear=True),
+                    mock.patch.object(cut, "run_corpus_cut", wraps=runner),
+                ):
+                    code = main(argv)
         return code, out.getvalue(), err.getvalue()
 
     def prepare_base(self) -> Lockfile:
@@ -654,6 +674,48 @@ class Cut(unittest.TestCase):
         self.assertEqual(self.host.writes, first_writes)
         self.assertEqual(self.host.record_writes, 2)
         self.assertIsNotNone(self.host.record_row)
+
+    def test_archive_next_step_follows_a_written_lockfile_on_the_build_box_in_both_forms(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        directory = self.checkout / "corpus/lockfiles"
+        for installed in (False, True):
+            for build_box in (False, True):
+                for courts in (None, "scotus"):
+                    with self.subTest(installed=installed, build_box=build_box, courts=courts):
+                        if directory.exists():
+                            shutil.rmtree(directory)
+                        self.host = FakeHost()
+                        self.host.snapshots, self.host.checkout = self.snapshots, self.checkout
+                        if build_box:
+                            self.host.markers.add(nogpu.BUILD_BOX_PATH)
+                        code, out, err = self.run_cut(installed=installed, courts=courts)
+                        self.assertEqual(code, 0, out + err)
+                        self.assertEqual(err, "")
+                        self.assertIn("lockfile: ok — wrote ", out)
+                        written = directory / f"corpus-{CUT_AT.date().isoformat()}.yaml"
+                        self.assertTrue(written.is_file())
+                        prefix = "gideon" if installed else "sudo python3 -m gideon"
+                        expected = (
+                            f"Next: run {prefix} archive push to send the new lockfile "
+                            "and its snapshot to the source archive."
+                        )
+                        lines = out.splitlines()
+                        archive_lines = [line for line in lines if "archive push" in line]
+                        self.assertEqual(archive_lines, [expected] if build_box else [])
+                        next_lines = [line for line in lines if line.startswith("Next:")]
+                        self.assertEqual(len(next_lines), 2 if build_box else 1)
+                        if build_box:
+                            self.assertEqual(next_lines[-1], expected)
+                            self.assertLess(
+                                next(index for index, line in enumerate(lines) if line.startswith("record: ok")),
+                                lines.index(expected),
+                            )
+                        previous_writes = list(self.host.writes)
+                        code, out, err = self.run_cut(installed=installed, courts=courts)
+                        self.assertEqual(code, 0, out + err)
+                        self.assertIn("unchanged", out)
+                        self.assertEqual(self.host.writes, previous_writes)
+                        self.assertNotIn("Next:", out)
 
     def test_reason_priority_for_all_four_changes(self) -> None:
         self.assertEqual(self.run_cut()[0], 0)

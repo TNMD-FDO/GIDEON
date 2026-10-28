@@ -1,4 +1,4 @@
-"""Render, pull, start, and verify the host's Compose project."""
+"""Render, pull, start, verify, and prune the host's Compose project."""
 
 import json
 import math
@@ -17,6 +17,7 @@ from gideon.host import (
     cotenants,
     egress,
     grafana,
+    imagestore,
     models,
     owui,
     pgbackrest,
@@ -1237,6 +1238,13 @@ def _record_stage(
     return StageResult("record", True, "applied manifest recorded", "")
 
 
+def _prune_stage(io: Host, context: _ApplyContext) -> StageResult:
+    result = imagestore.prune(io, context.target, context.inputs.images.images)
+    if result.problem is not None:
+        return StageResult("prune", False, result.problem, result.fix)
+    return StageResult("prune", True, imagestore.detail(result), "")
+
+
 def converge(
     io: Host,
     *,
@@ -1252,6 +1260,7 @@ def converge(
     clock: Callable[[], float],
     client_factory: Callable[..., owui.Client] | None,
     grafana_client_factory: Callable[..., grafana.Client] | None,
+    prune_images: bool = False,
 ) -> int:
     """Run apply's convergence stages after the command preconditions row."""
 
@@ -1347,6 +1356,10 @@ def converge(
         io, rendered_dir, site_path, lock_path, models_path, root, context
     )
     print_stage(record_result)
+    if record_result.ok and prune_images:
+        prune_result = _prune_stage(io, context)
+        print_stage(prune_result)
+        return int(not prune_result.ok)
     return int(not record_result.ok)
 
 
@@ -1418,6 +1431,7 @@ def run_apply(
             clock=clock,
             client_factory=client_factory,
             grafana_client_factory=grafana_client_factory,
+            prune_images=True,
         )
     finally:
         backuplock.release_claim(io, lock_claim)

@@ -4,7 +4,7 @@ inputs:
   site_sha256: "0193b145520c2f0c0171a5c991fedbba99b9b32736b55785e97b63d308b95aa5"
   host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
   models_lock_sha256: "386574fee11ddd25adb0021f82c644dd1694ede0fa997f2bb9943d0b7b3e03c4"
-  egress_sha256: "d41c0ffb68aef4e1e677f53cca1fbe102e1f61c17e41e2173226b1db993064f8"
+  egress_sha256: "e22abee0f29547aedd38bb2ca9ca9f0d2cd3dc4b28c9d6df72ae4fad53d0d3af"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
   source_digests:
@@ -59,7 +59,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/rules.yaml":
-    sha256: "e7e13fed06e4f16592933b41614f83a89df8959f15cb8e889f068ee9f823e4f6"
+    sha256: "83085efe7420d84fafb070f1ff7c3a6a78481b9b3d9279d25b198ef5089227ce"
     mode: "0644"
     owners:
       - "grafana"
@@ -69,7 +69,7 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/overview.json":
-    sha256: "c7a8e60f6eac2839530188f933378b3701a187395567425d789089eddca81b8d"
+    sha256: "caf5f706258367fe2d36f6071397d1c1e80e8512a8854c83a0c8cfd203c5453d"
     mode: "0644"
     owners:
       - "grafana"
@@ -227,6 +227,14 @@ files:
     owners: []
   "systemd/gideon-upstream-watch.timer":
     sha256: "0db0a8ee6fb0840167a07e04773b4180507b67e99392442d0269e8e5c4068b67"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-archive-push.service":
+    sha256: "1a5b8551f8c82dfc8c68f2997b712394249a7ce52a23bbb962494c7dabc235a1"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-archive-push.timer":
+    sha256: "6b0e67d9e03f3a07d74644244351e49d99583367e6900325ad2fa81d38f2e631"
     mode: "0644"
     owners: []
   "systemd/gideon-retention-sweep.service":

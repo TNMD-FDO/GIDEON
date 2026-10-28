@@ -241,8 +241,8 @@ change, remove the file as root with `sudo rm /etc/gideon/gpus.yaml`, then run
 `gideon render --diff` to re-record the cards and inspect what
 moves before applying. The record is never carried in a backup set.
 
-**Build box.** The KVM, registry, and runner steps (`kvm`, `registry`, and
-`gh-runner`) converge only on TNMD's box, declared once with
+**Build box.** The KVM, registry, runner, and archive-tools steps (`kvm`,
+`registry`, `gh-runner`, and `archive-tools`) converge only on TNMD's box, declared once with
 `gideon host provision --build-box`, which writes
 `/etc/gideon/build-box`; every other host skips them, and a no-GPU host cannot
 be declared the build box (nor the build box a no-GPU host). The marker is never
@@ -604,6 +604,8 @@ sudo cp -p /etc/containerd/config.toml /var/lib/gideon-store-move/config.toml.sh
 ```
 
 Check for pending package actions affecting Docker or containerd with `sudo apt-get update -q` and `sudo apt-get -s install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin`. If the simulation lists an action, apply it while all projects remain up with `sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin`, then repeat the survey and replace the saved lists and configuration. Do not stop the daemons until the simulation reports no pending action.
+
+On a box that hosts a self-hosted GitHub Actions runner, a running job may hold its own Compose stack on the daemon, and the package action restarts the daemon under it as Stop does, failing the job. Before applying a package action, and again before Stop, run `gh run list --status in_progress` from a clone of each repository the runner serves, and wait until it lists no run.
 
 ### Stop
 

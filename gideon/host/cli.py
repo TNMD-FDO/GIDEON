@@ -7,6 +7,7 @@ from collections.abc import Callable
 from gideon.host import (
     alerts,
     apply,
+    archive,
     backup,
     drill,
     engine,
@@ -106,6 +107,10 @@ def run_backup_run(args: argparse.Namespace) -> int:
 
 def run_backup_push(args: argparse.Namespace) -> int:
     return _guarded("backup push", backup.run_backup_push, args)
+
+
+def run_archive_push(args: argparse.Namespace) -> int:
+    return _guarded("archive push", archive.run_archive_push, args)
 
 
 def run_restore(args: argparse.Namespace) -> int:

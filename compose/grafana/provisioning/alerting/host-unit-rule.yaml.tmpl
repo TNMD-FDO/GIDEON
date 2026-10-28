@@ -24,3 +24,29 @@
         annotations: {summary: A required host unit is inactive, runbook: docs/runbooks/observability.md §4}
         labels: {class: page}
         isPaused: false
+      - uid: gideon-archive-push-failed
+        title: Archive push failed
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: prometheus
+            model: {datasource: {type: prometheus, uid: prometheus}, expr: 'max(node_systemd_unit_state{name="$archive_unit",state="failed"})', instant: true, intervalMs: 1000, maxDataPoints: 43200, refId: A}
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [0], type: gt}, operator: {type: and}, query: {params: [A, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: threshold
+        for: 0s
+        noDataState: OK
+        execErrState: OK
+        annotations: {summary: The source-archive push unit is failed, runbook: docs/runbooks/observability.md §4}
+        labels: {class: page}
+        isPaused: false

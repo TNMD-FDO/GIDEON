@@ -19,10 +19,23 @@ class CommittedArtifact(unittest.TestCase):
 
         self.assertTrue(result.ok, render_errors(result.errors))
         assert result.allowlist is not None
-        self.assertEqual(result.allowlist.version, 7)
+        self.assertEqual(result.allowlist.version, 8)
         self.assertEqual(
             [group.name for group in result.allowlist.groups],
-            ["host-provisioning", "install-upgrade", "corpus", "image-build"],
+            ["host-provisioning", "install-upgrade", "corpus", "image-build", "archive"],
+        )
+
+    def test_archive_group_has_the_box_endpoints_without_status_overrides(self) -> None:
+        result = load_egress_allowlist(ARTIFACT)
+        assert result.allowlist is not None
+        group = result.allowlist.group("archive")
+        assert group is not None
+        self.assertEqual(
+            [(entry.host, entry.probe_url, entry.expect) for entry in group.hosts],
+            [
+                ("api.box.com", "https://api.box.com/2.0/", ()),
+                ("upload.box.com", "https://upload.box.com/api/2.0/", ()),
+            ],
         )
 
     def test_install_upgrade_group_pins_live_hf_hosts(self) -> None:
@@ -94,6 +107,7 @@ def _document(**overrides: object) -> dict[str, object]:
             "install-upgrade": [{"host": "b.example", "probe_url": "https://b.example/"}],
             "corpus": [{"host": "c.example", "probe_url": "https://c.example/"}],
             "image-build": [{"host": "d.example", "probe_url": "https://d.example/"}],
+            "archive": [{"host": "archive.example", "probe_url": "https://archive.example/"}],
         },
     }
     document.update(overrides)

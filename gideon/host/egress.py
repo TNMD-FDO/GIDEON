@@ -103,7 +103,7 @@ _FIX: Final = (
     "Edit config/egress.yaml; consult docs/runbooks/release-files.md §5."
 )
 _ROOT_KEYS: Final = ("version", "groups")
-_GROUP_NAMES: Final = ("host-provisioning", "install-upgrade", "corpus", "image-build")
+_GROUP_NAMES: Final = ("host-provisioning", "install-upgrade", "corpus", "image-build", "archive")
 _HOST_KEYS: Final = ("host", "probe_url", "expect")
 
 

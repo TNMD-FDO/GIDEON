@@ -300,6 +300,7 @@ groups:
         labels: {class: page, upstream: 'true'}
         isPaused: false
 
+
   - orgId: 1
     name: metrics
     folder: GIDEON

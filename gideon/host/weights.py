@@ -19,7 +19,7 @@ from urllib.parse import quote, urlsplit
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.host import report
+from gideon.host import nogpu, report
 from gideon.host.egress import EgressAllowlist, load_egress_allowlist
 from gideon.host.egress import render_errors as render_egress_errors
 from gideon.host.models import (
@@ -1640,4 +1640,7 @@ def run_models_pull(
             refusal("models pull", outcome.problem, _retry_fix(outcome.fix, candidate)),
             file=sys.stderr,
         )
+    if outcome.ok and any(model.kind == "fetched" for model in outcome.models) and nogpu.is_build_box(io):
+        print(f"Next: run {report.command('archive push')} to send the fetched revision "
+              "to the source archive.")
     return int(not outcome.ok)

@@ -1,6 +1,7 @@
 """Render contracts: host facts, artifacts, and the pure core."""
 
 import argparse
+import ast
 import contextlib
 import hashlib
 import io
@@ -34,7 +35,7 @@ from gideon.host.models import (
     load_models_lock,
     select_profile,
 )
-from gideon.host.render import ARTIFACTS, RenderInputs, render_all, systemd
+from gideon.host.render import ARTIFACTS, RenderInputs, compose, render_all, systemd
 from gideon.host.render.api import (
     API_JOB_NAME,
     API_SERVICE_NAME,
@@ -58,23 +59,11 @@ from gideon.host.render.command import (
     run_render,
 )
 from gideon.host.render.compose import (
-    BUILD_BOX_UNIT_PATTERN,
-    ENGINE_ACCESS_LOG_EXCLUDED_PATHS,
-    ENGINE_HEALTHCHECK,
-    ENGINE_READY_SECONDS,
-    ENGINE_USAGE_SWITCHES,
     INTERNAL_NETWORK_NAME,
     NETWORK_NAME,
-    OWUI_COMMAND,
-    POSTGRES_SHM_SIZE_BYTES,
     PROJECT_NAME,
-    UNIT_PATTERN,
     ComposeArtifact,
     compose_top_level,
-    engine_command,
-    engine_service,
-    engine_wrapper,
-    grafana_environment,
     network_members,
     network_name,
     service_blocks,
@@ -87,6 +76,7 @@ from gideon.host.render.engine import (
     EMBED_SERVICE_NAME,
     ENGINE_JOB_NAME,
     ENGINE_PORT,
+    ENGINE_READY_SECONDS,
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
     INTEGRATION_NETWORK_NAME,
@@ -131,6 +121,21 @@ from gideon.host.render.routeguard import (
 )
 from gideon.host.render.searxng import SEARXNG_JOB_NAME, searxng_health_url
 from gideon.host.render.services import declared_sources
+from gideon.host.render.services.generator import (
+    ENGINE_ACCESS_LOG_EXCLUDED_PATHS,
+    ENGINE_HEALTHCHECK,
+    ENGINE_USAGE_SWITCHES,
+    engine_command,
+    engine_service,
+    engine_wrapper,
+)
+from gideon.host.render.services.grafana import grafana_environment
+from gideon.host.render.services.node_exporter import (
+    BUILD_BOX_UNIT_PATTERN,
+    UNIT_PATTERN,
+)
+from gideon.host.render.services.open_webui import OWUI_COMMAND
+from gideon.host.render.services.postgres import POSTGRES_SHM_SIZE_BYTES
 from gideon.host.render.worker import WORKER_SERVICE_NAME
 from gideon.host.render.yamlout import dump_fragment
 from gideon.host.site import SiteConfig, load_site
@@ -471,6 +476,8 @@ class Registry(unittest.TestCase):
                 "systemd/gideon-proposals-tally.timer",
                 "systemd/gideon-upstream-watch.service",
                 "systemd/gideon-upstream-watch.timer",
+                "systemd/gideon-archive-push.service",
+                "systemd/gideon-archive-push.timer",
                 "systemd/gideon-retention-sweep.service",
                 "systemd/gideon-retention-sweep.timer",
                 DCGM_COUNTERS_PATH,
@@ -535,6 +542,37 @@ class Registry(unittest.TestCase):
 
 
 class Compose(unittest.TestCase):
+    def test_namespace_has_no_service_fragment_re_exports(self) -> None:
+        source = (ROOT / "gideon/host/render/compose.py").read_text()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    with self.subTest(line=node.lineno, name=alias.name):
+                        self.assertIsNone(alias.asname)
+        # Ruff's F401 is the half that fails a plain unused import.
+        former_names = (
+            "ENGINE_READY_SECONDS",
+            "image_pin",
+            "ENGINE_ACCESS_LOG_EXCLUDED_PATHS",
+            "ENGINE_HEALTHCHECK",
+            "ENGINE_USAGE_SWITCHES",
+            "engine_command",
+            "engine_service",
+            "engine_wrapper",
+            "grafana_environment",
+            "BUILD_BOX_UNIT_PATTERN",
+            "UNIT_PATTERN",
+            "OWUI_COMMAND",
+            "OWUI_ENV_FILE",
+            "OWUI_HEALTHCHECK",
+            "POSTGRES_HEALTHCHECK",
+            "POSTGRES_SHM_SIZE_BYTES",
+            "SEARXNG_HEALTHCHECK",
+        )
+        for name in former_names:
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(compose, name))
+
     def test_networks_are_declared_in_project_internal_integration_order(self) -> None:
         networks = compose_top_level(inputs())["networks"]
         assert isinstance(networks, Mapping)
@@ -1291,12 +1329,61 @@ class Core(unittest.TestCase):
         no_gpu = inputs(no_gpu=True)
         self.assertEqual(
             [artifact.name for artifact in ARTIFACTS if not artifact.applies(gpu)],
-            ["gideon-egress-env"],
+            ["gideon-egress-env", "gideon-archive-push-service", "gideon-archive-push-timer"],
         )
         self.assertEqual(
             [artifact.name for artifact in ARTIFACTS if not artifact.applies(no_gpu)],
-            ["grafana-gpu", "grafana-eval", "api-instruction", "model-servers-route-guard", "gideon-egress-env", "gideon-eval-nightly-service", "gideon-eval-nightly-timer", "dcgm-counters"],
+            ["grafana-gpu", "grafana-eval", "api-instruction", "model-servers-route-guard", "gideon-egress-env", "gideon-eval-nightly-service", "gideon-eval-nightly-timer", "gideon-archive-push-service", "gideon-archive-push-timer", "dcgm-counters"],
         )
+        build_box = inputs(build_box=True)
+        self.assertEqual(
+            [artifact.name for artifact in ARTIFACTS if not artifact.applies(build_box)],
+            ["gideon-egress-env"],
+        )
+
+    def test_archive_units_are_build_box_only_zoned_persistent_and_bounded(self) -> None:
+        service_artifact = systemd.ArchivePushServiceArtifact()
+        timer_artifact = systemd.ArchivePushTimerArtifact()
+        self.assertEqual(systemd.ARCHIVE_PUSH_CALENDAR, "Mon *-*-* 05:00:00")
+        self.assertGreater(systemd.ARCHIVE_PUSH_TIMEOUT_START_SECONDS, 0)
+        for site_path, no_gpu, build_box in (
+            (EXAMPLE, False, True), (SECOND, False, True),
+            (EXAMPLE, False, False), (SECOND, False, False), (EXAMPLE, True, False),
+        ):
+            with self.subTest(site=site_path.name, no_gpu=no_gpu, build_box=build_box):
+                rendered_inputs = inputs(
+                    site_path, no_gpu=no_gpu, build_box=build_box, checkout="/srv/fictitious-gideon",
+                )
+                rendered = render_all(rendered_inputs)
+                for artifact in (service_artifact, timer_artifact):
+                    self.assertEqual(artifact.applies(rendered_inputs), build_box)
+                    self.assertEqual(artifact.relative_path in rendered.by_path, build_box)
+                if not build_box:
+                    continue
+                service = rendered.by_path[service_artifact.relative_path].content
+                timer = rendered.by_path[timer_artifact.relative_path].content
+                self.assertIn("Type=oneshot", service)
+                self.assertIn(f"WorkingDirectory={rendered_inputs.checkout}", service)
+                self.assertIn("Requires=docker.service", service)
+                self.assertIn("After=docker.service network-online.target", service)
+                self.assertEqual(
+                    [line for line in service.splitlines() if line.startswith("ExecStart=")],
+                    ["ExecStart=/usr/bin/python3 -m gideon archive push"],
+                )
+                self.assertIn(f"TimeoutStartSec={systemd.ARCHIVE_PUSH_TIMEOUT_START_SECONDS}", service)
+                self.assertIn(
+                    f"OnCalendar={systemd.ARCHIVE_PUSH_CALENDAR} {rendered_inputs.site.office.timezone}",
+                    timer,
+                )
+                self.assertIn("Persistent=true", timer)
+                self.assertIn("WantedBy=timers.target", timer)
+                for text in (service, timer):
+                    self.assertNotRegex(text, r"\b(?:corpus|index)\b")
+                    self.assertNotIn("password", text.lower())
+                    self.assertNotIn("token", text.lower())
+                    self.assertNotIn(str(secrets.current_directory()), text)
+                    for value in rendered_inputs.secrets.values():
+                        self.assertNotIn(value, text)
 
     def test_backup_services_carry_the_shared_timeout_on_every_host_kind(self) -> None:
         for name, site_path, no_gpu, build_box in FIXTURE_CASES:

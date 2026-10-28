@@ -20,6 +20,8 @@ _PROPOSALS_TALLY_SERVICE_TEMPLATE = "systemd/gideon-proposals-tally.service.tmpl
 _PROPOSALS_TALLY_TIMER_TEMPLATE = "systemd/gideon-proposals-tally.timer.tmpl"
 _UPSTREAM_WATCH_SERVICE_TEMPLATE = "systemd/gideon-upstream-watch.service.tmpl"
 _UPSTREAM_WATCH_TIMER_TEMPLATE = "systemd/gideon-upstream-watch.timer.tmpl"
+_ARCHIVE_PUSH_SERVICE_TEMPLATE = "systemd/gideon-archive-push.service.tmpl"
+_ARCHIVE_PUSH_TIMER_TEMPLATE = "systemd/gideon-archive-push.timer.tmpl"
 _RETENTION_SWEEP_SERVICE_TEMPLATE = "systemd/gideon-retention-sweep.service.tmpl"
 _RETENTION_SWEEP_TIMER_TEMPLATE = "systemd/gideon-retention-sweep.timer.tmpl"
 
@@ -37,6 +39,11 @@ NIGHTLY_CALENDAR: Final = "*-*-* 21:00:00"
 PROPOSALS_TALLY_CALENDAR: Final = "*-*-* 07:00:00"
 # Before the 07:00 tally, so a dump seen Monday morning reaches that morning's nudge.
 UPSTREAM_WATCH_CALENDAR: Final = "Mon *-*-* 06:30:00"
+# Before the upstream watch and tally, after the usual daily backup push.
+ARCHIVE_PUSH_CALENDAR: Final = "Mon *-*-* 05:00:00"
+# Exempt operational starting value: a 102 GiB copy took 2 h 18 min at
+# 7 to 21 MiB/s; six hours leave room for a new snapshot and model revision.
+ARCHIVE_PUSH_TIMEOUT_START_SECONDS: Final = 21600
 # The nightly expiry hour; it shares the hour with the cotenant's backup,
 # which it does not contend with: a few dozen HTTP calls, no engine.
 RETENTION_SWEEP_CALENDAR: Final = "*-*-* 02:00:00"
@@ -275,6 +282,38 @@ class UpstreamWatchTimerArtifact(_SystemdArtifact):
     def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
         substitutions = dict(super()._substitutions(inputs))
         substitutions["calendar"] = _calendar_with_zone(UPSTREAM_WATCH_CALENDAR, inputs)
+        return substitutions
+
+
+class ArchivePushServiceArtifact(_SystemdArtifact):
+    """Render the build box's source-archive push service."""
+
+    name = "gideon-archive-push-service"
+    relative_path = "systemd/gideon-archive-push.service"
+    template_paths = (_ARCHIVE_PUSH_SERVICE_TEMPLATE,)
+
+    def applies(self, inputs: RenderInputs) -> bool:
+        return inputs.build_box
+
+    def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
+        substitutions = dict(super()._substitutions(inputs))
+        substitutions["timeout_start_seconds"] = str(ARCHIVE_PUSH_TIMEOUT_START_SECONDS)
+        return substitutions
+
+
+class ArchivePushTimerArtifact(_SystemdArtifact):
+    """Render the build box's persistent office-zoned archive push timer."""
+
+    name = "gideon-archive-push-timer"
+    relative_path = "systemd/gideon-archive-push.timer"
+    template_paths = (_ARCHIVE_PUSH_TIMER_TEMPLATE,)
+
+    def applies(self, inputs: RenderInputs) -> bool:
+        return inputs.build_box
+
+    def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
+        substitutions = dict(super()._substitutions(inputs))
+        substitutions["calendar"] = _calendar_with_zone(ARCHIVE_PUSH_CALENDAR, inputs)
         return substitutions
 
 

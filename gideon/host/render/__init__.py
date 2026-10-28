@@ -204,6 +204,8 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         SearxngSettingsArtifact,
     )
     from gideon.host.render.systemd import (
+        ArchivePushServiceArtifact,
+        ArchivePushTimerArtifact,
         BackupServiceArtifact,
         BackupTimerArtifact,
         DrillServiceArtifact,
@@ -270,6 +272,8 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         ProposalsTallyTimerArtifact(),
         UpstreamWatchServiceArtifact(),
         UpstreamWatchTimerArtifact(),
+        ArchivePushServiceArtifact(),
+        ArchivePushTimerArtifact(),
         RetentionSweepServiceArtifact(),
         RetentionSweepTimerArtifact(),
         DcgmCountersArtifact,

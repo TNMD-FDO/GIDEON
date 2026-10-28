@@ -434,6 +434,7 @@ groups:
         annotations: {summary: 'The nightly run for {{ $labels.slice }} is overdue', runbook: docs/runbooks/observability.md §4}
         labels: {class: page}
         isPaused: false
+
   - orgId: 1
     name: metrics
     folder: GIDEON
