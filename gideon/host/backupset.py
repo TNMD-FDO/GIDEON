@@ -1017,10 +1017,10 @@ class RemoteSnapshot:
     complete: bool
 
 
-def select_set(
+def eligible_sets(
     sets: Sequence[SetRef], at: datetime | None = None
-) -> SetRef | Problem:
-    """Select the newest complete set, optionally bounded by ``at``."""
+) -> list[SetRef] | Problem:
+    """Return complete finished sets newest first, optionally bounded by ``at``."""
 
     complete = sorted(
         (ref for ref in sets if ref.complete and ref.finished is not None),
@@ -1033,14 +1033,14 @@ def select_set(
             f"Run {report.command('backup run')}, then retry.",
         )
     if at is None:
-        return complete[0]
+        return complete
     try:
         bound = _aware(at, "at")
     except (TypeError, ValueError) as exc:
         return Problem(f"Cannot select a backup set: {exc}.", "Use a timezone-aware --at value.")
     eligible = [ref for ref in complete if cast(datetime, ref.finished) <= bound]
     if eligible:
-        return eligible[0]
+        return eligible
     oldest = complete[-1]
     assert oldest.finished is not None
     return Problem(
@@ -1048,6 +1048,15 @@ def select_set(
         f"at {_datetime_json(oldest.finished)}.",
         "Choose a later --at, or omit it for the newest set.",
     )
+
+
+def select_set(
+    sets: Sequence[SetRef], at: datetime | None = None
+) -> SetRef | Problem:
+    """Select the newest complete set, optionally bounded by ``at``."""
+
+    eligible = eligible_sets(sets, at=at)
+    return eligible if isinstance(eligible, Problem) else eligible[0]
 
 
 def select_set_by_label(sets: Sequence[SetRef], label: str) -> SetRef | Problem:

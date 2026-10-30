@@ -102,6 +102,8 @@ from gideon.host.steps.docker import (
 from gideon.host.steps.maintenance import (
     _PERIODIC,
     AUTO_UPGRADES_DROP_IN,
+    NEEDRESTART_DROP_IN,
+    NEEDRESTART_DROP_IN_TEXT,
     UnattendedUpgradesStep,
 )
 from gideon.host.steps.network import (
@@ -5254,10 +5256,16 @@ class TimezoneStepTests(unittest.TestCase):
 
 class MaintenanceStepTests(unittest.TestCase):
     PACKAGE = ("dpkg-query", "-W", "-f=${Status} ${Version}\\n", "unattended-upgrades")
+    NEEDRESTART_PACKAGE = ("dpkg-query", "-W", "-f=${Status} ${Version}\\n", "needrestart")
     DROP_IN = os.fspath(AUTO_UPGRADES_DROP_IN)
 
     def maintenance_host(
-        self, *, values: Mapping[str, str] | None = None, drop_in: str | None = None
+        self,
+        *,
+        values: Mapping[str, str] | None = None,
+        drop_in: str | None = None,
+        needrestart_installed: bool = True,
+        needrestart_drop_in: str | None = NEEDRESTART_DROP_IN_TEXT,
     ) -> FakeHost:
         output = "APT::Periodic \"\";\n"
         output += "".join(
@@ -5265,10 +5273,18 @@ class MaintenanceStepTests(unittest.TestCase):
             for key, value in (values or {}).items()
         )
         files = {} if drop_in is None else {self.DROP_IN: drop_in}
+        if needrestart_drop_in is not None:
+            files[os.fspath(NEEDRESTART_DROP_IN)] = needrestart_drop_in
         return FakeHost(
             files=files,
             commands={
                 self.PACKAGE: completed(self.PACKAGE, "install ok installed 99.0-fictitious\n"),
+                self.NEEDRESTART_PACKAGE: subprocess.CompletedProcess(
+                    list(self.NEEDRESTART_PACKAGE),
+                    0 if needrestart_installed else 1,
+                    "install ok installed 99.0-fictitious\n" if needrestart_installed else "",
+                    "",
+                ),
                 _PERIODIC: completed(_PERIODIC, output),
             },
         )
@@ -5283,7 +5299,7 @@ class MaintenanceStepTests(unittest.TestCase):
         with self.assertRaises(StepFailure) as raised:
             step.apply(context(host))
         self.assertEqual((raised.exception.detail, raised.exception.fix), (reading.detail, reading.fix))
-        assert_no_host_mutation(self, host, {self.PACKAGE, _PERIODIC})
+        assert_no_host_mutation(self, host, {self.PACKAGE, self.NEEDRESTART_PACKAGE, _PERIODIC})
 
     def test_unattended_upgrades_installs_and_writes_only_its_dropin(self) -> None:
         install = ("apt-get", "install", "-y", "unattended-upgrades")
@@ -5302,6 +5318,7 @@ class MaintenanceStepTests(unittest.TestCase):
             'APT::Periodic::Update-Package-Lists "1";\n'
             'APT::Periodic::Unattended-Upgrade "1";\n',
         )
+        self.assertEqual(host.write_modes, [(self.DROP_IN, 0o644)])
 
     def test_zero_without_a_drop_in_refuses_before_mutation(self) -> None:
         host = self.maintenance_host(values={
@@ -5361,7 +5378,7 @@ class MaintenanceStepTests(unittest.TestCase):
         self.assertIn("Update-Package-Lists 7", reading.detail)
         host.calls.clear()
         step.apply(context(host))
-        assert_no_host_mutation(self, host, {self.PACKAGE, _PERIODIC})
+        assert_no_host_mutation(self, host, {self.PACKAGE, self.NEEDRESTART_PACKAGE, _PERIODIC})
         self.assertNotIn(self.DROP_IN, host.files)
 
     def test_failing_apt_config_refuses_before_mutation(self) -> None:
@@ -5370,6 +5387,113 @@ class MaintenanceStepTests(unittest.TestCase):
             list(_PERIODIC), 2, "", "fictitious apt error\nsecond line\n"
         )
         self.assert_periodic_refusal(host, "apt-config", "fictitious apt error")
+
+    def test_needrestart_drop_in_adds_two_overrides_and_sets_nothing_else(self) -> None:
+        settings = [
+            line for line in NEEDRESTART_DROP_IN_TEXT.splitlines()
+            if line and not line.startswith("#")
+        ]
+        self.assertEqual(settings, [
+            "$nrconf{override_rc}{qr(^gideon-)} = 0;",
+            r"$nrconf{override_rc}{qr(^actions\.runner\.)} = 0;",
+        ])
+
+    def test_missing_needrestart_drop_in_writes_only_its_exact_text(self) -> None:
+        host = self.maintenance_host(
+            values={"Update-Package-Lists": "7", "Unattended-Upgrade": "1"},
+            needrestart_drop_in=None,
+        )
+        step = UnattendedUpgradesStep()
+        reading = step.check(context(host))
+        self.assertEqual(reading.disposition, Disposition.DRIFT)
+        self.assertIn("needrestart would restart GIDEON's units", reading.detail)
+        self.assertIn(os.fspath(NEEDRESTART_DROP_IN), reading.detail)
+        self.assertIn(os.fspath(NEEDRESTART_DROP_IN), reading.fix)
+        step.apply(context(host))
+        self.assertEqual(host.files, {os.fspath(NEEDRESTART_DROP_IN): NEEDRESTART_DROP_IN_TEXT})
+        self.assertEqual(host.write_modes, [(os.fspath(NEEDRESTART_DROP_IN), 0o644)])
+        self.assertEqual(
+            [call for call in host.calls if call[0] == "write_text"],
+            [("write_text", (os.fspath(NEEDRESTART_DROP_IN), NEEDRESTART_DROP_IN_TEXT))],
+        )
+        self.assertEqual(step.check(context(host)).disposition, Disposition.CONVERGED)
+
+    def test_equal_needrestart_drop_in_is_met_without_a_write(self) -> None:
+        host = self.maintenance_host(values={
+            "Update-Package-Lists": "7", "Unattended-Upgrade": "1"
+        })
+        step = UnattendedUpgradesStep()
+        reading = step.check(context(host))
+        self.assertEqual(reading.disposition, Disposition.CONVERGED)
+        self.assertIn("needrestart defers the gideon-* and actions.runner.* units", reading.detail)
+        self.assertIn(os.fspath(NEEDRESTART_DROP_IN), reading.detail)
+        step.apply(context(host))
+        assert_no_host_mutation(self, host, {self.PACKAGE, self.NEEDRESTART_PACKAGE, _PERIODIC})
+
+    def test_differing_needrestart_drop_in_is_rewritten_whole(self) -> None:
+        host = self.maintenance_host(
+            values={"Update-Package-Lists": "7", "Unattended-Upgrade": "1"},
+            needrestart_drop_in="# fictitious obsolete deferral\n",
+        )
+        step = UnattendedUpgradesStep()
+        reading = step.check(context(host))
+        self.assertEqual(reading.disposition, Disposition.DRIFT)
+        self.assertIn(f"{NEEDRESTART_DROP_IN} differs from GIDEON's text", reading.detail)
+        step.apply(context(host))
+        self.assertEqual(host.files, {os.fspath(NEEDRESTART_DROP_IN): NEEDRESTART_DROP_IN_TEXT})
+        self.assertEqual(host.write_modes, [(os.fspath(NEEDRESTART_DROP_IN), 0o644)])
+
+    def test_absent_needrestart_needs_no_drop_in_or_write(self) -> None:
+        host = self.maintenance_host(
+            values={"Update-Package-Lists": "7", "Unattended-Upgrade": "1"},
+            needrestart_installed=False,
+            needrestart_drop_in=None,
+        )
+        step = UnattendedUpgradesStep()
+        reading = step.check(context(host))
+        self.assertEqual(reading.disposition, Disposition.CONVERGED)
+        self.assertIn("needrestart is not installed, no deferral file needed", reading.detail)
+        step.apply(context(host))
+        assert_no_host_mutation(self, host, {self.PACKAGE, self.NEEDRESTART_PACKAGE, _PERIODIC})
+        self.assertEqual(host.files, {})
+
+    def test_unreadable_needrestart_drop_in_refuses_before_either_write(self) -> None:
+        host = self.maintenance_host(needrestart_drop_in=None)
+        host.stats[os.fspath(NEEDRESTART_DROP_IN)] = os.stat_result(
+            (stat.S_IFREG | 0o644, 0, 0, 1, 0, 0, 0, 0, 0, 0)
+        )
+        self.assert_periodic_refusal(host, "cannot read", os.fspath(NEEDRESTART_DROP_IN))
+        self.assertIn(os.fspath(NEEDRESTART_DROP_IN), UnattendedUpgradesStep().check(context(host)).fix)
+        self.assertEqual(host.files, {})
+
+    def test_periodic_shortfall_with_missing_needrestart_drop_in_refuses(self) -> None:
+        host = self.maintenance_host(
+            values={"Update-Package-Lists": "0", "Unattended-Upgrade": "1"},
+            needrestart_drop_in=None,
+        )
+        self.assert_periodic_refusal(host, "apt periodic triggers", "Update-Package-Lists 0")
+        self.assertEqual(host.files, {})
+
+    def test_periodic_drift_with_missing_needrestart_drop_in_writes_both_in_order(self) -> None:
+        host = self.maintenance_host(needrestart_drop_in=None)
+        step = UnattendedUpgradesStep()
+        reading = step.check(context(host))
+        self.assertEqual(reading.disposition, Disposition.DRIFT)
+        self.assertIn(self.DROP_IN, reading.detail)
+        self.assertIn(os.fspath(NEEDRESTART_DROP_IN), reading.detail)
+        self.assertEqual(reading.fix, f"Write {AUTO_UPGRADES_DROP_IN}, then re-run provision.")
+        step.apply(context(host))
+        self.assertEqual(
+            [call for call in host.calls if call[0] == "write_text"],
+            [
+                ("write_text", (
+                    self.DROP_IN,
+                    'APT::Periodic::Update-Package-Lists "1";\n'
+                    'APT::Periodic::Unattended-Upgrade "1";\n',
+                )),
+                ("write_text", (os.fspath(NEEDRESTART_DROP_IN), NEEDRESTART_DROP_IN_TEXT)),
+            ],
+        )
 
 
 class HostToolsStepTests(unittest.TestCase):

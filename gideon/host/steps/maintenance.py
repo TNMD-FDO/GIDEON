@@ -1,7 +1,8 @@
-"""Periodic apt triggers for unattended maintenance."""
+"""Periodic apt triggers and needrestart deferrals for unattended maintenance."""
 
 import re
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from gideon.host.steps import (
@@ -19,6 +20,18 @@ from gideon.host.steps import (
 )
 
 AUTO_UPGRADES_DROP_IN = Path("/etc/apt/apt.conf.d/52gideon-auto-upgrades")
+NEEDRESTART_DROP_IN = Path("/etc/needrestart/conf.d/gideon.conf")
+NEEDRESTART_UNITS = (r"^gideon-", r"^actions\.runner\.")
+# Keys join the stock override_rc hash, whose dbus and display-manager entries a
+# reassignment would drop; setting $nrconf{restart} or {ui} would take the apt
+# hook out of its automatic Ubuntu mode into an interactive one.
+NEEDRESTART_DROP_IN_TEXT = (
+    "# GIDEON needrestart deferrals\n"
+    "# Keep library upgrades from interrupting backups and CI jobs.\n"
+    + "".join(f"$nrconf{{override_rc}}{{qr({pattern})}} = 0;\n" for pattern in NEEDRESTART_UNITS)
+)
+_NEEDRESTART_READ_FIX = f"Repair access to {NEEDRESTART_DROP_IN}, then re-run provision."
+_NEEDRESTART_WRITE_FIX = f"Write {NEEDRESTART_DROP_IN}, then re-run provision."
 _PERIODIC = ("apt-config", "dump", "APT::Periodic")
 _KEYS = ("Update-Package-Lists", "Unattended-Upgrade")
 _PERIODIC_LINE = re.compile(r'^APT::Periodic::([A-Za-z-]+) "([^"]*)";$')
@@ -34,6 +47,31 @@ class _PeriodicReading:
     values: tuple[str | None, ...]
     own: frozenset[str]
     stale: bool
+
+
+class _NeedrestartReading(Enum):
+    ABSENT = "package absent"
+    MISSING = "file missing"
+    EQUAL = "equal"
+    DIFFERING = "differing"
+
+
+def _needrestart_read(context: ProvisionContext) -> _NeedrestartReading | CheckResult:
+    if not package_installed(context, "needrestart"):
+        return _NeedrestartReading.ABSENT
+    if not context.host.exists(NEEDRESTART_DROP_IN):
+        return _NeedrestartReading.MISSING
+    try:
+        text = context.host.read_text(NEEDRESTART_DROP_IN)
+    except (OSError, UnicodeError) as exc:
+        return CheckResult(
+            Disposition.UNFIXABLE,
+            f"cannot read {NEEDRESTART_DROP_IN}: {exc}",
+            _NEEDRESTART_READ_FIX,
+        )
+    if text == NEEDRESTART_DROP_IN_TEXT:
+        return _NeedrestartReading.EQUAL
+    return _NeedrestartReading.DIFFERING
 
 
 def _drop_in_text(keys: set[str] | frozenset[str]) -> str:
@@ -142,15 +180,16 @@ def _periodic_check(reading: _PeriodicReading, setting: BoxWideSetting) -> Check
 
 
 class UnattendedUpgradesStep(Step):
-    """Own only apt's periodic triggers, set each while unset, and accept any on value.
+    """Own two drop-ins: apt's periodic triggers and needrestart's unit deferrals.
 
     Ubuntu's stock 50unattended-upgrades origins stay security-only; a trigger
     another file set to a value other than 0 is met and never restated, since
-    a later drop-in would override it.
+    a later drop-in would override it. The needrestart file defers GIDEON's
+    units and CI runners while preserving the stock restart policy.
     """
 
     name = "unattended-upgrades"
-    summary = "ensure periodic package lists and unattended security upgrades"
+    summary = "ensure unattended security upgrades, needrestart deferring GIDEON's units"
     settings = (BoxWideSetting("apt periodic triggers"),)
 
     def check(self, context: ProvisionContext) -> CheckResult:
@@ -163,7 +202,35 @@ class UnattendedUpgradesStep(Step):
         reading = _periodic_read(context)
         if isinstance(reading, CheckResult):
             return reading
-        return _periodic_check(reading, self.settings[0])
+        checked = _periodic_check(reading, self.settings[0])
+        if checked.disposition is Disposition.UNFIXABLE:
+            return checked
+        needrestart = _needrestart_read(context)
+        if isinstance(needrestart, CheckResult):
+            return needrestart
+        drifting = []
+        if checked.disposition is Disposition.DRIFT:
+            drifting.append(checked)
+        if needrestart in {_NeedrestartReading.MISSING, _NeedrestartReading.DIFFERING}:
+            detail = (
+                f"needrestart would restart GIDEON's units; GIDEON writes {NEEDRESTART_DROP_IN}"
+                if needrestart is _NeedrestartReading.MISSING
+                else f"{NEEDRESTART_DROP_IN} differs from GIDEON's text"
+            )
+            drifting.append(CheckResult(Disposition.DRIFT, detail, _NEEDRESTART_WRITE_FIX))
+        if drifting:
+            return CheckResult(
+                Disposition.DRIFT,
+                "; ".join(part.detail for part in drifting),
+                drifting[0].fix,
+            )
+        detail = (
+            "needrestart is not installed, no deferral file needed"
+            if needrestart is _NeedrestartReading.ABSENT
+            else "needrestart defers the gideon-* and actions.runner.* units "
+            f"({NEEDRESTART_DROP_IN})"
+        )
+        return CheckResult(Disposition.CONVERGED, f"{checked.detail}; {detail}", "")
 
     def apply(self, context: ProvisionContext) -> None:
         if not package_installed(context, "unattended-upgrades"):
@@ -174,6 +241,9 @@ class UnattendedUpgradesStep(Step):
         checked = _periodic_check(reading, self.settings[0])
         if checked.disposition is Disposition.UNFIXABLE:
             raise StepFailure(checked.detail, checked.fix)
+        needrestart = _needrestart_read(context)
+        if isinstance(needrestart, CheckResult):
+            raise StepFailure(needrestart.detail, needrestart.fix)
         if reading.stale or any(value is None for value in reading.values):
             keys = set(reading.own)
             keys.update(
@@ -181,3 +251,5 @@ class UnattendedUpgradesStep(Step):
                 if value is None
             )
             context.host.write_text(AUTO_UPGRADES_DROP_IN, _drop_in_text(keys))
+        if needrestart in {_NeedrestartReading.MISSING, _NeedrestartReading.DIFFERING}:
+            context.host.write_text(NEEDRESTART_DROP_IN, NEEDRESTART_DROP_IN_TEXT)

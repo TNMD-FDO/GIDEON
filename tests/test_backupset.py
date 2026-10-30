@@ -624,6 +624,40 @@ class DiscoveryAndSelection(unittest.TestCase):
         assert isinstance(empty, backupset.Problem)
         self.assertEqual(empty.fix, "Run sudo python3 -m gideon backup run, then retry.")
 
+    def test_eligible_sets_orders_all_complete_finished_sets_with_an_inclusive_bound(self) -> None:
+        oldest = backupset.SetRef("old", "/old", aware(10), True)
+        middle = backupset.SetRef("middle", "/middle", aware(11), True)
+        newest = backupset.SetRef("new", "/new", aware(12), True)
+        partial = backupset.SetRef("partial.partial", "/partial", aware(13), False)
+        unfinished = backupset.SetRef("unfinished", "/unfinished", None, True)
+        sets = (middle, partial, oldest, unfinished, newest)
+        self.assertEqual(backupset.eligible_sets(sets), [newest, middle, oldest])
+        self.assertEqual(backupset.eligible_sets(sets, aware(11)), [middle, oldest])
+        self.assertEqual(backupset.eligible_sets(sets, aware(14)), [newest, middle, oldest])
+
+    def test_eligible_sets_refuses_when_none_is_complete_or_finished_by_at(self) -> None:
+        oldest = backupset.SetRef("old", "/old", aware(10), True)
+        newest = backupset.SetRef("new", "/new", aware(12), True)
+        partial = backupset.SetRef("partial.partial", "/partial", None, False)
+        unfinished = backupset.SetRef("unfinished", "/unfinished", None, True)
+        for sets in ((), (partial, unfinished)):
+            with self.subTest(sets=sets):
+                empty = backupset.eligible_sets(sets)
+                self.assertIsInstance(empty, backupset.Problem)
+                assert isinstance(empty, backupset.Problem)
+                self.assertEqual(empty.problem, "No complete backup set is available.")
+                self.assertEqual(empty.fix, "Run sudo python3 -m gideon backup run, then retry.")
+        before = backupset.eligible_sets((newest, partial, oldest), aware(9))
+        self.assertIsInstance(before, backupset.Problem)
+        assert isinstance(before, backupset.Problem)
+        assert oldest.finished is not None
+        self.assertEqual(
+            before.problem,
+            "No complete backup set finished by --at; the oldest complete set finished "
+            f"at {oldest.finished.isoformat()}.",
+        )
+        self.assertEqual(before.fix, "Choose a later --at, or omit it for the newest set.")
+
     def test_select_set_by_label_names_the_complete_labels_on_a_miss(self) -> None:
         oldest = backupset.SetRef("pre-v1.0.0", "/old", aware(10), True)
         newest = backupset.SetRef("20260101T000000Z", "/new", aware(12), True)

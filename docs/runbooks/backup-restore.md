@@ -179,8 +179,19 @@ row names the chosen snapshot's `archive_through` and then every newer
 unfinished snapshot, `N newer unfinished snapshot(s): <label>, ...`, so read
 it before anything stops. To hold a bound, pass `--at`, which refuses a time
 past the newest complete snapshot's boundary rather than going back further.
-`--at <ISO time>` restores Postgres to that instant and the files to the newest
-set finished by then; a naive time is office-local. Every point-in-time bound
+`--at <ISO time>` restores Postgres to that instant along the archive's kept
+history, following the timeline switches made by earlier restores; a naive
+time is office-local. From staging it takes the newest complete set finished
+by the instant whose backup reaches the archive's latest timeline. The
+`select:` row names the set, its backup and timeline, the latest timeline,
+and every newer set passed over with its reason. A backup past a fork sits on
+a branch an earlier restore abandoned; `gideon restore --from staging --set <label>`
+restores that set to its own boundary, the end of its branch. An instant on an
+abandoned branch comes back as the fork's state, the state the earlier restore
+returned to. If no set finished by the instant reaches the latest timeline,
+the restore refuses at `select` before anything stops, naming
+`gideon backup run --full` and a retry with an `--at` after it or no `--at`.
+Every point-in-time bound
 is a recorded archive boundary, never a clock: a time the sets cannot reach
 refuses and names the bound. The frontend's uploads root is then also overlaid
 from every complete set in the same source finished after the restored one,
@@ -399,9 +410,10 @@ label and restores Postgres from that set's own backup to that set's own
 archive boundary (and, since the set is a full one, the derived stores' indexes
 from the snapshots it took before the upgrade), which no `--at` can express once the set is the newest one;
 it is refused with `--at` or `--from target`. After a rollback, Postgres runs
-on a new timeline, and an `--at` earlier than the rollback's boundary may name
-a point on the old one that pgBackRest's auto-selected backup cannot reach;
-prefer `--set` for anything a rollback took. It is also the by-hand rollback when `upgrade --rollback`
+on a new timeline. An `--at` earlier than the rollback's boundary follows the
+kept history and reaches no later than the rollback's target state;
+`--set <label>` restores the rolled-back branch to its own end.
+It is also the by-hand rollback when `upgrade --rollback`
 finds no pre-upgrade set to work from. As before a restore, `sudo python3 -m
 tools.cistack down` runs first while the `gideon-ci` sibling stands. A labelled or pre-restore set never
 expires the repository's retention on its own; only the nightly run does.
@@ -420,7 +432,7 @@ its size.
 
 | Failure | Recovery point | Recovery time | Procedure | Proof |
 |---|---|---|---|---|
-| A database error while Postgres answers (a bad migration, a wrong delete) | The pre-restore set's boundary, taken after its own backup: a point-in-time restore to any instant before it, reached from the earlier set's backup and the archived WAL; the work after the chosen instant is discarded by choice, nothing else is lost; an instant past an earlier restore waits for that restore's full backup (below) | 2,052 s (34 min): the pre-restore set 536 s, the restore's other stages 1,202 s, the apply 309 s, the turn 4 s | §4, `gideon restore --from staging --at <instant>`, then `gideon apply` and any `gideon index build` and `gideon index promote` its `Next:` line names | A timed run on 2026-10-21 over a 69.5 GB set, `v0.3.181` |
+| A database error while Postgres answers (a bad migration, a wrong delete) | The pre-restore set's boundary, taken after its own backup: a point-in-time restore to any instant before it, reached from the earlier set's backup and the archived WAL; the work after the chosen instant is discarded by choice, nothing else is lost | 2,084 s (35 min): the pre-restore set 554 s, the restore's other stages 1,220 s, the apply 305 s, the turn 3 s | §4, `gideon restore --from staging --at <instant>`, then `gideon apply` and any `gideon index build` and `gideon index promote` its `Next:` line names | A timed run on 2026-10-28 over a 62.3 GB set, to an instant past an earlier restore's promotion with no full backup between, `v0.3.189` |
 | A damaged cluster that does not answer | The archive end: the stop less at most 300 s (`archive_timeout`), 3 s measured; the newest complete set's boundary, by the bare restore, when the archive has a gap | 1,237 s (21 min): the restore 919 s (the repository's verify 880 s of them), the apply 313 s, the turn 4 s | §4 with the stack stopped first, `gideon restore --from staging --archive-end`, then `gideon apply` and `gideon backup run --full` | A timed run on 2026-10-22 over a 69.6 GB set, `v0.3.183` |
 | A lost derived store's index (Qdrant, OpenSearch) | The newest full run's index snapshot, up to a week behind the record, then levelled with it | 1,685 s from the restore's start to the restored and levelled store, before the apply, over a 1,197,330-point scratch generation (2026-10-21); to a query answered through the alias, unproven | §4, the `stores:` row's put-back and level step, then the `Next:` line's `gideon index build` and `gideon index promote` | The 2026-10-21 record over a 1,197,330-point scratch generation and a 69.5 GB set, `v0.3.181`, for the store; the query's seconds unproven, read at the first restore after the first promoted generation |
 | Lost content-addressed store objects | Staging's store copy, every object the newest complete local set's listing names; an object stored since is written again from its source (§4's listing command) | Seconds per missing object at the put-back; the whole store's put-back unproven at today's size | §4, the `files:` row's `data-bulk-cas` clause and the listing command | Unproven; the clean-VM full restore at the next minor release with the store in the set |
@@ -438,14 +450,11 @@ the archive end reached; it verifies the pgBackRest repository alone and puts
 back no file root, so it is faster than a bare stopped-stack restore of the
 same set (1,165 s and 1,193 s on 2026-10-21, before the apply).
 
-After any restore, `--at` reaches no instant later than that restore until the
-full backup its `Next:` line names has finished, since a point-in-time restore
-replays only along the timeline the selected set's backup was taken on, and a
-restore starts a new one.
-Run `gideon backup run --full` at once after every restore's apply.
-A restore whose instant its set cannot reach stops the stack, runs to its
-`stores:` row, and refuses there with Postgres restarting; recover with a
-stopped-stack restore of the newest local set, `gideon restore --from staging`.
+After any restore, `--at` follows the kept timeline history and needs no full
+backup first. Run `gideon backup run --full` at once after every restore's
+apply to maintain retention and the incremental backup chain.
+With `--at` from staging, the command refuses at `select` before anything
+stops when no set finished by the instant can reach the latest timeline.
 
 A pre-restore set this release takes records its boundary after its own backup
 and restores as any other set.

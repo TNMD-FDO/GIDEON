@@ -19,7 +19,7 @@ from gideon.host.steps import disk, network
 from gideon.host.steps.accounts import SSHD_POLICY
 from gideon.host.steps.command import COMMAND_PATH, INSTALL_HOME
 from gideon.host.steps.docker import JOURNALD_DROP_IN
-from gideon.host.steps.maintenance import AUTO_UPGRADES_DROP_IN
+from gideon.host.steps.maintenance import AUTO_UPGRADES_DROP_IN, NEEDRESTART_DROP_IN
 from gideon.host.steps.proxy import PROXY_CONF
 from gideon.host.steps.services import REGISTRY_UNIT, RUNNER_SUDOERS
 from gideon.host.steps.site_dirs import ETC_GIDEON
@@ -478,7 +478,7 @@ class UninstallContracts(unittest.TestCase):
     def test_files_and_configuration_plain_then_purge(self) -> None:
         host = FakeHost()
         kept = (JOURNALD_DROP_IN, SSHD_POLICY, AUTO_UPGRADES_DROP_IN)
-        purged = (PROXY_CONF, network.CHRONY_SOURCES, network.WAIT_ONLINE_DROPIN)
+        purged = (PROXY_CONF, network.CHRONY_SOURCES, network.WAIT_ONLINE_DROPIN, NEEDRESTART_DROP_IN)
         for path in (*kept, *purged, ETC_GIDEON):
             host.files[os.fspath(path)] = "retained value"
         host.chrony_is_active = True

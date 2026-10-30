@@ -204,6 +204,7 @@ class FakeHost:
         history_files: Mapping[str, str] | None = None,
         lsn_stop: str | None = "0/7000000",
         backup_timeline: int = 2,
+        backups: Mapping[str, tuple[int, str | None]] | None = None,
         replay: Replay | None = None,
         fail_identity_exec: bool = False,
         secrets_present: bool = False,
@@ -276,13 +277,13 @@ class FakeHost:
         self.remote_records = dict(remote_records or {})
         self.fail_checksum = fail_checksum
         self.fail_pgbackrest = fail_pgbackrest
-        self.info_has_label = info_has_label
         self.archive_max = archive_max
         self.history_files = dict(history_files) if history_files is not None else {
             "00000002.history": "1\t0/4000000\tfictitious fork\n",
         }
-        self.lsn_stop = lsn_stop
-        self.backup_timeline = backup_timeline
+        self.backups = dict(backups) if backups is not None else (
+            {value.pgbackrest_label: (backup_timeline, lsn_stop)} if info_has_label else {}
+        )
         self.replay = replay or Replay()
         self.recovery_polls_remaining = self.replay.recovery_polls
         self.fail_identity_exec = fail_identity_exec
@@ -540,12 +541,11 @@ class FakeHost:
         if "pgbackrest" in command and "verify" in command:
             return completed(command, returncode=int(self.fail_pgbackrest))
         if "pgbackrest" in command and "info" in command and "--output=json" in command:
-            labels = [self.manifest_value.pgbackrest_label] if self.info_has_label else []
             backups = [{
                 "label": label, "type": "full", "timestamp": {"stop": 100},
-                "archive": {"start": f"{self.backup_timeline:08X}0000000000000005"},
-                "lsn": {"stop": self.lsn_stop},
-            } for label in labels]
+                "archive": {"start": f"{timeline:08X}0000000000000005"},
+                "lsn": {"stop": lsn_stop},
+            } for label, (timeline, lsn_stop) in self.backups.items()]
             return completed(command, stdout=json.dumps([{
                 "name": "gideon", "backup": backups,
                 "archive": [{"database": {"id": 1}, "id": "1000-1", "max": self.archive_max}],
@@ -670,6 +670,31 @@ def make_host(**kwargs: Any) -> FakeHost:
     return FakeHost(**kwargs)
 
 
+def forked_sets_host() -> FakeHost:
+    """Two sets on an abandoned branch, only the older backup preceding its fork."""
+
+    older = replace(manifest(), pgbackrest_label="backup-before-fork")
+    finished = NOW - timedelta(minutes=10)
+    newer = replace(
+        older, label=LATER_SET, started=finished - timedelta(minutes=10),
+        finished=finished, archive_through=finished, pgbackrest_label="backup-after-fork",
+    )
+    upload = "fictitious later upload"
+    upload_entry = replace(
+        entry("uploads/data.bin", digest=hashlib.sha256(upload.encode()).hexdigest()),
+        size=len(upload),
+    )
+    newer = replace(newer, inventory={**newer.inventory, UPLOADS_ROOT.name: (upload_entry,)})
+    fake = make_host(
+        names=(newer.label, older.label), manifest_value=older,
+        backups={older.pgbackrest_label: (1, "0/3000000"), newer.pgbackrest_label: (1, "0/5000000")},
+    )
+    newer_path = backupset.set_dir(newer.label)
+    fake.files[os.path.join(newer_path, backupset.MANIFEST_NAME)] = newer.to_json()
+    fake.files[os.path.join(backupset.files_dir(newer_path), UPLOADS_ROOT.name, upload_entry.path)] = upload
+    return fake
+
+
 class RenderedRestoreCase(unittest.TestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -689,6 +714,22 @@ class RenderedRestoreCase(unittest.TestCase):
         patcher = patch.object(restore, "render_to_disk", side_effect=render)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def run_restore(self, fake: FakeHost, **args: Any) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        namespace = argparse.Namespace(source=fake.source, at=None, set=None)
+        for key, value in args.items():
+            setattr(namespace, key, value)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = restore.run_restore(namespace, host=fake, now=NOW, sleep=lambda _: None)
+        return code, out.getvalue(), err.getvalue()
+
+    def _row(self, output: str, name: str) -> str:
+        return next(line for line in output.splitlines() if line.startswith(name + ":"))
+
+    def _assert_not_stopped(self, fake: FakeHost) -> None:
+        self.assertFalse(any(argv[-1] == "down" for argv, _, _, _ in fake.calls))
+        self.assertFalse(any("pgbackrest" in argv and "restore" in argv for argv, _, _, _ in fake.calls))
 
 
 class RegistrySeed(RenderedRestoreCase):
@@ -1835,10 +1876,14 @@ class RestoreContracts(RenderedRestoreCase):
         self.assertIn("--type=time", restore_call)
         self.assertIn("--target=2026-09-02 11:00:00+00:00", restore_call)
         self.assertIn("--target-action=promote", restore_call)
-        # Every set restore names its own backup and that backup's timeline:
-        # auto-selection and the current timeline both go wrong after a fork.
+        # --at names the backup and follows the archive's kept history.
         self.assertIn(f"--set={manifest().pgbackrest_label}", restore_call)
-        self.assertIn("--target-timeline=2", restore_call)
+        self.assertIn("--target-timeline=latest", restore_call)
+        down_index = next(index for index, call in enumerate(fake.calls) if call[0][-1] == "down")
+        self.assertFalse(any(
+            "pgbackrest" in argv and "info" in argv
+            for argv, _, _, _ in fake.calls[down_index + 1:]
+        ))
 
     def test_target_at_after_newest_remote_boundary_refuses_in_select(self) -> None:
         fake = make_host(
@@ -2650,17 +2695,160 @@ class StoreRestoreCommands(RenderedRestoreCase):
                 self.assertFalse(any(call[0][-1] == "down" for call in fake.calls))
 
 
+class PointInTimeRestore(RenderedRestoreCase):
+    """Time targets follow the kept history and refuse before stopping an unreachable branch."""
+
+    def test_at_passes_over_a_backup_past_the_fork_and_overlays_its_later_files(self) -> None:
+        fake = forked_sets_host()
+        newer, older = backupset.list_sets(fake)
+        assert newer.manifest is not None and older.manifest is not None
+        assert newer.finished is not None
+        at = newer.finished
+        code, output, errors = self.run_restore(fake, at=at.isoformat())
+        self.assertEqual(code, 0, output + errors)
+        self.assertEqual(errors, "")
+        self.assertEqual(
+            self._row(output, "select"),
+            f"select: ok — source=staging; set={older.label}; at={at.isoformat()}; "
+            f"backup={older.manifest.pgbackrest_label}; timeline=1; latest_timeline=2; "
+            f"passed over: set {newer.label}: backup {newer.manifest.pgbackrest_label} "
+            "on timeline 1 cannot reach timeline 2 — "
+            f"sudo python3 -m gideon restore --from staging --set {newer.label} "
+            "restores it to its own boundary",
+        )
+        restore_call = next(argv for argv, _, _, _ in fake.calls if "pgbackrest" in argv and "restore" in argv)
+        self.assertEqual(restore_call[restore_call.index("restore") + 1:], (
+            "--delta", f"--set={older.manifest.pgbackrest_label}", "--target-timeline=latest",
+            "--type=time", f"--target={backupset.pgbackrest_target(at)}", "--target-action=promote",
+        ))
+        overlays = [argv for argv, _, _, _ in fake.calls if argv[:3] == ("rsync", "-a", "--stats")]
+        self.assertEqual(len(overlays), 1)
+        self.assertEqual(
+            overlays[0][-2:],
+            (f"{backupset.files_dir(newer.path)}/{UPLOADS_ROOT.name}/", UPLOADS_ROOT.source + "/"),
+        )
+        self.assertIn(
+            f"{UPLOADS_ROOT.name}: added or rewrote 1 file(s) (with {newer.label})",
+            self._row(output, "files"),
+        )
+        self.assertTrue(any(
+            request and f'"later_labels": ["{newer.label}"]' in request
+            for _, request, _, _ in fake.calls
+        ))
+
+    def test_at_with_every_backup_past_the_fork_refuses_before_pre_restore(self) -> None:
+        fake = forked_sets_host()
+        fake.running = True
+        fake.backups[fake.manifest_value.pgbackrest_label] = (1, "0/5000000")
+        newer = backupset.list_sets(fake)[0]
+        assert newer.manifest is not None and newer.finished is not None
+        code, output, errors = self.run_restore(fake, at=newer.finished.isoformat())
+        self.assertEqual(code, 1)
+        self.assertEqual(errors, "")
+        row = self._row(output, "select")
+        self.assertIn("select: refuse — no complete backup set finished by --at reaches latest timeline 2", row)
+        self.assertIn(f"newest set={newer.label}; backup={newer.manifest.pgbackrest_label}; timeline=1", row)
+        for ref in backupset.list_sets(fake):
+            assert ref.manifest is not None
+            self.assertIn(f"set {ref.label}: backup {ref.manifest.pgbackrest_label} on timeline 1 cannot reach timeline 2", row)
+        self.assertIn("backup run --full", row)
+        self.assertIn("retry with an --at after it or omit --at", row)
+        self.assertIn("restore --from staging --set <label>", row)
+        self.assertEqual(output.splitlines(), [row])
+        self.assertFalse(any(request and "\\set v_kind 'backup_run'" in request for _, request, _, _ in fake.calls))
+        self.assertTrue(fake.running)
+        self._assert_not_stopped(fake)
+
+    def test_at_excludes_a_later_finished_set_even_when_its_backup_is_on_the_latest_timeline(self) -> None:
+        fake = forked_sets_host()
+        fake.running = True
+        newer, older = backupset.list_sets(fake)
+        assert newer.manifest is not None and older.manifest is not None
+        fake.backups[older.manifest.pgbackrest_label] = (1, "0/5000000")
+        fake.backups[newer.manifest.pgbackrest_label] = (2, "0/7000000")
+        code, output, errors = self.run_restore(fake, at=(NOW - timedelta(minutes=30)).isoformat())
+        self.assertEqual(code, 1)
+        self.assertEqual(errors, "")
+        row = self._row(output, "select")
+        self.assertIn("select: refuse — no complete backup set finished by --at reaches latest timeline 2", row)
+        self.assertIn(f"newest set={older.label}; backup={older.manifest.pgbackrest_label}; timeline=1", row)
+        self.assertNotIn(newer.label, row)
+        self.assertNotIn(newer.manifest.pgbackrest_label, row)
+        self.assertIn("retry with an --at after it", row)
+        self.assertEqual(output.splitlines(), [row])
+        self.assertTrue(fake.running)
+        self._assert_not_stopped(fake)
+
+    def test_failed_info_or_history_read_under_at_refuses_at_select_with_the_logs_fix(self) -> None:
+        for operation in ("info", "repo-ls", "repo-get"):
+            with self.subTest(operation=operation):
+                fake = make_host(running=True)
+                original_run = fake.run
+
+                def fail_read(
+                    argv: Command, *, operation: str = operation,
+                    original_run=original_run, **kwargs: Any,
+                ) -> subprocess.CompletedProcess[str]:
+                    result = original_run(argv, **kwargs)
+                    if "pgbackrest" in argv and operation in argv:
+                        return completed(argv, stdout=result.stdout, returncode=7, stderr="fictitious repository read failure")
+                    return result
+
+                with patch.object(fake, "run", side_effect=fail_read):
+                    code, output, errors = self.run_restore(fake, at=fake.manifest_value.finished.isoformat())
+                self.assertEqual(code, 1)
+                self.assertEqual(errors, "")
+                row = self._row(output, "select")
+                self.assertIn("select: refuse — pgBackRest", row)
+                self.assertIn("fictitious repository read failure", row)
+                self.assertTrue(row.endswith(f"Fix: {stack.logs_fix(RENDERED, 'postgres')}"), row)
+                self.assertEqual(output.splitlines(), [row])
+                self.assertTrue(fake.running)
+                self._assert_not_stopped(fake)
+
+    def test_target_at_uses_latest_without_reading_history_and_keeps_the_select_row(self) -> None:
+        fake = make_host(source="target", remote_listing=f"{REMOTE_SNAPSHOT}\t1\n")
+        at = fake.manifest_value.archive_through
+        code, output, errors = self.run_restore(fake, at=at.isoformat())
+        self.assertEqual(code, 0, output + errors)
+        self.assertEqual(errors, "")
+        self.assertEqual(
+            self._row(output, "select"),
+            f"select: ok — source=target; snapshot={REMOTE_SNAPSHOT}; set=chosen after fetch; "
+            f"at={at.isoformat()}; archive_through={fake.remote_record.archive_through.isoformat()}",
+        )
+        restore_call = next(argv for argv, _, _, _ in fake.calls if "pgbackrest" in argv and "restore" in argv)
+        self.assertEqual(restore_call[restore_call.index("restore") + 1:], (
+            "--delta", f"--set={fake.manifest_value.pgbackrest_label}", "--target-timeline=latest",
+            "--type=time", f"--target={backupset.pgbackrest_target(at)}", "--target-action=promote",
+        ))
+        self.assertFalse(any(
+            "pgbackrest" in argv and ("repo-ls" in argv or "repo-get" in argv)
+            for argv, _, _, _ in fake.calls
+        ))
+
+    def test_bare_named_set_and_archive_end_keep_their_restore_arguments(self) -> None:
+        for args in ({}, {"set": LOCAL_SET}, {"archive_end": True}):
+            with self.subTest(args=args):
+                fake = make_host()
+                code, output, errors = self.run_restore(fake, **args)
+                self.assertEqual(code, 0, output + errors)
+                self.assertEqual(errors, "")
+                restore_call = next(argv for argv, _, _, _ in fake.calls if "pgbackrest" in argv and "restore" in argv)
+                expected: tuple[str, ...] = ("--delta", f"--set={fake.manifest_value.pgbackrest_label}")
+                if args.get("archive_end"):
+                    expected += ("--type=default", "--target-timeline=latest")
+                else:
+                    expected += (
+                        "--target-timeline=2", "--type=time",
+                        f"--target={backupset.pgbackrest_target(fake.manifest_value.archive_through)}",
+                        "--target-action=promote",
+                    )
+                self.assertEqual(restore_call[restore_call.index("restore") + 1:], expected)
+
+
 class RestoreBySetLabel(RenderedRestoreCase):
     """``--set <label>`` selects the named set and restores it to its own archive boundary."""
-
-    def run_restore(self, fake: FakeHost, **args: Any) -> tuple[int, str, str]:
-        out, err = io.StringIO(), io.StringIO()
-        namespace = argparse.Namespace(source="staging", at=None, set=None)
-        for key, value in args.items():
-            setattr(namespace, key, value)
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = restore.run_restore(namespace, host=fake, now=NOW)
-        return code, out.getvalue(), err.getvalue()
 
     def test_set_selects_the_named_set_and_targets_its_archive_boundary(self) -> None:
         fake = make_host()
@@ -2760,13 +2948,6 @@ class ArchiveEndRestore(RenderedRestoreCase):
         line = next(line for line in sql.splitlines() if line.startswith("\\set v_detail '"))
         return json.loads(line.removeprefix("\\set v_detail '").removesuffix("'"))
 
-    def _row(self, output: str, name: str) -> str:
-        return next(line for line in output.splitlines() if line.startswith(name + ":"))
-
-    def _assert_not_stopped(self, fake: FakeHost) -> None:
-        self.assertFalse(any(argv[-1] == "down" for argv, _, _, _ in fake.calls))
-        self.assertFalse(any("pgbackrest" in argv and "restore" in argv for argv, _, _, _ in fake.calls))
-
     def test_target_source_refuses_before_select_or_ssh(self) -> None:
         fake = make_host(source="target")
         code, output, errors, _ = self._run(fake)
@@ -2807,7 +2988,7 @@ class ArchiveEndRestore(RenderedRestoreCase):
         row = self._row(output, "select")
         self.assertIn("select: refuse", row)
         self.assertIn("latest timeline 3", row)
-        self.assertIn(f"timeline={fake.backup_timeline}", row)
+        self.assertIn(f"timeline={fake.backups[fake.manifest_value.pgbackrest_label][0]}", row)
         self.assertIn(fake.manifest_value.archive_through.isoformat(), row)
         self.assertIn(report.command("restore --from staging"), row)
         self.assertIn(report.command("backup run --full"), row)
@@ -2944,7 +3125,7 @@ class ArchiveEndRestore(RenderedRestoreCase):
         )
         code, output, errors, _ = self._run(fake)
         self.assertEqual(code, 0, output + errors)
-        self.assertIn(f"timeline={fake.backup_timeline}; latest_timeline=3", self._row(output, "select"))
+        self.assertIn(f"timeline={fake.backups[fake.manifest_value.pgbackrest_label][0]}; latest_timeline=3", self._row(output, "select"))
 
     def test_unknown_backup_stop_lsn_is_named_and_not_selected(self) -> None:
         fake = make_host(lsn_stop=None)

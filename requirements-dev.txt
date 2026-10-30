@@ -19,6 +19,9 @@ PyYAML==6.0.3
 # alone so mypy sees its types; no browser is downloaded here. Its version is also
 # tools/turns/chromium.py's PLAYWRIGHT_VERSION (the box-side check); they move together.
 playwright==1.62.0
+# openpyxl is the workbook round trip's writer and reader, dev venv alone and never
+# a box unit; its one dependency, et_xmlfile, is admitted as pytest's are.
+openpyxl==3.1.5
 # The gideon image's dependency set (images.lock's gideon build arguments), here so
 # mypy and the unit suite see the service's imports. Never installed on the box;
 # tests/test_toolchain_pins.py holds each equal to its lock argument, and the

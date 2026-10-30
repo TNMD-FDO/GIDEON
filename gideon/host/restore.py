@@ -98,6 +98,15 @@ def _archive_fallback_fix() -> str:
     )
 
 
+def _at_fallback_fix() -> str:
+    return (
+        f"Run {report.command('backup run --full')}, then retry with an --at after it "
+        "or omit --at for the latest state; "
+        f"{report.command('restore --from staging --set <label>')} restores a "
+        "passed-over set to its own boundary."
+    )
+
+
 def _archive_running_fix() -> str:
     return (
         f"Use {report.command('restore --from staging --at <instant>')} "
@@ -327,7 +336,7 @@ def _newer_unfinished(
 
 
 def _select_staging(
-    io: Host, at: datetime | None, label: str | None = None
+    io: Host, rendered_dir: PathLike, at: datetime | None, label: str | None = None
 ) -> tuple[StageResult, _Selection | None]:
     try:
         sets = backupset.list_sets(io)
@@ -336,6 +345,8 @@ def _select_staging(
             StageResult("select", False, f"cannot list backup sets: {exc}", _set_fix()),
             None,
         )
+    if label is None and at is not None:
+        return _select_staging_at(io, rendered_dir, sets, at)
     selected = (
         backupset.select_set(sets, at=at)
         if label is None
@@ -356,6 +367,107 @@ def _select_staging(
     return StageResult("select", True, detail, ""), choice
 
 
+def _walk_candidates(
+    candidates: Sequence[backupset.SetRef],
+    backups: Mapping[str, pgbackrest.BackupInfo],
+    history: pgbackrest.HistoryResult,
+    *,
+    rendered_dir: PathLike,
+    include_set_command: bool = False,
+) -> tuple[tuple[backupset.SetRef, pgbackrest.BackupInfo] | None, list[str]] | Problem:
+    """Find the first backup that reaches the latest timeline, naming those passed over."""
+
+    passed: list[str] = []
+    for ref in candidates:
+        assert ref.manifest is not None
+        label = ref.manifest.pgbackrest_label
+        entry = backups.get(label)
+        if entry is None:
+            passed.append(f"set {ref.label}: the repository holds no backup {label}")
+            continue
+        if entry.lsn_stop is None:
+            passed.append(f"set {ref.label}: backup {label} records no stop LSN")
+            continue
+        try:
+            reaches = pgbackrest.reaches_latest(entry, history.latest, history.chain)
+        except ValueError as exc:
+            return Problem(
+                f"backup {label} records a malformed stop LSN: {exc}",
+                stack.logs_fix(rendered_dir, "postgres"),
+            )
+        if not reaches:
+            clause = (
+                f"set {ref.label}: backup {label} on timeline {entry.timeline} "
+                f"cannot reach timeline {history.latest}"
+            )
+            if include_set_command:
+                clause += (
+                    f" — {report.command(f'restore --from staging --set {ref.label}')} "
+                    "restores it to its own boundary"
+                )
+            passed.append(clause)
+            continue
+        return (ref, entry), passed
+    return None, passed
+
+
+def _archive_history(
+    io: Host, rendered_dir: PathLike, found: pgbackrest.InfoResult
+) -> pgbackrest.HistoryResult | StageResult:
+    if found.archive_id is None:
+        return StageResult(
+            "select", False, "pgBackRest info records no archive id",
+            stack.logs_fix(rendered_dir, "postgres"),
+        )
+    history = pgbackrest.history(io, rendered_dir, found.archive_id)
+    if not history.ok:
+        return StageResult("select", False, history.problem or "pgBackRest history failed", history.fix)
+    return history
+
+
+def _select_staging_at(
+    io: Host, rendered_dir: PathLike, sets: Sequence[backupset.SetRef], at: datetime
+) -> tuple[StageResult, _Selection | None]:
+    # Only a backup the latest timeline descends from reaches an instant on it;
+    # refusing here, before pre-restore, leaves the stack running.
+    eligible = backupset.eligible_sets(sets, at=at)
+    if isinstance(eligible, Problem):
+        return StageResult("select", False, eligible.problem, eligible.fix), None
+    found = pgbackrest.info(io, rendered_dir, running=False)
+    if not found.ok:
+        return StageResult("select", False, found.problem or "pgBackRest info failed", found.fix), None
+    history = _archive_history(io, rendered_dir, found)
+    if isinstance(history, StageResult):
+        return history, None
+    backups = {entry.label: entry for entry in found.infos}
+    walked = _walk_candidates(
+        eligible, backups, history, rendered_dir=rendered_dir, include_set_command=True,
+    )
+    if isinstance(walked, Problem):
+        return StageResult("select", False, walked.problem, walked.fix), None
+    reached, passed = walked
+    if reached is not None:
+        ref, entry = reached
+        choice = _Selection("staging", at, None, None, ref)
+        detail = (
+            f"source=staging; set={ref.label}; at={at.isoformat()}; "
+            f"backup={entry.label}; timeline={entry.timeline}; latest_timeline={history.latest}"
+        )
+        if passed:
+            detail += "; passed over: " + "; ".join(passed)
+        return StageResult("select", True, detail, ""), choice
+    newest = eligible[0]
+    assert newest.manifest is not None
+    newest_backup = backups.get(newest.manifest.pgbackrest_label)
+    timeline = newest_backup.timeline if newest_backup is not None else None
+    detail = (
+        f"no complete backup set finished by --at reaches latest timeline {history.latest}; "
+        f"newest set={newest.label}; backup={newest.manifest.pgbackrest_label}; "
+        f"timeline={timeline}; passed over: " + "; ".join(passed)
+    )
+    return StageResult("select", False, detail, _at_fallback_fix()), None
+
+
 def _select_archive_end(
     io: Host, rendered_dir: PathLike
 ) -> tuple[StageResult, _Selection | None]:
@@ -372,43 +484,20 @@ def _select_archive_end(
         return StageResult("select", False, found.problem or "pgBackRest info failed", found.fix), None
     if not found.archive_max:
         return StageResult("select", False, "the local archive has no archived WAL segment", _set_fix()), None
-    if found.archive_id is None:
-        return StageResult(
-            "select", False, "pgBackRest info records no archive id",
-            stack.logs_fix(rendered_dir, "postgres"),
-        ), None
-    history = pgbackrest.history(io, rendered_dir, found.archive_id)
-    if not history.ok:
-        return StageResult("select", False, history.problem or "pgBackRest history failed", history.fix), None
+    history = _archive_history(io, rendered_dir, found)
+    if isinstance(history, StageResult):
+        return history, None
 
     backups = {entry.label: entry for entry in found.infos}
-    passed: list[str] = []
-    for ref in complete:
-        assert ref.manifest is not None
-        label = ref.manifest.pgbackrest_label
-        entry = backups.get(label)
-        if entry is None:
-            passed.append(f"set {ref.label}: the repository holds no backup {label}")
-            continue
-        if entry.lsn_stop is None:
-            passed.append(f"set {ref.label}: backup {label} records no stop LSN")
-            continue
-        try:
-            reaches = pgbackrest.reaches_latest(entry, history.latest, history.chain)
-        except ValueError as exc:
-            return StageResult(
-                "select", False, f"backup {label} records a malformed stop LSN: {exc}",
-                stack.logs_fix(rendered_dir, "postgres"),
-            ), None
-        if not reaches:
-            passed.append(
-                f"set {ref.label}: backup {label} on timeline {entry.timeline} "
-                f"cannot reach timeline {history.latest}"
-            )
-            continue
+    walked = _walk_candidates(complete, backups, history, rendered_dir=rendered_dir)
+    if isinstance(walked, Problem):
+        return StageResult("select", False, walked.problem, walked.fix), None
+    reached, passed = walked
+    if reached is not None:
+        ref, entry = reached
         choice = _Selection("staging", None, None, None, ref, found.archive_max)
         detail = (
-            f"source=staging; set={ref.label}; backup={label}; timeline={entry.timeline}; "
+            f"source=staging; set={ref.label}; backup={entry.label}; timeline={entry.timeline}; "
             f"latest_timeline={history.latest}; archive_end={found.archive_max}"
         )
         if passed:
@@ -1181,6 +1270,7 @@ def _postgres_stage(
     boundary: datetime,
     backup_label: str,
     archive_end: bool = False,
+    follow_latest: bool = False,
 ) -> StageResult:
     """Restore the selected backup to its target or to the archive's end.
 
@@ -1198,18 +1288,25 @@ def _postgres_stage(
     follows ``--target-timeline=latest`` with no recovery target or target
     action, so recovery ends when the archive runs out rather than failing
     on a time target no archived commit passes.
+
+    The fifth lesson is an instant past a promotion: pinning the backup's
+    timeline holds it off an instant its history reaches. Under ``--at``,
+    ``--target-timeline=latest`` follows the switches to that instant.
     """
 
     args = ["restore", "--delta", f"--set={backup_label}"]
     if archive_end:
         args.extend(("--type=default", "--target-timeline=latest"))
     else:
-        timeline = _backup_timeline(io, rendered_dir, backup_label)
-        if isinstance(timeline, StageResult):
-            return timeline
+        if follow_latest:
+            args.append("--target-timeline=latest")
+        else:
+            timeline = _backup_timeline(io, rendered_dir, backup_label)
+            if isinstance(timeline, StageResult):
+                return timeline
+            args.append(f"--target-timeline={timeline}")
         target = at if at is not None else boundary
         args.extend((
-            f"--target-timeline={timeline}",
             "--type=time",
             f"--target={backupset.pgbackrest_target(target)}",
             "--target-action=promote",
@@ -1567,7 +1664,9 @@ def _restore_body(
     if archive_end:
         select_result, selection = _select_archive_end(io, rendered_dir)
     elif source == "staging":
-        select_result, selection = _select_staging(io, at, label=getattr(args, "set", None))
+        select_result, selection = _select_staging(
+            io, rendered_dir, at, label=getattr(args, "set", None),
+        )
     else:
         select_result, selection = _select_target(io, config, at)
     print_stage(select_result)
@@ -1699,6 +1798,7 @@ def _restore_body(
         boundary=selected.manifest.archive_through,
         backup_label=selected.manifest.pgbackrest_label,
         archive_end=archive_end,
+        follow_latest=at is not None,
     )
     print_stage(postgres_result)
     if not postgres_result.ok:

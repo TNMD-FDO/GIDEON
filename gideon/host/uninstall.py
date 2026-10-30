@@ -26,7 +26,7 @@ from gideon.host.steps import disk, network
 from gideon.host.steps.accounts import SSHD_POLICY
 from gideon.host.steps.command import COMMAND_PATH, INSTALL_HOME
 from gideon.host.steps.docker import JOURNALD_DROP_IN
-from gideon.host.steps.maintenance import AUTO_UPGRADES_DROP_IN
+from gideon.host.steps.maintenance import AUTO_UPGRADES_DROP_IN, NEEDRESTART_DROP_IN
 from gideon.host.steps.proxy import PROXY_CONF
 from gideon.host.steps.services import REGISTRY_UNIT, RUNNER_SUDOERS
 from gideon.host.steps.site_dirs import ETC_GIDEON
@@ -60,6 +60,7 @@ PURGED_DROP_INS: Final[tuple[PurgedDropIn, ...]] = (
     PurgedDropIn(PROXY_CONF, ()),
     PurgedDropIn(network.CHRONY_SOURCES, ("chronyc", "reload", "sources")),
     PurgedDropIn(network.WAIT_ONLINE_DROPIN, ("systemctl", "daemon-reload")),
+    PurgedDropIn(NEEDRESTART_DROP_IN, ()),
 )
 
 

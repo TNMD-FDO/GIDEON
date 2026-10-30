@@ -78,6 +78,7 @@ class BackupForms(test_restore.RenderedRestoreCase):
             ("apply", restore._apply_fix, "Run sudo python3 -m gideon apply, then retry."),
             ("set", restore._set_fix, "Run sudo python3 -m gideon backup run, then retry."),
             ("archive fallback", restore._archive_fallback_fix, "Run sudo python3 -m gideon restore --from staging, then sudo python3 -m gideon apply, then sudo python3 -m gideon backup run --full."),
+            ("at fallback", restore._at_fallback_fix, "Run sudo python3 -m gideon backup run --full, then retry with an --at after it or omit --at for the latest state; sudo python3 -m gideon restore --from staging --set <label> restores a passed-over set to its own boundary."),
             ("archive running", restore._archive_running_fix, "Use sudo python3 -m gideon restore --from staging --at <instant> (or omit --at) while Postgres answers. For a cluster that does not answer, stop the stack with docker compose -f /etc/gideon/rendered/compose.yaml down, then run sudo python3 -m gideon restore --from staging --archive-end."),
             ("account", restore._account_fix, "Run sudo python3 -m gideon host provision, then retry."),
             ("push", restore._push_fix, "Run sudo python3 -m gideon backup push, then retry."),
@@ -351,6 +352,51 @@ class BackupForms(test_restore.RenderedRestoreCase):
                     )
                     if installed:
                         self.assertNotIn("python3 -m gideon", out.getvalue())
+
+    def test_at_passed_over_clause_and_refusal_follow_both_command_forms(self) -> None:
+        for installed in (False, True):
+            report.set_installed_form(installed)
+            command = "gideon" if installed else "sudo python3 -m gideon"
+            for reaches in (True, False):
+                with self.subTest(installed=installed, reaches=reaches):
+                    fake = test_restore.forked_sets_host()
+                    newer, older = backupset.list_sets(fake)
+                    assert newer.manifest is not None and older.manifest is not None
+                    assert newer.finished is not None
+                    if not reaches:
+                        fake.running = True
+                        fake.backups[older.manifest.pgbackrest_label] = (1, "0/5000000")
+                    code, output, errors = self.run_restore(fake, at=newer.finished.isoformat())
+                    self.assertEqual(code, 0 if reaches else 1, output + errors)
+                    self.assertEqual(errors, "")
+                    passed = "; ".join(
+                        f"set {ref.label}: backup {ref.manifest.pgbackrest_label} "
+                        "on timeline 1 cannot reach timeline 2 — "
+                        f"{command} restore --from staging --set {ref.label} "
+                        "restores it to its own boundary"
+                        for ref in ((newer,) if reaches else (newer, older))
+                        if ref.manifest is not None
+                    )
+                    if reaches:
+                        expected = (
+                            f"select: ok — source=staging; set={older.label}; "
+                            f"at={newer.finished.isoformat()}; backup={older.manifest.pgbackrest_label}; "
+                            f"timeline=1; latest_timeline=2; passed over: {passed}"
+                        )
+                    else:
+                        expected = (
+                            "select: refuse — no complete backup set finished by --at "
+                            f"reaches latest timeline 2; newest set={newer.label}; "
+                            f"backup={newer.manifest.pgbackrest_label}; timeline=1; passed over: {passed} "
+                            f"Fix: Run {command} backup run --full, then retry with an --at after it "
+                            "or omit --at for the latest state; "
+                            f"{command} restore --from staging --set <label> restores a "
+                            "passed-over set to its own boundary."
+                        )
+                        self._assert_not_stopped(fake)
+                    self.assertEqual(self._row(output, "select"), expected)
+                    if installed:
+                        self.assertNotIn("python3 -m gideon", output)
 
     def test_select_refusal_and_both_next_lines_follow_the_form(self) -> None:
         for installed in (False, True):

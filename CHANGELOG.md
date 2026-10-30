@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.190](docs/release-notes/v0.3.190.md) — 2026-10-30 — Restore to a moment follows the backup history, needrestart defers GIDEON's units, segmenter workbook round trip
 - [v0.3.189](docs/release-notes/v0.3.189.md) — 2026-10-28 — Source-archive push, superseded pins pruned, own memory cards, drill from definitions, empty Blocked-by finding
 - [v0.3.188](docs/release-notes/v0.3.188.md) — 2026-10-25 — Bounded off-box prune, legible case lists, six frozen cases retired, sign-in alert text, imagebuild cache prune
 - [v0.3.187](docs/release-notes/v0.3.187.md) — 2026-10-23 — Eval board fits its cards, embed in-flight series, level-figure keys, a stopped run deletes its chat, per-ticket brief
