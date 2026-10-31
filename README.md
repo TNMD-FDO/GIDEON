@@ -10,7 +10,7 @@ day one for distribution: clone a tag, edit `site.yaml`, run one script. A
 [plain-words overview](docs/OVERVIEW.md) explains the system and how its answers
 are checked.
 
-**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live; slice 2 (eval harness) complete at `v0.3.0`; slice 3 (corpus machinery and tranche 1) next, its synthetic eval kit and category templates landed; this tree is `v0.3.190`.
+**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live; slice 2 (eval harness) complete at `v0.3.0`; slice 3 (corpus machinery and tranche 1) next, its synthetic eval kit and category templates landed; this tree is `v0.3.191`.
 What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), one line per release; from `v0.2.0` each line links its release note. Later-slice commands still print "not implemented".
 
 ## Install

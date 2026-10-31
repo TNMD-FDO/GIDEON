@@ -11,7 +11,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
@@ -241,10 +241,24 @@ class TreatmentHost(SyntheticHost):
                 "state": state, "no_state_reason": "non_holding" if state is None else None,
                 "verb_start": text.index("overruled"), "verb_end": text.index("overruled") + len("overruled"),
                 "citation_start": start, "citation_end": end, "section_id": section_id, "section_type": standing,
-                "cluster": cluster, "cluster_state": state, "listed": False,
-                "cited": {"opinion_id": 900 + index, "court": "fictionalcourt", "decided_date": "1990-01-01",
+                "cluster": cluster, "cluster_state": state, "listed": False, "listed_row": None,
+                "cited": {"opinion_id": 900 + index, "court": "fictionalcourt",
                           "reporter_cites": ["123 F.3d 456"], "case_name": "Fable v. Example"},
             })
+
+    def set_sentence(self, index: int, sentence: str) -> None:
+        """Build consistent recorded spans over a replacement fictitious sentence."""
+
+        text = ("Fictitious heading.\n\n" + sentence + "\n\nFictitious later paragraph.").ljust(synthetic.DOCUMENT_MIN_CHARS, ".")
+        self.set_text(index, text)
+        edge = self.edge_rows[index]
+        doc_id = cast(str, edge["doc_id"])
+        start = text.index("Fable v. Example, 123 F.3d 456")
+        end = start + len("Fable v. Example, 123 F.3d 456")
+        edge.update(citation_start=start, citation_end=end,
+                    verb_start=text.index("overruled"), verb_end=text.index("overruled") + len("overruled"))
+        self.section_rows[doc_id][0]["char_end"] = len(text)
+        self.citation_rows[doc_id][0].update(char_start=start, char_end=end, raw_cite=text[start:end])
 
     def run(
         self, argv: tuple[str, ...] | list[str], *, check: bool = False,
@@ -625,6 +639,7 @@ class Draft(unittest.TestCase):
             for entry, line in zip(value["entries"], lines, strict=True):
                 self.assertEqual(tuple(entry), manifest.ENTRY_KEYS)
                 self.assertEqual(entry["draft_sha256"], hashlib.sha256(line).hexdigest())
+                self.assertIsNone(entry["listed"])
                 case = json.loads(line)
                 self.assertEqual(tuple(case), manifest.DRAFT_KEYS)
                 gold = case["gold"][0]
@@ -689,7 +704,7 @@ class Draft(unittest.TestCase):
                 self.assertEqual((code, errors), (0, ""), output)
                 value = json.loads((root / "draft/manifest.json").read_bytes())
                 self.assertEqual(value["asked"], count)
-                version = 2 if category in ("retrieval", "synthesis", "existence") else 1
+                version = 3 if category == "treatment" else 2 if category in ("retrieval", "synthesis", "existence") else 1
                 self.assertEqual(value["template"], f"{category}@{version}")
                 self.assertIn(f"order: exhausted, kept 1 of {count}", output)
 
@@ -1209,7 +1224,7 @@ class Draft(unittest.TestCase):
 class NearMissDraft(unittest.TestCase):
     """Near misses are checked against the record before generation."""
 
-    def test_draw_slots_sheet_and_format_three_intake_for_each_category(self) -> None:
+    def test_draw_slots_sheet_and_format_four_intake_for_each_category(self) -> None:
         for category in synthetic.NEAR_MISS_CATEGORIES:
             with self.subTest(category=category), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -1225,7 +1240,7 @@ class NearMissDraft(unittest.TestCase):
                 for path in out.iterdir():
                     self.assertEqual(path.read_bytes(), (repeat / path.name).read_bytes())
                 value = json.loads((out / "manifest.json").read_bytes())
-                self.assertEqual(value["format"], 3)
+                self.assertEqual(value["format"], 4)
                 self.assertEqual(tuple(value), manifest.MANIFEST_KEYS)
                 records = [json.loads(line) for line in (out / "drafts.jsonl").read_bytes().splitlines()]
                 sheet = (out / "sheet.txt").read_text()
@@ -1349,6 +1364,130 @@ class TreatmentDraft(unittest.TestCase):
         for private in (QUESTION, ANSWER, CLOSED, REASON, TREATMENT_SENTENCE, "Fable v. Example"):
             self.assertNotIn(private, value)
 
+    def test_actor_discards_listed_first_slots_counts_sheet_and_notes_intake(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            host = TreatmentHost(5)
+            actor_cite = "Imaginary v. Pretend, 999 F.3d 111"
+            reported = (f"In this fictitious account, Fable v. Example, 123 F.3d 456, overruled on other grounds by {actor_cite}, "
+                        "had required notice on the invented issue.")
+            host.set_sentence(0, "In this fictitious account, Fable v. Example, 123 F.3d 456, would be overruled "
+                                 "on the invented notice issue because the earlier rule ignored written notice.")
+            host.set_sentence(1, "In this fictitious account, Fable v. Example, 123 F.3d 456, was overruled by statute "
+                                 "on the invented notice issue because the earlier rule ignored written notice.")
+            for index in (2, 4):
+                host.set_sentence(index, reported)
+                edge = host.edge_rows[index]
+                doc_id = cast(str, edge["doc_id"])
+                text = host.texts[cast(int, edge["opinion_id"])]
+                start = text.index(actor_cite)
+                host.citation_rows[doc_id].append({
+                    **host.citation_rows[doc_id][0],
+                    "citation_id": hashlib.sha256(f"fictitious actor {index}".encode()).hexdigest(), "ordinal": 1,
+                    "char_start": start, "char_end": start + len(actor_cite), "raw_cite": actor_cite,
+                    "reporter_cite": "999 F.3d 111", "to_cluster": 9000 + index,
+                })
+                for ordinal, (raw_cite, cite_type) in enumerate((
+                    ("grounds", "statute"), ("Fictitious later paragraph", "case_cite"),
+                ), start=2):
+                    start = text.index(raw_cite)
+                    host.citation_rows[doc_id].append({
+                        **host.citation_rows[doc_id][0], "ordinal": ordinal,
+                        "citation_id": hashlib.sha256(f"fictitious excluded citation {index} {ordinal}".encode()).hexdigest(),
+                        "char_start": start, "char_end": start + len(raw_cite), "raw_cite": raw_cite,
+                        "cite_type": cite_type, "to_cluster": None,
+                    })
+                edge["qualifier"] = "on_other_grounds"
+            for index in (3, 4):
+                host.edge_rows[index].update(
+                    state="negative", cluster_state="negative", listed=True,
+                    listed_row=hashlib.sha256(f"fictitious known-overruled row {index}".encode()).hexdigest(),
+                )
+            original_call = host.engine_call
+            original_resolve = synthetic.reported_agent
+
+            def resolve_agent(sentence: str, verb_end: int, cluster: int,
+                              cites: Iterable[tuple[int, int, int | None]]) -> synthetic.Agent:
+                edge = next(edge for edge in host.edge_rows if edge["cluster"] == cluster)
+                self.assertEqual(sentence[verb_end - len("overruled"):verb_end], "overruled")
+                self.assertEqual(sentence, host.texts[cast(int, edge["opinion_id"])].split("\n\n")[1])
+                triples = tuple(cites)
+                expected_cites = [citation for citation in host.citation_rows[cast(str, edge["doc_id"])][1:]
+                                  if citation["raw_cite"] == actor_cite]
+                self.assertEqual(len(triples), len(expected_cites))
+                for (start, end, resolved_cluster), citation in zip(triples, expected_cites, strict=True):
+                    self.assertEqual(sentence[start:end], citation["raw_cite"])
+                    self.assertEqual(resolved_cluster, citation["to_cluster"])
+                return original_resolve(sentence, verb_end, cluster, triples)
+
+            with (
+                patch.object(synthetic, "draw_order", wraps=synthetic.draw_order) as order,
+                patch.object(synthetic, "reported_agent", side_effect=resolve_agent) as resolve,
+            ):
+                def request(*args: object, **kwargs: object) -> engine.EngineReply:
+                    self.assertEqual(resolve.call_count, 4, "actor pass must finish before generation")
+                    return original_call(*args, **kwargs)
+
+                with patch.object(host, "engine_call", side_effect=request):
+                    code, output, errors = _run(host, root, root / "draft", category="treatment", count=5)
+            self.assertEqual((code, errors), (0, ""), output)
+            self.assertEqual(order.call_count, 2)
+            for call, indices in zip(order.call_args_list, ((3, 4), (2,)), strict=True):
+                self.assertEqual(call.args[1], 17)
+                self.assertEqual({document.item for document in call.args[0]},
+                                 {host.edge_rows[index]["citation_id"] for index in indices})
+            treatment_line = next(line for line in output.splitlines() if line.startswith("treatment:"))
+            self.assertEqual(treatment_line,
+                             "treatment: 5 edges, eligible negative=2, caution=0, none=1, performed=1, reported=2, listed=2, unlisted=1, "
+                             "skipped 2 (active-direction=0, agent-unresolved=1, conditional-verb=1, nearest-cite=0, procedural-disposition=0)")
+            self.assertIn("kinds negative=2, caution=0, none=1, performed=1, reported=2, listed=2, unlisted=1", output)
+            provenance = json.loads((root / "draft/manifest.json").read_bytes())
+            self.assertEqual(provenance["format"], 4)
+            self.assertEqual(provenance["discards"], [
+                {"reason": reason, "source_id": host.manifest_rows[index]["source_id"],
+                 "edge": host.edge_rows[index]["citation_id"], "kind": kind}
+                for index, reason, kind in ((0, "conditional-verb", "negative"), (1, "agent-unresolved", "caution"))
+            ])
+            cases = [json.loads(line) for line in (root / "draft/drafts.jsonl").read_bytes().splitlines()]
+            self.assertEqual(len(host.bodies), 3 * len(cases))
+            self.assertEqual(len(cases), 3)
+            self.assertEqual({case["gold"][0]["citation_id"] for case in cases[:2]},
+                             {host.edge_rows[index]["citation_id"] for index in (3, 4)})
+            self.assertEqual(cases[-1]["gold"][0]["citation_id"], host.edge_rows[2]["citation_id"])
+            sheet = (root / "draft/sheet.txt").read_text()
+            for ordinal, (case, entry) in enumerate(zip(cases, provenance["entries"], strict=True), start=1):
+                gold = case["gold"][0]
+                edge = next(edge for edge in host.edge_rows if edge["citation_id"] == gold["citation_id"])
+                index = host.edge_rows.index(edge)
+                is_reported = index in (2, 4)
+                actor_cluster = 9000 + index if is_reported else None
+                self.assertEqual(case["template"], "treatment@3")
+                self.assertEqual(case["expected"]["relation"]["actor"], actor_cluster if is_reported else gold["source_id"])
+                self.assertEqual(case["notes"], f"known-overruled row {edge['listed_row']}" if edge["listed_row"] else "")
+                self.assertEqual(entry["listed"], edge["listed_row"])
+                user = cast(list[dict[str, str]], host.bodies[(ordinal - 1) * 3]["messages"])[1]["content"]
+                line = synthetic.relation_line(CASE_NAME, cast(str, edge["standing"]), cast(str, edge["signal"]),
+                                               cast(str, edge["qualifier"]), "Fable v. Example", cast(int, edge["cluster"]),
+                                               actor_cite if is_reported else None, actor_cluster)
+                self.assertIn(f"Relation: {line}\nActor: {'reported' if is_reported else 'performed'}\n", user)
+                prefix = f"Relation: {line}\n" + (f"Listed: {edge['listed_row']}\n" if edge["listed_row"] else "")
+                self.assertIn(prefix + f"Synthetic case {ordinal:02d} required\n", sheet)
+            self.assert_private_absent(output + errors + (root / "draft/manifest.json").read_text())
+            self.assertNotIn(actor_cite, output + errors + (root / "draft/manifest.json").read_text())
+            marks = root / "marks.txt"
+            marks.write_text(f"synthetic: CSA-1 {provenance['sheet_sha256']} 2099-01-04\n"
+                             + "".join(f"{ordinal:02d} accept\n" for ordinal in range(1, len(cases) + 1)))
+            for dry_run in (True, False):
+                result = _run_intake(root / "draft/manifest.json", marks, tuple(host.court_map.courts), dry_run=dry_run)
+                self.assertEqual((result[0], result[2]), (0, ""), result[1])
+            loaded = evalset.load_set(root / "eval-v9", host.court_map.courts)
+            self.assertTrue(loaded.ok, loaded.findings)
+            assert loaded.loaded is not None
+            accepted = loaded.loaded.cases_by_file[synthetic.case_path("treatment")]
+            for case, draft_case in zip(accepted, cases, strict=True):
+                self.assertEqual(case["expected"], draft_case["expected"])
+                self.assertEqual(case["notes"], draft_case["notes"])
+
     def test_duplicates_are_skipped_at_submission_and_ordered_consumption(self) -> None:
         for window in (1, 3):
             with self.subTest(window=window), tempfile.TemporaryDirectory() as directory:
@@ -1401,12 +1540,12 @@ class TreatmentDraft(unittest.TestCase):
                 self.assertEqual([entry["source_id"] for entry in provenance["entries"]],
                                  [host.manifest_rows[index]["source_id"] for index in (0, 2)])
                 self.assertEqual(provenance["discards"], [
-                    {"reason": "same-cluster", "source_id": host.manifest_rows[1]["source_id"],
-                     "edge": second["citation_id"], "kind": "negative"},
                     {"reason": "same-document", "source_id": host.manifest_rows[0]["source_id"],
                      "edge": duplicate["citation_id"], "kind": "negative"},
+                    {"reason": "same-cluster", "source_id": host.manifest_rows[1]["source_id"],
+                     "edge": second["citation_id"], "kind": "negative"},
                 ])
-                expected = host.edge_rows if window > 1 else [first, third]
+                expected = [first, duplicate, second, third] if window > 1 else [first, third]
                 self.assertEqual(submitted, [row["citation_id"] for row in expected])
                 self.assertEqual(len(host.bodies), 3 * len(expected))
                 if window > 1:
@@ -1443,13 +1582,14 @@ class TreatmentDraft(unittest.TestCase):
             with patch.object(treatment, "sentence", wraps=treatment.sentence) as sentence:
                 code, output, errors = _run(host, root, root / "draft", category="treatment", count=3)
             self.assertEqual((code, errors), (0, ""), output)
-            self.assertEqual(sentence.call_count, 3)
+            self.assertEqual(sentence.call_count, 2 * len(host.documents))
             for call in sentence.call_args_list:
                 self.assertIsInstance(call.args[3], draft.SectionRow)
                 self.assertTrue(all(type(citation) is NewCitation for citation in call.args[4]))
                 self.assertIs(call.args[5], treatment.RULES)
             provenance = json.loads((root / "draft/manifest.json").read_bytes())
             self.assertEqual(provenance["discards"], [])
+            self.assertEqual(provenance["template"], "treatment@3")
             lines = (root / "draft/drafts.jsonl").read_bytes().splitlines()
             cases = [json.loads(line) for line in lines]
             self.assertEqual({case["expected"]["state"] for case in cases}, set(synthetic.TREATMENT_KINDS))
@@ -1463,6 +1603,13 @@ class TreatmentDraft(unittest.TestCase):
                 self.assertEqual(gold["quote"], TREATMENT_SENTENCE)
                 self.assertEqual(host.texts[cast(int, edge["opinion_id"])][gold["start"]:gold["end"]], gold["quote"])
                 self.assertEqual(case["expected"]["must_cite"], [gold["source_id"]])
+                self.assertEqual(tuple(case["expected"]), ("answer", "must_cite", "state", "relation"))
+                self.assertEqual(tuple(case["expected"]["relation"]), synthetic.RELATION_KEYS)
+                self.assertEqual(case["expected"]["relation"], {
+                    "citing": gold["source_id"], "standing": edge["standing"], "verb": edge["signal"],
+                    "qualifier": edge["qualifier"], "cited": edge["cluster"], "actor": gold["source_id"],
+                })
+                self.assertEqual(case["template"], "treatment@3")
                 self.assertEqual(case["cluster_id"], gold["source_id"])
                 self.assertIn(f"{ordinal:02d}: {gold['source_id']} {gold['citation_id']} {case['expected']['state']} [{gold['start']}, {gold['end']})", output)
                 complete = {key: f"research-qa-treatment-{ordinal:03d}" if key == "id" else
@@ -1476,12 +1623,31 @@ class TreatmentDraft(unittest.TestCase):
                 self.assertIn(TREATMENT_SENTENCE, user)
                 self.assertIn("Fable v. Example", user)
                 self.assertNotIn("Fictitious later paragraph", user)
+                self.assertNotIn("Cited decision date:", user)
+                self.assertEqual(tuple(line.split(":", 1)[0] for line in user.splitlines() if ":" in line), (
+                    "Citing court", "Citing decision date", "Citing reporter citations", "Citing parties",
+                    "Cited parties", "Cited reporter citations", "Cited court", "Kind", "Signal verb",
+                    "Qualifier", "Standing", "Relation", "Actor",
+                ))
+                matching = next(case for case in cases if f"Standing: {case['expected']['relation']['standing']}\n" in user
+                                and f"Kind: {case['expected']['state']}\n" in user)
+                relation = matching["expected"]["relation"]
+                relation_line = synthetic.relation_line(CASE_NAME, relation["standing"], relation["verb"],
+                                                        relation["qualifier"], "Fable v. Example", relation["cited"])
+                self.assertIn(f"Relation: {relation_line}\nActor: performed\n\n<citing-sentence>", user)
             sheet = (root / "draft/sheet.txt").read_bytes()
             self.assertEqual(hashlib.sha256(sheet).hexdigest(), provenance["sheet_sha256"])
             self.assertIn(b"Cited parties: Fable v. Example", sheet)
             self.assertIn(b"Cited original: https://www.courtlistener.com/c/F.3d/123/456/", sheet)
             self.assertIn(b"standing dissent", sheet)
             self.assertIn(b"Edge: ", sheet)
+            for ordinal, case in enumerate(cases, start=1):
+                relation = case["expected"]["relation"]
+                relation_line = synthetic.relation_line(CASE_NAME, relation["standing"], relation["verb"],
+                                                        relation["qualifier"], "Fable v. Example", relation["cited"])
+                self.assertIn(f"Relation: {relation_line}\nSynthetic case {ordinal:02d} required\n".encode(), sheet)
+            self.assertIn(b"Cited court: fictionalcourt\n", sheet)
+            self.assertNotIn(b"Cited court: fictionalcourt |", sheet)
             self.assertIn("kinds negative=1, caution=1, none=1", output)
             sql = next(sql for _, sql in host.calls if sql is not None and "AS treatment_edges" in sql)
             risk = sql.split("FROM citation_signals risk", 1)[1].split(") AS cluster_state", 1)[0]
@@ -1507,7 +1673,13 @@ class TreatmentDraft(unittest.TestCase):
             self.assertNotIn("opinion_ids", risk)
             self.assertIn("ready.status = 'ready'", sql)
             self.assertIn("ORDER BY cited.decided_date, cited.opinion_id LIMIT 1", sql)
+            cited_object = sql.split("(SELECT jsonb_build_object(", 1)[1].split("FROM opinions cited", 1)[0]
+            self.assertNotIn("decided_date", cited_object)
             self.assertIn("known.overruled_cluster = c.to_cluster", sql)
+            listed = sql.split("(SELECT known.row_id", 1)[1].split(") AS listed_row", 1)[0]
+            self.assertIn("known.overruled_cluster = c.to_cluster AND known.overruling_cluster = o.cluster_id", listed)
+            self.assertIn("ORDER BY known.caselaw_snapshot DESC, known.source_snapshot DESC, known.row_id", listed)
+            self.assertIn("LIMIT 1", listed)
             self.assert_private_absent(output + errors + (root / "draft/manifest.json").read_text())
             marks = root / "marks.txt"
             marks.write_text(f"synthetic: CSA-1 {provenance['sheet_sha256']} 2099-01-04\n01 accept\n02 accept\n03 accept\n")
@@ -1515,6 +1687,59 @@ class TreatmentDraft(unittest.TestCase):
             self.assertEqual((code, errors), (0, ""), output)
             self.assertTrue(evalset.load_set(root / "eval-v9").ok)
             self.assert_private_absent(output)
+
+    def test_sentence_pass_discards_before_requests_with_edge_kind_and_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            host = TreatmentHost(4)
+            other = "Imaginary v. Pretend, 999 F.3d 111"
+            host.set_sentence(0, f"The fictitious court cited Fable v. Example, 123 F.3d 456, and {other} "
+                                 "(overruled on the invented notice issue because the earlier rule ignored written notice).")
+            host.set_sentence(1, "In this fictitious account, Fable v. Example, 123 F.3d 456, overruled "
+                                 "Imaginary v. Pretend on the invented notice issue because the earlier rule ignored written notice.")
+            host.set_sentence(2, TREATMENT_SENTENCE + "\n\nIn this fictitious disposition, certiorari is "
+                                 "dismissed as improvidently granted.")
+            first = host.edge_rows[0]
+            doc_id = cast(str, first["doc_id"])
+            text = host.texts[cast(int, first["opinion_id"])]
+            start = text.index(other)
+            host.citation_rows[doc_id].append({
+                **host.citation_rows[doc_id][0], "citation_id": "e" * 64, "ordinal": 1,
+                "char_start": start, "char_end": start + len(other), "raw_cite": other,
+                "reporter_cite": "999 F.3d 111", "to_cluster": 9999,
+            })
+            # Every edge of the procedural document is discarded without reading its rows.
+            procedural = host.edge_rows[2]
+            duplicate = {**procedural, "citation_id": "a" * 64, "signal_id": "b" * 64}
+            host.edge_rows.append(duplicate)
+            code, output, errors = _run(host, root, root / "draft", category="treatment", count=4)
+            self.assertEqual((code, errors), (0, ""), output)
+            provenance = json.loads((root / "draft/manifest.json").read_bytes())
+            self.assertEqual(provenance["discards"], [
+                {"reason": reason, "source_id": host.manifest_rows[index]["source_id"],
+                 "edge": edge["citation_id"], "kind": kind}
+                for index, edge, reason, kind in (
+                    (0, host.edge_rows[0], "nearest-cite", "negative"),
+                    (1, host.edge_rows[1], "active-direction", "caution"),
+                    (2, procedural, "procedural-disposition", "none"),
+                    (2, duplicate, "procedural-disposition", "none"),
+                )
+            ])
+            treatment_line = next(line for line in output.splitlines() if line.startswith("treatment:"))
+            self.assertIn("eligible negative=1, caution=0, none=0", treatment_line)
+            for reason, count in (("nearest-cite", 1), ("active-direction", 1), ("procedural-disposition", 2)):
+                self.assertIn(f"{reason}={count}", treatment_line)
+            self.assertIn("skipped 4", treatment_line)
+            self.assertEqual(len(host.bodies), 3 * len(provenance["entries"]))
+            self.assertEqual([entry["source_id"] for entry in provenance["entries"]],
+                             [host.manifest_rows[3]["source_id"]])
+            for index, row in enumerate(host.manifest_rows):
+                self.assertEqual(host.fetched.count(row["canonical_text_sha256"]), 2 if index == 3 else 1)
+                for marker in ("AS section_rows", "AS citation_rows"):
+                    reads = [sql for _, sql in host.calls if sql is not None and marker in sql
+                             and read_psql_set(sql.splitlines()[0], "doc_id") == row["doc_id"]]
+                    self.assertEqual(len(reads), 0 if index == 2 else 2 if index == 3 else 1)
+            self.assert_private_absent(output + errors + (root / "draft/manifest.json").read_text())
 
     def test_draw_skips_each_edge_for_absence_name_and_risk_precedence(self) -> None:
         cases: tuple[tuple[dict[str, object], str], ...] = (
@@ -1556,15 +1781,18 @@ class TreatmentDraft(unittest.TestCase):
             host = TreatmentHost(2)
             first, second = host.edge_rows
             second.update(state="negative", cluster_state="negative", cluster=first["cluster"])
+            host.citation_rows[cast(str, second["doc_id"])][0]["to_cluster"] = first["cluster"]
             duplicate = {**first, "citation_id": "a" * 64, "signal_id": "b" * 64}
             host.edge_rows.append(duplicate)
+            citations = host.citation_rows[cast(str, first["doc_id"])]
+            citations.append({**citations[0], "citation_id": duplicate["citation_id"], "ordinal": 1})
             with patch.object(synthetic, "draw_order", side_effect=lambda documents, _seed: tuple(documents)):
                 code, output, errors = _run(host, root, root / "draft", category="treatment", count=3)
             self.assertEqual((code, errors), (0, ""), output)
             provenance = json.loads((root / "draft/manifest.json").read_bytes())
             self.assertEqual(len(provenance["entries"]), 1)
-            self.assertEqual([row["reason"] for row in provenance["discards"]], ["same-cluster", "same-document"])
-            self.assertEqual(len(host.fetched), 1)
+            self.assertEqual([row["reason"] for row in provenance["discards"]], ["same-document", "same-cluster"])
+            self.assertEqual(len(host.fetched), len(host.documents) + len(provenance["entries"]))
             self.assertEqual(len(host.bodies), 3)
             marks = root / "marks.txt"
             marks.write_text(f"synthetic: CSA-1 {provenance['sheet_sha256']} 2099-01-04\n01 accept\n")
@@ -1585,6 +1813,9 @@ class TreatmentDraft(unittest.TestCase):
                 provenance = json.loads((root / "draft/manifest.json").read_bytes())
                 self.assertEqual(provenance["discards"][0]["reason"], reason)
                 self.assertEqual(len(host.bodies), 0 if reason == "verb-outside" else 1)
+                self.assertIn(f"{host.manifest_rows[0]['source_id']}: discarded {reason}", output)
+                treatment_line = next(line for line in output.splitlines() if line.startswith("treatment:"))
+                self.assertNotIn(reason, treatment_line)
                 self.assert_private_absent(output + errors)
 
     def test_record_read_failures_and_disagreements_refuse_with_apply_logs_fix(self) -> None:
@@ -1612,7 +1843,7 @@ class TreatmentDraft(unittest.TestCase):
                     self.assertIn("logs", errors)
                     self.assertNotIn("internal error", errors)
                     self.assertEqual(host.bodies, [])
-                    self.assertEqual((root / "draft/manifest.json").exists(), stage in {"sections", "citations"})
+                    self.assertFalse((root / "draft/manifest.json").exists())
                     self.assertEqual(host.released, [backuplock.ENGINE_LOCK.path])
                     self.assert_private_absent(output + errors)
 
@@ -1625,6 +1856,7 @@ class TreatmentDraft(unittest.TestCase):
             ("state", "none"), ("state", None), ("no_state_reason", "non_holding"),
             ("verb_start", True), ("verb_end", 0), ("citation_start", -1), ("citation_end", False),
             ("section_id", "bad"), ("cluster", True), ("cluster_state", "good law"), ("listed", 1),
+            ("listed_row", "bad"), ("listed_row", "A" * 64), ("listed_row", 1), ("listed_row", False),
             ("cited", []), ("cited", {"extra": QUESTION}),
         )
         for key, value in cases:
@@ -1641,7 +1873,7 @@ class TreatmentDraft(unittest.TestCase):
                 self.assertNotIn("internal error", errors)
                 self.assertEqual((host.fetched, host.bodies), ([], []))
                 self.assert_private_absent(output + errors)
-        for key, value in (("opinion_id", False), ("court", "bad court"), ("decided_date", "bad"),
+        for key, value in (("opinion_id", False), ("court", "bad court"), ("decided_date", "unexpected cited date"),
                            ("reporter_cites", [None]), ("case_name", 1)):
             with self.subTest(cited=key), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -1691,17 +1923,16 @@ class TreatmentDraft(unittest.TestCase):
                     host.documents[0]["case_name"] = None
                 else:
                     text = host.texts[101][:synthetic.DOCUMENT_MIN_CHARS - 1]
-                    digest = hashlib.sha256(text.encode()).hexdigest()
-                    host.objects[digest] = text.encode()
-                    host.documents[0]["canonical_sha256"] = digest
-                    host.manifest_rows[0]["canonical_text_sha256"] = digest
+                    host.set_text(0, text)
+                    host.section_rows[cast(str, host.documents[0]["doc_id"])][0]["char_end"] = len(text)
                 code, output, errors = _run(host, root, root / "draft", category="treatment", count=1)
                 self.assertEqual((code, errors), (0, ""), output)
                 provenance = json.loads((root / "draft/manifest.json").read_bytes())
                 self.assertEqual(provenance["discards"][0]["reason"], scenario)
-                self.assertEqual(len(host.fetched), int(scenario == "document-short"))
+                self.assertEqual(len(host.fetched), 2 * int(scenario == "document-short"))
                 self.assertEqual(host.bodies, [])
-                self.assertFalse(any("AS section_rows" in (sql or "") for _, sql in host.calls))
+                self.assertEqual(sum("AS section_rows" in (sql or "") for _, sql in host.calls),
+                                 int(scenario == "document-short"))
                 if scenario == "document-short":
                     self.assertEqual(provenance["discards"][0]["edge"], host.edge_rows[0]["citation_id"])
                     self.assertEqual(provenance["discards"][0]["kind"], "negative")
@@ -2061,13 +2292,13 @@ class Intake(unittest.TestCase):
         self.assertIn("Fix:", errors)
         self.assert_private_absent(output + errors)
 
-    def test_old_formats_refuse_with_draft_command_and_format_three_appends(self) -> None:
+    def test_old_formats_refuse_with_draft_command_and_format_four_appends(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             set_root, manifest_path, marks_path, known_courts = _review_fixture(Path(directory))
             provenance = json.loads(manifest_path.read_bytes())
-            self.assertEqual(provenance["format"], 3)
+            self.assertEqual(provenance["format"], 4)
             path = set_root / synthetic.case_path("lookup")
-            for old_format in (1, 2):
+            for old_format in (1, 2, 3):
                 with self.subTest(format=old_format):
                     provenance["format"] = old_format
                     manifest_path.write_text(json.dumps(provenance))
@@ -2981,7 +3212,7 @@ class SharedManifest(unittest.TestCase):
 
     def test_discard_vocabulary_and_key_order(self) -> None:
         self.assertEqual(manifest.DISCARD_KEYS, ("reason", "source_id", "edge", "kind"))
-        self.assertEqual(set(manifest.DISCARD_REASONS), set(synthetic.DISCARD_REASONS) | {
+        self.assertEqual(set(manifest.DISCARD_REASONS), set(synthetic.DISCARD_REASONS) | set(synthetic.TREATMENT_DISCARDS) | {
             "request-failed", "http-status", "truncated", "off-schema", "closed-book-failed",
             "hash-changed", "not-ready", "already-cased", "document-short", "unpublished",
             "no-case-name", "cited-absent", "state-outranked", "no-state-kind", "same-document",
@@ -2990,7 +3221,11 @@ class SharedManifest(unittest.TestCase):
         self.assertEqual(len(manifest.DISCARD_REASONS), len(set(manifest.DISCARD_REASONS)))
 
     def test_manifest_format_key_order_and_sheet_suffixes(self) -> None:
-        self.assertEqual(manifest.MANIFEST_FORMAT, 3)
+        self.assertEqual(manifest.MANIFEST_FORMAT, 4)
+        self.assertEqual(manifest.ENTRY_KEYS, (
+            "ordinal", "source_id", "sha256", "doc_id", "start", "end", "length",
+            "quote_sha256", "closed_book_score", "label", "listed", "draft_sha256",
+        ))
         self.assertEqual(manifest.MANIFEST_KEYS, (
             "format", "set_root", "set_digest", "category", "case_pin", "template",
             "template_digest", "reading", "reading_digest", "generation", "seed", "asked",

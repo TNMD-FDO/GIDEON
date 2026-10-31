@@ -20,13 +20,18 @@ from gideon.evaluation.evalset import (
 )
 from gideon.host.corpus.lockfile import load_lockfile
 from gideon.host.courts import load_court_map
-from gideon.host.render.worker import SECTION_TYPES
+from gideon.host.render.worker import (
+    QUALIFIERS,
+    SECTION_TYPES,
+    TREATMENT_SIGNALS,
+    TREATMENT_STATES,
+)
 from tools.exportboundary import is_excluded
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 README_PATH: Final[Path] = SET_ROOT / "research-qa/README.md"
 REQUIRED_CATEGORIES: Final[frozenset[str]] = frozenset({
-    "lookup", "retrieval", "synthesis", "existence", "section-attribution",
+    "lookup", "retrieval", "synthesis", "existence", "treatment", "section-attribution",
     "unanswerable", "trap", "poisoned-premise",
 })
 PINNED_PREFIXES: Final[dict[str, tuple[tuple[int, str], ...]]] = {
@@ -42,6 +47,9 @@ PINNED_PREFIXES: Final[dict[str, tuple[tuple[int, str], ...]]] = {
     ),
     "existence": (
         (17, "3fb960f434f3c1cd3f4894b2d61449e79422698dbb27f76ebee6a16ade71291b"),
+    ),
+    "treatment": (
+        (6, "3ab8d866637a8047cc7b791f4bd9b7f1fb79d0637235fce94aea216efc71420a"),
     ),
     "section-attribution": (
         (19, "178818c9820d235ecdf6041452ea8b4a9e49d4ed20e32dcf0453638892ac9e8a"),
@@ -135,9 +143,33 @@ class SyntheticSetContract(TestCase):
                     ))
                     expected = cast(dict[str, object], case["expected"])
                     self.assertEqual(tuple(expected), spec.expected_keys_for())
+                    for key, vocabulary in (
+                        ("state", (*TREATMENT_STATES, synthetic.NO_STATE)),
+                        ("section_type", SECTION_TYPES),
+                    ):
+                        if key in spec.expected_keys_for():
+                            self.assertIn(expected[key], vocabulary)
+                    if category == "treatment":
+                        self.assertEqual(template, "treatment@3")
+                        relation = cast(dict[str, object], expected["relation"])
+                        self.assertEqual(tuple(relation), synthetic.RELATION_KEYS)
+                        for key, relation_vocabulary in (("standing", SECTION_TYPES), ("verb", TREATMENT_SIGNALS),
+                                                         ("qualifier", QUALIFIERS)):
+                            self.assertIn(relation[key], relation_vocabulary)
+                        gold = cast(list[dict[str, object]], case["gold"])[0]
+                        self.assertEqual(relation["citing"], gold["source_id"])
+                        self.assertIs(type(relation["cited"]), int)
+                        self.assertGreater(cast(int, relation["cited"]), 0)
+                        self.assertEqual(relation["cited"], gold["cluster"])
+                        actor = relation["actor"]
+                        if isinstance(actor, str):
+                            self.assertEqual(actor, gold["source_id"])
+                        else:
+                            self.assertIs(type(actor), int)
+                            self.assertGreater(cast(int, actor), 0)
+                            self.assertNotEqual(actor, gold["cluster"])
                     if category == "section-attribution":
                         self.assertEqual(template, "section-attribution@1")
-                        self.assertIn(expected["section_type"], SECTION_TYPES)
                     if category in synthetic.NEAR_MISS_CATEGORIES:
                         self.assertEqual(expected["behavior"], synthetic.BEHAVIORS[category])
                         self.assertNotIn("must_cite", expected)

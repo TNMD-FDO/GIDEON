@@ -33,7 +33,12 @@ from gideon.evaluation.signoffs import SignOff
 from gideon.extraction.scoring import active_cases
 from gideon.host.courts import load_court_map
 from gideon.host.index.treatment import PATTERN_SET_PATTERN
-from gideon.host.render.worker import SECTION_TYPES, TREATMENT_STATES
+from gideon.host.render.worker import (
+    QUALIFIERS,
+    SECTION_TYPES,
+    TREATMENT_SIGNALS,
+    TREATMENT_STATES,
+)
 from gideon.worker.opiniontext import TEXT_SOURCES
 from tools.exportboundary import absent_from_export
 
@@ -192,6 +197,10 @@ def _synthetic_case(case_id: str | None = None, *, category: str = "lookup") -> 
             "citation_id": "c" * 64, "signal_id": "d" * 64,
             "pattern_set": "treatment/patterns@999", "cluster": 123,
         })
+        expected["relation"] = {
+            "citing": gold["source_id"], "standing": "majority", "verb": "overruled",
+            "qualifier": "none", "cited": gold["cluster"], "actor": gold["source_id"],
+        }
     elif category == "section-attribution":
         expected["section_type"] = SECTION_TYPES[0]
     elif category in synthetic.NEAR_MISS_CATEGORIES:
@@ -211,7 +220,7 @@ def _synthetic_case(case_id: str | None = None, *, category: str = "lookup") -> 
         "expected": expected,
         "gold": [gold],
         "labels": [synthetic.SYNTHETIC_ORIGIN],
-        "template": f"{category}@1",
+        "template": f"{category}@3" if category == "treatment" else f"{category}@1",
         "cluster_id": "fictional/source-1",
         "review": review,
         "notes": "Fictitious case for the loader.",
@@ -1554,7 +1563,7 @@ class SyntheticCases(unittest.TestCase):
         self.assertEqual(lookup.expected_keys_for(), signoffs.EXPECTED_KEYS)
         self.assertEqual(lookup.gold_keys, ())
         self.assertEqual(lookup.gold_keys_for(), GOLD_COORDINATE_KEYS)
-        for category, extra in (("treatment", "state"), ("section-attribution", "section_type")):
+        for category, extra in (("treatment", ("state", "relation")), ("section-attribution", ("section_type",))):
             with self.subTest(category=category):
                 spec = SHAPE_REGISTRY[("research-qa", category)]
                 self.assertEqual(spec.question_origins, (synthetic.SYNTHETIC_ORIGIN,))
@@ -1566,7 +1575,7 @@ class SyntheticCases(unittest.TestCase):
                 self.assertIs(spec.cluster_pattern, lookup.cluster_pattern)
                 self.assertEqual(spec.review_keys, lookup.review_keys)
                 self.assertEqual(spec.review_keys_for(synthetic.SYNTHETIC_ORIGIN), ("by", "on"))
-                self.assertEqual(spec.expected_keys, (*signoffs.EXPECTED_KEYS, extra))
+                self.assertEqual(spec.expected_keys, (*signoffs.EXPECTED_KEYS, *extra))
                 self.assertEqual(spec.expected_keys_for(), spec.expected_keys)
                 if category == "treatment":
                     self.assertEqual(spec.gold_keys, (*GOLD_COORDINATE_KEYS, "citation_id", "signal_id", "pattern_set", "cluster"))
@@ -1620,8 +1629,8 @@ class SyntheticCases(unittest.TestCase):
                     elif mutation == "extra":
                         expected["extra"] = SENTINEL
                     else:
-                        extra = spec.expected_keys_for()[-1]
-                        expected["section_type" if extra == "state" else "state"] = expected.pop(extra)
+                        extra = "state" if category == "treatment" else "section_type"
+                        expected["section_type" if category == "treatment" else "state"] = expected.pop(extra)
                     self.assert_refused(record, "expected keys or order")
 
     def test_new_expected_vocabularies_refuse_wrong_values(self) -> None:
@@ -1671,6 +1680,109 @@ class SyntheticCases(unittest.TestCase):
         gold = cast(list[dict[str, object]], record["gold"])
         self.assertRegex(str(gold[0]["pattern_set"]), f"^{PATTERN_SET_PATTERN}$")
         self.assertEqual(case_findings(record, synthetic.case_path("treatment"), 1), ())
+
+    def test_treatment_relation_keys_are_required_exact_and_ordered(self) -> None:
+        for mutation in ("missing", "not-mapping", "reverse", "extra", *synthetic.RELATION_KEYS):
+            with self.subTest(mutation=mutation):
+                record = _synthetic_case(category="treatment")
+                expected = cast(dict[str, object], record["expected"])
+                relation = cast(dict[str, object], expected["relation"])
+                if mutation == "missing":
+                    del expected["relation"]
+                elif mutation == "not-mapping":
+                    expected["relation"] = SENTINEL
+                elif mutation == "reverse":
+                    expected["relation"] = dict(reversed(tuple(relation.items())))
+                elif mutation == "extra":
+                    relation["extra"] = SENTINEL
+                else:
+                    del relation[mutation]
+                findings = case_findings(record, synthetic.case_path("treatment"), 7, ("ca6",))
+                self.assertEqual(tuple(finding.rule for finding in findings),
+                                 ("expected keys or order", "expected.relation") if mutation == "missing"
+                                 else ("expected.relation",))
+                self.assertNotIn(SENTINEL, "\n".join(finding.text() for finding in findings))
+
+    def test_treatment_relation_values_name_only_the_key_in_each_finding(self) -> None:
+        value: object
+        for key in synthetic.RELATION_KEYS:
+            for value in (None, "", SENTINEL, 0, -1, True, False, 1.5, [], {}):
+                with self.subTest(key=key, value=value):
+                    record = _synthetic_case(category="treatment")
+                    relation = cast(dict[str, object], cast(dict[str, object], record["expected"])["relation"])
+                    relation[key] = value
+                    relative = synthetic.case_path("treatment")
+                    findings = case_findings(record, relative, 7, ("ca6",))
+                    self.assertEqual(tuple(finding.rule for finding in findings), (f"expected.relation.{key}",))
+                    self.assertTrue(all(finding.file == relative and finding.id == record["id"] and finding.line == 7
+                                        and finding.fix for finding in findings))
+                    self.assertNotIn(SENTINEL, "\n".join(finding.text() for finding in findings))
+
+    def test_treatment_relation_accepts_each_record_vocabulary(self) -> None:
+        for key, values in (("standing", SECTION_TYPES), ("verb", TREATMENT_SIGNALS), ("qualifier", QUALIFIERS)):
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    record = _synthetic_case(category="treatment")
+                    relation = cast(dict[str, object], cast(dict[str, object], record["expected"])["relation"])
+                    relation[key] = value
+                    self.assertEqual(case_findings(record, synthetic.case_path("treatment"), 1), ())
+
+    def test_treatment_actor_loads_in_both_forms(self) -> None:
+        for reported in (False, True):
+            with self.subTest(reported=reported), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "eval-v9"
+                record = _synthetic_case(category="treatment")
+                relation = cast(dict[str, object], cast(dict[str, object], record["expected"])["relation"])
+                gold = cast(list[dict[str, object]], record["gold"])[0]
+                relation["actor"] = cast(int, gold["cluster"]) + 1 if reported else gold["source_id"]
+                relative = synthetic.case_path("treatment")
+                self.assertEqual(case_findings(record, relative, 7, ("ca6",)), ())
+                _write(root, relative, synthetic.case_line(record).rstrip("\n"))
+                _write(root, "slices/demo/cases.ids", str(record["id"]))
+                result = load_set(root, ("ca6",))
+                self.assertTrue(result.ok, result.findings)
+                assert result.loaded is not None
+                self.assertEqual(result.loaded.cases_by_id[cast(str, record["id"])], record)
+
+    def test_treatment_actor_agrees_with_first_gold(self) -> None:
+        for reported in (False, True):
+            with self.subTest(reported=reported):
+                record = _synthetic_case(category="treatment")
+                relation = cast(dict[str, object], cast(dict[str, object], record["expected"])["relation"])
+                gold = cast(list[dict[str, object]], record["gold"])
+                relation["actor"] = gold[0]["cluster"] if reported else "fictional/other-source"
+                relative = synthetic.case_path("treatment")
+                findings = case_findings(record, relative, 7, ("ca6",))
+                self.assertEqual(tuple(finding.rule for finding in findings), ("expected.relation.actor",))
+                self.assertTrue(all(finding.file == relative and finding.id == record["id"] and finding.line == 7
+                                    and finding.fix for finding in findings))
+                self.assertNotIn(str(relation["actor"]), "\n".join(finding.text() for finding in findings))
+                # A later gold entry cannot make the first entry's actor agree.
+                gold.append(dict(gold[0], cluster=999, source_id="fictional/other-source"))
+                cast(list[object], cast(dict[str, object], record["expected"])["must_cite"]).append("fictional/other-source")
+                self.assertEqual(tuple(finding.rule for finding in case_findings(record, relative, 7)),
+                                 ("expected.relation.actor",))
+
+    def test_treatment_relation_agrees_with_first_gold_without_duplicate_malformed_findings(self) -> None:
+        for key, gold_key, mismatch, malformed in (
+            ("citing", "source_id", "fictional/other-source", SENTINEL),
+            ("cited", "cluster", 999, False),
+        ):
+            with self.subTest(key=key):
+                record = _synthetic_case(category="treatment")
+                relation = cast(dict[str, object], cast(dict[str, object], record["expected"])["relation"])
+                relation[key] = mismatch
+                findings = case_findings(record, synthetic.case_path("treatment"), 7)
+                self.assertEqual(tuple(finding.rule for finding in findings), (f"expected.relation.{key}",))
+                self.assertNotIn(str(mismatch), "\n".join(finding.text() for finding in findings))
+                # An invalid gold field owns its grammar error; no relation mismatch follows it.
+                record = _synthetic_case(category="treatment")
+                gold = cast(list[dict[str, object]], record["gold"])
+                gold[0][gold_key] = malformed
+                findings = case_findings(record, synthetic.case_path("treatment"), 7)
+                self.assertTrue(any(finding.rule.startswith(f"gold[1].{gold_key}") for finding in findings))
+                self.assertFalse(any(finding.rule.startswith("expected.relation") for finding in findings))
+                self.assertNotIn(SENTINEL, "\n".join(finding.text() for finding in findings))
 
     def test_new_shape_refusals_locate_file_id_and_line_in_loader(self) -> None:
         for category, key in (("treatment", "state"), ("section-attribution", "section_type")):

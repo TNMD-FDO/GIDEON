@@ -1,4 +1,10 @@
-"""Draft synthetic questions and review sheets from the sibling's eval sample."""
+"""Draft synthetic questions and review sheets from the sibling's eval sample.
+
+Treatment's sentence pass filters nearest-cite, active-direction,
+procedural-disposition, conditional-verb, and agent-unresolved edges before
+generation. Listed pairs precede the remaining seeded draw, with performed or
+reported actors shown in the prompt and on the sheet.
+"""
 
 import argparse
 import hashlib
@@ -85,9 +91,14 @@ FROM (
         ) AS cluster_state,
         EXISTS (SELECT 1 FROM known_overruled known
                 WHERE known.overruled_cluster = c.to_cluster) AS listed,
+        (SELECT known.row_id FROM known_overruled known
+         WHERE known.overruled_cluster = c.to_cluster AND known.overruling_cluster = o.cluster_id
+         ORDER BY known.caselaw_snapshot DESC, known.source_snapshot DESC, known.row_id
+         LIMIT 1
+        ) AS listed_row,
         (SELECT jsonb_build_object(
             'opinion_id', cited.opinion_id, 'court', cited.court,
-            'decided_date', cited.decided_date, 'reporter_cites', cited.reporter_cites,
+            'reporter_cites', cited.reporter_cites,
             'case_name', cited.case_name)
          FROM opinions cited JOIN documents ready ON ready.doc_id = cited.doc_id
          WHERE cited.cluster_id = c.to_cluster AND ready.status = 'ready'
@@ -162,7 +173,6 @@ class CitedOpinion:
 
     opinion_id: int
     court: str
-    decided: date
     cites: tuple[str, ...] = field(repr=False)
     case_name: str | None = field(repr=False)
 
@@ -189,6 +199,7 @@ class Edge:
     cluster: int | None
     cluster_state: str | None
     listed: bool
+    listed_row: str | None
     cited: CitedOpinion | None = field(repr=False)
 
 
@@ -364,24 +375,23 @@ def _edges(
             or (row["cluster"] is not None and not _positive(row["cluster"]))
             or row["cluster_state"] not in (None, *TREATMENT_STATES)
             or type(row["listed"]) is not bool
+            or (row["listed_row"] is not None and not _hash(row["listed_row"]))
         ):
             raise DraftError("treatment", "record reply has invalid edge facts", fix)
         cited = row["cited"]
         if cited is not None:
             if (
                 not isinstance(cited, dict)
-                or set(cited) != {"opinion_id", "court", "decided_date", "reporter_cites", "case_name"}
+                or set(cited) != {"opinion_id", "court", "reporter_cites", "case_name"}
                 or not _positive(cited["opinion_id"]) or row["cluster"] is None
                 or not isinstance(cited["court"], str) or _COURT.fullmatch(cited["court"]) is None
-                or not evalset.valid_iso_date(cited["decided_date"])
                 or not isinstance(cited["reporter_cites"], list)
                 or not all(isinstance(cite, str) for cite in cited["reporter_cites"])
                 or (cited["case_name"] is not None and not isinstance(cited["case_name"], str))
             ):
                 raise DraftError("treatment", "record reply has invalid cited facts", fix)
             cited = CitedOpinion(
-                cited["opinion_id"], cited["court"], date.fromisoformat(cited["decided_date"]),
-                tuple(cited["reporter_cites"]), cited["case_name"],
+                cited["opinion_id"], cited["court"], tuple(cited["reporter_cites"]), cited["case_name"],
             )
         result.append(Edge(**{key: cited if key == "cited" else row[key] for key in keys}))
         seen.add(row["citation_id"])
@@ -563,12 +573,12 @@ def _closed_book(
     return proposal, retraced, reading
 
 
-def _treatment_candidate(
-    io: DraftHost, rendered_dir: PathLike, served_model_name: str,
-    template: judge.JudgePrompt, facts: OpinionFacts, document: synthetic.DrawDocument,
-    edge: Edge, text: str, figures: Figures,
-) -> tuple[synthetic.Proposal, synthetic.Retraced, synthetic.ClosedBook] | str:
-    sections, citations = _document_rows(io, rendered_dir, document, text)
+def _treatment_sentence(
+    rendered_dir: PathLike, edge: Edge, text: str,
+    sections: Sequence[SectionRow], citations: Sequence[NewCitation],
+) -> synthetic.Retraced | synthetic.Discard:
+    """Hold an edge to the recorded rows and fix its pattern-set sentence."""
+
     citation = next((row for row in citations if row.citation_id == edge.citation_id), None)
     section = next((row for row in sections if row.section_id == edge.section_id), None)
     if (
@@ -580,18 +590,97 @@ def _treatment_candidate(
     ):
         raise DraftError("treatment", "edge citation or section disagrees with the record", _record_fix(rendered_dir))
     first, last = treatment.sentence(text, citation.char_start, citation.char_end, section, citations, treatment.RULES)
-    retraced = synthetic.fix_span(text, first, last, edge.verb_start, edge.verb_end)
+    return synthetic.fix_span(text, first, last, edge.verb_start, edge.verb_end)
+
+
+def _canonical_text(io: DraftHost, document: synthetic.DrawDocument) -> str:
+    """Read the canonical object, refusing an unavailable or non-UTF-8 text."""
+
+    value = cas.get(io, document.sha256)
+    if isinstance(value, report.Problem):
+        raise DraftError("text", f"source {document.source_id} canonical text is unavailable", value.fix)
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise DraftError("text", f"source {document.source_id} canonical text is not UTF-8", "Restore the canonical object, then retry.") from error
+
+
+def _treatment_sentence_pass(
+    io: DraftHost, rendered_dir: PathLike, document: synthetic.DrawDocument,
+    edges: Sequence[Edge],
+) -> tuple[str | tuple[int, str] | None, ...]:
+    """Resolve actors or discards with one text and row read per document."""
+
+    text = _canonical_text(io, document)
+    if synthetic.procedural_disposition(text):
+        return ("procedural-disposition",) * len(edges)
+    sections, citations = _document_rows(io, rendered_dir, document, text)
+    results: list[str | tuple[int, str] | None] = []
+    for edge in edges:
+        retraced = _treatment_sentence(rendered_dir, edge, text, sections, citations)
+        if isinstance(retraced, synthetic.Discard):
+            results.append(None)
+            continue
+        others = tuple(row for row in citations
+                       if row.cite_type == "case_cite" and row.citation_id != edge.citation_id
+                       and retraced.start <= row.char_start < row.char_end <= retraced.end)
+        if synthetic.nearest_cite(
+            edge.verb_start, edge.verb_end, (edge.citation_start, edge.citation_end),
+            ((row.char_start, row.char_end) for row in others),
+        ):
+            results.append("nearest-cite")
+        elif synthetic.active_direction(
+            retraced.quote, edge.citation_start - retraced.start, edge.citation_end - retraced.start,
+            edge.verb_start - retraced.start, edge.verb_end - retraced.start,
+        ):
+            results.append("active-direction")
+        elif synthetic.conditional_verb(retraced.quote, edge.verb_start - retraced.start):
+            results.append("conditional-verb")
+        else:
+            assert edge.cluster is not None
+            agent = synthetic.reported_agent(
+                retraced.quote, edge.verb_end - retraced.start, edge.cluster,
+                ((row.char_start - retraced.start, row.char_end - retraced.start, row.to_cluster)
+                 for row in others),
+            )
+            if agent.state == "unresolved":
+                results.append("agent-unresolved")
+            elif agent.state == "reported":
+                assert agent.cluster is not None and agent.span is not None
+                citation = next(row for row in others if (
+                    row.char_start - retraced.start, row.char_end - retraced.start,
+                ) == agent.span)
+                results.append((agent.cluster, citation.raw_cite))
+            else:
+                results.append(None)
+    return tuple(results)
+
+
+def _treatment_candidate(
+    io: DraftHost, rendered_dir: PathLike, served_model_name: str,
+    template: judge.JudgePrompt, facts: OpinionFacts, document: synthetic.DrawDocument,
+    edge: Edge, actor: tuple[int, str] | None, text: str, figures: Figures,
+) -> tuple[synthetic.Proposal, synthetic.Retraced, synthetic.ClosedBook] | str:
+    sections, citations = _document_rows(io, rendered_dir, document, text)
+    retraced = _treatment_sentence(rendered_dir, edge, text, sections, citations)
     if isinstance(retraced, synthetic.Discard):
         return retraced.reason
     assert edge.cited is not None and edge.cited.case_name is not None and facts.case_name is not None
+    assert edge.cluster is not None
     proposal, prompt, completion, seconds = synthetic.propose(
         io, rendered_dir, served_model_name=served_model_name, template=template,
         slots={
             "court": facts.court, "decided": facts.decided.isoformat(), "cites": "; ".join(facts.cites),
             "parties": facts.case_name, "cited_parties": edge.cited.case_name,
             "cited_cites": "; ".join(edge.cited.cites), "cited_court": edge.cited.court,
-            "cited_decided": edge.cited.decided.isoformat(), "kind": document.kind,
+            "kind": document.kind,
             "signal": edge.signal, "qualifier": edge.qualifier, "standing": edge.standing,
+            "relation": synthetic.relation_line(
+                facts.case_name, edge.standing, edge.signal, edge.qualifier, edge.cited.case_name, edge.cluster,
+                actor_cite=actor[1] if actor is not None else None,
+                actor_cluster=actor[0] if actor is not None else None,
+            ),
+            "actor": "performed" if actor is None else "reported",
             "sentence": retraced.quote,
         },
     )
@@ -608,6 +697,7 @@ def _document(
     template: judge.JudgePrompt, document: synthetic.DrawDocument, facts: OpinionFacts,
     edge: Edge | None = None,
     court_names: Mapping[str, str] | None = None,
+    actor: tuple[int, str] | None = None,
 ) -> tuple[
     tuple[synthetic.Proposal, synthetic.Retraced, synthetic.ClosedBook] | str,
     Figures, SectionRow | None, tuple[SectionRow, ...],
@@ -615,13 +705,7 @@ def _document(
     """Fetch and evaluate one document, retaining its own engine figures."""
 
     figures = Figures()
-    value = cas.get(io, document.sha256)
-    if isinstance(value, report.Problem):
-        raise DraftError("text", f"source {document.source_id} canonical text is unavailable", value.fix)
-    try:
-        text = value.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise DraftError("text", f"source {document.source_id} canonical text is not UTF-8", "Restore the canonical object, then retry.") from error
+    text = _canonical_text(io, document)
     if len(text) < synthetic.DOCUMENT_MIN_CHARS:
         return "document-short", figures, None, ()
     target: SectionRow | None = None
@@ -637,7 +721,7 @@ def _document(
         if target is None:
             raise DraftError("sections", "target section is absent from the record", _record_fix(rendered_dir))
     if edge is not None:
-        result = _treatment_candidate(io, rendered_dir, served_model_name, template, facts, document, edge, text, figures)
+        result = _treatment_candidate(io, rendered_dir, served_model_name, template, facts, document, edge, actor, text, figures)
     else:
         result = _candidate(
             io, rendered_dir, served_model_name, template, facts, text, figures,
@@ -654,15 +738,24 @@ def _sheet(ordinal: int, document: synthetic.DrawDocument, facts: OpinionFacts,
            proposal: synthetic.Proposal, retraced: synthetic.Retraced, reading: synthetic.ClosedBook,
            *, required: bool, edge: Edge | None = None, target: SectionRow | None = None,
            sections: Sequence[SectionRow] = (), category: str = "",
-           court_names: Mapping[str, str] | None = None) -> str:
+           court_names: Mapping[str, str] | None = None, actor: tuple[int, str] | None = None) -> str:
     suffix = manifest.SHEET_REQUIRED if required else manifest.SHEET_OPTIONAL
     extra: tuple[str, ...] = ()
+    relation: tuple[str, ...] = ()
     if edge is not None:
-        assert edge.cited is not None
+        assert edge.cited is not None and edge.cited.case_name is not None and facts.case_name is not None
+        assert edge.cluster is not None
+        relation = ("Relation: " + synthetic.relation_line(
+            facts.case_name, edge.standing, edge.signal, edge.qualifier, edge.cited.case_name, edge.cluster,
+            actor_cite=actor[1] if actor is not None else None,
+            actor_cluster=actor[0] if actor is not None else None,
+        ),)
+        if edge.listed_row is not None:
+            relation += (f"Listed: {edge.listed_row}",)
         extra = (
             f"Cited parties: {edge.cited.case_name}",
             "Cited citations: " + ("; ".join(edge.cited.cites) or "no cite recorded"),
-            f"Cited court: {edge.cited.court} | decided {edge.cited.decided.isoformat()}",
+            f"Cited court: {edge.cited.court}",
             "Cited original: " + manifest.original_link(edge.cited.cites),
             f"Kind: {document.kind} | verb {edge.signal} | qualifier {edge.qualifier} | standing {edge.standing}",
             f"Edge: {edge.citation_id} | signal {edge.signal_id} | pattern set {edge.pattern_set}",
@@ -682,6 +775,7 @@ def _sheet(ordinal: int, document: synthetic.DrawDocument, facts: OpinionFacts,
             near = f"premise {document.near}"
         extra = (f"Near miss: {near} | behavior {synthetic.BEHAVIORS[category]}",)
     return "\n".join((
+        *relation,
         f"{manifest.SHEET_BLOCK_HEADER} {ordinal:02d} {suffix}",
         f"Source: {document.source_id} | court {document.court} | decided {facts.decided.isoformat()}",
         *((f"Case name: {facts.case_name.strip()}",) if facts.case_name and facts.case_name.strip() else ()),
@@ -779,6 +873,7 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
         except OSError as error:
             raise DraftError("write", "output directory cannot be created", _OUT_FIX) from error
         edges: dict[str, Edge] = {}
+        actors: dict[str, tuple[int, str] | None] = {}
         edge: Edge | None
         court_names: Mapping[str, str] = {}
         if category in _ASKED_COURT_CATEGORIES:
@@ -808,10 +903,11 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
             print(f"near-miss: premises {len(captions)}, in record {len(in_record)}", file=stdout, flush=True)
         elif category == "treatment":
             drawn = []
+            by_document: dict[str, list[synthetic.DrawDocument]] = {}
             by_opinion = {document.opinion_id: document for document in documents}
             edge_rows = _edges(io, rendered_dir, documents, facts)
             eligible: Counter[str] = Counter()
-            skipped: Counter[str] = Counter()
+            skipped: Counter[str] = Counter(dict.fromkeys(synthetic.TREATMENT_DISCARDS, 0))
             for edge in edge_rows:
                 document = by_opinion[edge.opinion_id]
                 kind = synthetic.treatment_kind(edge.state, edge.no_state_reason, edge.standing, edge.cluster_state, edge.listed)
@@ -828,12 +924,25 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                     skipped[reason] += 1
                 else:
                     assert kind is not None
-                    drawn.append(replace(document, kind=kind, item=edge.citation_id))
+                    by_document.setdefault(document.doc_id, []).append(replace(document, kind=kind, item=edge.citation_id))
                     edges[edge.citation_id] = edge
-                    eligible[kind] += 1
+            for candidates in by_document.values():
+                sentence_results = _treatment_sentence_pass(
+                    io, rendered_dir, candidates[0], tuple(edges[document.item] for document in candidates),
+                )
+                for document, sentence_result in zip(candidates, sentence_results, strict=True):
+                    if isinstance(sentence_result, str):
+                        discard(document.source_id, sentence_result, document.item, document.kind)
+                        skipped[sentence_result] += 1
+                    else:
+                        actors[document.item] = sentence_result
+                        drawn.append(document)
+                        eligible[document.kind] += 1
+                        eligible["performed" if sentence_result is None else "reported"] += 1
+                        eligible["listed" if edges[document.item].listed_row is not None else "unlisted"] += 1
             documents = drawn
-            counts = ", ".join(f"{kind}={eligible[kind]}" for kind in synthetic.TREATMENT_KINDS)
-            reasons = ", ".join(f"{reason}={skipped[reason]}" for reason in sorted(skipped)) or "none"
+            counts = ", ".join(f"{kind}={eligible[kind]}" for kind in (*synthetic.TREATMENT_KINDS, *synthetic.ACTOR_WORDS, "listed", "unlisted"))
+            reasons = ", ".join(f"{reason}={skipped[reason]}" for reason in sorted(skipped))
             print(f"treatment: {len(edge_rows)} edges, eligible {counts}, skipped {sum(skipped.values())} ({reasons})", file=stdout, flush=True)
         elif category == "section-attribution":
             summaries = _section_summaries(io, rendered_dir, documents)
@@ -880,7 +989,12 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
         checkpoint_discards = len(discards)
         figures = Figures()
         closed_book_count = 0
-        order = iter(synthetic.draw_order(documents, seed))
+        if category == "treatment":
+            listed = [document for document in documents if edges[document.item].listed_row is not None]
+            rest = [document for document in documents if edges[document.item].listed_row is None]
+            order = iter((*synthetic.draw_order(listed, seed), *synthetic.draw_order(rest, seed)))
+        else:
+            order = iter(synthetic.draw_order(documents, seed))
         kept_sources: set[str] = set()
         kept_clusters: set[int] = set()
         kinds: Counter[str] = Counter()
@@ -912,6 +1026,7 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                     pending.append((document, executor.submit(
                         _document, io, rendered_dir, target.served_model_name,
                         template, document, facts[document.opinion_id], edges.get(document.item), court_names,
+                        actors.get(document.item),
                     )))
                     return True
                 return False
@@ -923,6 +1038,7 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                 document, future = pending.popleft()
                 result, used, section_target, sections = future.result()
                 edge = edges.get(document.item)
+                actor = actors.get(document.item)
                 before = figures.seconds
                 figures.add(used.prompt_tokens, used.completion_tokens, used.seconds)
                 result = duplicate_reason(document) or result
@@ -950,7 +1066,13 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                         "notes": "", "closed_book_answer": reading.answer, "ordinal": ordinal,
                     }
                     if edge is not None:
-                        cast(dict[str, object], draft["expected"])["state"] = document.kind
+                        expected["state"] = document.kind
+                        expected["relation"] = dict(zip(synthetic.RELATION_KEYS, (
+                            document.source_id, edge.standing, edge.signal, edge.qualifier, edge.cluster,
+                            actor[0] if actor is not None else document.source_id,
+                        ), strict=True))
+                        if edge.listed_row is not None:
+                            draft["notes"] = f"known-overruled row {edge.listed_row}"
                         cast(list[dict[str, object]], draft["gold"])[0].update(
                             citation_id=edge.citation_id, signal_id=edge.signal_id,
                             pattern_set=edge.pattern_set, cluster=edge.cluster,
@@ -963,18 +1085,21 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                         ordinal, document, facts[document.opinion_id], proposal, retraced, reading,
                         required=ordinal in synthetic.sample_ordinals(ordinal, read_share),
                         edge=edge, target=section_target, sections=sections,
-                        category=category, court_names=court_names,
+                        category=category, court_names=court_names, actor=actor,
                     ))
                     entries.append(dict(zip(manifest.ENTRY_KEYS, (
                         ordinal, document.source_id, document.sha256, document.doc_id, retraced.start, retraced.end,
                         len(retraced.quote), hashlib.sha256(retraced.quote.encode("utf-8")).hexdigest(),
-                        reading.score, reading.label, hashlib.sha256(line).hexdigest(),
+                        reading.score, reading.label, edge.listed_row if edge is not None else None,
+                        hashlib.sha256(line).hexdigest(),
                     ), strict=True)))
                     closed_book_count += int(reading.label is not None)
                     kept_sources.add(document.source_id)
                     if edge is not None:
                         assert edge.cluster is not None
                         kept_clusters.add(edge.cluster)
+                        kinds["performed" if actor is None else "reported"] += 1
+                        kinds["listed" if edge.listed_row is not None else "unlisted"] += 1
                     if document.kind:
                         kinds[document.kind] += 1
                     checkpoint()
@@ -994,7 +1119,7 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
         if len(discards) != checkpoint_discards:
             checkpoint()
         reasons = ", ".join(f"{reason}={discarded[reason]}" for reason in sorted(discarded)) or "none"
-        summary_kinds = (synthetic.TREATMENT_KINDS if category == "treatment" else
+        summary_kinds = ((*synthetic.TREATMENT_KINDS, *synthetic.ACTOR_WORDS, "listed", "unlisted") if category == "treatment" else
                          synthetic.ATTRIBUTION_KINDS if category == "section-attribution" else ())
         kind_counts = "kinds " + ", ".join(f"{kind}={kinds[kind]}" for kind in summary_kinds) + ", " if summary_kinds else ""
         print(f"summary: kept {len(entries)}, discarded {sum(discarded.values())} ({reasons}), "

@@ -5,7 +5,9 @@ names its parent, carries the parent's cluster, and retires with it. A judge
 triple is an invented reference-and-candidate grading case. A research-qa case
 is one reviewed research question. A harvest case's signed answer lives in the
 sign-offs file; a synthetic case carries its own expected answer and retraced
-gold evidence. A case is unsigned iff its shape takes a sign-off, it carries no
+gold evidence, with a treatment case's expected relation and actor held to that
+gold: the actor is the citing source id or a cluster other than the cited.
+A case is unsigned iff its shape takes a sign-off, it carries no
 expected of its own, and no sign-off or label names it — it loads, and a
 selection keeps it out of what a gate counts.
 The shape's zero_tolerance flag marks lookup, edition, treatment,
@@ -337,7 +339,7 @@ SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
         takes_signoff=False,
         synthetic_keys=_SYNTHETIC_KEYS,
         zero_tolerance=True,
-        expected_keys=("answer", "must_cite", "state"),
+        expected_keys=("answer", "must_cite", "state", "relation"),
         gold_keys=GOLD_COORDINATE_KEYS + ("citation_id", "signal_id", "pattern_set", "cluster"),
     ),
     ("research-qa", "section-attribution"): ShapeSpec(
@@ -980,7 +982,12 @@ def _validate_synthetic_fields(
 
     from gideon.evaluation import judgments, synthetic
     from gideon.host.index.treatment import PATTERN_SET_PATTERN
-    from gideon.host.render.worker import SECTION_TYPES, TREATMENT_STATES
+    from gideon.host.render.worker import (
+        QUALIFIERS,
+        SECTION_TYPES,
+        TREATMENT_SIGNALS,
+        TREATMENT_STATES,
+    )
 
     template = record.get("template")
     if (
@@ -993,6 +1000,8 @@ def _validate_synthetic_fields(
     expected = record.get("expected")
     expected_keys = spec.expected_keys_for()
     must_cite: list[object] = []
+    relation: Mapping[str, object] | None = None
+    relation_checks: dict[str, bool] = {}
     if not isinstance(expected, Mapping):
         findings.append(Finding(file, case_id, line, "expected mapping", _CASE_FIX))
     else:
@@ -1027,6 +1036,27 @@ def _validate_synthetic_fields(
             findings.append(Finding(file, case_id, line, "expected.state", _CASE_FIX))
         if "section_type" in expected_keys and expected.get("section_type") not in SECTION_TYPES:
             findings.append(Finding(file, case_id, line, "expected.section_type", _CASE_FIX))
+        if "relation" in expected_keys:
+            candidate = expected.get("relation")
+            if not isinstance(candidate, Mapping) or tuple(candidate) != synthetic.RELATION_KEYS:
+                findings.append(Finding(file, case_id, line, "expected.relation", _CASE_FIX))
+            else:
+                relation = candidate
+                citing, cited = relation.get("citing"), relation.get("cited")
+                actor = relation.get("actor")
+                relation_checks = {
+                    "citing": isinstance(citing, str) and judgments.SOURCE_ID_PATTERN.fullmatch(citing) is not None,
+                    "standing": relation.get("standing") in SECTION_TYPES,
+                    "verb": relation.get("verb") in TREATMENT_SIGNALS,
+                    "qualifier": relation.get("qualifier") in QUALIFIERS,
+                    "cited": _int(cited) and cast(int, cited) > 0,
+                    "actor": (
+                        isinstance(actor, str) and judgments.SOURCE_ID_PATTERN.fullmatch(actor) is not None
+                    ) or (_int(actor) and cast(int, actor) > 0),
+                }
+                for key, valid in relation_checks.items():
+                    if not valid:
+                        findings.append(Finding(file, case_id, line, f"expected.relation.{key}", _CASE_FIX))
     gold = record.get("gold")
     if not isinstance(gold, list) or not gold:
         findings.append(Finding(file, case_id, line, "gold non-empty list", _CASE_FIX))
@@ -1063,6 +1093,30 @@ def _validate_synthetic_fields(
             findings.append(Finding(file, case_id, line, f"{rule}.quote length", _CASE_FIX))
         if "must_cite" in expected_keys and entry.get("source_id") not in must_cite:
             findings.append(Finding(file, case_id, line, f"{rule}.source_id absent from expected.must_cite", _CASE_FIX))
+    if relation is not None and isinstance(gold[0], Mapping):
+        source_id, cluster = gold[0].get("source_id"), gold[0].get("cluster")
+        if (
+            relation_checks["citing"]
+            and isinstance(source_id, str) and judgments.SOURCE_ID_PATTERN.fullmatch(source_id) is not None
+            and relation["citing"] != source_id
+        ):
+            findings.append(Finding(file, case_id, line, "expected.relation.citing", _CASE_FIX))
+        if (
+            relation_checks["cited"] and _int(cluster) and cast(int, cluster) > 0
+            and relation["cited"] != cluster
+        ):
+            findings.append(Finding(file, case_id, line, "expected.relation.cited", _CASE_FIX))
+        actor = relation["actor"]
+        if relation_checks["actor"] and (
+            (
+                isinstance(actor, str)
+                and isinstance(source_id, str) and judgments.SOURCE_ID_PATTERN.fullmatch(source_id) is not None
+                and actor != source_id
+            ) or (
+                _int(actor) and _int(cluster) and cast(int, cluster) > 0 and actor == cluster
+            )
+        ):
+            findings.append(Finding(file, case_id, line, "expected.relation.actor", _CASE_FIX))
     if isinstance(gold[0], Mapping) and record.get("cluster_id") != gold[0].get("source_id"):
         findings.append(Finding(file, case_id, line, "cluster_id must equal first gold source_id", _CASE_FIX))
 

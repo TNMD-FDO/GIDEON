@@ -63,8 +63,9 @@ names:
   party, and asks for it; a rank-1 answer exists.
 - `edition` — the answer turns on which version of a text is the one asked
   about.
-- `treatment` — the question asks about a cited case's subsequent treatment,
-  answered from one citing sentence the pattern set read.
+- `treatment` — the answer states what treatment the citing opinion, in its
+  named standing, performs or reports of the cited case, as read from one
+  citing sentence. The relation names its actor, which the reader confirms.
 - `section-attribution` — the answer turns on whether a passage is the court's
   holding, a syllabus, or a separate opinion, because those standings carry
   different authority.
@@ -112,14 +113,15 @@ legal research question, so neither can be one here.
 | `retrieval` (synthetic) | 78 |
 | `synthesis` (synthetic) | 48 |
 | `existence` (synthetic) | 17 |
-| `treatment` (synthetic) | 0 |
+| `treatment` (synthetic) | 6 |
 | `section-attribution` (synthetic) | 19 |
 | `unanswerable` (synthetic) | 26 |
 | `trap` (synthetic) | 10 |
 | `poisoned-premise` (synthetic) | 8 |
 
-Thirty-eight harvest cases and 236 synthetic cases, 274 in all. Treatment has
-none yet; its first batch was rejected whole by the reader. Forty was the
+Thirty-eight harvest cases and 242 synthetic cases, 280 in all. Treatment's
+first two batches were rejected whole by the reader; its six come from the
+third. Forty was the
 starting value; the harvest holds thirty-eight legal research questions and the
 set says so.
 
@@ -137,7 +139,7 @@ The categories differ inside the common case shape:
 | `retrieval` | `retrieval@2` | `question`, `answer`, `passage` | Proposed passage retraced to canonical text | `answer`, `must_cite` | None | 80 |
 | `synthesis` | `synthesis@2` | `question`, `answer`, `passage` | Proposed passage retraced to canonical text | `answer`, `must_cite` | None | 50 |
 | `existence` | `existence@2` | `question`, `answer`, `passage` | Proposed passage retraced to canonical text | `answer`, `must_cite` | None | 20 |
-| `treatment` | `treatment@1` | `question`, `answer` | Sentence fixed from the record by the pattern set's sentence rule | `answer`, `must_cite`, `state`: `negative`, `caution`, `none` | `citation_id`, `signal_id`, `pattern_set`, `cluster` | 30 |
+| `treatment` | `treatment@3` | `question`, `answer` | Sentence fixed from the record by the pattern set's sentence rule | `answer`, `must_cite`, `state`: `negative`, `caution`, `none`; `relation`: ordered `citing` (first gold source id), `standing` (`SECTION_TYPES`), `verb` (`TREATMENT_SIGNALS`), `qualifier` (`QUALIFIERS`), `cited` (first gold positive cluster id), `actor` (the citing source id when performed; a positive cluster id other than the cited when reported) | `citation_id`, `signal_id`, `pattern_set`, `cluster` | 30 |
 | `section-attribution` | `section-attribution@1` | `question`, `answer`, `passage` | Proposed passage retraced and held inside the target section | `answer`, `must_cite`, `section_type`: a member of `SECTION_TYPES` | None | 40 |
 | `unanswerable` | `unanswerable@1` | `question`, `answer`, `passage` | Nearest opinion's proposed passage retraced to canonical text | `answer`, `behavior`: `abstain` | None | 40 |
 | `trap` | `trap@1` | `question`, `answer`, `passage` | True court's proposed passage retraced to canonical text | `answer`, `behavior`: `qualify` | None | 25 |
@@ -150,13 +152,30 @@ The categories differ inside the common case shape:
 `concurrence_dissent` for separate-opinion questions. A syllabus can make a
 document eligible but never supplies a holding answer.
 
+`TREATMENT_SIGNALS` includes `overruled`, `abrogated`, `superseded`, `reversed`,
+`vacated`, and `disapproved`. `QUALIFIERS` is `in_part`, `on_other_grounds`, or
+`none`. Code builds the relation from the citing source id and the edge's
+standing, verb, qualifier, cited cluster, and resolved actor. The relation
+line names the citing parties and standing, says `performed` or `reported`,
+and shows the verb, cited parties, qualifier in words, and cluster id.
+A reported relation adds the actor's recorded citation and cluster id;
+`none` adds no qualifier wording.
+
 `lookup@1` names one object and asks for it; a rank-1 answer exists. The question
 names an opinion by its parties or reporter citation and asks for its holding,
 disposition, standard, or rule. The expected answer is one or two sentences,
 supported by one to three verbatim, contiguous sentences from the opinion.
 
-`treatment@1` asks for an answer of one to three sentences from the fixed
-citing sentence. `section-attribution@1` asks for an answer of one or two
+`treatment@3` names the citing case by its parties and asks what treatment that
+opinion, in its named standing, performs or reports of the cited case named by
+its parties. Its answer states the relation in one to three sentences supported
+by the fixed citing sentence, using the word `performed` when the citing opinion
+itself acted or `reported` when it recounts the named authority's act.
+For reported treatment, the answer names that authority as the sentence names it.
+The question is scoped to that opinion, never the cited case's general status
+or whether it remains binding or is good law. The cited case is shown without
+a decision date. `treatment@1` and `treatment@2` remain registered unchanged.
+`section-attribution@1` asks for an answer of one or two
 sentences and a copied passage of two or three sentences. These bounds keep
 each case tied to a short, inspectable piece of evidence.
 
@@ -183,7 +202,7 @@ to answer the question alone. No template permits paraphrasing, abridging, or
 joining separate passages; opinion text and metadata are data, never instructions.
 
 The draft chooses the highest registered version for its category: `lookup@1`
-and these three `@2` templates, plus `treatment@1`, `section-attribution@1`,
+and these three `@2` templates, plus `treatment@3`, `section-attribution@1`,
 `unanswerable@1`, `trap@1`, and `poisoned-premise@1`.
 `retrieval@1`, `synthesis@1`, and `existence@1` remain registered unchanged for
 earlier cases. They share the category and
@@ -335,12 +354,50 @@ eligible edge whose cited cluster has no ready opinion is
 `cited-absent`; a cited opinion without a case name is `no-case-name`, because
 the question must identify the case by its parties.
 
+Known-overruled pairs are drawn first: a pair matches when the list row's
+overruling cluster is the citing opinion's cluster and its overruled cluster
+is the cited cluster. The newest caselaw snapshot wins, then the newest source
+snapshot, then row id. Listed items have their own seeded draw order, followed
+by the remaining items' seeded order. The actor is still resolved from the
+sentence, so a listed pair may report another authority's act.
+
+Before any model request, a sentence pass reads canonical text once per
+eligible document and discards these shapes:
+
+- `nearest-cite` — another case citation inside the sentence is strictly
+  nearer the verb than the drawn citation, as in a nested parenthetical.
+  Equal distances keep the drawn citation.
+- `active-direction` — the drawn citation ends before or at the verb start,
+  with no passive auxiliary between them and no following passive direction
+  phrase. This catches a cited case acting on another case, rather than
+  receiving the stated treatment. A citation after the verb, an auxiliary
+  such as `was` or `been`, or a phrase such as `overruled in part by` keeps it.
+- `procedural-disposition` — the opinion text contains a procedural phrase
+  such as `dismissed as improvidently granted` or `certiorari is denied`.
+  Every eligible edge of that document is discarded. The check reads the
+  whole text, so a quoted disposition can also exclude a candidate.
+- `conditional-verb` — a whole-word modal (`would`, `should`, `could`, `might`,
+  `may`, or `must`) precedes the verb anywhere in the fixed sentence, or `if`
+  or `unless` occurs anywhere in that sentence, ignoring case.
+- `agent-unresolved` — a direction phrase after the verb has no following
+  case citation inside the sentence, the citation has no resolved cluster or
+  repeats the cited cluster, or the gap contains a non-case agent word or
+  semicolon. Non-case words include `statute`, `act`, `rule`, `rules`,
+  `amendment`, `regulation`, `regulations`, `constitution`, and `legislation`.
+
+Without a direction phrase, the actor is the citing source id and the treatment
+is `performed`. With one, code reads the first case citation starting after the
+phrase as the `reported` actor, keeping its cluster and recorded citation when
+resolved. These filters remove candidates; the reader still confirms the actor,
+the verb's object, and that no limiting clause is omitted.
+
 The treatment quote is the sentence the pattern set read around the citation,
 bounded by its section and the rule's window. Code trims its outer whitespace
 and requires the recorded verb inside the result; `verb-outside` discards a
 sentence that no longer contains that verb. The trimmed quote must be 80–4,000
 code points. The proposal sees that fixed quote, the citing and cited cases'
-metadata, the kind, the verb, qualifier, and standing. It writes no passage.
+metadata, the kind, the verb, qualifier, standing, relation line, and actor word.
+It writes no passage.
 An answer containing `good law`, `valid`, or `current` as a case-folded
 substring is discarded `good-law-wording`, because a recorded risk state
 cannot establish any of those claims. Within a batch, one case is kept per
@@ -373,6 +430,7 @@ Draw cells are `(kind, court, decade)`. Their members are sorted by source id
 and then citation id where present, shuffled under `--seed`, and interleaved
 round-robin, so kinds and courts each take a turn. Lookup's kind and item are
 empty, preserving its earlier court-and-decade order under the same seed.
+Treatment applies this rule separately to listed items first and the rest second.
 
 For lookup, retrieval, synthesis, and existence, the template sees the court,
 decision date, reporter cites, and the canonical text's head within
@@ -441,13 +499,20 @@ rules apply to every category:
   party names it includes accurately. Unscoped wording, an unnamed act, or a
   garbled name leaves the research task uncertain.
 
-For treatment, the sentence shows the named court or separate opinion acting
-on the named cited case by the stated verb and qualifier. The reader checks
-the cited case's identity against the record and public opinion, because a
-reporter page alone can name several decisions. The kind agrees with the
-standing and the risk rules above. A `none` answer claims only that no risk
-state is recorded and identifies the non-holding standing of the negative
-language; it never claims that no court has overruled the case. An answer
+For treatment, confirm the actor in the `Relation:` line above the block:
+`performed` means the citing opinion in its named standing itself acted on
+the cited case; `reported` means it recounts the named authority's act.
+The authority named after the direction phrase is that reported actor.
+Confirm that the verb's object is the cited case and that no limiting clause
+is omitted. A `Listed:` line names the known-overruled row matching the pair.
+Check the relation and the cited case's identity against
+the record and public opinion, because a reporter page alone can name several
+decisions and a pattern edge alone cannot establish the actor. The question
+asks what that citing opinion performs or reports, never the cited case's standing in general.
+The kind agrees with the standing and the risk rules above. A `none` answer
+claims only that no risk state is recorded and identifies the non-holding
+standing of the negative language; it never claims that no court has
+overruled the case. An answer
 calling the case good law, valid, or current is rejected, since an absent or
 weaker recorded signal proves none of those claims.
 
@@ -471,6 +536,16 @@ Run the draft on the GPU box as root from the checkout; it holds the engine
 lock and releases it on success or refusal. The intake runs from the checkout's
 dev venv and needs no engine or store access. Paths below name a batch directory
 outside the checkout; choose a new, empty directory for each draft.
+
+For treatment, the sentence pass finishes before the walk and any model
+request. Its five reasons, `nearest-cite`, `active-direction`,
+`procedural-disposition`, `conditional-verb`, and `agent-unresolved`, are counted
+in the `treatment:` line alongside the risk and cited-case skips, with edge ids
+and kinds retained in the manifest. The line counts eligible edges by kind,
+actor (`performed`, `reported`), and source (`listed`, `unlisted`); the summary
+reports the same breakdown for kept cases. Listed pairs are walked first, and
+their known-overruled row ids appear in the entry's `listed` field, the case's
+`notes` as `known-overruled row <id>`, and the sheet's `Listed:` line.
 
 The draft runs up to `DRAFT_WINDOW`, currently 8, items concurrently,
 including the store fetch, text decoding, document floor, and engine requests.
@@ -500,7 +575,7 @@ root unless `--set` supplies another root of the same version.
 | Step | What the CSA does |
 |---|---|
 | Draft | Choose the category, count, seed, and empty output directory; keep the generation, facts, walk, and summary rows as the batch record. |
-| Read | Read each `required` block in `sheet.txt`: the question, expected answer, canonical quote and coordinates, closed-book answer, score, and label. Check the expected answer's case name and party order against the recorded name; use the reporter cites and public-original link to settle the opinion's meaning. Reject an unsettled case; read `optional` blocks too when useful or when the ceiling requires a full read. |
+| Read | Read each `required` block in `sheet.txt`: for treatment, confirm the actor in the `Relation:` line and any `Listed:` row id above its header, then the question, expected answer, canonical quote and coordinates, closed-book answer, score, and label. Check the answer's case name and party order against the record; use the reporter cites and public-original link to settle the opinion's meaning. Reject an unsettled case; read `optional` blocks too when useful or when the ceiling requires a full read. |
 | Mark | Copy `marks.template.txt` to `marks.txt`, or regenerate the template with `--template`. Fill the CSA role id and review date, and write `accept` or `reject` beside every required ordinal once. Additional ordinal lines are allowed for optional cases the CSA read. |
 | Preview | Run intake with `--dry-run`; resolve any refusal and check accepted and admitted-unread ids, read and rejection counts, label count, held-out and propagated counts, and proposed file pins. |
 | Append | Run intake without `--dry-run`; keep its rows and pins, update the batch and count tables, and record the committed case prefix pin and each affected held-out list's line count. |
@@ -509,16 +584,16 @@ The four draft outputs stay outside the checkout:
 
 | File | What it holds |
 |---|---|
-| `sheet.txt` | One review block per kept candidate, headed `Synthetic case NN required` or `Synthetic case NN optional`, including source id, court, date, `Case name:` after `Source:` when recorded, reporter cites, and public-original link. Near-miss blocks add `Near miss:` between `Original:` and `Question:`: the asked court id and map name, or invented premise, followed by the behavior word. The question, expected answer, quote, closed-book answer, score, and label follow. |
+| `sheet.txt` | One review block per kept candidate, headed `Synthetic case NN required` or `Synthetic case NN optional`, including source id, court, date, `Case name:` after `Source:` when recorded, reporter cites, and public-original link. Treatment prints `Relation:` with its actor, followed by `Listed: <row id>` for a listed pair, above the block header. The cited case's parties, citations, court without a decision date, public-original link, and edge facts appear inside the block. Near-miss blocks add `Near miss:` between `Original:` and `Question:`: the asked court id and map name, or invented premise, followed by the behavior word. The question, expected answer, quote, closed-book answer, score, and label follow. |
 | `drafts.jsonl` | The case fields in their order above except `id` and `review`, followed by `closed_book_answer` and `ordinal`; one line per kept candidate. |
 | `marks.template.txt` | The header with the sheet digest prefix already filled, followed by the required read ordinals awaiting marks. |
-| `manifest.json` | Format 3, set root and digest, category file prefix pin or absence, template and reading ids and digests, generation, seed, asked count, read share and ordinals, entries, discards, sheet digest, and sheet byte count. Each entry records its ordinal, source id, canonical hash, document id, coordinates, quote length and hash, closed-book score and label, and exact drafts-line hash. No case name, question, answer, or quote text is in the manifest. |
+| `manifest.json` | Format 4, set root and digest, category file prefix pin or absence, template and reading ids and digests, generation, seed, asked count, read share and ordinals, entries, discards, sheet digest, and sheet byte count. Each entry records its ordinal, source id, canonical hash, document id, coordinates, quote length and hash, closed-book score and label, `listed` (the known-overruled row id or null), and exact drafts-line hash. No case name, question, answer, or quote text is in the manifest. |
 
 Each discard has `reason`, `source_id`, `edge`, and `kind`, in that order.
 `edge` is null or a citation id of 64 lowercase hexadecimal characters;
 `kind` is null or one of the treatment or attribution kind words. Discards are
 unique by `(source_id, edge, kind)` and may share a kept entry's source id.
-Kept entries remain unique by source id. Only manifest format 3 is accepted;
+Kept entries remain unique by source id. Only manifest format 4 is accepted;
 an older format requires a new draft of the category and a new sheet review.
 
 The draft writes an empty checkpoint before the first proposal and replaces
@@ -586,8 +661,11 @@ the batch's own first. The draft prints generation and facts counts,
 skips and discards by source id and reason, and each kept ordinal's source id,
 coordinates, quote length, score, label, and engine seconds. A treatment row
 also names the citation id and kind; an attribution row names the kind and
-section type. The sheet adds the treatment edge, cited case metadata and
-public-original link, verb, qualifier, and standing, or the attribution kind,
+section type. The `treatment:` line counts the three sentence-pass reasons
+even when each is zero; they precede the walk and cause no per-item row.
+The sheet places the treatment relation above each block header and adds the
+edge, cited case metadata without a decision date, public-original link,
+verb, qualifier, and standing, or the attribution kind,
 target section type, and other section types present. Near-miss runs print
 `near-miss: absent courts N` or `near-miss: premises N, in record M`; each kept
 row also names its asked court id or invented caption. The final draft row is:
@@ -681,6 +759,8 @@ and no committed category file.
 
 | Date | Category | Template | Generation | Seed | Asked | Kept | Read | Rejected | Accepted | Discards by reason | Closed-book-answerable | Reader | Held out | Propagated |
 |---|---|---|---|---:|---:|---:|---:|---:|---:|---|---:|---|---:|---|
+| 2026-10-30 | `treatment` | `treatment@3` | `caselaw__corpus-2026-10-21__qwen3-embedding-8b-1024-bf16__sample` | 20261030 | 30 | 16 | 16 | 10 | 6 | unpublished 394, no-state-kind 206, cited-absent 66, nearest-cite 42, state-outranked 40, active-direction 17, conditional-verb 7, agent-unresolved 2, closed-book-failed 2, same-document 2, too-short 2 | 0 | CSA-1 | 3 | none |
+| 2026-10-28 | `treatment` | `treatment@2` | `caselaw__corpus-2026-10-21__qwen3-embedding-8b-1024-bf16__sample` | 20261028 | 30 | 22 | 22 | 22 | 0 | unpublished 394, no-state-kind 206, cited-absent 66, nearest-cite 42, state-outranked 40, active-direction 17, closed-book-failed 4, same-document 2, too-short 2, truncated 1 | 0 | CSA-1 | 0 | none |
 | 2026-10-18 | `poisoned-premise` | `poisoned-premise@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261020 | 15 | 15 | 15 | 7 | 8 | premise-in-record 5320, unpublished 414, document-short 28, not-found 4, closed-book-failed 2 | 0 | CSA-1 | 5 | none |
 | 2026-10-18 | `trap` | `trap@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261019 | 25 | 25 | 25 | 15 | 10 | unpublished 414, document-short 17, truncated 6, closed-book-failed 1 | 0 | CSA-1 | 5 | existence 1, retrieval 1, synthesis 1, unanswerable 2 |
 | 2026-10-18 | `unanswerable` | `unanswerable@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261018 | 40 | 40 | 40 | 14 | 26 | unpublished 414, document-short 47, closed-book-failed 21, not-found 5, truncated 3 | 0 | CSA-1 | 13 | existence 1, retrieval 4, synthesis 7 |
@@ -724,8 +804,32 @@ sixteen: most sentences hold the verb and the citation but recount another
 decision's treatment, attach through a nested parenthetical, or run the
 direction backwards, so a pattern-set row alone cannot state that the citing
 court treated the cited case; the questions also asked about the cited case's
-standing in general where the evidence is one citing opinion. Treatment cases
-wait on a rule for who acted on whom. The attribution batch filled its count
+standing in general where the evidence is one citing opinion. The rule that
+followed makes treatment gold a relation the reader confirms, scopes the
+question to the citing opinion, and discards nearer citations, active
+directions, and procedural dispositions before any request. The second batch,
+under `treatment@2`, exhausted its eligible edges at twenty-two, and the reader
+rejected all twenty-two. In eleven the sentence recounts another authority's
+treatment of the drawn case, as in `X, overruled on other grounds by Y`: the
+direction rule keeps that participial shape because the drawn case is the
+target, yet the citing opinion is not the actor. In seven the verb's object is
+not the cited case, or the act is hypothetical, conditional, or declined; in
+three the drawn case is the authority acting on another; in one the relation
+omits the sentence's own limiting qualifier. The rule that followed names the
+relation's actor, so a reported treatment is gold with its authority named,
+and discards conditional verbs and unresolved agents before any request. The
+third batch, under `treatment@3`, exhausted its eligible edges at sixteen:
+ten performed and six reported, none listed, eight negative, four caution, and
+four none. The reader accepted six, all reported, unlisted, and in the
+majority, five negative and one caution, and rejected all ten performed. In
+four the drawn case is the authority acting on another, or a possible actor
+the sentence declines to decide; in three the sentence recounts another
+court's act in the active voice (`Y overruled X`), which the direction rule
+cannot see, so the citing opinion is named as an actor it is not; in three,
+each a separate opinion's `none`, the verb's object is a conviction, an
+amendment's effect, or a distinction rather than the cited case. No drawn
+pair matched a known-overruled row naming the citing opinion. The attribution
+batch filled its count
 from seventy-odd documents carrying two standings; the reader rejected
 twenty-one whose expected answer claims more than the quoted passage shows.
 
