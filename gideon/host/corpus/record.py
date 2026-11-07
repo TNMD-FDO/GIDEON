@@ -597,7 +597,7 @@ def _write_failure(
     if superseded is not None:
         return Problem(
             f"lockfile label {superseded.group(1)} is superseded",
-            f"Run {report.command(command_path)} with the newest committed label.",
+            f"Run {report.command(command_path)} with the newest committed label of the profile's line.",
         )
     missing = re.search(r"CORPUS_LOCKFILE_MISSING:([^\s]+)", result.stderr)
     if missing is not None:

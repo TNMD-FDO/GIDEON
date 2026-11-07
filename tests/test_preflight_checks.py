@@ -1927,7 +1927,7 @@ class Jurisdiction(unittest.TestCase):
             context(FakeHost(), site=make_jurisdiction_site())
         )
         self.assertEqual(report.severity, Severity.PASS)
-        self.assertIn("rules are not judged until a lockfile is installed", report.detail)
+        self.assertIn("rules are not judged until a lockfile on the profile's line is committed", report.detail)
 
     def test_unknown_district_refuses_naming_it(self) -> None:
         site = make_jurisdiction_site(district="fx-distrct")

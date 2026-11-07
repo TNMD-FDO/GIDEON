@@ -285,7 +285,7 @@ class InstalledWriter(unittest.TestCase):
                 self.assertIsInstance(result, Problem)
                 assert isinstance(result, Problem)
                 self.assertEqual(result.problem, f"lockfile label {self.lockfile.label} {detail}")
-                fix = "with the newest committed label." if tag == "SUPERSEDED" else "again."
+                fix = "with the newest committed label of the profile's line." if tag == "SUPERSEDED" else "again."
                 self.assertEqual(result.fix, f"Run {report.command('corpus install')} {fix}")
 
     def test_invalid_or_missing_notices_refuse(self) -> None:

@@ -1268,6 +1268,45 @@ class Build(unittest.TestCase):
         self.assertEqual((code, err), (0, ""), out)
         self.assertEqual(self.host.deferred[0]["label"], self.fixture.labels[-1])
 
+    def test_default_uses_profiles_line_despite_newer_default_lockfile(self) -> None:
+        label = self.fixture.labels[-1]
+        self.fixture.set_corpus_line(label, "scotus")
+        self.fixture.select_corpus_line("scotus")
+        other = "corpus-2099-01-05"
+        self.fixture._write_snapshot(other, "2099-01-04", b"fictitious off-line snapshot")
+        code, out, err = self.run_build()
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertTrue(self.host.deferred)
+        self.assertTrue(all(job["label"] == label for job in self.host.deferred))
+        self.assertIn(label, out)
+        self.assertNotIn(other, out)
+
+    def test_off_line_explicit_label_and_sample_fix(self) -> None:
+        off_line = self.fixture.labels[-1]
+        on_line = self.fixture.labels[0]
+        self.fixture.set_corpus_line(off_line, "scotus")
+        path = self.fixture.checkout / "corpus/lockfiles" / f"{off_line}.yaml"
+        loaded = load_lockfile(path, known_sources={self.fixture.source.name: self.fixture.source})
+        assert loaded.lockfile is not None
+        path.write_text(render_lockfile(replace(loaded.lockfile, pipeline="1000.0.0")))
+        for sample_inputs in (None, self.sample_inputs()):
+            with self.subTest(sample=sample_inputs is not None):
+                code, out, err = self.run_build(off_line, sample=sample_inputs)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("profile's line is 'default'", err)
+                self.assertIn("on line 'scotus'", err)
+                path_before_label = "index build caselaw" + (" --sample" if sample_inputs is not None else "") + " --lockfile"
+                self.assertIn(report.command(f"{path_before_label} {on_line}"), err)
+                self.assertIn(report.command(f"{path_before_label} {off_line}"), err)
+                self.assertIn("hardware_profile in /etc/gideon/site.yaml", err)
+                self.assertEqual(err.count(report.command(path_before_label)), 2)
+                self.assertNotIn("Then run", err)
+                self.assertNotIn("not registered", err)
+                self.assertFalse(self.host.deferred)
+                self.assertFalse(self.host.generations)
+                self.assertFalse(self.host.reports)
+                self.assertIsNone(self.host.lock_holder)
+
     def test_same_state_under_another_label_finds_the_original_generation(self) -> None:
         first, second = self.fixture.labels
         self.assertEqual(self.run_build(first)[0], 0)

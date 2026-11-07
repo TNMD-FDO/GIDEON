@@ -2820,6 +2820,52 @@ class Install(unittest.TestCase):
         self.assertIn("superseded", err)
         self.assertIn(self.labels[1], err)
 
+    def set_corpus_line(self, label: str, line: str | None) -> None:
+        """Place a fictitious lockfile on a line without changing its pins."""
+        path = self.checkout / "corpus/lockfiles" / f"{label}.yaml"
+        loaded = load_lockfile(path, known_sources={self.source.name: self.source})
+        assert loaded.lockfile is not None
+        path.write_text(render_lockfile(replace(loaded.lockfile, line=line)))
+
+    def select_corpus_line(self, line: str) -> None:
+        """Select a line through the fixture's models lock, never a site key."""
+        path = self.checkout / "models.lock"
+        document = yaml.safe_load(path.read_text())
+        document["profiles"][document["reference"]]["corpus_line"] = line
+        path.write_text(yaml.safe_dump(document, sort_keys=False))
+
+    def test_off_line_label_refuses_before_record_fetch_or_pipeline_checks(self) -> None:
+        self.set_corpus_line(self.labels[1], "scotus")
+        path = self.checkout / "corpus/lockfiles" / f"{self.labels[1]}.yaml"
+        loaded = load_lockfile(path, known_sources={self.source.name: self.source})
+        assert loaded.lockfile is not None
+        path.write_text(render_lockfile(replace(loaded.lockfile, pipeline="1000.0.0")))
+        code, out, err = self.run_install(self.labels[1])
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("on line 'scotus'", err)
+        self.assertIn("profile's line is 'default'", err)
+        self.assertIn(report.command(f"corpus install {self.labels[0]}"), err)
+        self.assertIn("hardware_profile in /etc/gideon/site.yaml", err)
+        self.assertNotIn("not registered", err)
+        self.assertFalse(self.host.deferred_urls)
+        self.assertEqual(self.host.record_writes, 0)
+        self.assertFalse(any(command[0] == "sha256sum" for command in self.host.calls))
+        self.assertIsNone(self.host.lock_holder)
+
+    def test_superseded_fix_names_the_selected_lines_newest(self) -> None:
+        for label in self.labels:
+            self.set_corpus_line(label, "scotus")
+        self.select_corpus_line("scotus")
+        other = "corpus-2099-01-05"
+        self._write_snapshot(other, "2099-01-04", b"fictitious newer off-line snapshot")
+        self._hold_record("superseded")
+        code, out, err = self.run_install(self.labels[0])
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("superseded", err)
+        self.assertIn(report.command(f"corpus install {self.labels[1]}"), err)
+        self.assertNotIn(other, err)
+        self.assertIsNone(self.host.lock_holder)
+
     def _derive_second_label(self) -> None:
         directory = self.checkout / "corpus/lockfiles"
         loaded = load_lockfile(directory / f"{self.labels[0]}.yaml",

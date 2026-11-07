@@ -156,18 +156,20 @@ def _sibling_row(checkout: Path, site_path: Path = ROOT / "config/site.example.y
     directory = read_lockfile_directory(
         checkout / "corpus/lockfiles", known_sources={source.name: source for source in SOURCES},
     )
-    assert not directory.errors and directory.newest is not None
+    assert not directory.errors
     loaded_site = site.load_site(site_path)
     assert loaded_site.config is not None
     loaded_models = models.load_models_lock(checkout / "models.lock")
     assert loaded_models.lock is not None
     profile = models.select_profile(loaded_models.lock, loaded_site.config.hardware_profile)
     assert isinstance(profile, models.HardwareProfile) and profile.embedding_space is not None
+    newest = directory.newest_on(profile.corpus_line)
+    assert newest is not None
     return {
         "gen_id": sample_name(generation_name(
-            command.generation.COLLECTION, directory.newest.label, profile.embedding_space.id,
+            command.generation.COLLECTION, newest.label, profile.embedding_space.id,
         )),
-        "corpus_lockfile": directory.newest.label,
+        "corpus_lockfile": newest.label,
         "state": "built",
     }
 
@@ -1723,7 +1725,7 @@ class EngineStackAndLock(unittest.TestCase):
                     retry = report.command("eval run --slice smoke --stack ci --kind smoke")
                 self.assertEqual((code, stderr), (1, ""), stdout)
                 self.assertIn(f"generation {row['gen_id']} is not recorded on the {CI_STACK} stack", stdout)
-                self.assertIn(f"Build it with {build}, or name a built generation with {retry} --generation <name>", stdout)
+                self.assertIn(f"Build the sample for the profile's line with {build}, or name a built generation with {retry} --generation <name>", stdout)
                 self.assertEqual(observed["contexts"], [])
                 self.assertEqual(host.locks, {})
                 self.assertNotIn("run: ok", stdout)

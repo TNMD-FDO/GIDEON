@@ -9,7 +9,12 @@ from typing import Final, cast
 
 from gideon.evaluation import record
 from gideon.host import report, stack
-from gideon.host.corpus.lockfile import LABEL, read_lockfile_directory, render_errors
+from gideon.host.corpus.lockfile import (
+    DEFAULT_LINE_WORD,
+    LABEL,
+    read_lockfile_directory,
+    render_errors,
+)
 from gideon.host.corpus.sources import SOURCES
 from gideon.host.index import build, generations
 from gideon.host.index.sample import sample_name
@@ -36,9 +41,12 @@ class GenerationAccess:
 def sibling_default(
     host: Host, checkout: PathLike, site_path: PathLike, *, command_path: str,
 ) -> str | Problem:
-    """Derive the newest committed lockfile's sample using the site's embedding space."""
+    """Derive the sample from the newest lockfile on the profile's line and its embedding space."""
 
     root = Path(checkout)
+    profile = build.selected_profile(host, root, site_path, command_path)
+    if isinstance(profile, Problem):
+        return profile
     directory = read_lockfile_directory(
         root / "corpus/lockfiles", known_sources={source.name: source for source in SOURCES},
         host=cast(ReadBytesHost, host),
@@ -47,13 +55,15 @@ def sibling_default(
     if directory.errors:
         fixes = "; ".join(dict.fromkeys(error.fix for error in directory.errors))
         return Problem(render_errors(directory.errors), f"{fixes} Then run {retry} again.")
-    latest = directory.newest
+    latest = directory.newest_on(profile.corpus_line)
     if latest is None:
         return Problem(
-            f"no completed corpus lockfile in {root / 'corpus/lockfiles'}",
-            f"Make a committed lockfile with {report.command('corpus cut')}, then run {retry} again.",
+            f"no completed corpus lockfile on line {profile.corpus_line or DEFAULT_LINE_WORD!r} "
+            f"in {root / 'corpus/lockfiles'}",
+            f"Make a committed lockfile on the profile's line with {report.command('corpus cut')}, "
+            f"then run {retry} again.",
         )
-    target = build.embed_target(cast(build.IndexHost, host), root, site_path, command_path)
+    target = build.embed_target(cast(build.IndexHost, host), root, site_path, command_path, profile=profile)
     if isinstance(target, Problem):
         return target
     try:
@@ -115,7 +125,7 @@ def resolve_generation(
         label = name.split("__")[1] if name is not None and re.fullmatch(GENERATION_PATTERN, name) else "<label>"
         sample_build = report.command(f"index build {COLLECTION} --sample --lockfile {label}")
         selection_fix = (
-            f"Build it with {sample_build}, or name a built generation with "
+            f"Build the sample for the profile's line with {sample_build}, or name a built generation with "
             f"{retry_command} --generation <name>, then retry."
         )
     if name is not None and re.fullmatch(GENERATION_PATTERN, name) is None:

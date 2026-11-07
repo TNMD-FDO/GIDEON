@@ -6,7 +6,11 @@ import os
 import subprocess
 import unittest
 from collections.abc import Callable, Mapping
+from dataclasses import replace
+from datetime import date, timedelta
 from pathlib import Path
+
+import yaml  # type: ignore[import-untyped]
 
 from gideon.host import report
 from gideon.host.checks import (
@@ -18,7 +22,7 @@ from gideon.host.checks import (
 )
 from gideon.host.checks.artifacts import JurisdictionCheck
 from gideon.host.checks.capacity import HostMemoryCheck, LowReading
-from gideon.host.corpus.lockfile import load_lockfile
+from gideon.host.corpus.lockfile import load_lockfile, render_lockfile
 from gideon.host.courts import CourtMap
 from gideon.host.nogpu import BUILD_BOX_PATH, NO_GPU_PATH, NOT_BUILD_BOX_DETAIL
 from gideon.host.preflight import ObservedRow, run_preflight
@@ -242,6 +246,41 @@ def preflight(
 
 class LockfileReading(unittest.TestCase):
     """The committed court map and a fictitious cut meet at the pre-run boundary."""
+
+    def assert_selected_line(self, line: str | None) -> None:
+        original_path, = LOCKFILES_PATH.glob("*.yaml")
+        loaded = load_lockfile(original_path)
+        assert loaded.lockfile is not None
+        original = loaded.lockfile
+        next_date = date.fromisoformat(original.label.removeprefix("corpus-")) + timedelta(days=1)
+        label = f"corpus-{next_date}"
+        lined = replace(original, label=label, line="scotus", base=None, sources={
+            name: replace(pin, courts=("scotus",)) if pin.courts is not None else pin
+            for name, pin in original.sources.items()
+        })
+        files = fixture_files(LOCKFILES_PATH)
+        for path, text in list(files.items()):
+            if Path(path).parent == LOCKFILES_PATH / original.label:
+                files[str(LOCKFILES_PATH / label / Path(path).name)] = text
+        files[str(LOCKFILES_PATH / f"{label}.yaml")] = render_lockfile(lined)
+        models = yaml.safe_load(MODELS_LOCK_TEXT)
+        configured = load_site(Path(SITE_PATH), host=FakeHost(files={SITE_PATH: EXAMPLE_SITE}))
+        assert configured.config is not None
+        if line is not None:
+            models["profiles"][configured.config.hardware_profile]["corpus_line"] = line
+        files[str(MODELS_LOCK_PATH)] = yaml.safe_dump(models, sort_keys=False)
+        code, out, err = preflight(files=files, lockfiles_path=LOCKFILES_PATH, checks=[JurisdictionCheck()])
+        self.assertEqual((code, err), (0, ""), out)
+        expected = lined if line is not None else original
+        other = original if line is not None else lined
+        self.assertIn(f"lockfile {expected.label}", out)
+        self.assertNotIn(f"lockfile {other.label}", out)
+
+    def test_reference_ignores_newer_scotus_line(self) -> None:
+        self.assert_selected_line(None)
+
+    def test_profile_corpus_line_selects_scotus_lockfile(self) -> None:
+        self.assert_selected_line("scotus")
 
     def test_valid_cut_reaches_jurisdiction_and_warns_on_unshipped_home_courts(self) -> None:
         paths = list(LOCKFILES_PATH.glob("*.yaml"))

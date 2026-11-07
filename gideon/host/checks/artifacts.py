@@ -98,7 +98,7 @@ class JurisdictionCheck(PreflightCheck):
             return CheckReport(
                 Severity.PASS,
                 f"{len(leaves)} jurisdiction id(s) resolved in courts.yaml; the corpus "
-                "lockfile's courts[] rules are not judged until a lockfile is installed",
+                "lockfile's courts[] rules are not judged until a lockfile on the profile's line is committed",
             )
 
         lockfile = context.lockfile

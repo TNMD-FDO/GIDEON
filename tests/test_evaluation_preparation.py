@@ -478,8 +478,8 @@ class StoresPreparation(unittest.TestCase):
 
         directory = self.checkout / "corpus/lockfiles"
         loaded = read_lockfile_directory(directory)
-        assert loaded.newest is not None
-        latest = loaded.newest
+        latest = loaded.newest_on(None)
+        assert latest is not None
         label = f"corpus-{date.fromisoformat(latest.label.removeprefix('corpus-')) + timedelta(days=1)}"
         shutil.copytree(directory / latest.label, directory / label)
         (directory / f"{label}.yaml").write_text(render_lockfile(replace(
@@ -517,6 +517,38 @@ class StoresPreparation(unittest.TestCase):
         line = next(line for line in reads[0].splitlines() if line.startswith("\\set v_name "))
         self.assertEqual(read_psql_set(line, "v_name"), resolved.name)
 
+    def test_unnamed_ci_uses_profiles_line_despite_newer_other_line(self) -> None:
+        directory = self.checkout / "corpus/lockfiles"
+        loaded = read_lockfile_directory(directory)
+        original = loaded.newest_on(None)
+        assert original is not None
+        original_date = date.fromisoformat(original.label.removeprefix("corpus-"))
+        selected = replace(original, label=f"corpus-{original_date + timedelta(days=1)}", line="scotus", base=None)
+        other = replace(original, label=f"corpus-{original_date + timedelta(days=2)}", base=None)
+        for lockfile in (selected, other):
+            shutil.copytree(directory / original.label, directory / lockfile.label)
+            (directory / f"{lockfile.label}.yaml").write_text(render_lockfile(lockfile))
+        path = self.checkout / "models.lock"
+        document = yaml.safe_load(path.read_text())
+        configured = command.site.load_site(ROOT / "config/site.example.yaml")
+        assert configured.config is not None
+        document["profiles"][configured.config.hardware_profile]["corpus_line"] = selected.line
+        path.write_text(yaml.safe_dump(document, sort_keys=False))
+        expected = _sibling_row(self.checkout)
+        self.assertEqual(expected["corpus_lockfile"], selected.label)
+        host = EvalHost()
+        (code, out, err), contexts, _ = _invoke_planted(
+            host, self.checkout, self.ranked_path, self.surfaces,
+            stack_name=CI_STACK, generation_reply=json.dumps(expected),
+        )
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(len(contexts), 1)
+        resolved = contexts[0].generation
+        assert resolved is not None
+        self.assertEqual(resolved.name, expected["gen_id"])
+        self.assertEqual(resolved.corpus_lockfile, selected.label)
+        self.assertNotIn(other.label, out)
+
     def test_no_completed_lockfile_refuses_before_generation_or_runner(self) -> None:
         directory = self.checkout / "corpus/lockfiles"
         shutil.rmtree(directory)
@@ -529,7 +561,7 @@ class StoresPreparation(unittest.TestCase):
                     host, self.checkout, self.ranked_path, self.surfaces,
                     stack_name=CI_STACK, generation_reply="",
                 )
-                self.assert_refusal(host, outcome, contexts, f"no completed corpus lockfile in {directory}", report.command("corpus cut"))
+                self.assert_refusal(host, outcome, contexts, f"no completed corpus lockfile on line 'default' in {directory}", report.command("corpus cut"))
                 self.assertFalse(any("index_generations" in (sql or "") for _argv, sql in host.calls))
 
     def test_malformed_or_unreadable_lockfiles_refuse_with_loader_text_and_restore_fix(self) -> None:

@@ -31,6 +31,7 @@ FIXTURES = Path(__file__).parent / "fixtures/corpus"
 VALID = FIXTURES / "corpus-2099-01-03.yaml"
 DERIVED = FIXTURES / "corpus-2099-01-07.yaml"
 CAPTURED = FIXTURES / "corpus-2099-01-09.yaml"
+LINED = FIXTURES / "corpus-2099-01-02.yaml"
 KNOWN = {
     "example": SourceDefinition(
         "example", "https://example.invalid/archive/", True, ("ca6",),
@@ -46,6 +47,22 @@ KNOWN = {
 
 class Fixture(unittest.TestCase):
     """The fictitious fixture is a complete, readable cut."""
+
+    def test_optional_line_round_trips_in_canonical_order(self) -> None:
+        for path in (VALID, LINED):
+            with self.subTest(path=path):
+                result = load_lockfile(path, known_sources=KNOWN)
+                self.assertTrue(result.ok, render_errors(result.errors))
+                assert result.lockfile is not None
+                document = yaml.safe_load(path.read_text())
+                self.assertEqual(result.lockfile.line, document.get("line"))
+                rendered = render_lockfile(result.lockfile)
+                self.assertEqual(rendered, path.read_text())
+                if result.lockfile.line is not None:
+                    keys = list(yaml.safe_load(rendered))
+                    self.assertEqual(keys[keys.index("reason") + 1], "line")
+                    derived = render_lockfile(replace(result.lockfile, base=VALID.stem))
+                    self.assertLess(derived.index("line:"), derived.index("base:"))
 
     def test_load_and_render_byte_for_byte(self) -> None:
         result = load_lockfile(VALID, known_sources=KNOWN)
@@ -144,6 +161,30 @@ class Refusals(unittest.TestCase):
         self.refusal("base", "expected a lockfile label")
         self.edit("base: corpus-yesterday", "base: corpus-2099-02-30")
         self.refusal("base", "expected a valid YYYY-MM-DD date")
+
+    def test_line_grammar_and_reserved_default(self) -> None:
+        original = self.path.read_text()
+        for value in (None, "", True, 7, "Trial", "two--words", "-trial", "trial-", "two_words", "two words", "default"):
+            with self.subTest(value=value):
+                document = yaml.safe_load(original)
+                document["line"] = value
+                self.path.write_text(yaml.safe_dump(document, sort_keys=False))
+                loaded = load_lockfile(self.path, known_sources=KNOWN)
+                self.assertFalse(loaded.ok)
+                errors = [error for error in loaded.errors if error.key_path == "line"]
+                self.assertTrue(errors, loaded.errors)
+                self.assertTrue(all(error.fix for error in errors))
+                if value == "default":
+                    self.assertIn("Omit the line key", errors[0].fix)
+        for value in ("trial", "trial-2", "2-courts"):
+            with self.subTest(valid=value):
+                document = yaml.safe_load(original)
+                document["line"] = value
+                self.path.write_text(yaml.safe_dump(document, sort_keys=False))
+                loaded = load_lockfile(self.path, known_sources=KNOWN)
+                self.assertTrue(loaded.ok, loaded.errors)
+                assert loaded.lockfile is not None
+                self.assertEqual(loaded.lockfile.line, value)
 
     def test_unknown_source_and_missing_known_source(self) -> None:
         self.edit("  example:", "  alien:")
@@ -364,14 +405,62 @@ class RelatedArtifacts(unittest.TestCase):
             "example": replace(pin, mirror_url="https://example.invalid/mirror/")
         })))
 
+    def test_state_comparison_includes_line(self) -> None:
+        trial = replace(self.lockfile, line="fictitious-trial")
+        self.assertFalse(same_state(self.lockfile, trial))
+        self.assertFalse(same_state(trial, self.lockfile))
+        self.assertTrue(same_state(trial, replace(trial, label="corpus-2099-01-04")))
+        self.assertFalse(same_state(trial, replace(trial, line="another-trial")))
+
 
 class Directory(unittest.TestCase):
     """The reader sees complete YAML files and ignores unfinished directories."""
 
+    def test_newest_on_each_line_and_missing_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for path in (VALID, LINED, FIXTURES / "corpus-2099-01-06.yaml"):
+                shutil.copy2(path, root)
+                shutil.copytree(path.with_suffix(""), root / path.stem)
+            lined = load_lockfile(LINED, known_sources=KNOWN).lockfile
+            assert lined is not None
+            later = replace(lined, label="corpus-2099-01-04", cut_at="2099-01-04T00:00:00Z")
+            shutil.copytree(LINED.with_suffix(""), root / later.label)
+            (root / f"{later.label}.yaml").write_text(render_lockfile(later))
+            loaded = read_lockfile_directory(root, known_sources=KNOWN)
+            self.assertFalse(loaded.errors, loaded.errors)
+            for line in (None, "fictitious-trial", "absent-line"):
+                expected = [item for item in loaded.lockfiles if item.line == line]
+                self.assertEqual(loaded.newest_on(line), expected[-1] if expected else None)
+
+    def test_derived_line_must_equal_bases_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base_path = FIXTURES / "corpus-2099-01-06.yaml"
+            for path in (base_path, DERIVED):
+                shutil.copy2(path, root)
+                shutil.copytree(path.with_suffix(""), root / path.stem)
+            base = load_lockfile(root / base_path.name, known_sources=KNOWN).lockfile
+            derived = load_lockfile(root / DERIVED.name, known_sources=KNOWN).lockfile
+            assert base is not None and derived is not None
+            for base_line, derived_line in ((None, "trial"), ("trial", None), ("trial", "other"), ("trial", "trial")):
+                with self.subTest(base=base_line, derived=derived_line):
+                    (root / base_path.name).write_text(render_lockfile(replace(base, line=base_line)))
+                    (root / DERIVED.name).write_text(render_lockfile(replace(derived, line=derived_line)))
+                    loaded = read_lockfile_directory(root, known_sources=KNOWN)
+                    if base_line == derived_line:
+                        self.assertFalse(loaded.errors, loaded.errors)
+                    else:
+                        self.assertEqual(len(loaded.errors), 1)
+                        error = loaded.errors[0]
+                        self.assertIn(base.label, error.problem)
+                        self.assertIn(derived.label, error.problem)
+                        self.assertIn("derived cut from a base on the same line", error.fix)
+
     def test_empty_and_unfinished(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            self.assertIsNone(read_lockfile_directory(root, known_sources=KNOWN).newest)
+            self.assertIsNone(read_lockfile_directory(root, known_sources=KNOWN).newest_on(None))
             (root / "corpus-2099-01-03").mkdir()
             self.assertEqual(read_lockfile_directory(root, known_sources=KNOWN).lockfiles, ())
 
@@ -382,7 +471,10 @@ class Directory(unittest.TestCase):
                 shutil.copy2(FIXTURES / f"{label}.yaml", root)
                 shutil.copytree(FIXTURES / label, root / label)
             result = read_lockfile_directory(root, known_sources=KNOWN)
-            self.assertEqual(result.newest.label if result.newest else None, VALID.stem)
+            newest = result.newest_on(None)
+            self.assertIsNotNone(newest)
+            assert newest is not None
+            self.assertEqual(newest.label, VALID.stem)
             self.assertIn("sidecar digest differs", render_errors(result.errors))
 
     def test_derived_base_must_be_loaded_and_earlier(self) -> None:

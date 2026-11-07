@@ -28,7 +28,7 @@ from gideon.host import (
     worker,
 )
 from gideon.host.corpus import artifacts, record, snapshots
-from gideon.host.corpus.lockfile import Lockfile
+from gideon.host.corpus.lockfile import DEFAULT_LINE_WORD, Lockfile
 from gideon.host.corpus.sources import SOURCES, SourceDefinition
 from gideon.host.index import (
     buildreport,
@@ -159,9 +159,11 @@ def _collection_scope(
     return f"{source.name}-{pin.snapshot_date}", courts, geography
 
 
-def _selected_profile(
+def selected_profile(
     host: Host, checkout: Path, site_path: PathLike, command_path: str,
 ) -> models.HardwareProfile | Problem:
+    """Read the hardware profile selected by the site from the release's models lock."""
+
     loaded_site = site.load_site(Path(site_path), host=host)
     if loaded_site.errors:
         return Problem("; ".join(error.problem for error in loaded_site.errors),
@@ -177,13 +179,14 @@ def _selected_profile(
 
 def embed_target(
     host: IndexHost, checkout: Path, site_path: PathLike, command_path: str,
+    *, profile: models.HardwareProfile | None = None,
 ) -> engine._EmbedTarget | Problem:
     """Read the selected site's embedding pin and vector space."""
 
-    profile = _selected_profile(host, checkout, site_path, command_path)
-    if isinstance(profile, Problem):
-        return profile
-    target = engine._embed_target(profile)
+    selected = profile if profile is not None else selected_profile(host, checkout, site_path, command_path)
+    if isinstance(selected, Problem):
+        return selected
+    target = engine._embed_target(selected)
     if isinstance(target, Problem):
         return Problem(target.problem, snapshots.retry_fix(target.fix, command_path=command_path))
     return target
@@ -191,11 +194,12 @@ def embed_target(
 
 def chunk_guards(
     host: Host, checkout: Path, site_path: PathLike, command_path: str,
+    *, profile: models.HardwareProfile | None = None,
 ) -> models.ChunkGuards | Problem:
     """Read the selected profile's chunk guards, which the guard row judges."""
 
-    profile = _selected_profile(host, checkout, site_path, command_path)
-    return profile if isinstance(profile, Problem) else profile.chunk_guards
+    selected = profile if profile is not None else selected_profile(host, checkout, site_path, command_path)
+    return selected if isinstance(selected, Problem) else selected.chunk_guards
 
 
 def collection_inputs(
@@ -258,24 +262,37 @@ def _preconditions(
     if issue is not None:
         return Problem(issue.detail, issue.fix)
     assert loaded is not None
+    profile = selected_profile(host, checkout, site_path, command_path)
+    if isinstance(profile, Problem):
+        return profile
     problem = check_services(host, rendered_dir, command_path, embed_dir=production_dir)
     if problem is not None:
         return problem
     lockfile = (
         next((item for item in loaded.directory.lockfiles if item.label == args.lockfile), None)
-        if args.lockfile is not None else loaded.directory.newest
+        if args.lockfile is not None else loaded.directory.newest_on(profile.corpus_line)
     )
     if lockfile is None:
-        labels = ", ".join(item.label for item in loaded.directory.lockfiles) or "none"
+        labels = ", ".join(
+            item.label for item in loaded.directory.lockfiles if item.line == profile.corpus_line
+        ) or "none"
         return Problem(
-            "no matching committed corpus lockfile",
-            f"Use a committed label from corpus/lockfiles/ ({labels}), or run {report.command('corpus cut')}, "
+            f"no matching committed corpus lockfile on line {profile.corpus_line or DEFAULT_LINE_WORD!r}",
+            f"Use a committed label on that line from corpus/lockfiles/ ({labels}), "
+            f"or cut a lockfile on that line with {report.command('corpus cut')}, "
             f"then run {report.command(command_path)} again.",
         )
+    if args.lockfile is not None:
+        problem = artifacts.line_problem(
+            loaded.directory, lockfile, profile.corpus_line,
+            command_path=command_path.removesuffix(f" {args.lockfile}"),
+        )
+        if problem is not None:
+            return problem
     problem = caselaw.pipeline_problem(lockfile.pipeline, command_path)
     if problem is not None:
         return problem
-    # Validate the scope before the record and model reads, in the command's order.
+    # Validate the scope before the record and embedding-target checks.
     scope = _collection_scope(loaded, lockfile, collection, registry, command_path)
     if isinstance(scope, Problem):
         return scope
@@ -298,10 +315,10 @@ def _preconditions(
         )
         if sample is not None:
             return superseded
-    target = embed_target(host, checkout, site_path, command_path)
+    target = embed_target(host, checkout, site_path, command_path, profile=profile)
     if isinstance(target, Problem):
         return target
-    guarded = chunk_guards(host, checkout, site_path, command_path)
+    guarded = chunk_guards(host, checkout, site_path, command_path, profile=profile)
     if isinstance(guarded, Problem):
         return guarded
     inputs = collection_inputs(loaded, lockfile, collection, registry, target, command_path)

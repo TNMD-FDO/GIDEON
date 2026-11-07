@@ -50,6 +50,7 @@ PINNED_PREFIXES: Final[dict[str, tuple[tuple[int, str], ...]]] = {
     ),
     "treatment": (
         (6, "3ab8d866637a8047cc7b791f4bd9b7f1fb79d0637235fce94aea216efc71420a"),
+        (18, "461975624207242dbf50d69702d4d9dee339fa026ddfdf0c0cfd705665f24cd4"),
     ),
     "section-attribution": (
         (19, "178818c9820d235ecdf6041452ea8b4a9e49d4ed20e32dcf0453638892ac9e8a"),
@@ -59,6 +60,7 @@ PINNED_PREFIXES: Final[dict[str, tuple[tuple[int, str], ...]]] = {
     ),
     "trap": (
         (10, "8418643e8fde64cbf1983c6e445385e96a3b139aac02db1387da7b4e9e0cab34"),
+        (15, "d6cd0ac75d47099a09a0ecf6c69680a0b86af579cdcfb5104bb6da75ed554875"),
     ),
     "poisoned-premise": (
         (8, "07d9a8813503eb84daca569c763f4bdd490cec503b4570a6edf2ee3ed81f0bb7"),
@@ -237,6 +239,8 @@ class SyntheticSetContract(TestCase):
         }
         for category in sorted(court_categories):
             for case in self.cases.get(category, ()):
+                if "asked_court" not in synthetic.TEMPLATES[cast(str, case["template"])].slots:
+                    continue
                 with self.subTest(category=category, case_id=case["id"]):
                     asked = cast(list[str], case["jurisdiction"])[0]
                     self.assertIn(asked, self._court_ids())

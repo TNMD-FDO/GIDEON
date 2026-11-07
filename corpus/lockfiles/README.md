@@ -19,6 +19,16 @@ sidecar line is `path  sha256  size`, with two spaces between fields, in path
 order. The path is relative to the dated source snapshot directory. The digest
 and byte size cover the snapshot file; the YAML pins the sidecar's digest.
 
+The optional `line` field follows `reason` and precedes `base` when present.
+Its name is lowercase words and digits joined by single hyphens. Omission
+means the unnamed default line; the literal `default` is refused. A hardware
+profile's optional `corpus_line` in `models.lock` selects that line, the default
+when absent. Preflight, index builds without an explicit label, and the CI
+sibling's default eval sample read the newest committed lockfile on the
+selected profile's line. Install and explicit index builds refuse a label on
+another line. Labels remain unique across all lines: a second cut on the same
+UTC date is refused, even when its line differs. Run it on a later date.
+
 For a fetched source, an index document is the exact response the corpus cut
 command read. A listing query can change after the cut, so it is committed
 rather than listed in the sidecar. A captured page is both the sidecar's one
@@ -40,14 +50,24 @@ a `mirror_url` that serves the pinned bytes, or a new cut.
 The `pipeline` value is the release's registered pipeline version. A change
 to that version gets a new cut. `courts[]` lists the court
 map IDs in `courts.yaml` that belong to the cut; the IDs must resolve there.
-Preflight reads this list to check the site's home courts.
+Preflight reads this list from the selected profile's line to check the site's home courts.
 
 A derived lockfile copies an earlier committed lockfile's pins, sidecars, and
 index documents byte for byte, extends `courts[]`, names that lockfile in
-`base:`, and carries `reason: tranche`. The corpus cut command's
+`base:`, inherits its line, and carries `reason: tranche`. The corpus cut command's
 `--base <label> --add-courts <ids>` form writes it. Its base must be a
-lockfile in this same directory with an earlier label date.
+lockfile on the same line in this directory with an earlier label date.
+Neither `--line` nor `--courts` is used with the derived form.
 
-The corpus cut command's `--courts <ids>` form writes a lockfile whose case-law
-courts are the typed set over the same pins, committed here only once a
-release's hardware profile names it.
+The corpus cut command's `--line <name> --courts <ids>` form starts a named
+line with the typed case-law courts. Its first cut needs `--courts`, carries
+same-snapshot companions and pins from the default line's newest lockfile
+when present, and has reason `tranche` even when those snapshots are unchanged.
+Later
+`--line <name>` cuts carry that line's courts unless `--courts` supplies a new
+set. The bare command extends the default line; over an empty directory it
+uses the source definitions' first courts. A cut adds files without editing
+`models.lock`. Commit the lockfile and companions here: a release ships a
+named line once a profile's `corpus_line` names it. Every committed line must
+have a profile, every profile's line a committed lockfile, and each line's
+newest must use the release's pipeline version.

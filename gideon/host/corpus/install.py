@@ -159,6 +159,9 @@ def _artifact_preconditions(
     if issue is not None:
         return issue, None, None, ()
     assert loaded is not None
+    profile = build.selected_profile(host, checkout, site_path, COMMAND_PATH)
+    if isinstance(profile, Problem):
+        return _build_refusal(profile), None, None, ()
     lockfile = next((item for item in loaded.directory.lockfiles if item.label == label), None)
     if lockfile is None:
         labels = ", ".join(item.label for item in loaded.directory.lockfiles) or "none"
@@ -167,6 +170,11 @@ def _artifact_preconditions(
             f"Use a committed label from corpus/lockfiles/: {labels}; then run "
             f"{report.command(COMMAND_PATH)} again.",
         ), None, None, ()
+    problem = artifacts.line_problem(
+        loaded.directory, lockfile, profile.corpus_line, command_path=COMMAND_PATH,
+    )
+    if problem is not None:
+        return _build_refusal(problem), None, None, ()
     if lockfile.pipeline not in PIPELINE_CHUNK_SIZES:
         versions = ", ".join(sorted(PIPELINE_CHUNK_SIZES))
         return StageResult(
@@ -190,7 +198,7 @@ def _artifact_preconditions(
     if isinstance(row, Problem):
         return StageResult("preconditions", False, row.problem, row.fix), None, None, ()
     if row is not None and row.state == "superseded":
-        newest = loaded.directory.newest
+        newest = loaded.directory.newest_on(profile.corpus_line)
         assert newest is not None
         return StageResult(
             "preconditions", False, f"lockfile label {label} is superseded",
@@ -214,7 +222,7 @@ def _artifact_preconditions(
     problem = build.check_services(host, rendered_dir, COMMAND_PATH)
     if problem is not None:
         return _build_refusal(problem), None, None, ()
-    target = build.embed_target(host, checkout, site_path, COMMAND_PATH)
+    target = build.embed_target(host, checkout, site_path, COMMAND_PATH, profile=profile)
     if isinstance(target, Problem):
         return _build_refusal(target), None, None, ()
     inputs_by_collection: list[dense.DenseInputs] = []

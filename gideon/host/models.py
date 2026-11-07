@@ -1,8 +1,8 @@
 """Loading and validation for the committed models lock.
 
 The models lock is release data, not site configuration. It names evaluated
-hardware profiles, chunk guards, model pins, optional co-tenant reserves, and
-candidates.
+hardware profiles, corpus lines, chunk guards, model pins, optional co-tenant
+reserves, and candidates.
 """
 
 import difflib
@@ -153,6 +153,7 @@ class HardwareProfile:
     cotenant_reserve: tuple[CotenantReserve, ...] = ()
     # The share of the generator's cap left for a client; absent reserves nothing.
     client_reserve_seqs: int = 0
+    corpus_line: str | None = None
 
     def model(self, role: str) -> ModelPin | None:
         """Return the model for *role*, or ``None`` when it is absent."""
@@ -258,7 +259,7 @@ _CANDIDATE_CLASH_FIX: Final = (
 _ROOT_KEYS: Final =("version", "reference", "profiles", "candidates")
 _PROFILE_KEYS: Final = (
     "requires", "memory", "models", "embedding_space", "cotenant_reserve_gb",
-    "client_reserve_seqs", "chunk_guards",
+    "client_reserve_seqs", "chunk_guards", "corpus_line",
 )
 _REQUIRES_KEYS: Final = ("platform", "gpu", "dram_gb", "data_volume_gb")
 _GPU_KEYS: Final = (
@@ -292,6 +293,9 @@ COMPUTE_CAPABILITY: Final = re.compile(r"^[0-9]+\.[0-9]+$")
 
 ROLE_NAME: Final = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 """Lowercase words and digits joined by single hyphens."""
+
+CORPUS_LINE: Final = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+"""A named corpus line; absence selects the default line."""
 
 EMBEDDING_SPACE_ID: Final = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 """Lowercase words and digits joined by single hyphens."""
@@ -844,6 +848,16 @@ def validate_models_lock(document: Mapping[str, object]) -> list[ModelsLockError
                 continue
             profile = cast(Mapping[str, object], profile_value)
             _walk_unknown(profile, _PROFILE_KEYS, profile_path, errors)
+            if "corpus_line" in profile:
+                line_path = f"{profile_path}.corpus_line"
+                line = _string(profile, "corpus_line", errors, error_path=line_path)
+                if line == "default":
+                    errors.append(_error(
+                        line_path, "'default' is reserved",
+                        fix=f"Omit the corpus_line key for the default line; {_FIX}",
+                    ))
+                elif line is not None and not CORPUS_LINE.fullmatch(line):
+                    errors.append(_error(line_path, "expected lowercase words and digits joined by single hyphens"))
             requires = _check_mapping(profile, "requires", errors, error_path=f"{profile_path}.requires")
             gpu_count: int | None = None
             if requires is not None:
@@ -986,6 +1000,7 @@ def _construct(document: Mapping[str, object]) -> ModelsLock:
                 cast(str, name), requirements, memory, models, chunk_guards,
                 embedding_space, cotenant_reserve,
                 client_reserve_seqs=cast(int, profile.get("client_reserve_seqs", 0)),
+                corpus_line=cast(str | None, profile.get("corpus_line")),
             )
         )
     candidates_value = cast(Mapping[str, object], document.get("candidates", {}))

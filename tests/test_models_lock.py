@@ -10,9 +10,11 @@ from dataclasses import FrozenInstanceError, fields, is_dataclass
 from fractions import Fraction
 from pathlib import Path
 
+from gideon.host.corpus.lockfile import LINE
 from gideon.host.engine import CONCURRENT_SESSIONS_CEILING
 from gideon.host.images import DIGEST
 from gideon.host.models import (
+    CORPUS_LINE,
     EMBEDDING_SPACE_ID,
     ENV_NAME,
     FILE_PATH,
@@ -249,6 +251,16 @@ def embedding_space_problems(lock: ModelsLock) -> list[str]:
 
 
 class CommittedLock(unittest.TestCase):
+    def test_reference_profile_uses_the_default_corpus_line(self) -> None:
+        result = load_models_lock(LOCK)
+        self.assertTrue(result.ok, result.errors)
+        assert result.lock is not None and result.document is not None
+        profiles = result.document["profiles"]
+        assert isinstance(profiles, Mapping)
+        raw = profiles[result.lock.reference]
+        assert isinstance(raw, Mapping)
+        self.assertNotIn("corpus_line", raw)
+
     def test_chunk_guards_fit_each_profiles_memory_and_ceiling(self) -> None:
         result = load_models_lock(LOCK)
         self.assertTrue(result.ok, render_errors(result.errors))
@@ -539,6 +551,31 @@ class CommittedLock(unittest.TestCase):
 
 
 class Refusals(unittest.TestCase):
+    def test_corpus_line_grammar_and_default(self) -> None:
+        absent = load_models_lock_text(VALID)
+        assert absent.lock is not None
+        self.assertIsNone(absent.lock.profiles[0].corpus_line)
+        for value in ("scotus", "trial-2", "2-courts"):
+            with self.subTest(valid=value):
+                result = load_models_lock_text(VALID.replace("    requires:\n", f"    corpus_line: {value}\n    requires:\n"))
+                self.assertTrue(result.ok, result.errors)
+                assert result.lock is not None
+                self.assertEqual(result.lock.profiles[0].corpus_line, value)
+        for raw in ('""', "null", "true", "7", "Trial", "two--words", "-trial", "trial-", "two_words", "two words", "default"):
+            with self.subTest(invalid=raw):
+                result = load_models_lock_text(VALID.replace("    requires:\n", f"    corpus_line: {raw}\n    requires:\n"))
+                self.assertFalse(result.ok)
+                errors = [error for error in result.errors if error.key_path and error.key_path.endswith(".corpus_line")]
+                self.assertTrue(errors, result.errors)
+                for error in errors:
+                    self.assertIn("docs/runbooks/release-files.md §4", error.fix)
+                if raw == "default":
+                    self.assertIn("Omit the corpus_line key", errors[0].fix)
+
+    def test_corpus_line_grammar_matches_lockfiles(self) -> None:
+        self.assertEqual(CORPUS_LINE.pattern, LINE.pattern)
+        self.assertEqual(CORPUS_LINE.flags, LINE.flags)
+
     def assert_refused(self, text: str, fragment: str, *, key_path: str | None = None) -> None:
         result = load_text(text)
         self.assertIsNone(result.lock)

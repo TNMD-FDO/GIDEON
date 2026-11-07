@@ -21,6 +21,8 @@ SCHEMA_VERSION: Final = 1
 READABLE_SCHEMAS: Final = (SCHEMA_VERSION,)
 REASONS: Final = ("quarterly", "instrument", "tranche", "pipeline")
 LABEL: Final = re.compile(r"^corpus-(\d{4}-\d{2}-\d{2})$")
+LINE: Final = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+DEFAULT_LINE_WORD: Final = "default"
 SIDECAR_LINE: Final = re.compile(r"^(\S+)  ([0-9a-f]{64})  (0|[1-9][0-9]*)$")
 _DIGEST: Final = re.compile(r"^[0-9a-f]{64}$")
 _VERSION: Final = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
@@ -28,7 +30,7 @@ _TIMESTAMP: Final = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _NAME: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _FIX: Final = "Restore the lockfile and its companion files from the release checkout."
 _HEADER: Final = "# Written by the corpus cut command; edit mirror_url alone.\n"
-_ROOT_KEYS: Final = ("schema", "label", "pipeline", "cut_at", "reason", "base", "sources")
+_ROOT_KEYS: Final = ("schema", "label", "pipeline", "cut_at", "reason", "line", "base", "sources")
 _SOURCE_KEYS: Final = (
     "snapshot_date", "base_url", "mirror_url", "sidecar_sha256", "files",
     "bytes", "index", "courts",
@@ -82,6 +84,7 @@ class Lockfile:
     reason: str
     sources: Mapping[str, SourcePin]
     base: str | None = None
+    line: str | None = None
 
     @property
     def courts(self) -> tuple[str, ...]:
@@ -117,9 +120,9 @@ class LockfileDirectoryResult:
     lockfiles: tuple[Lockfile, ...] = ()
     errors: tuple[LockfileError, ...] = ()
 
-    @property
-    def newest(self) -> Lockfile | None:
-        return self.lockfiles[-1] if self.lockfiles else None
+    def newest_on(self, line: str | None) -> Lockfile | None:
+        """Return the newest lockfile on *line*, ``None`` naming the default line."""
+        return next((item for item in reversed(self.lockfiles) if item.line == line), None)
 
 
 class _DuplicateKeyError(yaml.YAMLError):
@@ -399,8 +402,8 @@ def load_lockfile(path: PathLike, *, known_sources: Mapping[str, SourceDefinitio
         return LockfileLoadResult(errors=(_error(None, f"lockfile has a {exc}"),))
     except yaml.YAMLError as exc:
         mark = getattr(exc, "problem_mark", None)
-        line = getattr(mark, "line", None)
-        location = f" at line {line + 1}" if isinstance(line, int) else ""
+        line_number = getattr(mark, "line", None)
+        location = f" at line {line_number + 1}" if isinstance(line_number, int) else ""
         return LockfileLoadResult(errors=(_error(None, f"lockfile has a YAML parse error{location}: {exc}"),))
     if not isinstance(document, Mapping):
         return LockfileLoadResult(errors=(_error(None, "lockfile root must be a mapping"),))
@@ -437,6 +440,16 @@ def load_lockfile(path: PathLike, *, known_sources: Mapping[str, SourceDefinitio
     reason = _string(document["reason"], "reason", errors) if "reason" in document else None
     if reason is not None and reason not in REASONS:
         errors.append(_error("reason", f"expected one of {', '.join(REASONS)}"))
+    line: str | None = None
+    if "line" in document:
+        line = _string(document["line"], "line", errors)
+        if line == DEFAULT_LINE_WORD:
+            errors.append(_error(
+                "line", f"{DEFAULT_LINE_WORD!r} is reserved",
+                fix="Omit the line key for the default line.",
+            ))
+        elif line is not None and not LINE.fullmatch(line):
+            errors.append(_error("line", "expected lowercase words and digits joined by single hyphens"))
     base: str | None = None
     if "base" in document:
         base = _string(document["base"], "base", errors)
@@ -476,7 +489,7 @@ def load_lockfile(path: PathLike, *, known_sources: Mapping[str, SourceDefinitio
         return LockfileLoadResult(errors=tuple(errors))
     return LockfileLoadResult(Lockfile(cast(int, schema), cast(str, label),
                                        cast(str, pipeline), cast(str, cut_at),
-                                       cast(str, reason), pins, base))
+                                       cast(str, reason), pins, base, line))
 
 
 def render_sidecar(entries: Sequence[SidecarEntry]) -> str:
@@ -496,6 +509,8 @@ def render_lockfile(lockfile: Lockfile) -> str:
         "cut_at": lockfile.cut_at,
         "reason": lockfile.reason,
     }
+    if lockfile.line is not None:
+        document["line"] = lockfile.line
     if lockfile.base is not None:
         document["base"] = lockfile.base
     sources: dict[str, object] = {}
@@ -522,7 +537,8 @@ def render_lockfile(lockfile: Lockfile) -> str:
 
 def same_state(left: Lockfile, right: Lockfile) -> bool:
     """Compare the state a cut pins, excluding its label and index bytes."""
-    if left.pipeline != right.pipeline or tuple(left.sources) != tuple(right.sources):
+    if (left.line != right.line or left.pipeline != right.pipeline
+            or tuple(left.sources) != tuple(right.sources)):
         return False
     return all(
         (a.snapshot_date, a.base_url, a.mirror_url, a.sidecar_sha256, a.courts)
@@ -573,13 +589,20 @@ def read_lockfile_directory(path: PathLike, *, known_sources: Mapping[str, Sourc
         if result.lockfile is not None:
             lockfiles.append(result.lockfile)
         errors.extend(result.errors)
-    labels = {lockfile.label for lockfile in lockfiles}
+    labels = {lockfile.label: lockfile for lockfile in lockfiles}
     for lockfile in lockfiles:
         if lockfile.base is None:
             continue
         key_path = str(directory / f"{lockfile.label}.yaml")
         if lockfile.base not in labels:
             errors.append(_error(key_path, f"base {lockfile.base} is not a lockfile in this directory"))
+        elif lockfile.line != labels[lockfile.base].line:
+            errors.append(_error(
+                key_path,
+                f"lockfile {lockfile.label} is on line {lockfile.line or DEFAULT_LINE_WORD!r} "
+                f"but base {lockfile.base} is on line {labels[lockfile.base].line or DEFAULT_LINE_WORD!r}",
+                fix="Make a derived cut from a base on the same line.",
+            ))
         if lockfile.base[len("corpus-"):] >= lockfile.label[len("corpus-"):]:
             errors.append(_error(key_path, f"base {lockfile.base} is not earlier than this lockfile"))
     return LockfileDirectoryResult(tuple(lockfiles), tuple(errors))

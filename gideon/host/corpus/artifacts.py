@@ -6,6 +6,8 @@ from pathlib import Path
 
 from gideon.host import report, worker
 from gideon.host.corpus.lockfile import (
+    DEFAULT_LINE_WORD,
+    Lockfile,
     LockfileDirectoryResult,
     LockfileError,
     read_lockfile_directory,
@@ -13,7 +15,7 @@ from gideon.host.corpus.lockfile import (
 from gideon.host.corpus.sources import SourceDefinition
 from gideon.host.courts import CourtMap, CourtsError, load_court_map
 from gideon.host.egress import EgressAllowlist, EgressError, load_egress_allowlist
-from gideon.host.report import StageResult
+from gideon.host.report import Problem, StageResult
 from gideon.host.sysio import PathLike, WritableBytesHost
 
 
@@ -24,6 +26,30 @@ class CorpusArtifacts:
     court_map: CourtMap
     allowlist: EgressAllowlist
     directory: LockfileDirectoryResult
+
+
+def line_problem(
+    directory: LockfileDirectoryResult, lockfile: Lockfile, line: str | None,
+    *, command_path: str,
+) -> Problem | None:
+    """Judge a label's line; *command_path* is the command before its label."""
+    if lockfile.line == line:
+        return None
+    newest = directory.newest_on(line)
+    if newest is None:
+        fix = (
+            f"Commit a corpus lockfile on line {line or DEFAULT_LINE_WORD!r}, "
+            f"then run {report.command(command_path)} with its label"
+        )
+    else:
+        fix = f"Run {report.command(f'{command_path} {newest.label}')}"
+    return Problem(
+        f"Corpus lockfile {lockfile.label} is on line {lockfile.line or DEFAULT_LINE_WORD!r}; "
+        f"the profile's line is {line or DEFAULT_LINE_WORD!r}.",
+        f"{fix}, or set hardware_profile in /etc/gideon/site.yaml to a profile on line "
+        f"{lockfile.line or DEFAULT_LINE_WORD!r} and run "
+        f"{report.command(f'{command_path} {lockfile.label}')} again.",
+    )
 
 
 def artifact_problem(

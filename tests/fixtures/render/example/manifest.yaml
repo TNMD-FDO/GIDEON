@@ -3,7 +3,7 @@ release: "fixture"
 inputs:
   site_sha256: "0193b145520c2f0c0171a5c991fedbba99b9b32736b55785e97b63d308b95aa5"
   host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
-  models_lock_sha256: "386574fee11ddd25adb0021f82c644dd1694ede0fa997f2bb9943d0b7b3e03c4"
+  models_lock_sha256: "5b6c96654a692957e29b620f2bb366c714cc42713f551e85f54bc3c78430b340"
   egress_sha256: "e22abee0f29547aedd38bb2ca9ca9f0d2cd3dc4b28c9d6df72ae4fad53d0d3af"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
@@ -113,7 +113,7 @@ files:
     mode: "0644"
     owners: []
   "gideon-api/instruction.txt":
-    sha256: "54740c9b23d63c1fb9bb0e8dea4ac198dd4e897ad730b61fa983e83956be84bc"
+    sha256: "8e73279a89e03ca5967772e743f8ec9105344b0638ac93bb239cf729d57d5f55"
     mode: "0644"
     owners:
       - "gideon-api"

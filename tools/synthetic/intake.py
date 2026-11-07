@@ -95,7 +95,6 @@ def _load_manifest(path: Path) -> Manifest:
         or not isinstance(reading, str) or reading not in synthetic.READINGS
         or value["reading_digest"] != synthetic.READING_DIGESTS[reading]
         or not isinstance(value["generation"], str) or re.fullmatch(GENERATION_PATTERN, value["generation"]) is None
-        or not value["generation"].endswith(f"__{SAMPLE_SUFFIX}")
         or type(value["seed"]) is not int
         or type(value["asked"]) is not int or value["asked"] <= 0
         or not isinstance(value["entries"], list) or len(value["entries"]) > value["asked"]
@@ -109,6 +108,12 @@ def _load_manifest(path: Path) -> Manifest:
         or not isinstance(value["discards"], list)
     ):
         raise _manifest_problem()
+    sampled = value["generation"].endswith(f"__{SAMPLE_SUFFIX}")
+    if category in synthetic.PRODUCTION_CATEGORIES and sampled:
+        raise IntakeError("manifest", f"{category} requires a production generation",
+                          f"Run python3 -m tools.synthetic.draft --category {category} using a production caselaw generation, then review the new sheet and retry.")
+    if category not in synthetic.PRODUCTION_CATEGORIES and not sampled:
+        raise _manifest_problem("sample generation")
     raw_pin = value["case_pin"]
     if raw_pin is not None and (
         not isinstance(raw_pin, list) or len(raw_pin) != 2

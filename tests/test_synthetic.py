@@ -83,7 +83,7 @@ class Registry(unittest.TestCase):
             "lookup@1", "retrieval@1", "synthesis@1", "existence@1",
             "retrieval@2", "synthesis@2", "existence@2",
             "treatment@1", "treatment@2", "treatment@3", "section-attribution@1",
-            "unanswerable@1", "trap@1", "poisoned-premise@1",
+            "unanswerable@1", "trap@1", "trap@2", "poisoned-premise@1",
         ))
         self.assertEqual(tuple(synthetic.READINGS), ("closed-book@1",))
         for registry, digests in (
@@ -216,6 +216,8 @@ class Registry(unittest.TestCase):
             "DRAFT_WINDOW", "SECTION_MIN_CHARS", "GOOD_LAW_PHRASES",
             "HELD_OUT_SHARE", "SURNAMES", "ABSENT_COURT_LEVEL", "PROCEDURAL_DISPOSITIONS",
             "CONDITIONAL_MODALS", "CONDITIONAL_WORDS", "NON_CASE_AGENTS",
+            "COMMA_DIRECTION", "PERFORMED_ADVERBS", "LISTED_SHARE", "PASS_DOCUMENTS",
+            "OVERRULING_WINDOW_CHARS",
         }
         found = set()
         for node in ast.parse(source).body:
@@ -317,6 +319,133 @@ class Registry(unittest.TestCase):
         self.assertTrue({*synthetic.SEPARATE_SECTIONS, synthetic.SYLLABUS}.isdisjoint(treatment.HOLDING_SECTIONS))
         self.assertFalse(hasattr(synthetic, "HOLDING_SECTIONS"))
         self.assertEqual(set(synthetic.PLANNED_COUNTS), {key.rsplit("@", 1)[0] for key in synthetic.TEMPLATES})
+
+    def test_overruled_trap_slots_rules_and_shared_contract(self) -> None:
+        prompt = synthetic.TEMPLATES["trap@2"]
+        original = synthetic.TEMPLATES["trap@1"]
+        self.assertEqual(prompt.slots, (
+            "court", "decided", "cites", "caption", "overruling_caption", "overruling_cites",
+            "overruling_year", "overruling_window", "text",
+        ))
+        self.assertEqual(prompt.schema_name, original.schema_name)
+        self.assertIs(prompt.schema, original.schema)
+        self.assertEqual(prompt.user_template, synthetic.TEMPLATES["retrieval@2"].user_template.replace(
+            "\n<opinion-text>",
+            "Overruling case name: {overruling_caption}\nOverruling citations: {overruling_cites}\n"
+            "Overruling year: {overruling_year}\n\n<overruling-text>\n{overruling_window}\n"
+            "</overruling-text>\n\n<opinion-text>",
+        ))
+        tail = original.system[original.system.index("Copy a supporting passage"):]
+        self.assertTrue(prompt.system.endswith(tail))
+        normalized = " ".join(prompt.system.split())
+        for phrase in (
+            "question names the opinion shown, by the case name shown",
+            "rule or standard it states as the governing law today",
+            "Never name the overruling decision in the question",
+            "premise that the rule governs is false",
+            "one or two sentences stating what the opinion shown held",
+            "the overruling decision overruled it",
+            "overruling case name shown with its year",
+            "overruled opinion's own statement of that doctrine",
+        ):
+            self.assertIn(phrase, normalized)
+        slots = {
+            **SLOTS, "caption": "Fable v. Example", "overruling_caption": "Imaginary v. Pretend",
+            "overruling_cites": "Invented reporter cite", "overruling_year": "2002",
+            "overruling_window": "The fictitious court overrules the invented notice rule.",
+        }
+        user = prompt.user_template.format(**slots)
+        for value in slots.values():
+            self.assertIn(value, user)
+        self.assertIn(f"<overruling-text>\n{slots['overruling_window']}\n</overruling-text>", user)
+        self.assertIn(f"<opinion-text>\n{PASSAGE}\n</opinion-text>", user)
+
+    def test_production_categories_and_trap_discard_reasons(self) -> None:
+        self.assertEqual(synthetic.PRODUCTION_CATEGORIES, ("treatment", "trap"))
+        self.assertEqual(synthetic.TRAP_DISCARDS, (
+            "list-qualified", "overruling-absent", "overruling-uncited",
+        ))
+        suffix = (*synthetic.TREATMENT_DISCARDS, *synthetic.TRAP_DISCARDS)
+        self.assertEqual(manifest.DISCARD_REASONS[-len(suffix):], suffix)
+        self.assertEqual(len(manifest.DISCARD_REASONS), len(set(manifest.DISCARD_REASONS)))
+
+
+class CitationWindow(unittest.TestCase):
+    """Overruling context keeps the citation and nearby complete paragraphs."""
+
+    def test_short_text_and_spans_at_both_ends_use_code_points(self) -> None:
+        text = "Fictitious café 😀 cites Imaginary v. Pretend."
+        for start, end in ((0, 1), (len(text) - 1, len(text)), (0, len(text))):
+            with self.subTest(span=(start, end)):
+                bounds = synthetic.citation_window(text, start, end)
+                self.assertEqual(bounds, (0, len(text)))
+                self.assertEqual(text[slice(*bounds)], text)
+
+    def test_long_paragraph_centres_and_clamps_to_the_budget(self) -> None:
+        budget = synthetic.OVERRULING_WINDOW_CHARS
+        text = "Fictitious café 😀 citation context. " * budget
+        for start, end, expected in (
+            (0, 2, (0, budget)),
+            (len(text) - 2, len(text), (len(text) - budget, len(text))),
+            (2 * budget, 2 * budget + 2, None),
+        ):
+            with self.subTest(span=(start, end)):
+                first, last = synthetic.citation_window(text, start, end)
+                self.assertEqual(last - first, budget)
+                self.assertLessEqual(first, start)
+                self.assertGreaterEqual(last, end)
+                if expected is None:
+                    self.assertLessEqual(abs((first + last) - (start + end)), 1)
+                else:
+                    self.assertEqual((first, last), expected)
+
+    def test_short_text_with_paragraphs_is_whole(self) -> None:
+        citation = "Imaginary v. Pretend"
+        paragraph = f"The fictitious café court cites {citation} and rejects its invented rule."
+        text = "\n\n".join(("Invented heading.", paragraph, "Fictitious disposition."))
+        start = text.index(citation)
+        self.assertEqual(synthetic.citation_window(text, start, start + len(citation)), (0, len(text)))
+
+    def test_edges_inside_paragraphs_move_inward_to_their_boundaries(self) -> None:
+        budget = synthetic.OVERRULING_WINDOW_CHARS
+        filler = "Fictitious opinion context. " * (budget // 10)
+        paragraphs = [f"Invented paragraph {n}. " * (budget // 120) for n in range(12)]
+        citation = "Imaginary v. Pretend"
+        paragraphs[6] = f"The fictitious court cites {citation} and rejects its invented rule."
+        text = "\n\n".join((filler, *paragraphs, filler))
+        start = text.index(citation)
+        first, last = synthetic.citation_window(text, start, start + len(citation))
+        window = text[first:last]
+        self.assertLessEqual(last - first, budget)
+        self.assertEqual(text[first - 2:first], "\n\n")
+        self.assertEqual(text[last:last + 2], "\n\n")
+        self.assertIn(paragraphs[5], window.split("\n\n"))
+        self.assertIn(paragraphs[7], window.split("\n\n"))
+        self.assertTrue(set(window.split("\n\n")) <= set(paragraphs))
+
+    def test_span_across_boundary_keeps_both_paragraphs(self) -> None:
+        budget = synthetic.OVERRULING_WINDOW_CHARS
+        filler = "Fictitious opinion context. " * budget
+        paragraphs = (
+            filler, "The fictitious court rejects Imaginary",
+            "v. Pretend and its invented rule.", filler,
+        )
+        text = "\n\n".join(paragraphs)
+        start = text.index("Imaginary")
+        end = text.index("Pretend") + len("Pretend")
+        bounds = synthetic.citation_window(text, start, end)
+        self.assertEqual(text[slice(*bounds)], "\n\n".join(paragraphs[1:3]))
+
+    def test_paragraph_breaks_outside_budget_do_not_expand_the_window(self) -> None:
+        budget = synthetic.OVERRULING_WINDOW_CHARS
+        paragraph = "Fictitious opinion context. " * budget
+        text = "Invented heading.\n\n" + paragraph + "\n\nFictitious disposition."
+        start = len(text) // 2
+        first, last = synthetic.citation_window(text, start, start + 2)
+        self.assertEqual(last - first, budget)
+        self.assertNotIn("\n\n", text[first:last])
+        self.assertLessEqual(first, start)
+        self.assertGreaterEqual(last, start + 2)
 
 
 class Requests(unittest.TestCase):
@@ -683,7 +812,8 @@ class TreatmentRelations(unittest.TestCase):
             with self.subTest(sentence=sentence):
                 cites = tuple((sentence.index(cite), sentence.index(cite) + len(cite), cluster)
                               for cite, cluster in citations)
-                result = synthetic.reported_agent(sentence, sentence.index(verb) + len(verb), 123, iter(cites))
+                drawn = (sentence.index("FictitiousX"), sentence.index("FictitiousX") + len("FictitiousX"))
+                result = synthetic.reported_agent(sentence, sentence.index(verb) + len(verb), 123, iter(cites), drawn)
                 self.assertEqual(result.state, state)
                 if state == "reported":
                     start = sentence.index("ImaginaryY")
@@ -698,8 +828,124 @@ class TreatmentRelations(unittest.TestCase):
             sentence = f"FictitiousX is superseded by the fictitious {word.upper()} as stated in ImaginaryY."
             start = sentence.index("ImaginaryY")
             self.assertEqual(synthetic.reported_agent(sentence, sentence.index("superseded") + len("superseded"),
-                                                     123, ((start, start + len("ImaginaryY"), 456),)),
+                                                     123, ((start, start + len("ImaginaryY"), 456),),
+                                                     (0, len("FictitiousX"))),
                              synthetic.Agent("unresolved"))
+
+    def test_comma_direction_resolves_actor_and_drawn_actor(self) -> None:
+        for qualifier in ("", " on other grounds", " in part", " ON\tOTHER\nGROUNDS"):
+            sentence = f"FictitiousX, overruled{qualifier}, ImaginaryY and PretendZ."
+            verb_end = sentence.index("overruled") + len("overruled")
+            spans = {name: (sentence.index(name), sentence.index(name) + len(name))
+                     for name in ("FictitiousX", "ImaginaryY", "PretendZ")}
+            # Deliberately unsorted; the first following citation is the actor.
+            cites = ((*spans["PretendZ"], 789), (*spans["ImaginaryY"], 456), (*spans["FictitiousX"], 123))
+            with self.subTest(qualifier=qualifier):
+                self.assertEqual(synthetic.direction_phrase(sentence, verb_end, iter(cites)), spans["ImaginaryY"][0])
+                self.assertEqual(synthetic.reported_agent(sentence, verb_end, 123, iter(cites), spans["FictitiousX"]),
+                                 synthetic.Agent("reported", 456, spans["ImaginaryY"]))
+                for cluster in (456, None):
+                    actor_cites = ((*spans["ImaginaryY"], cluster), (*spans["PretendZ"], 789))
+                    self.assertEqual(synthetic.reported_agent(sentence, verb_end, 456, iter(actor_cites),
+                                                              spans["ImaginaryY"]),
+                                     synthetic.Agent("actor-drawn"))
+                self.assertEqual(synthetic.reported_agent(sentence, verb_end, 456, iter(((*spans["PretendZ"], 789),)),
+                                                          spans["ImaginaryY"]),
+                                 synthetic.Agent("actor-drawn"))
+
+    def test_by_direction_drawn_following_citation_is_actor(self) -> None:
+        for phrase in ("by", "in", "on other grounds by", "in part in"):
+            sentence = f"FictitiousX was overruled {phrase} ImaginaryY."
+            verb_end = sentence.index("overruled") + len("overruled")
+            drawn = (sentence.index("ImaginaryY"), sentence.index("ImaginaryY") + len("ImaginaryY"))
+            cites = ((*drawn, 456),)
+            with self.subTest(phrase=phrase):
+                match = synthetic.PASSIVE_AGENT.match(sentence, verb_end)
+                assert match is not None
+                self.assertEqual(synthetic.direction_phrase(sentence, verb_end, iter(cites)), match.end())
+                self.assertEqual(synthetic.reported_agent(sentence, verb_end, 456, iter(cites), drawn),
+                                 synthetic.Agent("actor-drawn"))
+
+    def test_comma_direction_requires_an_immediate_case_citation(self) -> None:
+        for tail in ("see ImaginaryY", "fictitious statute", "fictitious statute as stated in ImaginaryY"):
+            sentence = f"FictitiousX, overruled, {tail}."
+            verb_end = sentence.index("overruled") + len("overruled")
+            for qualifier in ("", " on other grounds", " in part"):
+                qualified = sentence.replace("overruled", f"overruled{qualifier}")
+                cites = () if "ImaginaryY" not in qualified else (
+                    (qualified.index("ImaginaryY"), qualified.index("ImaginaryY") + len("ImaginaryY"), 456),
+                )
+                with self.subTest(tail=tail, qualifier=qualifier):
+                    self.assertIsNone(synthetic.direction_phrase(qualified, verb_end, iter(cites)))
+                    self.assertEqual(synthetic.reported_agent(qualified, verb_end, 123, iter(cites),
+                                                              (0, len("FictitiousX"))),
+                                     synthetic.Agent("performed"))
+
+    def test_performed_read_requires_present_holding_forms(self) -> None:
+        fixtures = (
+            ("We now", "overrule"), ("We", "overrules"),
+            ("We", "abrogate"), ("We", "supersede"), ("We", "disapprove"),
+            ("FictitiousX is", "overruled"), ("FictitiousX and ImaginaryY are", "overruled"),
+            ("FictitiousX is", "reversed"), ("FictitiousX is", "vacated"),
+        )
+        for prefix, verb in fixtures:
+            sentence = f"{prefix} {verb} the fictitious precedent."
+            for standing in (*treatment.HOLDING_SECTIONS, *synthetic.SEPARATE_SECTIONS, synthetic.SYLLABUS, "unknown"):
+                for text in (sentence, sentence.upper()):
+                    start = text.casefold().index(verb)
+                    with self.subTest(sentence=text, standing=standing):
+                        self.assertEqual(synthetic.performed_read(text, start, start + len(verb), standing),
+                                         standing in treatment.HOLDING_SECTIONS)
+
+    def test_performed_read_skips_adverbs_and_rejects_recounted_forms(self) -> None:
+        for adverb in (*synthetic.PERFORMED_ADVERBS, "fictitiously", "now expressly today"):
+            for prefix, verb in (("We", "overrule"), ("FictitiousX is", "overruled"),
+                                 ("FictitiousX and ImaginaryY are", "overruled")):
+                sentence = f"{prefix} {adverb.upper()} {verb} the fictitious precedent."
+                start = sentence.index(verb)
+                for standing in treatment.HOLDING_SECTIONS:
+                    with self.subTest(sentence=sentence, standing=standing):
+                        self.assertTrue(synthetic.performed_read(sentence, start, start + len(verb), standing))
+        fixtures = (
+            ("We overruled FictitiousX.", "overruled"),
+            ("FictitiousX was overruled.", "overruled"),
+            ("FictitiousX were now overruled.", "overruled"),
+            ("FictitiousX, overruled on an invented issue.", "overruled"),
+            ("Overruled FictitiousX.", "Overruled"),
+            ("To overrule FictitiousX.", "overrule"),
+            ("We decided to overrule FictitiousX.", "overrule"),
+            ("We now to overrule FictitiousX.", "overrule"),
+            ("We to now overrule FictitiousX.", "overrule"),
+            ("We are overruling FictitiousX.", "overruling"),
+            ("We now overruling FictitiousX.", "overruling"),
+            ("ImaginaryY overrules FictitiousX.", "overrules"),
+        )
+        for sentence, verb in fixtures:
+            start = sentence.index(verb)
+            for standing in (*treatment.HOLDING_SECTIONS, *synthetic.SEPARATE_SECTIONS, synthetic.SYLLABUS):
+                with self.subTest(sentence=sentence, standing=standing):
+                    self.assertFalse(synthetic.performed_read(sentence, start, start + len(verb), standing))
+
+    def test_comma_actor_is_excluded_from_proximity_but_nested_citation_is_not(self) -> None:
+        for parenthetical, nearer in (("1990", False), ("quoting PretendZ", True)):
+            sentence = f"FictitiousX ({parenthetical}), overruled, ImaginaryY."
+            verb_start = sentence.index("overruled")
+            verb_end = verb_start + len("overruled")
+            drawn = (0, len("FictitiousX"))
+            actor = (sentence.index("ImaginaryY"), sentence.index("ImaginaryY") + len("ImaginaryY"))
+            cites = [(*drawn, 123), (*actor, 456)]
+            if nearer:
+                start = sentence.index("PretendZ")
+                cites.append((start, start + len("PretendZ"), 789))
+            with self.subTest(parenthetical=parenthetical):
+                self.assertEqual(synthetic.direction_phrase(sentence, verb_end, iter(cites)), actor[0])
+                result = synthetic.reported_agent(sentence, verb_end, 123, iter(cites), drawn)
+                self.assertEqual(result, synthetic.Agent("reported", 456, actor))
+                self.assertTrue(synthetic.nearest_cite(verb_start, verb_end, drawn, (actor,)))
+                self.assertEqual(synthetic.nearest_cite(
+                    verb_start, verb_end, drawn,
+                    ((start, end) for start, end, _ in cites if (start, end) not in (drawn, result.span)),
+                ), nearer)
 
     def test_nearest_cite_in_parenthetical_and_ties(self) -> None:
         drawn = "Fable v. Example, 123 F.3d 456"
@@ -738,8 +984,10 @@ class TreatmentRelations(unittest.TestCase):
     def test_passive_agent_agrees_with_worker_and_reasons_with_manifest(self) -> None:
         self.assertEqual(synthetic.PASSIVE_AGENT.pattern, treatment._DIRECTION.pattern)
         self.assertEqual(synthetic.PASSIVE_AGENT.flags, treatment._DIRECTION.flags)
+        self.assertNotEqual(synthetic.COMMA_DIRECTION.pattern, treatment._DIRECTION.pattern)
         self.assertEqual(synthetic.TREATMENT_DISCARDS, (
             "nearest-cite", "active-direction", "procedural-disposition", "conditional-verb", "agent-unresolved",
+            "actor-drawn", "recounted",
         ))
         self.assertTrue(set(synthetic.TREATMENT_DISCARDS) <= set(manifest.DISCARD_REASONS))
 

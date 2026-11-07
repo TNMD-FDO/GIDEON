@@ -315,7 +315,7 @@ class Cut(unittest.TestCase):
         record_path.write_text(json.dumps(record))
 
     def run_cut(self, *, base: str | None = None, add_courts: str | None = None,
-                courts: str | None = None,
+                courts: str | None = None, line: str | None = None,
                 now: list[float] | None = None,
                 cut_at: datetime = CUT_AT,
                 sources: tuple[SourceDefinition, ...] | None = None,
@@ -334,10 +334,10 @@ class Cut(unittest.TestCase):
         )
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             if installed is None:
-                code = runner(argparse.Namespace(base=base, add_courts=add_courts, courts=courts))
+                code = runner(argparse.Namespace(base=base, add_courts=add_courts, courts=courts, line=line))
             else:
                 argv = ["corpus", "cut"]
-                for name, value in (("--base", base), ("--add-courts", add_courts), ("--courts", courts)):
+                for name, value in (("--base", base), ("--add-courts", add_courts), ("--courts", courts), ("--line", line)):
                     if value is not None:
                         argv.extend((name, value))
                 environment = {report.GIDEON_INSTALLED_COMMAND: "1"} if installed else {}
@@ -582,6 +582,7 @@ class Cut(unittest.TestCase):
             self.host, self.checkout, sources, resolved,
             {name: pin.entries for name, pin in newest.sources.items()},
             newest, CUT_AT + timedelta(days=1), None, "corpus cut",
+            carry=newest, line=newest.line,
         )
         assert isinstance(built, cut.LockfileCandidate)
         self.assertEqual(built.index_bytes[source.name], {"saved.html": data})
@@ -688,7 +689,7 @@ class Cut(unittest.TestCase):
                         self.host.snapshots, self.host.checkout = self.snapshots, self.checkout
                         if build_box:
                             self.host.markers.add(nogpu.BUILD_BOX_PATH)
-                        code, out, err = self.run_cut(installed=installed, courts=courts)
+                        code, out, err = self.run_cut(installed=installed, courts=courts, line="scotus" if courts is not None else None)
                         self.assertEqual(code, 0, out + err)
                         self.assertEqual(err, "")
                         self.assertIn("lockfile: ok — wrote ", out)
@@ -703,7 +704,7 @@ class Cut(unittest.TestCase):
                         archive_lines = [line for line in lines if "archive push" in line]
                         self.assertEqual(archive_lines, [expected] if build_box else [])
                         next_lines = [line for line in lines if line.startswith("Next:")]
-                        self.assertEqual(len(next_lines), 2 if build_box else 1)
+                        self.assertEqual(len(next_lines), 1 + int(build_box) + int(courts is not None))
                         if build_box:
                             self.assertEqual(next_lines[-1], expected)
                             self.assertLess(
@@ -711,7 +712,7 @@ class Cut(unittest.TestCase):
                                 lines.index(expected),
                             )
                         previous_writes = list(self.host.writes)
-                        code, out, err = self.run_cut(installed=installed, courts=courts)
+                        code, out, err = self.run_cut(installed=installed, courts=courts, line="scotus" if courts is not None else None)
                         self.assertEqual(code, 0, out + err)
                         self.assertIn("unchanged", out)
                         self.assertEqual(self.host.writes, previous_writes)
@@ -1052,12 +1053,116 @@ class Cut(unittest.TestCase):
         self.assertEqual(self.host.calls, [])
         self.assertEqual(self.host.lock_releases, 0)
 
+    def test_line_flag_refusals_before_host_work(self) -> None:
+        self.host.euid = 1000
+        cases = (
+            ({"line": "scotus", "base": "corpus-2099-01-01"}, "--line cannot be used"),
+            ({"line": "scotus", "add_courts": "ca6"}, "--line cannot be used"),
+            ({"line": "scotus", "base": "corpus-2099-01-01", "add_courts": "ca6"}, "--line cannot be used"),
+            ({"courts": "scotus"}, "--courts requires --line"),
+        )
+        for values, detail in cases:
+            with self.subTest(values=values):
+                code, out, err = self.run_cut(line=values.get("line"), courts=values.get("courts"),
+                                             base=values.get("base"), add_courts=values.get("add_courts"))
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn(detail, err)
+                self.assertIn("--line <name>", err)
+                self.assertIn("Fix:", err)
+        for line in ("", "default", "Upper", "two--words", "bad_name", "-bad", "bad-"):
+            with self.subTest(line=line):
+                code, out, err = self.run_cut(line=line)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("lowercase words and digits joined by single hyphens", err)
+        self.assertFalse(self.host.calls)
+        self.assertFalse(self.host.writes)
+        self.assertIsNone(self.host.lock_holder)
+
+    def test_named_first_cut_requires_courts_and_bare_first_cut_keeps_first_courts(self) -> None:
+        code, out, err = self.run_cut(line="scotus")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("first cut needs --courts", err)
+        self.assertIn(report.command("corpus cut --line scotus --courts <ids>"), err)
+        self.assertFalse(self.host.writes)
+        self.assertIsNone(self.host.lock_holder)
+        code, out, err = self.run_cut()
+        self.assertEqual((code, err), (0, ""), out)
+        loaded = self.load_cut((self.source,))
+        self.assertIsNone(loaded.line)
+        self.assertEqual(loaded.courts, self.source.first_courts)
+        self.assertEqual(loaded.reason, "tranche")
+
+    def test_named_first_cut_carries_default_companions_and_treatment_pin(self) -> None:
+        treatment = replace(self.captured_source(), name=worker_identity.OVERRULED_SOURCE)
+        self.write_capture(treatment, CUT_AT.date().isoformat(), b"fictitious treatment capture")
+        sources = (self.source, treatment)
+        code, out, err = self.run_cut(sources=sources)
+        self.assertEqual((code, err), (0, ""), out)
+        base = self.load_cut(sources)
+        pin = base.sources[self.source.name]
+        base = replace(base, sources={**base.sources, self.source.name: replace(pin, mirror_url=self.source.base_url)})
+        directory = self.checkout / "corpus/lockfiles"
+        (directory / f"{base.label}.yaml").write_text(render_lockfile(base))
+        self.host.index_bytes = b"fictitious later listing must not replace the pinned companion"
+        next_cut = CUT_AT + timedelta(days=1)
+        code, out, err = self.run_cut(line="scotus", courts="scotus", cut_at=next_cut, sources=sources)
+        self.assertEqual((code, err), (0, ""), out)
+        selected = self.load_cut(sources, at=next_cut)
+        self.assertEqual(selected.line, "scotus")
+        self.assertEqual(selected.reason, "tranche")
+        self.assertNotIn("unchanged", out)
+        self.assertEqual(selected.sources[treatment.name], base.sources[treatment.name])
+        self.assertEqual(selected.sources[self.source.name], replace(base.sources[self.source.name], courts=("scotus",)))
+        for name, pin in base.sources.items():
+            for suffix in ("sha256", *(item.name for item in pin.index)):
+                self.assertEqual((directory / selected.label / f"{name}.{suffix}").read_bytes(),
+                                 (directory / base.label / f"{name}.{suffix}").read_bytes())
+        self.assertIn("Next: commit the new lockfile and companion files.", out)
+        self.assertIn("corpus_line names 'scotus'", out)
+        self.assertNotIn("move them out", out)
+
+    def test_unchanged_run_records_its_line_label_despite_newer_other_line(self) -> None:
+        default = self.prepare_base()
+        trial_at = CUT_AT + timedelta(days=1)
+        code, out, err = self.run_cut(line="scotus", courts="scotus", cut_at=trial_at)
+        self.assertEqual((code, err), (0, ""), out)
+        trial = self.load_cut((self.source,), at=trial_at)
+        directory = self.checkout / "corpus/lockfiles"
+        other_at = trial_at + timedelta(days=1)
+        other_label = f"corpus-{other_at.date().isoformat()}"
+        shutil.copytree(directory / default.label, directory / other_label)
+        (directory / f"{other_label}.yaml").write_text(render_lockfile(replace(default, label=other_label, line="other-line")))
+        writes = list(self.host.writes)
+        code, out, err = self.run_cut(line=trial.line, cut_at=other_at + timedelta(days=1))
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn(f"unchanged; {trial.label} already pins this state", out)
+        self.assertIn(f"record: ok — {trial.label}: cut", out)
+        self.assertEqual(self.host.writes, writes)
+        assert self.host.record_row is not None
+        self.assertEqual(self.host.record_row["label"], trial.label)
+        self.assertNotIn("Next:", out)
+
+    def test_derived_cut_inherits_the_bases_line(self) -> None:
+        self.prepare_base()
+        trial_at = CUT_AT + timedelta(days=1)
+        self.assertEqual(self.run_cut(line="scotus", courts="scotus", cut_at=trial_at)[0], 0)
+        trial = self.load_cut((self.source,), at=trial_at)
+        assert self.host.record_row is not None
+        self.host.base_rows[trial.label] = dict(self.host.record_row)
+        derived_at = trial_at + timedelta(days=1)
+        code, out, err = self.run_cut(base=trial.label, add_courts="ca6", cut_at=derived_at)
+        self.assertEqual((code, err), (0, ""), out)
+        derived = self.load_cut((self.source,), at=derived_at)
+        self.assertEqual(derived.line, trial.line)
+        self.assertEqual(derived.base, trial.label)
+        self.assertEqual(derived.courts, tuple(sorted((*trial.courts, "ca6"))))
+
     def test_selection_replaces_carried_courts_and_keeps_snapshot_companions(self) -> None:
         base = self.prepare_base()
         next_cut = CUT_AT + timedelta(days=1)
         self.host.index_bytes = b"<listing>fictitious changed listing</listing>\n"
         releases = self.host.lock_releases
-        code, out, err = self.run_cut(courts="tenn, scotus", cut_at=next_cut)
+        code, out, err = self.run_cut(line="scotus", courts="tenn, scotus", cut_at=next_cut)
         self.assertEqual(code, 0, out + err)
         self.assertEqual(err, "")
         selected = self.load_cut((self.source,), at=next_cut)
@@ -1077,32 +1182,29 @@ class Cut(unittest.TestCase):
         self.assertTrue(all(destination.startswith("resolve/")
                             for destination in self.host.job_destinations.values()))
         self.assertEqual([line for line in out.splitlines() if line.startswith("Next:")], [
-            "Next: keep the new lockfile and companion files out of every release until "
-            "a hardware profile names it; move them out of corpus/lockfiles/ as "
-            "docs/runbooks/release-files.md §10 says.",
+            "Next: commit the new lockfile and companion files.",
+            "Next: a release ships line 'scotus' once a hardware profile's corpus_line names 'scotus'.",
         ])
-        self.assertNotIn("Next: commit the new lockfile", out)
+        self.assertNotIn("move them out", out)
         self.assertEqual(self.host.lock_releases, releases + 1)
         self.assertIsNone(self.host.lock_holder)
 
     def test_selection_equal_to_carried_courts_is_unchanged(self) -> None:
-        base = self.prepare_base()
-        courts = base.sources[self.source.name].courts
-        assert courts is not None
+        self.assertEqual(self.run_cut(line="scotus", courts="scotus")[0], 0)
+        base = self.load_cut((self.source,))
+        writes = list(self.host.writes)
         next_cut = CUT_AT + timedelta(days=1)
-        code, out, err = self.run_cut(courts=",".join(courts), cut_at=next_cut)
-        self.assertEqual(code, 0, out + err)
-        self.assertEqual(err, "")
-        self.assertIn(f"lockfile: ok — unchanged; {base.label} already pins this state", out)
-        self.assertEqual(self.host.writes, [])
+        code, out, err = self.run_cut(line=base.line, courts=",".join(base.courts), cut_at=next_cut)
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn(f"unchanged; {base.label} already pins this state", out)
+        self.assertEqual(self.host.writes, writes)
         self.assertEqual(self.load_cut((self.source,)), base)
-        self.assertFalse((self.checkout / "corpus/lockfiles" /
-                          f"corpus-{next_cut.date().isoformat()}.yaml").exists())
+        self.assertFalse((self.checkout / "corpus/lockfiles" / f"corpus-{next_cut.date().isoformat()}.yaml").exists())
         self.assertNotIn("Next:", out)
         self.assertIsNone(self.host.lock_holder)
 
     def test_selection_on_first_cut_replaces_first_courts(self) -> None:
-        code, out, err = self.run_cut(courts="scotus")
+        code, out, err = self.run_cut(line="scotus", courts="scotus")
         self.assertEqual(code, 0, out + err)
         self.assertEqual(err, "")
         selected = self.load_cut((self.source,))
@@ -1127,7 +1229,7 @@ class Cut(unittest.TestCase):
                 self.host.euid = 1000 if beside else 0
                 releases = self.host.lock_releases
                 with mock.patch.object(self.host, "take_lock", wraps=self.host.take_lock) as take:
-                    code, out, err = self.run_cut(courts=courts, base=base, add_courts=added)
+                    code, out, err = self.run_cut(line=None if beside else "scotus", courts=courts, base=base, add_courts=added)
                 self.assertEqual(code, 1)
                 self.assertEqual(out, "")
                 problem, fix = err.split(" Fix: ", 1)
@@ -1135,7 +1237,7 @@ class Cut(unittest.TestCase):
                 self.assertIn("--courts", fix)
                 if beside:
                     self.assertEqual(fix.strip(),
-                                     f"Run {report.command('corpus cut')} --courts <ids> alone, or "
+                                     f"Run {report.command('corpus cut')} --line <name> --courts <ids>, or "
                                      f"{report.command('corpus cut')} --base <label> --add-courts <ids>.")
                     take.assert_not_called()
                     self.assertEqual(self.host.lock_releases, releases)
@@ -1143,6 +1245,9 @@ class Cut(unittest.TestCase):
                 else:
                     take.assert_called_once()
                     self.assertEqual(self.host.lock_releases, releases + 1)
+                    self.assertIn(report.command("corpus cut --line scotus --courts <ids>"), fix)
+                    if courts:
+                        self.assertNotIn(report.command(f"corpus cut --line scotus --courts {courts}"), fix)
                 if courts == "scotu":
                     self.assertIn("docs/runbooks/release-files.md §10", fix)
                 self.assertEqual(self.host.writes, [])
@@ -1153,11 +1258,11 @@ class Cut(unittest.TestCase):
 
     def test_selection_capture_refusal_repeats_the_selection(self) -> None:
         source = self.captured_source()
-        code, out, err = self.run_cut(courts="scotus", sources=(self.source, source))
+        code, out, err = self.run_cut(line="scotus", courts="scotus", sources=(self.source, source))
         self.assertEqual(code, 1, out + err)
         self.assertEqual(err, "")
         self.assertIn(f"{source.name}: no capture under", out)
-        self.assertIn(f"then run {report.command('corpus cut --courts scotus')} again",
+        self.assertIn(f"then run {report.command('corpus cut --line scotus --courts scotus')} again",
                       out.split(" Fix: ", 1)[1])
         self.assert_capture_refusal(out)
 
@@ -1169,11 +1274,11 @@ class Cut(unittest.TestCase):
                     self.file.unlink()
                     (self.snapshots / f"{self.destination}{worker_identity.RECORD_SUFFIX}").unlink()
                 releases = self.host.lock_releases
-                code, out, err = self.run_cut(courts="scotus")
+                code, out, err = self.run_cut(line="scotus", courts="scotus")
                 self.assertEqual(code, 1, out + err)
                 self.assertEqual(err, "")
                 self.assertIn(f"{stage}: refuse — interrupted;", out)
-                self.assertIn(f"Run {report.command('corpus cut --courts scotus')} again to {action}.",
+                self.assertIn(f"Run {report.command('corpus cut --line scotus --courts scotus')} again to {action}.",
                               out.split(" Fix: ", 1)[1])
                 self.assertEqual(self.host.lock_releases, releases + 1)
                 self.assertIsNone(self.host.lock_holder)
@@ -1416,9 +1521,9 @@ class Cli(unittest.TestCase):
         self.assertEqual(exit_result.exception.code, 0)
         help_text = " ".join(re.sub(r"-\n\s+", "-", out.getvalue()).split())
         self.assertIn("--courts <ids>", help_text)
-        self.assertIn("comma-separated court ids that become this cut's case-law courts "
-                      "in place of the carried ones; not for use with --base or --add-courts",
-                      help_text)
+        self.assertIn("--line <name>", help_text)
+        self.assertIn("comma-separated court ids for the line's case-law courts; requires --line", help_text)
+        self.assertIn("the default line when absent", help_text)
 
     def test_derived_flags_reach_corpus_cut(self) -> None:
         for flag, value, missing in (

@@ -349,9 +349,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help="copy the pins of this committed lockfile label (a derived cut)")
     cut.add_argument("--add-courts", metavar="<ids>",
                      help="comma-separated court ids to add to the base's courts")
+    cut.add_argument("--line", metavar="<name>",
+                     help="lockfile line this cut extends; the default line when absent; "
+                          "not for use with --base or --add-courts")
     cut.add_argument("--courts", metavar="<ids>",
-                     help="comma-separated court ids that become this cut's case-law courts "
-                          "in place of the carried ones; not for use with --base or --add-courts")
+                     help="comma-separated court ids for the line's case-law courts; "
+                          "requires --line; not for use with --base or --add-courts")
     cut.set_defaults(handler=host_cli.run_corpus_cut, command_path="corpus cut")
     watch = corpus_sub.add_parser(
         "watch",
@@ -382,7 +385,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     build.add_argument("collection", choices=[item.name for item in COLLECTIONS], help="collection to build")
-    build.add_argument("--lockfile", metavar="LABEL", help="committed corpus lockfile label; defaults to the newest")
+    build.add_argument("--lockfile", metavar="LABEL", help="committed corpus lockfile label; defaults to the newest on the profile's line")
     build.add_argument(
         "--sample", action="store_true",
         help="build the eval sample generation on the CI sibling, without clusters, risk states, or a report",

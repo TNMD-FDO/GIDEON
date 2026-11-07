@@ -28,11 +28,11 @@ from gideon.host.egress import load_egress_allowlist
 from gideon.host.egress import render_errors as render_egress_errors
 from gideon.host.lock import load_host_lock
 from gideon.host.lock import render_errors as render_lock_errors
-from gideon.host.models import load_models_lock
+from gideon.host.models import load_models_lock, select_profile
 from gideon.host.models import render_errors as render_models_errors
 from gideon.host.nogpu import NOT_BUILD_BOX_DETAIL
 from gideon.host.provision import check_step
-from gideon.host.report import command, refusal
+from gideon.host.report import Problem, command, refusal
 from gideon.host.site import load_site
 from gideon.host.site import render_errors as render_site_errors
 from gideon.host.steps import (
@@ -179,10 +179,10 @@ def run_preflight(
     egress_result = load_egress_allowlist(actual_egress_path, host=io)
     courts_result = load_court_map(actual_courts_path, host=io)
     lockfiles_result = read_lockfile_directory(actual_lockfiles_path, host=io)
-    lockfile = lockfiles_result.newest
     lockfile_errors = lockfiles_result.errors
-    if lockfile is not None and courts_result.court_map is not None:
-        lockfile_errors += check_courts(lockfile, courts_result.court_map)
+    if courts_result.court_map is not None:
+        for committed_lockfile in lockfiles_result.lockfiles:
+            lockfile_errors += check_courts(committed_lockfile, courts_result.court_map)
     if lock_result.errors:
         print(render_lock_errors(lock_result.errors), file=sys.stderr)
     if models_result.errors:
@@ -218,6 +218,11 @@ def run_preflight(
         print(render_site_errors(site_result.errors), file=sys.stderr)
         return 1
 
+    profile = select_profile(models_result.lock, site_result.config.hardware_profile)
+    lockfile = (
+        None if isinstance(profile, Problem)
+        else lockfiles_result.newest_on(profile.corpus_line)
+    )
     no_gpu = nogpu.is_no_gpu_host(io)
     provision_context = ProvisionContext(
         host=io,

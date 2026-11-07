@@ -1,9 +1,15 @@
 """Generate synthetic research cases and retrace their evidence to canonical text.
 
+Trap questions attribute an opinion to the wrong court or ask an overruled
+holding as governing law. The latter uses a citation-centred, paragraph-bounded
+window of the overruling opinion alongside the overruled opinion's own text.
+
 Treatment relations use RELATION_KEYS, ACTOR_WORDS, and relation_line to name
-performed or reported treatment. TREATMENT_DISCARDS, PASSIVE_AUXILIARIES,
-PASSIVE_AGENT, PROCEDURAL_DISPOSITIONS, CONDITIONAL_MODALS, CONDITIONAL_WORDS,
-and NON_CASE_AGENTS define the sentence-pass rules before generation.
+performed or reported treatment. The sentence-pass rules resolve by/in and
+comma direction phrases, discard actor-drawn citations, and read performed
+forms only in holding sections; other no-phrase reads are recounted.
+TREATMENT_DISCARDS names these and the proximity, active-direction,
+procedural-disposition, conditional-verb, and unresolved-agent reasons.
 """
 
 import json
@@ -36,11 +42,21 @@ RELATION_KEYS: Final[tuple[str, ...]] = ("citing", "standing", "verb", "qualifie
 ACTOR_WORDS: Final[tuple[str, ...]] = ("performed", "reported")
 TREATMENT_DISCARDS: Final[tuple[str, ...]] = (
     "nearest-cite", "active-direction", "procedural-disposition", "conditional-verb", "agent-unresolved",
+    "actor-drawn", "recounted",
 )
+TRAP_DISCARDS: Final[tuple[str, ...]] = (
+    "list-qualified", "overruling-absent", "overruling-uncited",
+)
+PRODUCTION_CATEGORIES: Final[tuple[str, ...]] = ("treatment", "trap")
 PASSIVE_AUXILIARIES: Final[tuple[str, ...]] = ("is", "are", "was", "were", "be", "been", "being")
 PASSIVE_AGENT: Final[re.Pattern[str]] = re.compile(
     r"\s+(?:(?:in\s+part|on\s+other\s+grounds)\s+(?:by|in)|"
     r"by|in(?!\s+part\b))\b",
+    re.IGNORECASE,
+)
+# exempt: the sentence pass's own comma direction form, never the worker's.
+COMMA_DIRECTION: Final[re.Pattern[str]] = re.compile(
+    r"(?:\s+(?:in\s+part|on\s+other\s+grounds))?\s*,\s+",
     re.IGNORECASE,
 )
 TREATMENT_KINDS: Final[tuple[str, ...]] = ("negative", "caution", "none")
@@ -55,6 +71,8 @@ NEAR_MISS_CATEGORIES: Final[tuple[str, ...]] = tuple(BEHAVIORS)
 
 # exempt: a starting prompt window, in canonical-text code points.
 TEMPLATE_WINDOW_CHARS: Final[int] = 30_000
+# exempt: a starting overruling window, in canonical-text code points.
+OVERRULING_WINDOW_CHARS: Final[int] = 3_000
 # exempt: a starting lower bound for a supporting passage.
 PASSAGE_MIN_CHARS: Final[int] = 80
 # exempt: a starting upper bound for a supporting passage.
@@ -89,6 +107,10 @@ PLANNED_COUNTS: Final[Mapping[str, int]] = {
 }
 # exempt: a starting held-out share, one accepted cluster in two at intake.
 HELD_OUT_SHARE: Final[int] = 2
+# exempt: a starting listed-pair cap, at most one in two of the asked count.
+LISTED_SHARE: Final[int] = 2
+# exempt: a starting ceiling on documents the sentence pass reads per draft.
+PASS_DOCUMENTS: Final[int] = 2_000
 # exempt: the vocabulary from which invented case captions are drawn.
 SURNAMES: Final[tuple[str, ...]] = (
     "Smith", "Jones", "Taylor", "Brown", "Williams", "Wilson", "Johnson", "Davis",
@@ -133,6 +155,10 @@ CONDITIONAL_WORDS: Final[tuple[str, ...]] = ("if", "unless")
 # exempt: starting non-case agent words, corrected by the batches.
 NON_CASE_AGENTS: Final[tuple[str, ...]] = (
     "statute", "act", "rule", "rules", "amendment", "regulation", "regulations", "constitution", "legislation",
+)
+# exempt: starting performed-form adverbs, alongside any word ending in ly.
+PERFORMED_ADVERBS: Final[tuple[str, ...]] = (
+    "now", "today", "hereby", "therefore", "thus", "accordingly", "also", "expressly", "specifically",
 )
 # exempt: a starting storage lower bound for each generated string.
 _STRING_MIN_CHARS: Final[int] = 1
@@ -196,6 +222,22 @@ Asked court: {asked_court}
 {text}
 </opinion-text>
 """
+_OVERRULED_USER_TEMPLATE: Final[str] = """Court: {court}
+Decided: {decided}
+Reporter citations: {cites}
+Case name: {caption}
+Overruling case name: {overruling_caption}
+Overruling citations: {overruling_cites}
+Overruling year: {overruling_year}
+
+<overruling-text>
+{overruling_window}
+</overruling-text>
+
+<opinion-text>
+{text}
+</opinion-text>
+"""
 _PREMISE_USER_TEMPLATE: Final[str] = """Court: {court}
 Decided: {decided}
 Reporter citations: {cites}
@@ -233,6 +275,19 @@ premise about the court is false.
 Write an expected answer of one or two sentences stating that the named
 opinion is the court shown's, not the asked court's, and what it held. Use the
 case name shown, its parties in the order shown, and name the true court.
+"""
+_OVERRULED_SYSTEM_TEXT: Final[str] = """Write one trap question an attorney would type.
+
+The question names the opinion shown, by the case name shown, and asks what
+rule or standard it states as the governing law today. Never name the
+overruling decision in the question. The question's premise that the rule
+governs is false.
+
+Write an expected answer of one or two sentences stating what the opinion
+shown held and that the overruling decision overruled it. Name the overruling
+decision by the overruling case name shown with its year. Use the overruling
+text to identify the overruled doctrine; the supporting passage must be the
+overruled opinion's own statement of that doctrine.
 """
 _POISONED_PREMISE_SYSTEM_TEXT: Final[str] = """Write one poisoned-premise question an attorney would type.
 
@@ -487,6 +542,13 @@ TEMPLATES: Final[Mapping[str, judge.JudgePrompt]] = {
         slots=("court", "decided", "cites", "caption", "asked_court", "text"),
         schema_name="synthetic_trap", schema=_PROPOSAL_SCHEMA,
     ),
+    "trap@2": judge.JudgePrompt(
+        id="trap@2", system=_OVERRULED_SYSTEM_TEXT + _NEAR_MISS_RULES,
+        user_template=_OVERRULED_USER_TEMPLATE,
+        slots=("court", "decided", "cites", "caption", "overruling_caption", "overruling_cites",
+               "overruling_year", "overruling_window", "text"),
+        schema_name="synthetic_trap", schema=_PROPOSAL_SCHEMA,
+    ),
     "poisoned-premise@1": judge.JudgePrompt(
         id="poisoned-premise@1", system=_POISONED_PREMISE_SYSTEM_TEXT + _NEAR_MISS_RULES,
         user_template=_PREMISE_USER_TEMPLATE,
@@ -509,6 +571,7 @@ TEMPLATE_DIGESTS: Final[Mapping[str, str]] = {
     "section-attribution@1": "cbe71a789b1ddfe21fb57ade92f10ea5b7ee1d617e63229ed047698264b1586c",
     "unanswerable@1": "1335894e6f6ce1a887b5ebcf8b708a37e1860c2a03e3bd6246dc8875168703b6",
     "trap@1": "70833aaccf18a4c14d953aab579a1c9e1f48ecdeaacf9c62ed36446aee8d626e",
+    "trap@2": "e9310a467514c04f5398acf8f927c1b6b4030cc0bf7f13614981c782d884e9ea",
     "poisoned-premise@1": "e60532d376ac4f8f7053d80dec0ac2561d03a603f45dfe89406745a7fa525680",
 }
 
@@ -630,6 +693,29 @@ def case_path(category: str) -> str:
     """The category file relative to an eval-set root."""
 
     return f"research-qa/synthetic-{category}.jsonl"
+
+
+def citation_window(text: str, start: int, end: int) -> tuple[int, int]:
+    """Return a citation's window: centred in the budget, clamped to the text, whole paragraphs.
+
+    An edge falling inside a paragraph moves inward to that paragraph's
+    boundary when one lies between the edge and the citation, so the window
+    never exceeds the budget and shows no cut paragraph it can avoid.
+    """
+
+    budget = max(OVERRULING_WINDOW_CHARS, end - start)
+    first = max(0, start - (budget - (end - start)) // 2)
+    last = min(len(text), first + budget)
+    first = max(0, last - budget)
+    if first > 0 and text[first - 2:first] != "\n\n":
+        boundary = text.find("\n\n", first, start)
+        if boundary >= 0:
+            first = boundary + 2
+    if last < len(text) and text[last:last + 2] != "\n\n":
+        boundary = text.rfind("\n\n", end, last)
+        if boundary >= 0:
+            last = boundary
+    return first, last
 
 
 def _proposal_body(
@@ -874,29 +960,66 @@ def conditional_verb(sentence: str, verb_start: int) -> bool:
     )
 
 
+def direction_phrase(
+    sentence: str, verb_end: int, cites: Iterable[tuple[int, int, int | None]],
+) -> int | None:
+    """Find a by/in phrase or a comma form immediately followed by a case cite."""
+
+    phrase = PASSIVE_AGENT.match(sentence, verb_end)
+    if phrase is not None:
+        return phrase.end()
+    phrase = COMMA_DIRECTION.match(sentence, verb_end)
+    if phrase is not None and any(start == phrase.end() for start, _, _ in cites):
+        return phrase.end()
+    return None
+
+
 def reported_agent(
     sentence: str, verb_end: int, cited_cluster: int,
-    cites: Iterable[tuple[int, int, int | None]],
+    cites: Iterable[tuple[int, int, int | None]], drawn: tuple[int, int],
 ) -> Agent:
     """Resolve a direction phrase's first following case citation as the actor."""
 
-    phrase = PASSIVE_AGENT.match(sentence, verb_end)
+    cites = tuple(cites)
+    if all((start, end) != drawn for start, end, _ in cites):
+        cites = (*cites, (*drawn, cited_cluster))
+    phrase = direction_phrase(sentence, verb_end, cites)
     if phrase is None:
         return Agent("performed")
     following = min(
-        (cite for cite in cites if phrase.end() <= cite[0] < len(sentence) and cite[1] <= len(sentence)),
+        (cite for cite in cites if phrase <= cite[0] < len(sentence) and cite[1] <= len(sentence)),
         key=lambda cite: cite[0], default=None,
     )
     if following is None:
         return Agent("unresolved")
     start, end, cluster = following
-    gap = sentence[phrase.end():start]
+    if (start, end) == drawn:
+        return Agent("actor-drawn")
+    gap = sentence[phrase:start]
     if (
         cluster is None or cluster == cited_cluster or ";" in gap
         or any(word in NON_CASE_AGENTS for word in re.findall(r"\b\w+\b", gap.casefold()))
     ):
         return Agent("unresolved")
     return Agent("reported", cluster, (start, end))
+
+
+def performed_read(sentence: str, verb_start: int, verb_end: int, standing: str) -> bool:
+    """Read present active or passive treatment only in a holding section."""
+
+    if standing not in treatment.HOLDING_SECTIONS:
+        return False
+    verb = sentence[verb_start:verb_end].casefold()
+    words = re.findall(r"\b\w+\b", sentence[:verb_start].casefold())
+    preceding = next(
+        (word for word in reversed(words) if word not in PERFORMED_ADVERBS and not word.endswith("ly")),
+        None,
+    )
+    if verb.endswith("ed"):
+        return preceding in ("is", "are")
+    if verb.endswith(("e", "es")):
+        return preceding == "we" and words[-1] != "to"
+    return False
 
 
 def procedural_disposition(text: str) -> bool:
