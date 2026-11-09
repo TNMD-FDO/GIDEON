@@ -26,14 +26,14 @@ GUARDRAILS_PATH: Final[Path] = SET_ROOT / "guardrails"
 SEED_PATH: Final[Path] = Path("eval/seed/guardrails")
 PINNED_PREFIXES: Final[tuple[tuple[str, int, str], ...]] = (
     ("deadline-trap", 105, "d38ceb4e875111cf7503b8c2e378204e38168996e36f36e8a6859ff3d5828f76"),
-    ("guidelines-range", 96, "c25da2f636b208315f61935299d2fa3cea4e5a04084fb239912f232ae3502e0b"),
+    ("guidelines-range", 97, "43ad9961fdee3e83dcd9465aebfa6bfca4449bbff4b78119cc20748fadea1d64"),
     ("sentence-credit", 89, "d7efe667a7b88e9811452162ed1ebda5c4937bf68bee4e45454ffe4c77a2c03f"),
 )
 # The counts at the conversion: lines, active, active
 # positives, active controls, superseded. An append moves them with the pins.
 COUNTS: Final[dict[str, tuple[int, int, int, int, int]]] = {
     "deadline-trap": (105, 102, 39, 63, 3),
-    "guidelines-range": (96, 87, 45, 42, 9),
+    "guidelines-range": (97, 88, 45, 43, 9),
     "sentence-credit": (89, 86, 39, 47, 3),
 }
 # Active positives with no written pattern and nothing derived from the canned

@@ -1,18 +1,24 @@
 """Draft treatment and overruled trap pairs from production, other cases from the sibling's sample.
 
 Trap pairs use the generation's recorded treatment snapshot, rejecting qualified
-rows and absent or uncited overruling opinions before requests. Their sheets
-show the overruling citation's canonical window beside the overruled passage.
+rows and absent or uncited overruling opinions. Before the draw, an anchor pass
+reads each surviving overruling opinion's text and rows once and rejects pairs
+with no nearby holding-section repudiation as overruling-unstated. Their sheets
+show the canonical window around the last kept phrase and its anchor offsets
+beside the overruled passage.
 
 Treatment's sentence pass runs on demand in draw order, once per document up
 to PASS_DOCUMENTS, and counts unreached candidates as unread. It filters
-nearest-cite, active-direction, procedural-disposition, conditional-verb,
-actor-drawn, agent-unresolved, and recounted edges before generation. Listed
+procedural-disposition documents, then sentence-clipped, nearest-cite,
+active-direction, conditional-verb, actor-drawn, agent-unresolved, recounted,
+and procedural-object edges before generation. Listed
 pairs precede the remaining seeded draw, capped at count // LISTED_SHARE kept
 pairs. A listed result consumed after that cap is reached is dropped whole,
 with no row, discard, or figures, so rows and ordinals match a serial walk.
 Performed or reported actors appear in the prompt and on the sheet. Resolved
 sentence citations reach the manifest and the sheet's correction guidance.
+A limiting phrase on an edge recorded none drafts in_part into the prompt,
+relation, and sheet, which names the recorded qualifier beside the drafted one.
 """
 
 import argparse
@@ -140,6 +146,7 @@ FROM (
 PAIRS_SQL: Final[str] = f"""SELECT COALESCE(jsonb_agg(to_jsonb(listed_pairs)), '[]'::jsonb)::text
 FROM (
     SELECT k.row_id, k.qualifier, k.overruling_name, k.overruling_year,
+        k.overruled_name, k.overruled_cluster,
         overruled.source_id, overruled.generation_sha256, overruled.doc_id,
         overruled.opinion_id, overruled.source,
         CASE WHEN overruling.opinion_id IS NULL THEN NULL
@@ -298,6 +305,8 @@ class Pair:
     qualifier: str
     overruling_name: str = field(repr=False)
     overruling_year: int
+    overruled_name: str = field(repr=False)
+    overruled_cluster: int
     overruled: tuple[str, str, str, int]
     overruling: Overruling | None
 
@@ -497,7 +506,8 @@ def _pair_rows(io: DraftHost, rendered_dir: PathLike, generation: str, snapshot:
     ))
     fix = _record_fix(rendered_dir)
     keys = {"row_id", "qualifier", "overruling_name", "overruling_year", "source_id",
-            "generation_sha256", "doc_id", "opinion_id", "source", "overruling"}
+            "generation_sha256", "doc_id", "opinion_id", "source", "overruling",
+            "overruled_name", "overruled_cluster"}
     overruling_keys = {item.name for item in fields(Overruling)} | {"source"}
     seen: set[str] = set()
     result: list[Pair] = []
@@ -509,6 +519,8 @@ def _pair_rows(io: DraftHost, rendered_dir: PathLike, generation: str, snapshot:
             or row["qualifier"] not in QUALIFIERS
             or not isinstance(row["overruling_name"], str) or not row["overruling_name"].strip()
             or not _positive(row["overruling_year"])
+            or not isinstance(row["overruled_name"], str) or not row["overruled_name"].strip()
+            or not _positive(row["overruled_cluster"])
             or not _positive(row["opinion_id"]) or not isinstance(row["source"], str)
             or row["source_id"] != indexsample.source_id(row["source"], row["opinion_id"])
             or not isinstance(row["source_id"], str) or _SOURCE_ID.fullmatch(row["source_id"]) is None
@@ -543,6 +555,7 @@ def _pair_rows(io: DraftHost, rendered_dir: PathLike, generation: str, snapshot:
             )
         result.append(Pair(
             row["row_id"], row["qualifier"], row["overruling_name"], row["overruling_year"],
+            row["overruled_name"], row["overruled_cluster"],
             (row["source_id"], row["generation_sha256"], row["doc_id"], row["opinion_id"]), overruling,
         ))
         seen.add(row["row_id"])
@@ -662,7 +675,7 @@ def _premises_in_record(
 
 
 def _sections(
-    io: DraftHost, rendered_dir: PathLike, document: synthetic.DrawDocument, text: str,
+    io: DraftHost, rendered_dir: PathLike, document: synthetic.DrawDocument | Overruling, text: str,
 ) -> tuple[SectionRow, ...]:
     prefix = bind("doc_id", document.doc_id) + "\n" + bind("pipeline", PIPELINE_VERSION) + "\n"
     fix = _record_fix(rendered_dir)
@@ -682,7 +695,7 @@ def _sections(
 
 
 def _document_rows(
-    io: DraftHost, rendered_dir: PathLike, document: synthetic.DrawDocument, text: str,
+    io: DraftHost, rendered_dir: PathLike, document: synthetic.DrawDocument | Overruling, text: str,
 ) -> tuple[tuple[SectionRow, ...], tuple[NewCitation, ...]]:
     sections = _sections(io, rendered_dir, document, text)
     prefix = bind("doc_id", document.doc_id) + "\n" + bind("pipeline", PIPELINE_VERSION) + "\n"
@@ -789,11 +802,11 @@ def _closed_book(
     return proposal, retraced, reading
 
 
-def _treatment_sentence(
+def _treatment_bounds(
     rendered_dir: PathLike, edge: Edge, text: str,
     sections: Sequence[SectionRow], citations: Sequence[NewCitation],
-) -> synthetic.Retraced | synthetic.Discard:
-    """Hold an edge to the recorded rows and fix its pattern-set sentence."""
+) -> tuple[SectionRow, NewCitation, tuple[int, int]]:
+    """Hold an edge to the recorded rows and bound its pattern-set sentence."""
 
     citation = next((row for row in citations if row.citation_id == edge.citation_id), None)
     section = next((row for row in sections if row.section_id == edge.section_id), None)
@@ -805,7 +818,18 @@ def _treatment_sentence(
         or not section.char_start <= citation.char_start < citation.char_end <= section.char_end
     ):
         raise DraftError("treatment", "edge citation or section disagrees with the record", _record_fix(rendered_dir))
-    first, last = treatment.sentence(text, citation.char_start, citation.char_end, section, citations, treatment.RULES)
+    return section, citation, treatment.sentence(
+        text, citation.char_start, citation.char_end, section, citations, treatment.RULES,
+    )
+
+
+def _treatment_sentence(
+    rendered_dir: PathLike, edge: Edge, text: str,
+    sections: Sequence[SectionRow], citations: Sequence[NewCitation],
+) -> synthetic.Retraced | synthetic.Discard:
+    """Fix the recorded pattern-set sentence to its non-blank code points."""
+
+    _, _, (first, last) = _treatment_bounds(rendered_dir, edge, text, sections, citations)
     return synthetic.fix_span(text, first, last, edge.verb_start, edge.verb_end)
 
 
@@ -824,18 +848,22 @@ def _canonical_text(io: DraftHost, document: synthetic.DrawDocument | Overruling
 def _treatment_sentence_pass(
     io: DraftHost, rendered_dir: PathLike, document: synthetic.DrawDocument,
     edges: Sequence[Edge],
-) -> tuple[tuple[str | tuple[int, str] | None, tuple[tuple[int, str], ...]], ...]:
-    """Resolve actors, discards, and sentence citations with one document read."""
+) -> tuple[tuple[str | tuple[int, str] | None, tuple[tuple[int, str], ...], str], ...]:
+    """Resolve actors, citations, and drafted qualifiers with one document read."""
 
     text = _canonical_text(io, document)
     if synthetic.procedural_disposition(text):
-        return (("procedural-disposition", ()),) * len(edges)
+        return tuple(("procedural-disposition", (), edge.qualifier) for edge in edges)
     sections, citations = _document_rows(io, rendered_dir, document, text)
-    results: list[tuple[str | tuple[int, str] | None, tuple[tuple[int, str], ...]]] = []
+    results: list[tuple[str | tuple[int, str] | None, tuple[tuple[int, str], ...], str]] = []
     for edge in edges:
-        retraced = _treatment_sentence(rendered_dir, edge, text, sections, citations)
+        section, citation, (first, last) = _treatment_bounds(rendered_dir, edge, text, sections, citations)
+        if synthetic.sentence_clipped(text, citation.char_start, citation.char_end, section, citations, first, last):
+            results.append(("sentence-clipped", (), edge.qualifier))
+            continue
+        retraced = synthetic.fix_span(text, first, last, edge.verb_start, edge.verb_end)
         if isinstance(retraced, synthetic.Discard):
-            results.append((None, ()))
+            results.append((None, (), edge.qualifier))
             continue
         case_cites = tuple(row for row in citations if row.cite_type == "case_cite"
                            and retraced.start <= row.char_start < row.char_end <= retraced.end)
@@ -876,7 +904,7 @@ def _treatment_sentence_pass(
                 ) == agent.span)
                 result = (agent.cluster, citation.raw_cite)
             elif synthetic.performed_read(retraced.quote, verb_start, verb_end, edge.standing):
-                result = None
+                result = "procedural-object" if synthetic.procedural_object(retraced.quote, verb_start, verb_end) else None
             else:
                 result = "recounted"
         resolved: dict[int, str] = {}
@@ -884,7 +912,7 @@ def _treatment_sentence_pass(
             for row in sorted(case_cites, key=lambda row: row.char_start):
                 if row.to_cluster is not None:
                     resolved.setdefault(row.to_cluster, row.raw_cite)
-        results.append((result, tuple(resolved.items())))
+        results.append((result, tuple(resolved.items()), synthetic.drafted_qualifier(retraced.quote, edge.qualifier)))
     return tuple(results)
 
 
@@ -892,6 +920,7 @@ def _treatment_candidate(
     io: DraftHost, rendered_dir: PathLike, served_model_name: str,
     template: judge.JudgePrompt, facts: OpinionFacts, document: synthetic.DrawDocument,
     edge: Edge, actor: tuple[int, str] | None, text: str, figures: Figures,
+    qualifier: str | None = None,
 ) -> tuple[synthetic.Proposal, synthetic.Retraced, synthetic.ClosedBook] | str:
     sections, citations = _document_rows(io, rendered_dir, document, text)
     retraced = _treatment_sentence(rendered_dir, edge, text, sections, citations)
@@ -899,6 +928,7 @@ def _treatment_candidate(
         return retraced.reason
     assert edge.cited is not None and edge.cited.case_name is not None and facts.case_name is not None
     assert edge.cluster is not None
+    qualifier = edge.qualifier if qualifier is None else qualifier
     proposal, prompt, completion, seconds = synthetic.propose(
         io, rendered_dir, served_model_name=served_model_name, template=template,
         slots={
@@ -906,9 +936,9 @@ def _treatment_candidate(
             "parties": facts.case_name, "cited_parties": edge.cited.case_name,
             "cited_cites": "; ".join(edge.cited.cites), "cited_court": edge.cited.court,
             "kind": document.kind,
-            "signal": edge.signal, "qualifier": edge.qualifier, "standing": edge.standing,
+            "signal": edge.signal, "qualifier": qualifier, "standing": edge.standing,
             "relation": synthetic.relation_line(
-                facts.case_name, edge.standing, edge.signal, edge.qualifier, edge.cited.case_name, edge.cluster,
+                facts.case_name, edge.standing, edge.signal, qualifier, edge.cited.case_name, edge.cluster,
                 actor_cite=actor[1] if actor is not None else None,
                 actor_cluster=actor[0] if actor is not None else None,
             ),
@@ -931,8 +961,9 @@ def _document(
     court_names: Mapping[str, str] | None = None,
     actor: tuple[int, str] | None = None,
     pair: Pair | None = None,
-    overruling_windows: dict[str, tuple[int, int, str]] | None = None,
+    overruling_windows: Mapping[str, tuple[int, int, int, int, str]] | None = None,
     citations: Sequence[tuple[int, str]] = (),
+    qualifier: str | None = None,
 ) -> tuple[
     tuple[synthetic.Proposal, synthetic.Retraced, synthetic.ClosedBook] | str,
     Figures, SectionRow | None, tuple[SectionRow, ...],
@@ -945,18 +976,10 @@ def _document(
         return "document-short", figures, None, ()
     target: SectionRow | None = None
     sections: tuple[SectionRow, ...] = ()
-    overruling_window: tuple[int, int, str] | None = None
+    overruling_window: tuple[int, int, int, int, str] | None = None
     if pair is not None:
-        assert pair.overruling is not None
-        overruling = pair.overruling
-        overruling_text = _canonical_text(io, overruling)
-        assert overruling.char_start is not None and overruling.char_end is not None
-        if not 0 <= overruling.char_start < overruling.char_end <= len(overruling_text):
-            raise DraftError("pairs", "overruling citation span disagrees with the canonical text", _record_fix(rendered_dir))
-        first, last = synthetic.citation_window(overruling_text, overruling.char_start, overruling.char_end)
-        overruling_window = (first, last, overruling_text[first:last])
-        if overruling_windows is not None:
-            overruling_windows[pair.row_id] = overruling_window
+        assert overruling_windows is not None and pair.row_id in overruling_windows
+        overruling_window = overruling_windows[pair.row_id]
     if template.id.startswith("section-attribution@"):
         sections = _sections(io, rendered_dir, document, text)
         target_types = synthetic.SEPARATE_SECTIONS if document.kind == "separate" else treatment.HOLDING_SECTIONS
@@ -968,12 +991,14 @@ def _document(
         if target is None:
             raise DraftError("sections", "target section is absent from the record", _record_fix(rendered_dir))
     if edge is not None:
-        result = _treatment_candidate(io, rendered_dir, served_model_name, template, facts, document, edge, actor, text, figures)
+        result = _treatment_candidate(
+            io, rendered_dir, served_model_name, template, facts, document, edge, actor, text, figures, qualifier,
+        )
     else:
         result = _candidate(
             io, rendered_dir, served_model_name, template, facts, text, figures,
             kind=document.kind, target=target, near=document.near, court_names=court_names,
-            pair=pair, overruling_window=overruling_window[2] if overruling_window is not None else "",
+            pair=pair, overruling_window=overruling_window[4] if overruling_window is not None else "",
         )
     return result, figures, target, sections
 
@@ -987,27 +1012,29 @@ def _sheet(ordinal: int, document: synthetic.DrawDocument, facts: OpinionFacts,
            *, required: bool, edge: Edge | None = None, target: SectionRow | None = None,
            sections: Sequence[SectionRow] = (), category: str = "",
            court_names: Mapping[str, str] | None = None, actor: tuple[int, str] | None = None,
-           pair: Pair | None = None, overruling_window: tuple[int, int, str] | None = None,
-           citations: Sequence[tuple[int, str]] = ()) -> str:
+           pair: Pair | None = None, overruling_window: tuple[int, int, int, int, str] | None = None,
+           citations: Sequence[tuple[int, str]] = (), qualifier: str | None = None) -> str:
     suffix = manifest.SHEET_REQUIRED if required else manifest.SHEET_OPTIONAL
     extra: tuple[str, ...] = ()
     relation: tuple[str, ...] = ()
     if edge is not None:
         assert edge.cited is not None and edge.cited.case_name is not None and facts.case_name is not None
         assert edge.cluster is not None
+        qualifier = edge.qualifier if qualifier is None else qualifier
         relation = ("Relation: " + synthetic.relation_line(
-            facts.case_name, edge.standing, edge.signal, edge.qualifier, edge.cited.case_name, edge.cluster,
+            facts.case_name, edge.standing, edge.signal, qualifier, edge.cited.case_name, edge.cluster,
             actor_cite=actor[1] if actor is not None else None,
             actor_cluster=actor[0] if actor is not None else None,
         ),)
         if edge.listed_row is not None:
             relation += (f"Listed: {edge.listed_row}",)
+        qualifier_note = f" (drafted from a limiting phrase; signal {edge.qualifier})" if qualifier != edge.qualifier else ""
         extra = (
             f"Cited parties: {edge.cited.case_name}",
             "Cited citations: " + ("; ".join(edge.cited.cites) or "no cite recorded"),
             f"Cited court: {edge.cited.court}",
             "Cited original: " + manifest.original_link(edge.cited.cites),
-            f"Kind: {document.kind} | verb {edge.signal} | qualifier {edge.qualifier} | standing {edge.standing}",
+            f"Kind: {document.kind} | verb {edge.signal} | qualifier {qualifier}{qualifier_note} | standing {edge.standing}",
             f"Edge: {edge.citation_id} | signal {edge.signal_id} | pattern set {edge.pattern_set}",
             "Citations: " + "; ".join(
                 f"{raw_cite} (cluster {cluster}"
@@ -1029,12 +1056,13 @@ def _sheet(ordinal: int, document: synthetic.DrawDocument, facts: OpinionFacts,
     elif pair is not None:
         assert pair.overruling is not None and overruling_window is not None
         overruling = pair.overruling
-        first, last, text = overruling_window
+        first, last, anchor_start, anchor_end, text = overruling_window
         relation = (f"Listed: {pair.row_id}",)
         extra = (
             f"Near miss: overruled by {overruling.case_name} ({pair.overruling_year}) | cites "
             f"{'; '.join(overruling.cites)} | source {overruling.source_id} | behavior {synthetic.BEHAVIORS[category]}",
-            f"Overruling window: sha256 {overruling.generation_sha256} [{first}, {last})",
+            f"Overruling window: sha256 {overruling.generation_sha256} [{first}, {last}) "
+            f"anchor [{anchor_start}, {anchor_end})",
             text,
         )
     elif category in synthetic.NEAR_MISS_CATEGORIES:
@@ -1166,9 +1194,9 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
             raise DraftError("write", "output directory cannot be created", _OUT_FIX) from error
         edges: dict[str, Edge] = {}
         pairs: dict[str, Pair] = {}
-        # Workers write distinct row ids; sheets read after their futures complete.
-        overruling_windows: dict[str, tuple[int, int, str]] = {}
+        overruling_windows: dict[str, tuple[int, int, int, int, str]] = {}
         actors: dict[str, tuple[int, str] | None] = {}
+        qualifiers: dict[str, str] = {}
         citations: dict[str, tuple[tuple[int, str], ...]] = {}
         edge: Edge | None
         pair: Pair | None
@@ -1178,6 +1206,7 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
             documents = []
             pair_skips: Counter[str] = Counter()
             drawable_pairs = 0
+            eligible_pairs: list[tuple[synthetic.DrawDocument, Pair]] = []
             for pair in pair_rows:
                 document = drawable.get(pair.overruled[0])
                 if document is None:
@@ -1194,11 +1223,39 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                     discard(document.source_id, reason, pair.row_id)
                     pair_skips[reason] += 1
                 else:
-                    documents.append(replace(document, item=pair.row_id))
-                    pairs[pair.row_id] = pair
+                    eligible_pairs.append((document, pair))
+            overruling_texts: dict[str, str] = {}
+            overruling_rows: dict[str, tuple[tuple[SectionRow, ...], tuple[NewCitation, ...]]] = {}
+            for document, pair in eligible_pairs:
+                overruling = pair.overruling
+                assert overruling is not None
+                if overruling.generation_sha256 not in overruling_texts:
+                    overruling_texts[overruling.generation_sha256] = _canonical_text(io, overruling)
+                text = overruling_texts[overruling.generation_sha256]
+                if overruling.doc_id not in overruling_rows:
+                    overruling_rows[overruling.doc_id] = _document_rows(io, rendered_dir, overruling, text)
+                sections, citation_rows = overruling_rows[overruling.doc_id]
+                if not any(
+                    row.citation_id == overruling.citation_id
+                    and (row.char_start, row.char_end) == (overruling.char_start, overruling.char_end)
+                    for row in citation_rows
+                ):
+                    raise DraftError("pairs", "overruling citation disagrees with the record", _record_fix(rendered_dir))
+                anchor = synthetic.repudiation_anchor(
+                    text, sections, citation_rows, synthetic.name_words(pair.overruled_name), pair.overruled_cluster,
+                )
+                if anchor is None:
+                    discard(document.source_id, "overruling-unstated", pair.row_id)
+                    pair_skips["overruling-unstated"] += 1
+                    continue
+                first, last = synthetic.citation_window(text, *anchor)
+                overruling_windows[pair.row_id] = (first, last, *anchor, text[first:last])
+                documents.append(replace(document, item=pair.row_id))
+                pairs[pair.row_id] = pair
             print(f"near-miss: listed pairs {len(pair_rows)}, drawable {drawable_pairs}, "
                   f"qualified {pair_skips['list-qualified']}, absent {pair_skips['overruling-absent']}, "
-                  f"uncited {pair_skips['overruling-uncited']}", file=stdout, flush=True)
+                  f"uncited {pair_skips['overruling-uncited']}, unstated {pair_skips['overruling-unstated']}",
+                  file=stdout, flush=True)
         elif category in _ASKED_COURT_CATEGORIES:
             present = _recorded_courts(io, rendered_dir)
             court_result = courts.load_court_map(courts.default_courts_path())
@@ -1322,12 +1379,13 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                             )
                             read_documents.add(document.doc_id)
                             unread -= len(candidates)
-                            for candidate, (sentence_result, sentence_citations) in zip(candidates, sentence_results, strict=True):
+                            for candidate, (sentence_result, sentence_citations, qualifier) in zip(candidates, sentence_results, strict=True):
                                 if isinstance(sentence_result, str):
                                     discard(candidate.source_id, sentence_result, candidate.item, candidate.kind)
                                     skipped[sentence_result] += 1
                                 else:
                                     actors[candidate.item] = sentence_result
+                                    qualifiers[candidate.item] = qualifier
                                     citations[candidate.item] = sentence_citations
                                     eligible[candidate.kind] += 1
                                     eligible["performed" if sentence_result is None else "reported"] += 1
@@ -1367,7 +1425,7 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                         _document, io, rendered_dir, target.served_model_name,
                         template, document, facts[document.opinion_id], edges.get(document.item), court_names,
                         actors.get(document.item), pairs.get(document.item), overruling_windows,
-                        citations.get(document.item, ()),
+                        citations.get(document.item, ()), qualifiers.get(document.item),
                     )))
                     return True
                 return False
@@ -1413,7 +1471,7 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                     if edge is not None:
                         expected["state"] = document.kind
                         expected["relation"] = dict(zip(synthetic.RELATION_KEYS, (
-                            document.source_id, edge.standing, edge.signal, edge.qualifier, edge.cluster,
+                            document.source_id, edge.standing, edge.signal, qualifiers[document.item], edge.cluster,
                             actor[0] if actor is not None else document.source_id,
                         ), strict=True))
                         if edge.listed_row is not None:
@@ -1434,7 +1492,7 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                         edge=edge, target=section_target, sections=sections,
                         category=category, court_names=court_names, actor=actor,
                         pair=pair, overruling_window=overruling_windows.get(document.item),
-                        citations=citations.get(document.item, ()),
+                        citations=citations.get(document.item, ()), qualifier=qualifiers.get(document.item),
                     ))
                     entries.append(dict(zip(manifest.ENTRY_KEYS, (
                         ordinal, document.source_id, document.sha256, document.doc_id, retraced.start, retraced.end,

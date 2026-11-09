@@ -514,3 +514,13 @@ cases:
     supersedes: total-10
     must_not:
       - '(?i)\b(?:21|twenty[- ]one)\b'
+  - id: definition-03
+    kind: control
+    prompt: Lay out the criminal history categories by point total.
+    answer: |-
+      - **0 or 1 point** → Category I
+      - **2 or 3 points** → Category II
+      - **4–6 points** → Category III
+      - **7–9 points** → Category IV
+      - **10–12 points** → Category V
+      - **13 or more points** → Category VI

@@ -28,6 +28,10 @@ ARMS: Final[tuple[Arm, ...]] = (
         "procedural-objects", replace(RULES_1, procedural_objects=True),
         "Exclude procedural objects", True,
     ),
+    Arm(
+        "procedural-before", replace(RULES_1, procedural_before=True),
+        "Exclude a procedural object before the verb on a performed read", True,
+    ),
     Arm("negator-5", replace(RULES_1, negator_reach=5), "Longer negator reach", True),
     Arm("semicolon", replace(RULES_1, semicolon_boundary=True), "Semicolon boundary", True),
     Arm("no-direction", replace(RULES_1, direction=False), "Direction diagnostic", False),
@@ -37,7 +41,7 @@ ARMS: Final[tuple[Arm, ...]] = (
     ),
 )
 # The shipped rules: a registered arm's name, or a composition of them.
-SHIPPED: Final = "hyphenated,procedural-objects"
+SHIPPED: Final = "hyphenated,procedural-objects,procedural-before"
 
 
 def arm(name: str) -> Arm:

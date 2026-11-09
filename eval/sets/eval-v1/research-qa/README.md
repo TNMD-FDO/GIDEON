@@ -76,8 +76,8 @@ names:
 - `unanswerable` — the question asks for authority absent from the corpus;
   the expected response abstains and identifies the nearest passage.
 - `trap` — the question attributes an opinion to the wrong court (`trap@1`),
-  or asks an overruled Supreme Court holding as governing law (`trap@2`). The
-  expected response qualifies the premise: it names the true court for the
+  or asks an overruled Supreme Court holding as governing law (`trap@2` and
+  `trap@3`). The expected response qualifies the premise: it names the true court for the
   first kind, or the overruling decision and its year for the second.
 - `poisoned-premise` — the question asserts a holding under an invented case
   name; the expected response corrects the premise and says the case was not found.
@@ -115,18 +115,21 @@ legal research question, so neither can be one here.
 | `retrieval` (synthetic) | 78 |
 | `synthesis` (synthetic) | 48 |
 | `existence` (synthetic) | 17 |
-| `treatment` (synthetic) | 18 |
+| `treatment` (synthetic) | 37 |
 | `section-attribution` (synthetic) | 19 |
 | `unanswerable` (synthetic) | 26 |
-| `trap` (synthetic) | 15 |
+| `trap` (synthetic) | 19 |
 | `poisoned-premise` (synthetic) | 8 |
 
-Thirty-eight harvest cases and 259 synthetic cases, 297 in all. Trap's fifteen
-are ten of the wrong-court kind (`trap@1`) and five of the superseded-version
-kind (`trap@2`). Treatment's
-first two batches were rejected whole by the reader; its eighteen come from the
-third (six) and the fourth (twelve: all negative and in majority opinions,
-four performed and eight reported, three listed and nine unlisted). Forty was the
+Thirty-eight harvest cases and 282 synthetic cases, 320 in all. Trap's nineteen
+are ten of the wrong-court kind (`trap@1`) and nine of the superseded-version
+kind: five under `trap@2` and four under `trap@3`. Treatment's
+first two batches were rejected whole by the reader; its thirty-seven come from
+the third (six), the fourth (twelve: all negative and in majority opinions,
+four performed and eight reported, three listed and nine unlisted), and the
+fifth, the first under `treatment@4` (nineteen: seventeen negative, one caution,
+and one none; eleven performed and eight reported; nine listed and ten unlisted;
+six with a drafted `in_part`). Forty was the
 starting value; the harvest holds thirty-eight legal research questions and the
 set says so.
 
@@ -144,11 +147,12 @@ The categories differ inside the common case shape:
 | `retrieval` | `retrieval@2` | `question`, `answer`, `passage` | Proposed passage retraced to canonical text | `answer`, `must_cite` | None | 80 |
 | `synthesis` | `synthesis@2` | `question`, `answer`, `passage` | Proposed passage retraced to canonical text | `answer`, `must_cite` | None | 50 |
 | `existence` | `existence@2` | `question`, `answer`, `passage` | Proposed passage retraced to canonical text | `answer`, `must_cite` | None | 20 |
-| `treatment` | `treatment@3` | `question`, `answer` | Sentence fixed from the record by the pattern set's sentence rule | `answer`, `must_cite`, `state`: `negative`, `caution`, `none`; `relation`: ordered `citing` (first gold source id), `standing` (`SECTION_TYPES`), `verb` (`TREATMENT_SIGNALS`), `qualifier` (`QUALIFIERS`), `cited` (first gold positive cluster id), `actor` (the citing source id when performed; a positive cluster id other than the cited when reported) | `citation_id`, `signal_id`, `pattern_set`, `cluster` | 30 |
+| `treatment` | `treatment@4` | `question`, `answer` | Sentence fixed from the record by the pattern set's sentence rule | `answer`, `must_cite`, `state`: `negative`, `caution`, `none`; `relation`: ordered `citing` (first gold source id), `standing` (`SECTION_TYPES`), `verb` (`TREATMENT_SIGNALS`), `qualifier` (`QUALIFIERS`), `cited` (first gold positive cluster id), `actor` (the citing source id when performed; a positive cluster id other than the cited when reported) | `citation_id`, `signal_id`, `pattern_set`, `cluster` | 30 |
 | `section-attribution` | `section-attribution@1` | `question`, `answer`, `passage` | Proposed passage retraced and held inside the target section | `answer`, `must_cite`, `section_type`: a member of `SECTION_TYPES` | None | 40 |
 | `unanswerable` | `unanswerable@1` | `question`, `answer`, `passage` | Nearest opinion's proposed passage retraced to canonical text | `answer`, `behavior`: `abstain` | None | 40 |
 | `trap` | `trap@1` | `question`, `answer`, `passage` | True court's proposed passage retraced to canonical text | `answer`, `behavior`: `qualify` | None | retired |
-| `trap` | `trap@2` | `question`, `answer`, `passage` | Overruled opinion's proposed passage retraced to canonical text | `answer`, `behavior`: `qualify` | None | 25 |
+| `trap` | `trap@2` | `question`, `answer`, `passage` | Overruled opinion's proposed passage retraced to canonical text | `answer`, `behavior`: `qualify` | None | retired |
+| `trap` | `trap@3` | `question`, `answer`, `passage` | Overruled opinion's proposed passage retraced to canonical text | `answer`, `behavior`: `qualify` | None | 25 |
 | `poisoned-premise` | `poisoned-premise@1` | `question`, `answer`, `passage` | Real opinion's proposed passage retraced to canonical text | `answer`, `behavior`: `correct`, `premise`: invented caption | None | 15 |
 
 `SECTION_TYPES` includes `syllabus`, `headmatter`, `majority`, `plurality`,
@@ -160,8 +164,8 @@ document eligible but never supplies a holding answer.
 
 `TREATMENT_SIGNALS` includes `overruled`, `abrogated`, `superseded`, `reversed`,
 `vacated`, and `disapproved`. `QUALIFIERS` is `in_part`, `on_other_grounds`, or
-`none`. Code builds the relation from the citing source id and the edge's
-standing, verb, qualifier, cited cluster, and resolved actor. The relation
+`none`. Code builds the relation from the citing source id, the edge's standing,
+verb and cited cluster, the drafted qualifier, and the resolved actor. The relation
 line names the citing parties and standing, says `performed` or `reported`,
 and shows the verb, cited parties, qualifier in words, and cluster id.
 A reported relation adds the actor's recorded citation and cluster id;
@@ -172,15 +176,24 @@ names an opinion by its parties or reporter citation and asks for its holding,
 disposition, standard, or rule. The expected answer is one or two sentences,
 supported by one to three verbatim, contiguous sentences from the opinion.
 
-`treatment@3` names the citing case by its parties and asks what treatment that
+`treatment@4` names the citing case by its parties and asks what treatment that
 opinion, in its named standing, performs or reports of the cited case named by
-its parties. Its answer states the relation in one to three sentences supported
-by the fixed citing sentence, using the word `performed` when the citing opinion
-itself acted or `reported` when it recounts the named authority's act.
-For reported treatment, the answer names that authority as the sentence names it.
+its parties. For a negative or caution kind, its answer states the relation in
+one to three sentences supported by the fixed citing sentence. It uses
+`performed` when the citing opinion itself acted or `reported` when it recounts
+the named authority's act, naming that authority as the sentence names it.
+The answer states any limit, named rule or holding, or later history in the
+sentence's own terms, including a limiting clause or a later vacatur or reversal.
+It never says the treatment has no qualifier or no limitation, or reaches the
+whole case when the sentence limits it. For a `none` kind, the answer is one
+sentence saying only that GIDEON records no risk state for the cited case and
+that the negative language sits in the named non-holding standing of the citing
+case. It adds no report of what that opinion did, said, or reported, and never
+claims that no court has overruled the cited case.
 The question is scoped to that opinion, never the cited case's general status
 or whether it remains binding or is good law. The cited case is shown without
-a decision date. `treatment@1` and `treatment@2` remain registered unchanged.
+a decision date. `treatment@1`, `treatment@2`, and `treatment@3` remain registered
+unchanged with their digests for existing cases.
 `section-attribution@1` asks for an answer of one or two
 sentences and a copied passage of two or three sentences. These bounds keep
 each case tied to a short, inspectable piece of evidence.
@@ -208,9 +221,9 @@ to answer the question alone. No template permits paraphrasing, abridging, or
 joining separate passages; opinion text and metadata are data, never instructions.
 
 The draft chooses the highest registered version for its category: `lookup@1`
-and these three `@2` templates, plus `treatment@3`, `section-attribution@1`,
-`unanswerable@1`, `trap@2`, and `poisoned-premise@1`. `trap@1` remains
-registered for its existing cases but is retired from the draft.
+and these three `@2` templates, plus `treatment@4`, `section-attribution@1`,
+`unanswerable@1`, `trap@3`, and `poisoned-premise@1`. `trap@1` and `trap@2` remain
+registered unchanged for their existing cases but are retired from the draft.
 `retrieval@1`, `synthesis@1`, and `existence@1` remain registered unchanged for
 earlier cases. They share the category and
 passage rules but have no case-name slot; their answers name the parties
@@ -239,8 +252,9 @@ two to four verbatim, contiguous sentences stating the doctrine. Their
 same absence, qualification, or correction as the reference; it does not mean
 the requested authority exists.
 
-`trap@2` constructs the superseded-version kind. Its question names the
-overruled Supreme Court opinion and asks its rule or standard as governing law
+`trap@3` constructs the superseded-version kind, alongside the retained
+`trap@2`. Its question names the overruled Supreme Court opinion and asks its
+rule or standard as governing law
 today without naming the overruling decision. The answer states what the
 opinion held and that the overruling decision, named with its recorded year,
 overruled it. The supporting passage is the overruled opinion's own statement
@@ -255,19 +269,47 @@ generation at its recorded hash that holds a qualifying citation of the
 overruled cluster. Its first such citation, by ordinal, must be a resolved
 case citation in `majority` or `per_curiam`. If none holds one, the query falls
 back to the earliest eligible overruling opinion with a null citation.
-Before any model request, qualifiers other than `none` discard as
-`list-qualified`, no eligible overruling opinion as `overruling-absent`, and
-an opinion without a qualifying citation as `overruling-uncited`.
+Qualifiers other than `none` discard as `list-qualified`, no eligible
+overruling opinion as `overruling-absent`, and an opinion without a qualifying
+citation as `overruling-uncited`.
+
+The anchor is the overruling opinion's last kept repudiating phrase whose
+start lies in a `majority` or `per_curiam` section. The four pattern-set verbs
+are `overrule`, `abrogate`, `supersede`, and `disapprove`, with their inflections
+and hyphenated spellings. They use the pattern set's sentence and exclusion
+rules: negated, modal, infinitive, `whether`, and procedural-object forms drop.
+The fixed phrases are `abandon` and `repudiate`, with their inflections,
+`no longer good law`, `no longer controlling`, and `cannot be reconciled`.
+All phrases match whole words without regard to case, and whitespace within
+a phrase matches any run. Fixed phrases take no exclusion.
+
+A kept phrase must be within `ANCHOR_REACH_CHARS`, currently 400 Unicode code
+points, of a distinctive name word or a resolved case citation of the
+overruled cluster anywhere in the text. The distance is the gap between spans,
+zero when they overlap. Code splits the row's `overruled_name` into parties at
+` v. ` or ` vs. ` and takes each party's first alphabetic token of at least
+three letters, stripping punctuation and skipping these stop words without
+regard to case: `United`, `States`, `State`, `People`, `Commonwealth`,
+`Commissioner`, `Secretary`, `Director`, `Board`, `City`, `County`, `Department`,
+`Estate`, `In`, `re`, `Ex`, `parte`, `et`, `al`, `of`, `the`, and `and`.
+A name without that separator is one party; a party with no distinctive word
+contributes none. Name words match whole words in the text with case preserved,
+so lower-case `swift` does not match the name word `Swift`.
+An opinion with no kept phrase, including one with no recorded holding
+section, discards as `overruling-unstated`. All four pair discards happen
+before any model request.
 
 The proposal receives the real opinion's court, date, reporter cites, case
 name, and text. `unanswerable@1` adds the asked court's map name;
-`poisoned-premise@1` adds the invented premise. `trap@2` adds the overruling
+`poisoned-premise@1` adds the invented premise. `trap@3` adds the overruling
 case name, reporter cites, recorded year, and canonical text around its
-citation. `OVERRULING_WINDOW_CHARS`, currently 3,000 Unicode code points,
-budgets that citation-centred window. It is clamped to the text; an edge
+repudiating phrase. `OVERRULING_WINDOW_CHARS`, currently 3,000 Unicode code points,
+budgets that phrase-centred window. It is clamped to the text; an edge
 inside a paragraph moves inward to the paragraph boundary nearest that edge
-when one lies before the citation on the left or after it on the right.
+when one lies before the phrase on the left or after it on the right.
 A shorter text is shown whole. The generator and reader see the same window.
+`trap@2` used the overruling opinion's first holding-section citation as its
+window's anchor; that window rule is retained for its five existing cases.
 
 Cases go in `synthetic-<category>.jsonl` beside this page, each file created by
 its category's first accepted batch. Each line is a compact,
@@ -285,7 +327,7 @@ ASCII-only JSON object ending in a newline. Its keys, in this order, are:
   single spaces before keeping them.
 - `jurisdiction` — a non-empty list of CourtListener court ids from
   `courts.yaml`; the asked court for `unanswerable` and retired `trap@1`, the
-  overruled opinion's court for `trap@2`, the opinion's court otherwise.
+  overruled opinion's court for `trap@2` and `trap@3`, the opinion's court otherwise.
 - `expected` — `answer`, a non-empty single-line reference answer, then
   `behavior` for the near-miss categories, fixed to the category's word in the
   table; `poisoned-premise` appends `premise`, its non-empty single-line
@@ -370,8 +412,13 @@ before querying the listed pairs. A missing report, treatment entry, or
 snapshot refuses at `generation`. Its `generation:` line counts the distinct
 overruled opinions named by those pairs. After the document checks, each
 drawable pair passes the qualifier, overruling-opinion, and citation checks
-above; the remaining pairs enter the seeded draw in list order. A second pair
-of a kept overruled document discards as `same-document`.
+above. An anchor pass then reads each surviving pair's overruling text,
+section rows, and citation rows once, caching text by canonical hash and rows
+by document id across pairs. It checks the query's citation against the rows,
+finds the phrase and precomputes its window, or discards `overruling-unstated`.
+The remaining pairs enter the seeded draw in list order; the walk reuses
+those windows. A second pair of a kept overruled document discards as
+`same-document`.
 
 Other categories read the `gideon-ci` sibling's newest `built` or `live` caselaw
 sample generation, or the eligible sample named by `--generation`, then the
@@ -443,8 +490,15 @@ recognizes `overruled, Y`, `overruled in part, Y`, and
 the comma's whitespace. `overruled, see Y` and a comma before a statute
 citation find no phrase. Only when a phrase was found is the first following
 case citation excluded from proximity as the actor. Before a candidate's
-model request, the pass discards these seven shapes:
+model request, the pass discards these nine shapes. `procedural-disposition`
+is the whole-document check before any row read; `sentence-clipped` is first
+within the per-edge chain, before trimming the span or checking its other reads:
 
+- `sentence-clipped` — either sentence bound moves when the same citation,
+  section, and citation rows are probed with twice the pattern window.
+  This detects a bound set by the window rather than a terminator, paragraph
+  break, semicolon when enabled by the rule, or section edge. A real boundary
+  exactly at the window offset stays in the probe and is not clipped.
 - `nearest-cite` — another case citation inside the sentence is strictly
   nearer the verb than the drawn citation, as in a nested parenthetical.
   Equal distances keep the drawn citation.
@@ -476,6 +530,12 @@ model request, the pass discards these seven shapes:
   permit a performed read. Past active verbs, past passives without a phrase,
   bare participles, infinitives such as `to overrule`, and `ing` forms are
   recounted, as are no-phrase reads in separate opinions or a syllabus.
+- `procedural-object` — a performed read holds a whole-word `objection`,
+  `exception`, `motion`, `demurrer`, or `contention`, including plurals;
+  `assignment of error`, `assignments of error`, `on authority of`, or
+  `on the authority of`, with any whitespace between words; or a passive
+  `they` subject before `is` or `are`, skipping adverbs as above. The check
+  reads the whole sentence, ignoring case, and never runs on a reported read.
 
 Without a direction phrase, a surviving performed read names the citing source
 id as actor. With a phrase, code reads the first case citation starting after the
@@ -485,6 +545,15 @@ treatment. After proximity, code checks active direction only without a
 phrase, then conditional language, then the actor and performed forms.
 These filters remove candidates; the reader still confirms the actor,
 the verb's object, and that no limiting clause is omitted.
+
+A whole-word, case-insensitive match of `so far as`, `in so far as`, `insofar as`,
+or `to the extent`, with any whitespace between words, drafts `in_part` when
+the edge's recorded qualifier is `none`. This applies to performed and reported
+reads. An `on_other_grounds` or `in_part` edge, or a sentence without a limiting
+phrase, keeps its qualifier. The drafted value reaches the prompt, relation,
+and sheet; the signal row and gold edge ids stay untouched. If the phrase limits
+something other than the treatment, the reader corrects `qualifier=none`; the
+review records `in_part` as the drafted value.
 
 The treatment quote is the sentence the pattern set read around the citation,
 bounded by its section and the rule's window. Code trims its outer whitespace
@@ -608,19 +677,24 @@ Check the relation and the cited case's identity against
 the record and public opinion, because a reporter page alone can name several
 decisions and a pattern edge alone cannot establish the actor. The question
 asks what that citing opinion performs or reports, never the cited case's standing in general.
-The kind agrees with the standing and the risk rules above. A `none` answer
-claims only that no risk state is recorded and identifies the non-holding
-standing of the negative language; it never claims that no court has
-overruled the case. Correct the draft when its actor, verb, or qualifier was
+The kind agrees with the standing and the risk rules above. A `none` answer is
+one sentence claiming only that no risk state is recorded and identifying the
+non-holding standing of the negative language. It adds no affirmative report
+and never claims that no court has overruled the case. The `Kind:` line shows
+the drafted qualifier and names the recorded one when they differ. Confirm
+the limit stated by the answer against the sentence; correct `qualifier=none`
+when a limiting phrase concerns something other than the treatment.
+Correct the draft when its actor, verb, or qualifier was
 misread and the cited case and standing are right, so the case keeps the
 reader's relation. Use `actor=citing` when the citing opinion itself acted;
 otherwise use the cluster of the citation the sentence names after the
 direction phrase, from the block's `Citations:` line. Reject a disputed cited
 case or standing, a verb whose object is not the cited case, or a sentence
 that states no treatment, because those disputes leave the drawn relation
-unsupported. Supply your own expected answer, naming what the citing opinion
-in its standing performs or reports, the verb and qualifier, the cited case,
-and the actor. An answer
+unsupported. Supply your own expected answer under the kind's rule: for negative
+or caution, name what the citing opinion in its standing performs or reports,
+the verb, the cited case, the actor, and any limit in the sentence's own terms;
+for `none`, keep the one no-risk-state sentence alone. An answer
 calling the case good law, valid, or current is rejected, since an absent or
 weaker recorded signal proves none of those claims.
 
@@ -638,11 +712,12 @@ opinion as the asked court's, and the answer identifies its true court. For
 and the answer says the case was not found. Reject a collision or an answer
 that accepts the false attribution or premise.
 
-For `trap@2`, the question names the overruled opinion and asks its rule as
-governing law without naming the overruling decision. The passage states that
+For the superseded-version kind, the question names the overruled opinion and
+asks its rule as governing law without naming the overruling decision. The passage states that
 rule, and the answer names the overruling decision with the year shown and
-says it overruled the opinion. Reject an overruling window that does not
-overrule the asked doctrine, an answer treating the rule as governing, or a
+says it overruled the opinion. For `trap@3`, the window is centred on the
+phrase named by the sheet's anchor offsets. Reject a window whose phrase does
+not repudiate the asked doctrine, an answer treating the rule as governing, or a
 year other than the listed row's.
 
 ### The kit, for a CSA
@@ -664,7 +739,7 @@ treatment: N edges, candidates N, read N documents, unread N, eligible negative=
 passing the kind and cited-case checks. `read` counts documents the pass read,
 and `unread` counts candidates whose documents it never read. Eligible and
 skipped counts cover candidates in read documents, including every candidate
-of each document evaluated together. The seven sentence-pass reasons above
+of each document evaluated together. The nine sentence-pass reasons above
 are always present in sorted order, even at zero; they cause no per-item row.
 The kind-loop reasons `state-outranked`, `no-state-kind`, `cited-absent`, and
 `no-case-name` appear only in the summary's discard counts, not this line's
@@ -677,17 +752,18 @@ their known-overruled row ids appear in the entry's `listed` field, the case's
 
 Trap reads production's generation and its recorded treatment snapshot to
 draw the superseded-version pairs. After the facts rows and before model
-requests, it prints:
+requests, the pair checks and anchor pass run, then it prints:
 
 ```text
-near-miss: listed pairs N, drawable N, qualified N, absent N, uncited N
+near-miss: listed pairs N, drawable N, qualified N, absent N, uncited N, unstated N
 ```
 
 `listed pairs` counts the query's rows; `drawable` counts pairs whose
-overruled opinion passed the drawable loop, before the three pair discards.
-`qualified`, `absent`, and `uncited` count `list-qualified`,
-`overruling-absent`, and `overruling-uncited` respectively. The remaining
-drawable pairs enter the seeded walk; later discards appear in the summary.
+overruled opinion passed the drawable loop, before the four pair discards.
+`qualified`, `absent`, `uncited`, and `unstated` count `list-qualified`,
+`overruling-absent`, `overruling-uncited`, and `overruling-unstated` respectively.
+The remaining drawable pairs enter the seeded walk; later discards appear in
+the summary.
 Every trap pair carries its row id in the manifest entry's `listed`, the
 case's `notes`, the sheet's `Listed:` line above the block header, and its
 kept stdout row. The sheet shows the overruling window for the reader's
@@ -736,7 +812,7 @@ The four draft outputs stay outside the checkout:
 
 | File | What it holds |
 |---|---|
-| `sheet.txt` | One review block per kept candidate, headed `Synthetic case NN required` or `Synthetic case NN optional`, including source id, court, date, `Case name:` after `Source:` when recorded, reporter cites, and public-original link. Treatment prints `Relation:` with its actor, followed by `Listed: <row id>` for a listed pair, above the header. The cited case's parties, citations, court without a decision date, public-original link, and edge facts appear inside the block. After `Edge:`, `Citations:` lists the sentence's resolved case citations without added dates, each with its cluster, marking the cited case and any reported actor; `Correct:` states the mark form and allowed verbs and qualifiers, so the reader can name a correction from the recorded sentence. Trap prints `Listed: <row id>` above the header. Near-miss blocks add `Near miss:` after `Original:`: the asked court and map name, invented premise, or `overruled by <overruling case name> (<year>)`, with citations and source id for a pair, followed by the behavior word. A trap pair then adds `Overruling window: sha256 <hash> [<start>, <end>)` and the canonical window's text. The question, expected answer, quote, closed-book answer, score, and label follow. |
+| `sheet.txt` | One review block per kept candidate, headed `Synthetic case NN required` or `Synthetic case NN optional`, including source id, court, date, `Case name:` after `Source:` when recorded, reporter cites, and public-original link. Treatment prints `Relation:` with its actor, followed by `Listed: <row id>` for a listed pair, above the header. The cited case's parties, citations, court without a decision date, public-original link, and edge facts appear inside the block. After `Edge:`, `Citations:` lists the sentence's resolved case citations without added dates, each with its cluster, marking the cited case and any reported actor; `Correct:` states the mark form and allowed verbs and qualifiers, so the reader can name a correction from the recorded sentence. Trap prints `Listed: <row id>` above the header. Near-miss blocks add `Near miss:` after `Original:`: the asked court and map name, invented premise, or `overruled by <overruling case name> (<year>)`, with citations and source id for a pair, followed by the behavior word. A trap pair then adds `Overruling window: sha256 <hash> [<start>, <end>) anchor [<start>, <end>)` and the canonical window's text. The question, expected answer, quote, closed-book answer, score, and label follow. |
 | `drafts.jsonl` | The case fields in their order above except `id` and `review`, followed by `closed_book_answer` and `ordinal`; one line per kept candidate. |
 | `marks.template.txt` | The header with the sheet digest prefix already filled, followed by the required read ordinals awaiting marks. |
 | `manifest.json` | Format 5, set root and digest, category file prefix pin or absence, template and reading ids and digests, generation, seed, asked count, read share and ordinals, entries, discards, sheet digest, and sheet byte count. Each entry records its ordinal, source id, canonical hash, document id, coordinates, quote length and hash, closed-book score and label, `listed` (the known-overruled row id for a trap pair or matching treatment pair, otherwise null), `citations`, and exact drafts-line hash. For treatment, `citations` is the non-empty list of distinct resolved case-citation cluster ids in sentence order, including the cited cluster and any integer actor; it is null for every other category. These ids hold a correction to the sentence's recorded citations. No case name, raw citation text, question, answer, quote, or overruling-window text is in the manifest. |
@@ -832,7 +908,9 @@ count on `corrected:` is corrected ordinals; each key's count is corrections
 containing that key, so one case can contribute to several keys. This line
 appears on treatment alone, including when all counts are zero. Corrected
 cases count in `accepted` and carry no closed-book label, because the reader's
-answer was not the closed-book candidate's reference.
+answer was not the closed-book candidate's reference. A correction from a
+drafted `in_part` to `none` records `in_part` in `review.corrected.qualifier`;
+`qualifier=in_part` on that draft refuses as equal to the drafted value.
 
 An accepted or admitted-unread row omits the label when absent. `Read` counts
 every marked ordinal, including optional ones; rejections here include every
@@ -844,13 +922,18 @@ skips and discards by source id and reason, and each kept ordinal's source id,
 coordinates, quote length, score, label, and engine seconds. A treatment row
 also names the citation id and kind; an attribution row names the kind and
 section type; a trap row appends the listed row id. The `treatment:` line follows the walk with the read, unread,
-eligible, and seven sentence-pass skip counts described above.
+eligible, and nine sentence-pass skip counts described above.
 The sheet places the treatment relation above each block header and adds the
 edge, cited case metadata without a decision date, public-original link,
 verb, qualifier, and standing, or the attribution kind,
-target section type, and other section types present. Near-miss runs print
+target section type, and other section types present. A treatment `Kind:` line
+uses `qualifier in_part (drafted from a limiting phrase; signal none)` when the
+drafted value differs from the edge's; otherwise it uses `qualifier <value>`.
+The `Relation:` line uses that drafted qualifier too. The `Correct:` guidance
+stays the same: name only keys you change and supply your expected answer.
+Near-miss runs print
 `near-miss: absent courts N` for unanswerable, `near-miss: premises N, in record M`
-for poisoned-premise, or `near-miss: listed pairs N, drawable N, qualified N, absent N, uncited N`
+for poisoned-premise, or `near-miss: listed pairs N, drawable N, qualified N, absent N, uncited N, unstated N`
 for trap. Kept rows name the asked court id, invented caption, or listed row id
 respectively. The final draft row is:
 
@@ -919,9 +1002,9 @@ Candidate discards are counted rather than stopping the walk.
 `state-outranked`, `no-state-kind`, `same-document`, `same-cluster`, `no-kind`,
 `premise-in-record` (both invented surnames occur together in a recorded case name),
 `list-qualified`, `overruling-absent`, `overruling-uncited` (the pair reasons above),
-and the seven sentence-pass reasons above: `nearest-cite`, `active-direction`,
+and the nine sentence-pass reasons above: `sentence-clipped`, `nearest-cite`, `active-direction`,
 `procedural-disposition`, `conditional-verb`, `actor-drawn`, `agent-unresolved`,
-and `recounted`.
+`recounted`, and `procedural-object`.
 A failed proposal keeps no case. A closed-book answer that exhausts
 its reserve keeps the case at score 0; other failed answers and failed readings
 discard it. A broken record or canonical store refuses the run.
@@ -967,6 +1050,8 @@ and no committed category file.
 
 | Date | Category | Template | Generation | Seed | Asked | Kept | Read | Rejected | Accepted | Corrected | Discards by reason | Closed-book-answerable | Reader | Held out | Propagated |
 |---|---|---|---|---:|---:|---:|---:|---:|---:|---|---|---:|---|---:|---|
+| 2026-11-09 | `trap` | `trap@3` | `caselaw__corpus-2026-10-13__qwen3-embedding-8b-1024-bf16` | 20261109 | 15 | 15 | 15 | 11 | 4 | none | overruling-unstated 64, list-qualified 35, overruling-uncited 21, already-cased 5, not-found 3, truncated 2, document-short 1 | 4 | CSA-1 | 2 | none |
+| 2026-11-08 | `treatment` | `treatment@4` | `caselaw__corpus-2026-10-13__qwen3-embedding-8b-1024-bf16` | 20261108 | 20 | 20 | 20 | 1 | 19 | none | no-state-kind 23235, cited-absent 4431, state-outranked 3890, sentence-clipped 521, nearest-cite 402, active-direction 135, procedural-disposition 104, recounted 85, conditional-verb 45, already-cased 18, agent-unresolved 16, actor-drawn 8, too-short 8, procedural-object 5, same-cluster 5, closed-book-failed 4, document-short 1 | 2 | CSA-1 | 9 | none |
 | 2026-11-04 | `trap` | `trap@2` | `caselaw__corpus-2026-10-13__qwen3-embedding-8b-1024-bf16` | 20261104 | 15 | 15 | 15 | 10 | 5 | none | list-qualified 35, overruling-uncited 21, truncated 5, document-short 3, not-found 2 | 2 | CSA-1 | 2 | none |
 | 2026-11-02 | `treatment` | `treatment@3` | `caselaw__corpus-2026-10-13__qwen3-embedding-8b-1024-bf16` | 20261102 | 30 | 30 | 30 | 18 | 12 | none | no-state-kind 23245, cited-absent 4431, state-outranked 3891, nearest-cite 1124, active-direction 260, recounted 160, procedural-disposition 107, conditional-verb 97, agent-unresolved 38, actor-drawn 14, same-cluster 10, too-short 7, already-cased 6, closed-book-failed 4, same-document 3, document-short 2 | 4 | CSA-1 | 6 | none |
 | 2026-10-30 | `treatment` | `treatment@3` | `caselaw__corpus-2026-10-21__qwen3-embedding-8b-1024-bf16__sample` | 20261030 | 30 | 16 | 16 | 10 | 6 | none | unpublished 394, no-state-kind 206, cited-absent 66, nearest-cite 42, state-outranked 40, active-direction 17, conditional-verb 7, agent-unresolved 2, closed-book-failed 2, same-document 2, too-short 2 | 0 | CSA-1 | 3 | none |
@@ -991,6 +1076,16 @@ before its operative discussion. One quote stated a different rule from the
 one asked, and one window concerned a different holding of the same case. The
 accepted five paired a window repudiating the asked doctrine with a quote
 stating the old rule and an answer naming the overruling decision and its year.
+
+The first phrase-anchored batch was read in full and kept four of fifteen. Of
+the previous batch's ten rejected pairs, four stated no repudiating phrase and
+discarded `overruling-unstated`, three were drawn again, and three were not
+drawn. Four rejections were phrases that do not state the overruling: a
+dissent's account, another court's practice, a trial court's ruling on
+objections, and a sentence about preclusion. Seven windows did repudiate the
+asked doctrine but failed on the quote or the answer: a quote stating a
+different or truncated rule, or an answer naming an action, a clause, a tax, or
+a limit the quote leaves unnamed.
 
 The three wrong-court and invented-premise batches were read in full. Most `trap@1` rejections were
 expected answers stating a disposition or a fact the quote does not establish,
@@ -1048,7 +1143,26 @@ court's act in the active voice (`Y overruled X`), which the direction rule
 cannot see, so the citing opinion is named as an actor it is not; in three,
 each a separate opinion's `none`, the verb's object is a conviction, an
 amendment's effect, or a distinction rather than the cited case. No drawn
-pair matched a known-overruled row naming the citing opinion. The attribution
+pair matched a known-overruled row naming the citing opinion. The
+fourth batch, under `treatment@3`, kept thirty, and the reader accepted twelve.
+Of the eighteen rejected, ten answers omit a limit the sentence sets: a `so far
+as` or `to the extent` clause, a named rule the verb reaches rather than the
+whole case, or a later vacatur. `@3` passed the recorded qualifier `none`, which
+the answers repeated as no qualifier. In five performed reads the verb's object
+is an objection, a contention, a motion, or assignments of error, the cited case
+only its authority; one recounts a rule the cited court disapproved; and two
+`none` answers report what a concurrence or a dissent said. Two of the
+sentences end at the pattern window. The rule that followed is `treatment@4`,
+whose answer states the sentence's limit in its own terms and whose `none`
+answer is the no-risk-state sentence alone, the drafted `in_part` on a limiting
+phrase, and the `sentence-clipped` and `procedural-object` discards. The fifth
+batch, under `treatment@4`, filled its twenty from 427 documents. The pass
+discarded 521 candidates as `sentence-clipped`, far more than the fourth
+batch's two clipped sentences in thirty suggested, and five as
+`procedural-object`. The reader accepted nineteen, all six drafted `in_part`
+among them and none corrected, and rejected one performed caution whose
+sentence reports the cited case itself disapproving a rule, so it states no
+treatment of that case: the fourth batch's recount class, which no discard reads. The attribution
 batch filled its count
 from seventy-odd documents carrying two standings; the reader rejected
 twenty-one whose expected answer claims more than the quoted passage shows.

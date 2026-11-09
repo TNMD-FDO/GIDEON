@@ -5,7 +5,8 @@ count, and Guidelines normalisers, and ``FAMILIES`` with the refusal lookups.
 In prefix mode a hit the judge did not trip on is never split from the context
 that follows and decided it: a pattern rejecting on following context owes
 ``judge_text`` that context's span as a release constraint, as the rate form
-and an exclusion hit reaching past its match do.
+and an exclusion hit reaching past its match do. A hit whose definition run
+is still open owes the judge an open constraint held until the run closes.
 
 Built over ``grammar``; ``judge``, ``writer``, and ``window`` import from it.
 """
@@ -35,6 +36,7 @@ from gideon.guardrail.grammar import (
     ELAPSED_EXCLUSION_SOURCE,
     EXPIRY_EXCLUSION_SOURCE,
     GUIDELINES_CHAINED_TOTAL_FORM,
+    GUIDELINES_DEFINITION_ROW_SOURCE,
     GUIDELINES_FIGURE,
     GUIDELINES_FIGURE_NOUNS,
     GUIDELINES_FIGURE_SOURCE,
@@ -116,6 +118,9 @@ class Pattern:
     # The source with each rate look-ahead made an optional positive, compiled
     # for prefix mode's release constraints alone and never judged for a trip.
     rate_form: re.Pattern[str] | None = None
+    # The code half of an exclusion: the judge reads whole lines to exempt
+    # a hit inside a run of definition rows.
+    definition_run_form: re.Pattern[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +173,7 @@ def _compiled(
     exclusion: str | None = None,
     yields_to: tuple[str, ...] = (),
     anchor: tuple[str, ...] = (),
+    definition_run_form: str | None = None,
 ) -> Pattern:
     rate_form = (
         re.compile(source.replace(RATE_LOOKAHEAD, RATE_OPTIONAL), re.IGNORECASE)
@@ -182,6 +188,9 @@ def _compiled(
         yields_to,
         anchor,
         rate_form,
+        re.compile(definition_run_form, re.IGNORECASE)
+        if definition_run_form is not None
+        else None,
     )
 
 
@@ -219,6 +228,7 @@ GUIDELINES_POINTS_TO_CATEGORY_PATTERN = _compiled(
     GUIDELINES_POINTS_TO_CATEGORY,
     exclusion=GUIDELINES_POINT_LIST_EXCLUSION_SOURCE,
     anchor=("category_after", "category_before"),
+    definition_run_form=GUIDELINES_DEFINITION_ROW_SOURCE,
 )
 SENTENCE_CREDIT_RELEASE_DATE_PATTERN = _compiled(
     "sentence-credit/release-date@1", RELEASE_DATE_PATTERN_SOURCE

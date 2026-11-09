@@ -8,16 +8,19 @@ The three files are the committed seeds for the three guardrail families:
 - `guidelines-range.yaml` covers Sentencing Guidelines range resolution and
   assertion. Its family set version is `2`, reflecting two total patterns;
   committed verdicts are unchanged, and the attribution form exempts two
-  families without moving either family's version.
+  families without moving either family's version. The run exclusion passes
+  a points-first category definition, carried by control `definition-03`,
+  without moving any committed verdict.
 - `sentence-credit.yaml` covers release-date, sentence-credit, and
   time-to-serve computation and confirmation. Its family set version is `1`.
 
 A set version is per family: it identifies the pattern set its seed was tuned
 against and is bumped when one of that family's patterns changes. A change
-beside a pattern that moves no committed verdict of its family — an exclusion
-that hands a shape no committed case carries to a later family — is not a
-pattern change, so that family's version stands. Each file's header carries
-its family and version. The case shape is `id`, `kind`, `prompt`, and
+beside a pattern that moves no committed verdict of its family — including
+an exclusion that passes a definition's shape or hands a shape no committed
+case carries to a later family — is not a pattern change, so that family's
+version stands. Each file's header carries its family and version. The case
+shape is `id`, `kind`, `prompt`, and
 `answer`, with `pattern` on positives, optional `must_not` on a positive, and
 optional `thinking` for carried reasoning. `thinking` is carried for the
 record and is never judged by the guardrail.

@@ -1,8 +1,10 @@
 """Pure treatment patterns over fictitious opinions and court geography."""
 
 import hashlib
+import json
 import unittest
 from dataclasses import dataclass, fields, replace
+from pathlib import Path
 
 from gideon.host.courts import CIRCUITS, STATE_CODES
 from gideon.host.courts import LEVELS as HOST_LEVELS
@@ -125,6 +127,7 @@ class RuleChoices(unittest.TestCase):
             "direction": True,
             "attribution": "sentence",
             "semicolon_boundary": False,
+            "procedural_before": False,
         }
         self.assertEqual(
             {field.name: getattr(RULES_1, field.name) for field in fields(PatternRules)},
@@ -247,8 +250,111 @@ class RuleChoices(unittest.TestCase):
 
 class ShippedSet(unittest.TestCase):
     def test_default_rules_are_the_shipped_set(self) -> None:
-        self.assertEqual(RULES, replace(RULES_1, hyphenated=True, procedural_objects=True))
-        self.assertEqual(PATTERN_SET_ID, "treatment/patterns@2")
+        self.assertEqual(RULES, replace(
+            RULES_1, hyphenated=True, procedural_objects=True, procedural_before=True,
+        ))
+        self.assertEqual(PATTERN_SET_ID, "treatment/patterns@3")
+
+    def test_procedural_words_and_phrases_before_performed_verbs(self) -> None:
+        previous_rules = replace(RULES, procedural_before=False)
+        texts = []
+        for word, distance, bridge in (
+            ("contention", 2, "was"),
+            ("objection", 6, "after careful consideration was unanimously"),
+            ("assignments", 17,
+             "of error after the panel carefully considered the full record "
+             "and heard both counsel were unanimously"),
+            ("motion", 30,
+             "after all three judges had carefully reviewed the complete record "
+             "and heard counsel explain the disputed facts during a lengthy "
+             "hearing earlier that morning was then unanimously and expressly"),
+        ):
+            with self.subTest(word=word, distance=distance):
+                self.assertEqual(len(bridge.split()) + 1, distance)
+            texts.append(f"The {word} {bridge} overruled under Bricker, 1 U.S. 2.")
+        texts.extend(
+            f"The {phrase} after careful consideration was unanimously "
+            "overruled under Bricker, 1 U.S. 2."
+            for phrase in (
+                "assignment of error", "assignments of error",
+                "point of error", "points of error", "POINTS\tOF\nERROR",
+            )
+        )
+        texts.extend(
+            f"We relied {phrase} Bricker, 1 U.S. 2, and overruled the ruling."
+            for phrase in ("on the authority of", "on authority of", "ON\tTHE\nAUTHORITY OF")
+        )
+        for text in texts:
+            with self.subTest(text=text):
+                previous = findings(text, rules=previous_rules)
+                self.assertEqual(len(previous), 1)
+                self.assertEqual(previous[0].treatment_signal, "overruled")
+                self.assertEqual(findings(text, rules=RULES), ())
+
+    def test_procedural_before_keeps_later_objects_reported_reads_and_they(self) -> None:
+        for text in (
+            "We overruled the ruling concerning a motion under Bricker, 1 U.S. 2.",
+            "Under Bricker, 1 U.S. 2, they are overruled.",
+        ):
+            with self.subTest(text=text):
+                result = findings(text, rules=RULES)
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0].treatment_signal, "overruled")
+                self.assertEqual(result[0].state, "negative")
+        bricker = "Bricker, 1 U.S. 2"
+        hall = "Hall, 3 U.S. 4"
+        for direction in ("by", "in"):
+            text = (
+                f"{bricker}, concerning an objection after careful consideration "
+                f"was unanimously overruled {direction} {hall}."
+            )
+            rows = (citation(text, bricker), citation(text, hall, ordinal=1))
+            with self.subTest(direction=direction):
+                result = findings(text, rows, rules=RULES)
+                self.assertEqual(tuple(item.citation_id for item in result),
+                                 (rows[0].citation_id,))
+                self.assertEqual(result[0].treatment_signal, "overruled")
+                self.assertEqual(result[0].state, "negative")
+
+    def test_excluded_lineage_verb_yields_to_later_reported_treatment(self) -> None:
+        bricker = "Bricker, 1 U.S. 2"
+        hall = "Hall, 3 U.S. 4"
+        text = (
+            f"{bricker}, concerning an objection after careful consideration "
+            f"was unanimously reversed and later overruled by {hall}."
+        )
+        rows = (citation(text, bricker), citation(text, hall, ordinal=1))
+        previous = findings(text, rows, rules=replace(RULES, procedural_before=False))
+        self.assertEqual(tuple(item.citation_id for item in previous),
+                         tuple(row.citation_id for row in rows))
+        for item in previous:
+            self.assertEqual(item.treatment_signal, "reversed")
+            self.assertEqual(item.no_state_reason, "lineage_unverified")
+            self.assertIsNone(item.state)
+            self.assertEqual((item.char_start, item.char_end),
+                             (text.index("reversed"), text.index("reversed") + len("reversed")))
+        result = findings(text, rows, rules=RULES)
+        self.assertEqual(tuple(item.citation_id for item in result), (rows[0].citation_id,))
+        self.assertEqual(result[0].treatment_signal, "overruled")
+        self.assertEqual(result[0].state, "negative")
+        self.assertIsNone(result[0].no_state_reason)
+        self.assertEqual((result[0].char_start, result[0].char_end),
+                         (text.index("overruled"), text.index("overruled") + len("overruled")))
+
+    def test_committed_treatment_gold_quotes_keep_their_occurrences(self) -> None:
+        path = (Path(__file__).resolve().parents[1]
+                / "eval/sets/eval-v1/research-qa/synthetic-treatment.jsonl")
+        entries = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(entries)
+        previous_rules = replace(RULES, procedural_before=False)
+        for entry in entries:
+            for gold in entry["gold"]:
+                with self.subTest(id=entry["id"], citation_id=gold["citation_id"]):
+                    found = occurrences(gold["quote"], RULES)
+                    self.assertEqual(found, occurrences(gold["quote"], previous_rules))
+                    self.assertTrue(found)
+                    self.assertIn(entry["expected"]["relation"]["verb"],
+                                  tuple(item.signal for item in found))
 
     def test_default_signals_read_hyphens_and_skip_procedural_objects(self) -> None:
         geography = (
@@ -260,6 +366,8 @@ class ShippedSet(unittest.TestCase):
             ("We overruled Bricker, 1 U.S. 2.", ("overruled",)),
             ("Bricker, 1 U.S. 2, drew an objection that was overruled.", ()),
             ("We overruled his assignments of error under Bricker, 1 U.S. 2.", ()),
+            ("The objection after careful consideration was unanimously overruled "
+             "under Bricker, 1 U.S. 2.", ()),
         ):
             row = citation(text)
             section = Section("body", "majority", 0, len(text))

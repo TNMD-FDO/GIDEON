@@ -206,6 +206,7 @@ class PairHost(SyntheticHost):
 
     def __init__(self, count: int = 1) -> None:
         super().__init__(count)
+        self.events: list[tuple[str, str]] = []
         self.generation_rendered_dir = RENDERED
         self.generations = [replace(
             self.generations[0], gen_id=self.generations[0].gen_id.removesuffix(f"__{indexsample.SAMPLE_SUFFIX}"),
@@ -215,7 +216,9 @@ class PairHost(SyntheticHost):
             report_for(), gen_id=self.generations[0].gen_id, treatment=treatment_for(),
         )
         self.pair_rows: list[dict[str, object]] = []
-        context = "\n\n".join(f"Invented overruling context {number}. " * 20 for number in range(12))
+        self.section_rows: dict[str, list[dict[str, object]]] = {}
+        self.citation_rows: dict[str, list[dict[str, object]]] = {}
+        context = "\n\n".join(f"Invented successor context {number}. " * 20 for number in range(12))
         for index, (fact, member) in enumerate(zip(self.documents, self.manifest_rows, strict=True)):
             opinion_id = index + 1001
             holding = f"Fictitious overruling window sentinel {index}: we overrule {CASE_NAME} on the invented notice issue."
@@ -227,6 +230,7 @@ class PairHost(SyntheticHost):
             self.pair_rows.append({
                 "row_id": hashlib.sha256(f"fictitious listed pair {index}".encode()).hexdigest(),
                 "qualifier": "none", "overruling_name": f"Fictitious listed successor {index}", "overruling_year": 2009,
+                "overruled_name": CASE_NAME, "overruled_cluster": 1000 + index,
                 "source_id": member["source_id"], "generation_sha256": member["canonical_text_sha256"],
                 "doc_id": member["doc_id"], "opinion_id": fact["opinion_id"], "source": fact["source"],
                 "overruling": {
@@ -238,6 +242,41 @@ class PairHost(SyntheticHost):
                     "char_start": start, "char_end": start + len(CASE_NAME), "section_type": "majority",
                 },
             })
+            overruling = cast(dict[str, object], self.pair_rows[-1]["overruling"])
+            doc_id = cast(str, overruling["doc_id"])
+            section_id = hashlib.sha256(f"fictitious overruling section {opinion_id}".encode()).hexdigest()
+            self.section_rows[doc_id] = [{
+                "section_id": section_id, "section_type": "majority", "char_start": 0, "char_end": len(text),
+            }]
+            self.citation_rows[doc_id] = [asdict(NewCitation(
+                cast(str, overruling["citation_id"]), doc_id, 0, start, start + len(CASE_NAME),
+                section_id, "majority", "case_cite", "full", CASE_NAME, None, None, None,
+                cast(int, self.pair_rows[-1]["overruled_cluster"]), "fictitious/edges@1",
+            ))]
+
+    def set_overruling_text(self, index: int, text: str) -> None:
+        """Replace a fictitious successor's text and its recorded citation span."""
+
+        pair = self.pair_rows[index]
+        overruling = cast(dict[str, object], pair["overruling"])
+        doc_id = cast(str, overruling["doc_id"])
+        name = cast(str, pair["overruled_name"])
+        start = text.index(name)
+        end = start + len(name)
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        self.texts[cast(int, overruling["opinion_id"])] = text
+        self.objects[digest] = text.encode()
+        overruling.update(generation_sha256=digest, char_start=start, char_end=end)
+        self.section_rows[doc_id][0]["char_end"] = len(text)
+        self.citation_rows[doc_id][0].update(char_start=start, char_end=end, raw_cite=text[start:end])
+
+    def read_bytes(self, path: PathLike) -> bytes:
+        self.events.append(("text", Path(path).name))
+        return super().read_bytes(path)
+
+    def engine_call(self, *_args: object, **kwargs: object) -> engine.EngineReply:
+        self.events.append(("engine", "request"))
+        return super().engine_call(*_args, **kwargs)
 
     def run(
         self, argv: tuple[str, ...] | list[str], *, check: bool = False,
@@ -245,16 +284,24 @@ class PairHost(SyntheticHost):
         env: Mapping[str, str] | None = None, timeout: float | None = None,
         passthrough: bool = False,
     ) -> subprocess.CompletedProcess[str]:
-        if input is not None and ("public.build_reports" in input or "AS listed_pairs" in input):
+        if input is not None and any(token in input for token in (
+            "public.build_reports", "AS listed_pairs", "AS section_rows", "AS citation_rows",
+        )):
             self.calls.append((tuple(argv), input))
             if "public.build_reports" in input:
                 assert list(argv) == worker.psql_argv(RENDERED)
                 kind = "report"
                 output = json.dumps(self.build_report.to_json()) if self.build_report is not None else ""
-            else:
+            elif "AS listed_pairs" in input:
                 assert list(argv) == record.reader_argv(RENDERED)
                 kind = "pairs"
                 output = json.dumps(self.pair_rows)
+            else:
+                assert list(argv) == record.reader_argv(RENDERED)
+                kind = "sections" if "AS section_rows" in input else "citations"
+                doc_id = read_psql_set(input.splitlines()[0], "doc_id")
+                self.events.append((kind, doc_id))
+                output = json.dumps((self.section_rows if kind == "sections" else self.citation_rows)[doc_id])
             if kind in self.run_errors:
                 raise self.run_errors[kind]
             return subprocess.CompletedProcess(list(argv), self.exit_codes.get(kind, 0), self.responses.get(kind, output), REASON)
@@ -832,7 +879,7 @@ class Draft(unittest.TestCase):
                 self.assertEqual((code, errors), (0, ""), output)
                 value = json.loads((root / "draft/manifest.json").read_bytes())
                 self.assertEqual(value["asked"], count)
-                version = 3 if category == "treatment" else 2 if category in ("retrieval", "synthesis", "existence", "trap") else 1
+                version = 4 if category == "treatment" else 3 if category == "trap" else 2 if category in ("retrieval", "synthesis", "existence") else 1
                 self.assertEqual(value["template"], f"{category}@{version}")
                 self.assertIn(f"order: exhausted, kept 1 of {count}", output)
 
@@ -1523,7 +1570,7 @@ class PairDraft(unittest.TestCase):
             pair = host.pair_rows[0]
             overruling = cast(dict[str, object], pair["overruling"])
             self.assertEqual(provenance["generation"], host.generations[0].gen_id)
-            self.assertEqual(provenance["template"], "trap@2")
+            self.assertEqual(provenance["template"], "trap@3")
             self.assertEqual(provenance["entries"][0]["listed"], pair["row_id"])
             self.assertEqual(provenance["discards"], [
                 {"reason": reason, "source_id": row["source_id"], "edge": row["row_id"], "kind": None}
@@ -1531,7 +1578,7 @@ class PairDraft(unittest.TestCase):
                     "list-qualified", "list-qualified", "overruling-uncited", "overruling-absent",
                 ), strict=True)
             ])
-            self.assertIn("near-miss: listed pairs 5, drawable 5, qualified 2, absent 1, uncited 1\n", output)
+            self.assertIn("near-miss: listed pairs 5, drawable 5, qualified 2, absent 1, uncited 1, unstated 0\n", output)
             self.assertIn("summary: kept 1, discarded 4", output)
             case = json.loads((out / "drafts.jsonl").read_bytes())
             self.assertEqual(case["notes"], f"known-overruled row {pair['row_id']}")
@@ -1545,11 +1592,13 @@ class PairDraft(unittest.TestCase):
                 "start": canonical.index(PASSAGE), "end": canonical.index(PASSAGE) + len(PASSAGE), "quote": PASSAGE,
             })
             text = host.texts[cast(int, overruling["opinion_id"])]
-            first, last = synthetic.citation_window(text, cast(int, overruling["char_start"]), cast(int, overruling["char_end"]))
+            anchor_start = text.index("overrule")
+            anchor_end = anchor_start + len("overrule")
+            first, last = synthetic.citation_window(text, anchor_start, anchor_end)
             window = text[first:last]
             self.assertLessEqual(len(window), synthetic.OVERRULING_WINDOW_CHARS)
             self.assertNotEqual(window, text)
-            self.assertEqual(host.fetched, [pair["generation_sha256"], overruling["generation_sha256"]])
+            self.assertEqual(host.fetched, [overruling["generation_sha256"], pair["generation_sha256"]])
             user = cast(list[dict[str, str]], host.bodies[0]["messages"])[1]["content"]
             for line in (
                 f"Case name: {host.documents[0]['case_name']}",
@@ -1565,11 +1614,150 @@ class PairDraft(unittest.TestCase):
             self.assertTrue(sheet.startswith(f"Listed: {pair['row_id']}\n{manifest.SHEET_BLOCK_HEADER} 01 "))
             near = (f"Near miss: overruled by {overruling['case_name']} ({pair['overruling_year']}) | cites "
                     f"{'; '.join(cast(list[str], overruling['cites']))} | source {overruling['source_id']} | behavior qualify")
-            self.assertIn(near + f"\nOverruling window: sha256 {overruling['generation_sha256']} [{first}, {last})\n{window}\n", sheet)
+            self.assertIn(near + f"\nOverruling window: sha256 {overruling['generation_sha256']} [{first}, {last}) "
+                          f"anchor [{anchor_start}, {anchor_end})\n{window}\n", sheet)
             self.assertLess(sheet.index("Original:"), sheet.index(near))
             self.assertLess(sheet.index(near), sheet.index("Question:"))
             self.assertIn(f"01: {pair['source_id']} {pair['row_id']} [{gold['start']}, {gold['end']})", output)
             self.assert_private_absent(host, output + errors + (out / "manifest.json").read_text())
+
+    def test_late_repudiation_centres_the_window_and_records_its_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            host = PairHost()
+            pair = host.pair_rows[0]
+            phrase = f"We now overrule {CASE_NAME} on the invented notice issue."
+            filler = "Invented background without a doctrinal decision. " * synthetic.OVERRULING_WINDOW_CHARS
+            text = f"Fictitious history cites {CASE_NAME}.\n\n{filler}\n\n{phrase}\n\n{filler}"
+            host.set_overruling_text(0, text)
+            overruling = cast(dict[str, object], pair["overruling"])
+            anchor_start = text.index("overrule")
+            anchor_end = anchor_start + len("overrule")
+            self.assertGreater(anchor_start - cast(int, overruling["char_end"]), synthetic.OVERRULING_WINDOW_CHARS // 2)
+            old_window = text[slice(*synthetic.citation_window(
+                text, cast(int, overruling["char_start"]), cast(int, overruling["char_end"]),
+            ))]
+            self.assertNotIn(phrase, old_window)
+            out = root / "draft"
+            code, output, errors = _run(host, root, out, category="trap", count=1)
+            self.assertEqual((code, errors), (0, ""), output)
+            first, last = synthetic.citation_window(text, anchor_start, anchor_end)
+            window = text[first:last]
+            self.assertIn(phrase, window)
+            self.assertLessEqual(len(window), synthetic.OVERRULING_WINDOW_CHARS)
+            user = cast(list[dict[str, str]], host.bodies[0]["messages"])[1]["content"]
+            self.assertIn(f"<overruling-text>\n{window}\n</overruling-text>", user)
+            self.assertIn(
+                f"Overruling window: sha256 {overruling['generation_sha256']} [{first}, {last}) "
+                f"anchor [{anchor_start}, {anchor_end})\n{window}\n",
+                (out / "sheet.txt").read_text(),
+            )
+            provenance_text = (out / "manifest.json").read_text()
+            self.assertEqual(json.loads(provenance_text)["template"], "trap@3")
+            for private in (phrase, window):
+                self.assertNotIn(private, output + errors + provenance_text)
+            self.assert_private_absent(host, output + errors + provenance_text)
+
+    def test_unstated_pair_discards_before_requests_and_counts_its_row(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            host = PairHost(2)
+            unstated = host.pair_rows[1]
+            text = (f"The fictitious court cites {CASE_NAME}.\n\n"
+                    "The invented notice rule is discussed without a decision on its merits.")
+            host.set_overruling_text(1, text)
+            out = root / "draft"
+            code, output, errors = _run(host, root, out, category="trap", count=1)
+            self.assertEqual((code, errors), (0, ""), output)
+            provenance_text = (out / "manifest.json").read_text()
+            provenance = json.loads(provenance_text)
+            self.assertEqual(provenance["template"], "trap@3")
+            self.assertEqual(provenance["discards"], [{
+                "reason": "overruling-unstated", "source_id": unstated["source_id"],
+                "edge": unstated["row_id"], "kind": None,
+            }])
+            self.assertEqual(provenance["entries"][0]["listed"], host.pair_rows[0]["row_id"])
+            self.assertIn("near-miss: listed pairs 2, drawable 2, qualified 0, absent 0, uncited 0, unstated 1\n", output)
+            self.assertIn("summary: kept 1, discarded 1 (overruling-unstated=1)", output)
+            self.assertNotIn(unstated["generation_sha256"], host.fetched)
+            self.assertEqual(len(host.bodies), 3)
+            overruling = cast(dict[str, object], unstated["overruling"])
+            self.assertLess(host.events.index(("citations", cast(str, overruling["doc_id"]))),
+                            host.events.index(("engine", "request")))
+            self.assert_private_absent(host, output + errors + provenance_text)
+
+    def test_shared_overruling_text_and_rows_are_read_once_before_the_walk(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            host = PairHost(3)
+            first_pair, second_pair, third_pair = host.pair_rows
+            second_name = "Fable v. Example"
+            second_pair["overruled_name"] = second_name
+            phrase = f"We overrule {CASE_NAME} and {second_name} on the invented notice issue."
+            text = f"This fictitious court cites {CASE_NAME} and {second_name}.\n\n{phrase}"
+            host.set_overruling_text(0, text)
+            shared = cast(dict[str, object], first_pair["overruling"])
+            original_second = cast(dict[str, object], second_pair["overruling"])
+            doc_id = cast(str, shared["doc_id"])
+            start = text.index(second_name)
+            end = start + len(second_name)
+            host.citation_rows[doc_id].append({
+                **host.citation_rows[doc_id][0], "ordinal": 1,
+                "citation_id": original_second["citation_id"],
+                "char_start": start, "char_end": end, "raw_cite": second_name,
+                "to_cluster": second_pair["overruled_cluster"],
+            })
+            second_pair["overruling"] = {
+                **shared, "citation_id": original_second["citation_id"], "char_start": start, "char_end": end,
+            }
+            other = cast(dict[str, object], third_pair["overruling"])
+            out = root / "draft"
+            code, output, errors = _run(host, root, out, category="trap", count=3)
+            self.assertEqual((code, errors), (0, ""), output)
+            anchor_reads = [
+                (kind, cast(str, overruling[key]))
+                for overruling in (shared, other)
+                for kind, key in (("text", "generation_sha256"), ("sections", "doc_id"), ("citations", "doc_id"))
+            ]
+            self.assertEqual(host.events[:len(anchor_reads)], anchor_reads)
+            for event in anchor_reads:
+                self.assertEqual(host.events.count(event), 1)
+            first_walk_read = next(index for index, event in enumerate(host.events)
+                                   if event[0] == "text" and event[1] in {
+                                       cast(str, pair["generation_sha256"]) for pair in host.pair_rows
+                                   })
+            self.assertEqual(first_walk_read, len(anchor_reads))
+            self.assertLess(first_walk_read, host.events.index(("engine", "request")))
+            self.assertEqual(len(host.bodies), 3 * len(host.pair_rows))
+            provenance_text = (out / "manifest.json").read_text()
+            provenance = json.loads(provenance_text)
+            self.assertEqual(provenance["template"], "trap@3")
+            self.assertEqual({entry["listed"] for entry in provenance["entries"]},
+                             {pair["row_id"] for pair in host.pair_rows})
+            self.assertIn("near-miss: listed pairs 3, drawable 3, qualified 0, absent 0, uncited 0, unstated 0\n", output)
+            self.assertNotIn(phrase, output + errors + provenance_text)
+            self.assert_private_absent(host, output + errors + provenance_text)
+
+    def test_query_citation_missing_or_moved_in_the_record_refuses_before_requests(self) -> None:
+        for scenario in ("missing", "moved"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                host = PairHost()
+                overruling = cast(dict[str, object], host.pair_rows[0]["overruling"])
+                if scenario == "missing":
+                    host.citation_rows[cast(str, overruling["doc_id"])] = []
+                else:
+                    overruling["char_start"] = cast(int, overruling["char_start"]) + 1
+                code, output, errors = _run(host, root, root / "draft", category="trap", count=1)
+                self.assertEqual(code, 1)
+                self.assertIn("pairs: refused", errors)
+                self.assertIn("overruling citation disagrees with the record", errors)
+                self.assertIn("Fix:", errors)
+                self.assertEqual(host.bodies, [])
+                self.assertEqual(host.fetched, [overruling["generation_sha256"]])
+                self.assertEqual(host.released, [backuplock.ENGINE_LOCK.path])
+                self.assertFalse((root / "draft/manifest.json").exists())
+                self.assert_private_absent(host, output + errors)
 
     def test_pair_query_binds_the_named_generation_and_its_report_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1587,7 +1775,7 @@ class PairDraft(unittest.TestCase):
             code, output, errors = _run(host, root, root / "draft", category="trap", count=1,
                                         generation=host.generations[0].gen_id)
             self.assertEqual((code, errors), (0, ""), output)
-            self.assertEqual(len(host.calls), 4)
+            self.assertEqual(len(host.calls), 6)
             self.assertIn("public.index_generations", host.calls[0][1] or "")
             report_sql = host.calls[1][1] or ""
             self.assertIn(worker.bind("v_name", host.build_report.gen_id), report_sql)
@@ -1602,6 +1790,7 @@ class PairDraft(unittest.TestCase):
                 for key in expected
             }, expected)
             for condition in (
+                "k.overruled_name, k.overruled_cluster",
                 "FROM known_overruled k", "k.source = :'treatment_source'",
                 "k.source_snapshot = :'treatment_snapshot_date'::date",
                 "k.overruled_cluster IS NOT NULL AND k.overruling_cluster IS NOT NULL",
@@ -1629,7 +1818,7 @@ class PairDraft(unittest.TestCase):
             host.documents[0]["canonical_sha256"] = "a" * 64
             code, output, errors = _run(host, root, root / "draft", category="trap", count=1)
             self.assertEqual((code, errors), (0, ""), output)
-            self.assertIn("near-miss: listed pairs 2, drawable 1, qualified 0, absent 0, uncited 0\n", output)
+            self.assertIn("near-miss: listed pairs 2, drawable 1, qualified 0, absent 0, uncited 0, unstated 0\n", output)
             provenance = json.loads((root / "draft/manifest.json").read_bytes())
             self.assertEqual(provenance["discards"], [{
                 "reason": "hash-changed", "source_id": host.pair_rows[0]["source_id"], "edge": None, "kind": None,
@@ -1680,7 +1869,7 @@ class PairDraft(unittest.TestCase):
             code, output, errors = _run(host, root, root / "draft", category="trap", count=1)
             self.assertEqual(code, 1)
             self.assertIn("pairs: refused", errors)
-            self.assertIn("overruling citation span disagrees with the canonical text", errors)
+            self.assertIn("overruling citation disagrees with the record", errors)
             self.assertIn("Fix:", errors)
             self.assertEqual(host.bodies, [])
             self.assertEqual(host.released, [backuplock.ENGINE_LOCK.path])
@@ -1888,6 +2077,175 @@ class TreatmentDraft(unittest.TestCase):
                     self.assertEqual(case["expected"]["relation"]["actor"], host.manifest_rows[0]["source_id"])
                     self.assertEqual(json.loads((root / "draft/manifest.json").read_bytes())["discards"], [])
 
+    def test_clipped_sentence_discards_before_fix_span_and_other_checks(self) -> None:
+        long_run = "invented context " * treatment.PATTERN_WINDOW
+        drawn = "Fable v. Example, 123 F.3d 456"
+        for sentence in (
+            f"We would overrule the motion {long_run}{drawn} on the fictitious issue.",
+            f"{drawn} is overruled on the fictitious motion {long_run}",
+        ):
+            with self.subTest(sentence=sentence), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                host = TreatmentHost(1)
+                host.set_sentence(0, sentence)
+                with (
+                    patch.object(synthetic, "fix_span") as fix_span,
+                    patch.object(synthetic, "nearest_cite") as nearest,
+                    patch.object(synthetic, "active_direction") as active,
+                    patch.object(synthetic, "conditional_verb") as conditional,
+                    patch.object(synthetic, "reported_agent") as agent,
+                    patch.object(synthetic, "procedural_object") as procedural,
+                ):
+                    code, output, errors = _run(host, root, root / "draft", category="treatment", count=1)
+                self.assertEqual((code, errors), (0, ""), output)
+                for check in (fix_span, nearest, active, conditional, agent, procedural):
+                    check.assert_not_called()
+                provenance = json.loads((root / "draft/manifest.json").read_bytes())
+                self.assertEqual(provenance["discards"], [{
+                    "reason": "sentence-clipped", "source_id": host.manifest_rows[0]["source_id"],
+                    "edge": host.edge_rows[0]["citation_id"], "kind": "negative",
+                }])
+                self.assertEqual(provenance["entries"], [])
+                self.assertEqual(host.bodies, [])
+                self.assertIn("sentence-clipped=1", output)
+                self.assert_private_absent(output + errors + json.dumps(provenance))
+
+    def test_procedural_objects_discard_only_performed_reads(self) -> None:
+        forms = (
+            "objection", "objections", "exception", "exceptions", "motion", "motions",
+            "demurrer", "demurrers", "contention", "contentions", "assignment of error",
+            "assignments of error", "on authority of", "on the authority of", "they",
+        )
+        for form in forms:
+            for reported in (False, True):
+                with self.subTest(form=form, reported=reported), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    host = TreatmentHost(1)
+                    drawn = "Fable v. Example, 123 F.3d 456"
+                    if reported:
+                        sentence = (f"{drawn}, overruled on other grounds by {TREATMENT_ACTOR}, "
+                                    f"rejected the fictitious {form} in the notice dispute.")
+                    elif form == "they":
+                        sentence = (f"They are now expressly overruled, as illustrated by {drawn}, "
+                                    "in the fictitious notice dispute.")
+                    else:
+                        sentence = (f"We overrule the fictitious {form}, relying on {drawn}, "
+                                    "because the invented notice rule applies.")
+                    host.set_sentence(0, sentence)
+                    if reported:
+                        host.add_citation(0, TREATMENT_ACTOR, 9000)
+                    with patch.object(synthetic, "procedural_object", wraps=synthetic.procedural_object) as procedural:
+                        code, output, errors = _run(host, root, root / "draft", category="treatment", count=1)
+                    self.assertEqual((code, errors), (0, ""), output)
+                    provenance = json.loads((root / "draft/manifest.json").read_bytes())
+                    if reported:
+                        procedural.assert_not_called()
+                        self.assertEqual(provenance["discards"], [])
+                        self.assertEqual(len(provenance["entries"]), 1)
+                        case = json.loads((root / "draft/drafts.jsonl").read_bytes())
+                        self.assertEqual(case["expected"]["relation"]["actor"], 9000)
+                        self.assertEqual(len(host.bodies), 3)
+                    else:
+                        procedural.assert_called_once()
+                        self.assertEqual(provenance["discards"], [{
+                            "reason": "procedural-object", "source_id": host.manifest_rows[0]["source_id"],
+                            "edge": host.edge_rows[0]["citation_id"], "kind": "negative",
+                        }])
+                        self.assertEqual(provenance["entries"], [])
+                        self.assertEqual(host.bodies, [])
+                        self.assertIn("procedural-object=1", output)
+                    self.assert_private_absent(output + errors + json.dumps(provenance))
+
+    def test_drafted_qualifier_reaches_prompt_relation_and_sheet(self) -> None:
+        fixtures = [
+            (phrase, "none", "in_part", reported)
+            for phrase in ("so far as", "in so far as", "insofar as", "to the extent")
+            for reported in (False, True)
+        ] + [
+            ("to the extent", "on_other_grounds", "on_other_grounds", False),
+            ("insofar as", "in_part", "in_part", False),
+            ("", "none", "none", False),
+        ]
+        for phrase, recorded, drafted, reported in fixtures:
+            with self.subTest(phrase=phrase, recorded=recorded, reported=reported), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                host = TreatmentHost(1)
+                drawn = "Fable v. Example, 123 F.3d 456"
+                sentence = (f"{drawn} was overruled by {TREATMENT_ACTOR}" if reported else f"We overrule {drawn}")
+                sentence += (f" {phrase} it bars notice in the fictitious dispute." if phrase else
+                             " on the fictitious notice issue because the earlier rule ignored written notice.")
+                host.set_sentence(0, sentence)
+                edge = host.edge_rows[0]
+                edge["qualifier"] = recorded
+                if reported:
+                    host.add_citation(0, TREATMENT_ACTOR, 9000)
+                    edge.update(standing="dissent", section_type="dissent", state=None,
+                                no_state_reason="non_holding", cluster_state=None)
+                    doc_id = cast(str, edge["doc_id"])
+                    host.section_rows[doc_id][0]["section_type"] = "dissent"
+                    for row in host.citation_rows[doc_id]:
+                        row["section_type"] = "dissent"
+                code, output, errors = _run(host, root, root / "draft", category="treatment", count=1)
+                self.assertEqual((code, errors), (0, ""), output)
+                provenance = json.loads((root / "draft/manifest.json").read_bytes())
+                self.assertEqual(provenance["discards"], [])
+                self.assertEqual(provenance["template"], "treatment@4")
+                self.assertEqual(provenance["template_digest"], synthetic.TEMPLATE_DIGESTS["treatment@4"])
+                case = json.loads((root / "draft/drafts.jsonl").read_bytes())
+                relation = case["expected"]["relation"]
+                self.assertEqual(relation["qualifier"], drafted)
+                self.assertEqual(relation["actor"], 9000 if reported else host.manifest_rows[0]["source_id"])
+                self.assertEqual(edge["qualifier"], recorded)
+                gold = case["gold"][0]
+                for key in ("citation_id", "signal_id", "pattern_set", "cluster"):
+                    self.assertEqual(gold[key], edge[key])
+                line = synthetic.relation_line(
+                    CASE_NAME, cast(str, edge["standing"]), cast(str, edge["signal"]), drafted,
+                    "Fable v. Example", cast(int, edge["cluster"]),
+                    TREATMENT_ACTOR if reported else None, 9000 if reported else None,
+                )
+                user = cast(list[dict[str, str]], host.bodies[0]["messages"])[1]["content"]
+                self.assertIn(f"Qualifier: {drafted}\n", user)
+                self.assertIn(f"Relation: {line}\n", user)
+                sheet = (root / "draft/sheet.txt").read_text()
+                self.assertIn(f"Relation: {line}\n", sheet)
+                note = " (drafted from a limiting phrase; signal none)" if drafted != recorded else ""
+                self.assertIn(f"Kind: {case['expected']['state']} | verb {edge['signal']} | "
+                              f"qualifier {drafted}{note} | standing {edge['standing']}\n", sheet)
+                self.assert_private_absent(output + errors + json.dumps(provenance))
+
+    def test_drafted_qualifier_correction_uses_the_drafted_value(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            host = TreatmentHost(1)
+            host.set_sentence(0, "We overrule Fable v. Example, 123 F.3d 456 to the extent "
+                                 "it bars notice in the fictitious dispute.")
+            code, output, errors = _run(host, root, root / "draft", category="treatment", count=1)
+            self.assertEqual((code, errors), (0, ""), output)
+            manifest_path = root / "draft/manifest.json"
+            provenance = json.loads(manifest_path.read_bytes())
+            marks = root / "marks.txt"
+            header = f"synthetic: CSA-1 {provenance['sheet_sha256']} 2099-01-04\n"
+            marks.write_text(header + f"01 correct qualifier=in_part | {CORRECTED_ANSWER}\n")
+            result = _run_intake(manifest_path, marks, tuple(host.court_map.courts))
+            self.assertEqual(result[0], 1)
+            self.assertIn("correction qualifier equals the drafted value", result[2])
+            case_path = root / "eval-v9" / synthetic.case_path("treatment")
+            self.assertFalse(case_path.exists())
+            marks.write_text(header + f"01 correct qualifier=none | {CORRECTED_ANSWER}\n")
+            for dry_run in (True, False):
+                result = _run_intake(manifest_path, marks, tuple(host.court_map.courts), dry_run=dry_run)
+                self.assertEqual((result[0], result[2]), (0, ""), result[1])
+                if dry_run:
+                    self.assertFalse(case_path.exists())
+            case = json.loads(case_path.read_bytes())
+            self.assertEqual(case["expected"]["relation"]["qualifier"], "none")
+            self.assertEqual(case["review"]["corrected"], {"qualifier": "in_part"})
+            self.assertEqual(case["expected"]["answer"], CORRECTED_ANSWER)
+            self.assertTrue(evalset.load_set(root / "eval-v9", host.court_map.courts).ok)
+            self.assert_private_absent(result[1] + result[2])
+            self.assertNotIn(CORRECTED_ANSWER, result[1] + result[2])
+
     def test_separate_opinion_without_a_direction_phrase_is_recounted(self) -> None:
         for standing in (*synthetic.SEPARATE_SECTIONS, synthetic.SYLLABUS):
             with self.subTest(standing=standing), tempfile.TemporaryDirectory() as directory:
@@ -2003,7 +2361,7 @@ class TreatmentDraft(unittest.TestCase):
             self.assertEqual(treatment_line,
                              "treatment: 6 edges, candidates 6, read 1 documents, unread 5, eligible negative=1, caution=0, none=0, "
                              "performed=1, reported=0, listed=0, unlisted=1, skipped 0 "
-                             "(active-direction=0, actor-drawn=0, agent-unresolved=0, conditional-verb=0, nearest-cite=0, procedural-disposition=0, recounted=0)")
+                             "(active-direction=0, actor-drawn=0, agent-unresolved=0, conditional-verb=0, nearest-cite=0, procedural-disposition=0, procedural-object=0, recounted=0, sentence-clipped=0)")
             self.assertGreater(lines.index(treatment_line), next(index for index, line in enumerate(lines) if line.startswith("01:")))
             self.assertEqual(lines[lines.index(treatment_line) + 1].split(":", 1)[0], "summary")
             self.assert_private_absent(output + errors)
@@ -2115,7 +2473,7 @@ class TreatmentDraft(unittest.TestCase):
             treatment_line = next(line for line in output.splitlines() if line.startswith("treatment:"))
             self.assertEqual(treatment_line,
                              "treatment: 5 edges, candidates 5, read 5 documents, unread 0, eligible negative=2, caution=0, none=1, performed=1, reported=2, listed=2, unlisted=1, "
-                             "skipped 2 (active-direction=0, actor-drawn=0, agent-unresolved=1, conditional-verb=1, nearest-cite=0, procedural-disposition=0, recounted=0)")
+                             "skipped 2 (active-direction=0, actor-drawn=0, agent-unresolved=1, conditional-verb=1, nearest-cite=0, procedural-disposition=0, procedural-object=0, recounted=0, sentence-clipped=0)")
             self.assertIn("kinds negative=2, caution=0, none=1, performed=1, reported=2, listed=2, unlisted=1", output)
             provenance = json.loads((root / "draft/manifest.json").read_bytes())
             self.assertEqual(provenance["format"], 5)
@@ -2137,7 +2495,7 @@ class TreatmentDraft(unittest.TestCase):
                 index = host.edge_rows.index(edge)
                 is_reported = index in (2, 4)
                 actor_cluster = 9000 + index if is_reported else None
-                self.assertEqual(case["template"], "treatment@3")
+                self.assertEqual(case["template"], "treatment@4")
                 self.assertEqual(case["expected"]["relation"]["actor"], actor_cluster if is_reported else gold["source_id"])
                 self.assertEqual(case["notes"], f"known-overruled row {edge['listed_row']}" if edge["listed_row"] else "")
                 self.assertEqual(entry["listed"], edge["listed_row"])
@@ -2296,14 +2654,20 @@ class TreatmentDraft(unittest.TestCase):
             with patch.object(treatment, "sentence", wraps=treatment.sentence) as sentence:
                 code, output, errors = _run(host, root, root / "draft", category="treatment", count=3)
             self.assertEqual((code, errors), (0, ""), output)
-            self.assertEqual(sentence.call_count, 2 * len(host.documents))
+            self.assertEqual(sentence.call_count, 3 * len(host.documents))
+            probes = []
             for call in sentence.call_args_list:
                 self.assertIsInstance(call.args[3], draft.SectionRow)
                 self.assertTrue(all(type(citation) is NewCitation for citation in call.args[4]))
-                self.assertIs(call.args[5], treatment.RULES)
+                if "rules" in call.kwargs:
+                    probes.append(call)
+                    self.assertEqual(call.kwargs["rules"], replace(treatment.RULES, window=synthetic.CLIP_PROBE_WINDOW))
+                else:
+                    self.assertIs(call.args[5], treatment.RULES)
+            self.assertEqual(len(probes), len(host.documents))
             provenance = json.loads((root / "draft/manifest.json").read_bytes())
             self.assertEqual(provenance["discards"], [])
-            self.assertEqual(provenance["template"], "treatment@3")
+            self.assertEqual(provenance["template"], "treatment@4")
             lines = (root / "draft/drafts.jsonl").read_bytes().splitlines()
             cases = [json.loads(line) for line in lines]
             self.assertEqual({case["expected"]["state"] for case in cases}, set(synthetic.TREATMENT_KINDS))
@@ -2324,7 +2688,7 @@ class TreatmentDraft(unittest.TestCase):
                     "qualifier": edge["qualifier"], "cited": edge["cluster"],
                     "actor": 9000 + host.edge_rows.index(edge) if edge["standing"] == "dissent" else gold["source_id"],
                 })
-                self.assertEqual(case["template"], "treatment@3")
+                self.assertEqual(case["template"], "treatment@4")
                 self.assertEqual(case["cluster_id"], gold["source_id"])
                 self.assertIn(f"{ordinal:02d}: {gold['source_id']} {gold['citation_id']} {case['expected']['state']} [{gold['start']}, {gold['end']})", output)
                 complete = {key: f"research-qa-treatment-{ordinal:03d}" if key == "id" else

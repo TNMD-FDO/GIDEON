@@ -227,7 +227,7 @@ def _window_judgement(
 ) -> object | None:
     supplied, contexts = _message_context(guardrail, user_content)
     since = max(0, previous_length - int(guardrail.RESTATEMENT_LOOKAHEAD_CHARS))
-    floor = guardrail.judge_floor(since)
+    floor = guardrail.judge_floor(text, since)
     return guardrail.judge_rendered(
         (text[floor:],),
         text[: int(guardrail.MAX_MATCH_CHARS)],

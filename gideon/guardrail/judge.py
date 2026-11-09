@@ -1,5 +1,6 @@
-"""The guardrail's judge: the restatement and attribution tests, ``judge_text``,
-the message readers, and the entries over a rendered message and a floor.
+"""The guardrail's judge: the restatement, attribution, and definition run
+tests, ``judge_text``, the message readers, and the entries over a rendered
+message and a floor.
 
 Built over ``grammar`` and ``families``; ``window`` imports from it, and
 General's service, ``engine verify``, and the turn harness call it through the
@@ -10,6 +11,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import Literal
 
 from gideon.guardrail.families import (
     AFFIRMATION_OPEN,
@@ -23,6 +25,7 @@ from gideon.guardrail.grammar import (
     ATTRIBUTION_REACH_CHARS,
     EXCLUSION_REACH_CHARS,
     EXEMPTION_REACH_CHARS,
+    GUIDELINES_CATEGORY_ORDER,
     MAX_MATCH_CHARS,
     RESTATEMENT_LOOKAHEAD_CHARS,
     RESTATEMENT_REACH_CHARS,
@@ -31,6 +34,17 @@ from gideon.guardrail.grammar import (
 # The judge's default context: no figure supplied by the user for any family
 # and no confirmation context matched — the stricter side.
 NO_SUPPLIED: Mapping[str, frozenset[str]] = MappingProxyType({})
+
+# How far before the decided point a stream's judged window begins: a hit
+# still decidable starts after it less the match bound, and its exemption
+# context reaches back EXEMPTION_REACH_CHARS at most.
+_FLOOR_REACH_CHARS = MAX_MATCH_CHARS + EXEMPTION_REACH_CHARS
+_DEFINITION_ROW_FORMS = tuple(
+    pattern.definition_run_form
+    for family in FAMILIES
+    for pattern in family.patterns
+    if pattern.definition_run_form is not None
+)
 
 
 def rendered_texts(message: Mapping[str, object]) -> tuple[str, ...]:
@@ -122,12 +136,79 @@ def _is_attributed(
     return family.attribution_form.search(window) is not None
 
 
+def _definition_run(
+    text: str,
+    match_start: int,
+    row_form: re.Pattern[str],
+    *,
+    prefix: bool,
+) -> tuple[int, int, Literal["definition", "open", "no definition"]]:
+    """Read the consecutive definition rows around a hit of their leading mapping."""
+
+    start = text.rfind("\n", 0, match_start) + 1
+    end = text.find("\n", start)
+    if end == -1:
+        end = len(text)
+    row = row_form.fullmatch(text[start:end])
+    if row is None or not (
+        row.start("lead") <= match_start - start < row.end("lead")
+    ):
+        return start, end, "no definition"
+
+    def category_index(row: re.Match[str]) -> int:
+        numeral = row.group("category").upper()
+        if numeral.isdecimal():
+            numeral = GUIDELINES_CATEGORY_ORDER[int(numeral) - 1]
+        return GUIDELINES_CATEGORY_ORDER.index(numeral)
+
+    # An unterminated row's numeral can still grow, so only complete rows
+    # decide the order in prefix mode.
+    categories = [category_index(row)] if not prefix or end < len(text) else []
+    while start > 0:
+        previous_end = start - 1
+        previous_start = text.rfind("\n", 0, previous_end) + 1
+        previous = row_form.fullmatch(text[previous_start:previous_end])
+        if previous is None:
+            break
+        category = category_index(previous)
+        if categories and category >= categories[0]:
+            return previous_start, end, "no definition"
+        categories.insert(0, category)
+        start = previous_start
+
+    if prefix and end == len(text):
+        return start, len(text), "open"
+    while end < len(text):
+        following_start = end + 1
+        following_end = text.find("\n", following_start)
+        if following_end == -1:
+            # Any unfinished adjacent line may still become another row.
+            if prefix:
+                return start, len(text), "open"
+            following_end = len(text)
+        following = row_form.fullmatch(text[following_start:following_end])
+        if following is None:
+            break
+        category = category_index(following)
+        if category <= categories[-1]:
+            return start, following_end, "no definition"
+        categories.append(category)
+        end = following_end
+
+    return (
+        start,
+        min(len(text), end + 1),
+        "definition" if len(categories) >= 2 else "no definition",
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Constraint:
     """A context that must remain together before a stream can release it."""
 
     start: int
     end: int
+    open: bool = False
 
 
 def judge_text(
@@ -153,7 +234,10 @@ def judge_text(
     else the release constraints of the exempt hits: the hit and its
     look-ahead, which the stream never splits.  Those constraints also include
     rejected matches' exclusion tails and rate-form hits, so the stream never
-    splits a hit from the context that decided it.
+    splits a hit from the context that decided it. A definition run that is
+    still open leaves an open constraint from its start through the text's
+    end; the window holds its decided position there and reads the run again
+    until it closes.
     """
 
     constraints: list[Constraint] = []
@@ -205,6 +289,19 @@ def judge_text(
                     continue
                 if prefix and match.end() + RESTATEMENT_LOOKAHEAD_CHARS > len(text):
                     continue
+                if pattern.definition_run_form is not None:
+                    start, end, verdict = _definition_run(
+                        text,
+                        match.start(),
+                        pattern.definition_run_form,
+                        prefix=prefix,
+                    )
+                    if verdict != "no definition":
+                        if prefix:
+                            constraints.append(
+                                Constraint(start, end, open=verdict == "open")
+                            )
+                        continue
                 if _is_attributed(text, match, pattern, family):
                     # An authority's figure: no trip, no constraint, as an
                     # exclusion's hit rejects.
@@ -339,8 +436,24 @@ def judge_message(
     return result if isinstance(result, Trip) else None
 
 
-def judge_floor(since: int) -> int:
-    """The start of the window a stream judges: every hit still decidable starts after ``since`` less
-    the match bound, and its exemption context reaches back EXEMPTION_REACH_CHARS at most."""
+def judge_floor(text: str, since: int) -> int:
+    """The start of the window a stream judges over ``text``.
 
-    return max(0, since - MAX_MATCH_CHARS - EXEMPTION_REACH_CHARS)
+    The window begins at the start of the line holding the point
+    ``_FLOOR_REACH_CHARS`` before ``since``, so the definition run reader
+    never reads a cut line as a row, and moves above any definition rows
+    directly over that line, so it never reads a run without its top.  The
+    walk stops after six rows: seven rows in view cannot be distinct and
+    ascending, so the reader refuses the run whatever lies above them.
+    """
+
+    floor = text.rfind("\n", 0, max(0, since - _FLOOR_REACH_CHARS)) + 1
+    for _ in GUIDELINES_CATEGORY_ORDER:
+        if floor == 0:
+            break
+        previous_start = text.rfind("\n", 0, floor - 1) + 1
+        previous = text[previous_start : floor - 1]
+        if not any(form.fullmatch(previous) for form in _DEFINITION_ROW_FORMS):
+            break
+        floor = previous_start
+    return floor

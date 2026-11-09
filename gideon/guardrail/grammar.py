@@ -1,6 +1,6 @@
 """The guardrail's grammar: the match, gap, and lag bounds, the refusal
-separator, each family's vocabulary, and every bounded pattern source and
-construction builder the families compile.
+separator, each family's vocabulary, the Guidelines definition row form,
+and every bounded pattern source and construction builder the families compile.
 
 Standard library only; ``families``, ``judge``, and ``window`` import from it.
 """
@@ -893,14 +893,14 @@ GUIDELINES_LEVEL_SOURCE = (
     rf")"
 )
 GUIDELINES_CATEGORY_NUMERAL = rf"(?:{GUIDELINES_ROMAN}|[1-6])(?!\w)"
+GUIDELINES_CATEGORY_ORDER = ("I", "II", "III", "IV", "V", "VI")
 GUIDELINES_CATEGORY_SOURCE = (
     rf"(?:"
     rf"\b(?:criminal(?:{GUIDELINES_WORD_SPACE}|-)history{GUIDELINES_WORD_SPACE})?"
     rf"category{GUIDELINES_WORD_SPACE}(?:of{GUIDELINES_WORD_SPACE})?"
-    rf"{GUIDELINES_CATEGORY_NUMERAL}"
-    rf"|\bCHC{GUIDELINES_OPTIONAL_SPACE}{GUIDELINES_CATEGORY_NUMERAL}"
+    rf"|\bCHC{GUIDELINES_OPTIONAL_SPACE}"
     rf"|\bcrim\.?{GUIDELINES_WORD_SPACE}hist\.?{GUIDELINES_WORD_SPACE}cat\.?"
-    rf"{GUIDELINES_OPTIONAL_SPACE}{GUIDELINES_CATEGORY_NUMERAL})"
+    rf"{GUIDELINES_OPTIONAL_SPACE}){GUIDELINES_CATEGORY_NUMERAL}"
 )
 # The level reaches its category within a short gap (", ", " and a ", " with a ").
 GUIDELINES_PAIR_GAP = r"[\s\S]{0,12}"
@@ -966,6 +966,8 @@ GUIDELINES_SENTENCE_BREAK = r"(?:[.!?](?:\s|$)|\n)"
 # point count to its link or a category to its lead.
 GUIDELINES_CHAIN_GAP_CHARS = 60
 GUIDELINES_POINT_GAP_CHARS = 30
+# A definition row includes its indentation and trailing prose in this bound.
+GUIDELINES_DEFINITION_ROW_MAX_CHARS = 200
 # The chained-total prefix starts at a level figure so a generic sum cannot
 # qualify. Its gap admits commas but no sentence break, and its look-ahead
 # requires the result number to end a clause without a following unit word.
@@ -1061,6 +1063,34 @@ GUIDELINES_POINTS_TO_CATEGORY = (
 # width list cannot be represented by a look-behind.
 GUIDELINES_LIST_NUMBER = (
     rf"(?:\d{{1,2}}|{_phrases(NUMBER_WORDS)}|{_phrases(NUMBER_COMPOUNDS)})"
+)
+# A row leads with a single count, a closed range, or an open top, with the
+# noun and any emphasis belonging to the whole figure.
+GUIDELINES_POINT_FIGURE_SOURCE = (
+    rf"{MARK}(?<![\w/]){GUIDELINES_LIST_NUMBER}"
+    rf"(?:"
+    rf"[ \t]{{0,3}}(?:{'|'.join(GUIDELINES_RANGE_SEPARATORS)})[ \t]{{0,3}}"
+    rf"{GUIDELINES_LIST_NUMBER}"
+    rf"|{SP}{_phrases((*GUIDELINES_RANGE_WORDS, 'or'))}{SP}{GUIDELINES_LIST_NUMBER}"
+    rf"|{SP}or{SP}more|[ \t]{{0,3}}\+"
+    rf")?(?:{SP}criminal{SP}history)?{SP}points?{MARK}(?![\w/])"
+)
+# Only the leading mapping belongs to a definition; a further mapping in
+# trailing prose must be judged on its own. The length look-ahead also keeps
+# the shared whitespace sources from crossing a line boundary.
+GUIDELINES_DEFINITION_ROW_SOURCE = (
+    rf"\A(?=[^\n]{{0,{GUIDELINES_DEFINITION_ROW_MAX_CHARS}}}\Z)"
+    rf"[ \t]{{0,{GUIDELINES_DEFINITION_ROW_MAX_CHARS}}}"
+    rf"(?:(?:[-\x2a+]|\d{{1,3}}[.)]|\|){SP})?"
+    rf"(?P<lead>{GUIDELINES_POINT_FIGURE_SOURCE}"
+    rf"(?:{SP}(?:"
+    rf"\b{_phrases(GUIDELINES_POINT_PLACING_VERBS)}{SP}"
+    rf"{_phrases(GUIDELINES_PLACED_OBJECTS)}{SP}in\b"
+    rf"|\b{_phrases(GUIDELINES_POINT_LINKS)}\b)"
+    rf"|[ \t]{{0,3}}(?:→|->|=>|=|:)[ \t]{{0,3}})"
+    rf"{SP}(?:(?:the|a|an){SP})?"
+    rf"{GUIDELINES_CATEGORY_SOURCE.replace(GUIDELINES_CATEGORY_NUMERAL, rf'(?P<category>{GUIDELINES_CATEGORY_NUMERAL})')})"
+    rf"[^\n]{{0,{GUIDELINES_DEFINITION_ROW_MAX_CHARS}}}\Z"
 )
 # The whole list is one hit, so its last count lies inside it.
 GUIDELINES_POINT_LIST_ITEMS = 5

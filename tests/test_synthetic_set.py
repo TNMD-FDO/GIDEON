@@ -52,6 +52,7 @@ PINNED_PREFIXES: Final[dict[str, tuple[tuple[int, str], ...]]] = {
     "treatment": (
         (6, "3ab8d866637a8047cc7b791f4bd9b7f1fb79d0637235fce94aea216efc71420a"),
         (18, "461975624207242dbf50d69702d4d9dee339fa026ddfdf0c0cfd705665f24cd4"),
+        (37, "995d1be8ef1adfe12c466934280e4322c77a80283d3797453419405259262de5"),
     ),
     "section-attribution": (
         (19, "178818c9820d235ecdf6041452ea8b4a9e49d4ed20e32dcf0453638892ac9e8a"),
@@ -62,6 +63,7 @@ PINNED_PREFIXES: Final[dict[str, tuple[tuple[int, str], ...]]] = {
     "trap": (
         (10, "8418643e8fde64cbf1983c6e445385e96a3b139aac02db1387da7b4e9e0cab34"),
         (15, "d6cd0ac75d47099a09a0ecf6c69680a0b86af579cdcfb5104bb6da75ed554875"),
+        (19, "4858a8103551fc0373d369da4bad8a495119ae0455b3162b23bf365b9f127b6c"),
     ),
     "poisoned-premise": (
         (8, "07d9a8813503eb84daca569c763f4bdd490cec503b4570a6edf2ee3ed81f0bb7"),
@@ -154,7 +156,8 @@ class SyntheticSetContract(TestCase):
                         if key in spec.expected_keys_for():
                             self.assertIn(expected[key], vocabulary)
                     if category == "treatment":
-                        self.assertEqual(template, "treatment@3")
+                        ordinal = int(cast(str, case["id"]).rsplit("-", 1)[1])
+                        self.assertEqual(template, "treatment@3" if ordinal <= 18 else "treatment@4")
                         relation = cast(dict[str, object], expected["relation"])
                         self.assertEqual(tuple(relation), synthetic.RELATION_KEYS)
                         for key, relation_vocabulary in (("standing", SECTION_TYPES), ("verb", TREATMENT_SIGNALS),

@@ -142,8 +142,8 @@ CITE_TYPES: Final = (
     "state_code", "case_cite", "law_cite", "journal_cite", "unknown",
 )
 CITE_FORMS: Final = ("full", "short", "id", "supra", "reference")
-PATTERN_SET_ID: Final = "treatment/patterns@2"
-# On at 0.997 measured precision; the build's materialization reads
+PATTERN_SET_ID: Final = "treatment/patterns@3"
+# On at 0.996 measured precision; the build's materialization reads
 # the switch here, held equal to the worker's, which never imports the host.
 SIGNAL_PATTERN: Final[bool] = True
 TREATMENT_SIGNALS: Final = (

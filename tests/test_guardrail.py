@@ -3,10 +3,18 @@
 The tests moved whole from the former arithmetic guardrail module; ``FILTER``
 names the service module so each moved test reads as it did there. The writer's
 patched seams target ``FILTER.writer``.
+
+Beside the tripwires its architecture leaf names, the module holds the
+reasoning never judged, the figure forms canonical, the confirmation gate and
+the families' order, displacement, and yields, the rate forms, the state's
+content-free repr, the lookup, the once-only recorder, the attribution class,
+the bounds, the chat id's shape, and the retired words held out of the
+guardrail, service, and turns packages.
 """
 
 import contextlib
 import io
+import random
 import re
 import sys
 import tempfile
@@ -18,6 +26,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Literal, Self
 from unittest.mock import patch
 
+import pytest
 import yaml  # type: ignore[import-untyped]
 
 from gideon import guardrail
@@ -553,6 +562,238 @@ class Guidelines(unittest.TestCase):
         message: dict[str, object] = {"role": "assistant", "content": answer, "output": []}
         return FILTER.judge_message(message, [{"role": "user", "content": prompt}, message], 1)
 
+    def _passing_definition_runs(self) -> dict[str, str]:
+        """Invented glossary rows and the committed definition control."""
+
+        heading = "Fictitious category glossary:\n"
+        return {
+            "seed": str(seed_case(SEED_DIR / "guidelines-range.yaml", "definition-03")["answer"]),
+            "bullets": heading + (
+                "- **4–6 points** → Category III\n"
+                "- **7 to 9 points** → Category IV\n"
+                "- **10 or 12 points** → Category V\n"
+                "- **13 or more points** → Category VI"
+            ),
+            "ordinals": heading + (
+                "1. 4 points: Category 3\n"
+                "2) 7–9 points: Category IV"
+            ),
+            "pipes": heading + (
+                "| *4–6 points* = Category III |\n"
+                "| 7 points = Category 4 |"
+            ),
+            "bare": heading + (
+                "4 or 6 points corresponds to Category III\n"
+                "7 to 9 points falls into Category IV\n"
+                "13+ points results in Category VI"
+            ),
+            "placing": heading + (
+                "+ four points puts him in the Category III\n"
+                "* **seven criminal history points** places your client in Category IV"
+            ),
+            "ascii-arrows": heading + (
+                "4-6 points -> Category III\n"
+                "7–9 points => Category IV"
+            ),
+            "growing-numeral": heading + (
+                "4–6 points → Category III\n"
+                "seven criminal history points corresponds to Category IV"
+            ),
+            # Rows wider than the stream's floor reach, whose top rows the
+            # list exclusion passes before the first row the reader judges.
+            "padded-seed": heading + self._padded_rows(self._seed_rows()),
+            "spelled-categories": heading + "\n".join(
+                f"- **{points} points** → Criminal History Category {category}"
+                for points, category in self._SEED_TABLE
+            ),
+            "corresponds": heading + "\n".join(
+                f"- {points} criminal history points corresponds to Category {category}"
+                for points, category in self._SEED_TABLE
+            ),
+        }
+
+    _SEED_TABLE: ClassVar[tuple[tuple[str, str], ...]] = (
+        ("0 or 1", "I"),
+        ("2 or 3", "II"),
+        ("4–6", "III"),
+        ("7–9", "IV"),
+        ("10–12", "V"),
+        ("13 or more", "VI"),
+    )
+
+    def _seed_rows(self) -> list[str]:
+        return str(
+            seed_case(SEED_DIR / "guidelines-range.yaml", "definition-03")["answer"]
+        ).splitlines()
+
+    def _padded_rows(self, rows: list[str]) -> str:
+        padded = "\n".join(
+            row.ljust(FILTER.GUIDELINES_DEFINITION_ROW_MAX_CHARS) for row in rows
+        )
+        self.assertGreater(
+            len(padded), FILTER.MAX_MATCH_CHARS + FILTER.EXEMPTION_REACH_CHARS
+        )
+        return padded
+
+    def _tripping_definition_runs(self) -> dict[str, str]:
+        """Invented mappings outside the definition rule, and a seed positive."""
+
+        heading = "Fictitious category examples:\n"
+        seed_rows = self._seed_rows()
+        return {
+            "single": heading + "- 4–6 points → Category III",
+            "seed-positive": str(seed_case(SEED_DIR / "guidelines-range.yaml", "points-04")["answer"]),
+            "scenario-labels": heading + (
+                "- Fictitious client A: 4–6 points → Category III\n"
+                "- Fictitious client B: 7–9 points → Category IV"
+            ),
+            "repeat": heading + (
+                "- 4–6 points → Category III\n"
+                "- 7–9 points → Category III"
+            ),
+            "descent": heading + (
+                "- 7–9 points → Category IV\n"
+                "- 4–6 points → Category III"
+            ),
+            "trailing-prose": heading + (
+                "- 4–6 points → Category III (your 8 points → Category IV).\n"
+                "- 7–9 points → Category IV."
+            ),
+            # A descent far above the first judged row: the top row has no
+            # hit and the next two are the list exclusion's.
+            "padded-descent-above": heading + self._padded_rows(
+                [seed_rows[5], *seed_rows[:3]]
+            ),
+        }
+
+    def _definition_chunkings(self, text: str) -> Iterator[tuple[str, list[str]]]:
+        for size in range(1, 25):
+            yield str(size), [text[start : start + size] for start in range(0, len(text), size)]
+        generator = random.Random("fictitious definition rows")
+        chunks: list[str] = []
+        start = 0
+        while start < len(text):
+            size = generator.randint(1, 24)
+            chunks.append(text[start : start + size])
+            start += size
+        yield "random", chunks
+
+    def test_ascending_point_rows_are_definitions(self) -> None:
+        for name, text in self._passing_definition_runs().items():
+            with self.subTest(case=name):
+                self.assertIsNone(FILTER.judge_text(text))
+
+    def test_point_rows_outside_a_definition_trip(self) -> None:
+        for name, text in self._tripping_definition_runs().items():
+            with self.subTest(case=name):
+                self.assertEqual(
+                    FILTER.judge_text(text),
+                    FILTER.Trip("guidelines", FILTER.GUIDELINES_POINTS_TO_CATEGORY_PATTERN.pattern_id),
+                )
+
+    def test_closed_definition_run_has_a_closed_prefix_constraint(self) -> None:
+        heading = "Fictitious category glossary:\n"
+        rows = "- 4–6 points → Category III\n- 7–9 points → Category IV\n"
+        text = heading + rows + "\n" + "Fictitious commentary.".ljust(FILTER.RESTATEMENT_LOOKAHEAD_CHARS)
+        result = FILTER.judge_text(text, prefix=True)
+        self.assertIsInstance(result, tuple)
+        assert isinstance(result, tuple)
+        self.assertEqual(
+            set(result), {FILTER.Constraint(len(heading), len(heading) + len(rows))}
+        )
+        self.assertTrue(all(not item.open for item in result))
+
+    def test_unterminated_line_keeps_a_definition_run_open(self) -> None:
+        heading = "Fictitious category glossary:\n"
+        first_row = "- 4–6 points → Category III\n"
+        for tail in (
+            "Fictitious unfinished commentary.".ljust(FILTER.RESTATEMENT_LOOKAHEAD_CHARS),
+            "- seven criminal history points corresponds to Category I",
+        ):
+            with self.subTest(tail=tail):
+                text = heading + first_row + tail
+                result = FILTER.judge_text(text, prefix=True)
+                self.assertIsInstance(result, tuple)
+                assert isinstance(result, tuple)
+                self.assertEqual(
+                    set(result), {FILTER.Constraint(len(heading), len(text), open=True)}
+                )
+
+    @pytest.mark.slow
+    def test_definition_streams_release_whole_text_and_no_tripping_prefix(self) -> None:
+        tail = "\n\n" + "Fictitious trailing commentary.".ljust(
+            FILTER.LAG_CHARS + FILTER.RESTATEMENT_LOOKAHEAD_CHARS, "."
+        )
+        for name, rows in self._passing_definition_runs().items():
+            text = rows + tail
+            for chunking, chunks in self._definition_chunkings(text):
+                with self.subTest(case=name, chunking=chunking):
+                    state = FILTER.StreamState({}, frozenset())
+                    stream = FILTER.StreamCheck(state, judge=FILTER.judge_rendered)
+                    released = ""
+                    for chunk in chunks:
+                        delta = stream.append(chunk)
+                        released += delta
+                        self.assertIsNone(state.trip)
+                        if delta:
+                            self.assertIsNone(FILTER.judge_rendered((released,), released))
+                    self.assertTrue(released.startswith(rows))
+                    released += stream.finish()
+                    self.assertIsNone(state.trip)
+                    self.assertEqual(released, text)
+                    self.assertIsNone(FILTER.judge_rendered((released,), released))
+
+    def test_nondefinition_streams_trip_at_every_chunking(self) -> None:
+        tail = "\n\n" + "Fictitious trailing commentary.".ljust(
+            FILTER.LAG_CHARS + FILTER.RESTATEMENT_LOOKAHEAD_CHARS, "."
+        )
+        for name, rows in self._tripping_definition_runs().items():
+            for chunking, chunks in self._definition_chunkings(rows + tail):
+                with self.subTest(case=name, chunking=chunking):
+                    state = FILTER.StreamState({}, frozenset())
+                    stream = FILTER.StreamCheck(state, judge=FILTER.judge_rendered)
+                    released = ""
+                    for chunk in chunks:
+                        delta = stream.append(chunk)
+                        released += delta
+                        if delta:
+                            self.assertIsNone(FILTER.judge_rendered((released,), released))
+                        if state.trip is not None:
+                            break
+                    stream.finish()
+                    self.assertEqual(
+                        state.trip,
+                        FILTER.Trip("guidelines", FILTER.GUIDELINES_POINTS_TO_CATEGORY_PATTERN.pattern_id),
+                    )
+
+    def test_decided_holds_an_open_run_then_advances_when_it_closes(self) -> None:
+        heading = "Fictitious category glossary:\n"
+        rows = "- 4–6 points → Category III\n- 7–9 points → Category IV\n"
+        state = FILTER.StreamState({}, frozenset())
+        stream = FILTER.StreamCheck(state, judge=FILTER.judge_rendered)
+        released = stream.append(heading)
+        for chunk in (
+            rows + "Fictitious unfinished commentary.".ljust(FILTER.RESTATEMENT_LOOKAHEAD_CHARS),
+            "Still unfinished.",
+        ):
+            released += stream.append(chunk)
+            self.assertIsNone(state.trip)
+            self.assertTrue(any(item.open for item in state.content.constraints))
+            self.assertLessEqual(state.content.decided, len(heading))
+            self.assertLessEqual(state.content.released, len(heading))
+        released += stream.append(
+            "\n" + "Fictitious closed commentary.".ljust(
+                FILTER.LAG_CHARS + FILTER.RESTATEMENT_LOOKAHEAD_CHARS, "."
+            )
+        )
+        self.assertIsNone(state.trip)
+        self.assertGreater(state.content.decided, len(heading))
+        self.assertGreater(state.content.released, len(heading) + len(rows))
+        self.assertFalse(any(item.open for item in state.content.constraints))
+        text = state.content.text
+        released += stream.finish()
+        self.assertEqual(released, text)
+
     def test_normalized_figures_use_one_key_for_each_written_form(self) -> None:
         self.assertEqual(
             FILTER.normalized_figures(
@@ -743,6 +984,7 @@ class Guidelines(unittest.TestCase):
             "add-01",
             "definition-01",
             "definition-02",
+            "definition-03",
             "case-03",
             "psr-01",
             "psr-02",
@@ -1759,15 +2001,25 @@ class BoundsAndHygiene(unittest.TestCase):
         ]
         for family in FILTER.FAMILIES:
             for pattern in family.patterns:
-                for regex in (pattern.regex, pattern.rate_form, pattern.exclusion):
+                for regex, ceiling in (
+                    (pattern.regex, FILTER.MAX_MATCH_CHARS),
+                    (pattern.rate_form, FILTER.MAX_MATCH_CHARS),
+                    (pattern.exclusion, FILTER.MAX_MATCH_CHARS),
+                    (pattern.definition_run_form, FILTER.GUIDELINES_DEFINITION_ROW_MAX_CHARS),
+                ):
                     if regex is None:
                         continue
-                    self.assertNotRegex(regex.pattern, r"(?:\*|\+|\{\d+,\})")
+                    source = regex.pattern
+                    if regex is pattern.definition_run_form:
+                        # Escaped marks and character classes carry literal
+                        # plus signs and bullets, never quantifiers.
+                        source = re.sub(r"\[(?:\\.|[^\]\\])*\]|\\.", "", source)
+                    self.assertNotRegex(source, r"(?:\*|\+|\{\d+,\})")
                     for text in adversarial:
                         for match in regex.finditer(text):
                             self.assertLessEqual(
                                 len(match.group(0)),
-                                FILTER.MAX_MATCH_CHARS,
+                                ceiling,
                                 (pattern.pattern_id, text[:40]),
                             )
         # The two maximal texts the resolver admits — the longest pair (a
@@ -1841,6 +2093,15 @@ class BoundsAndHygiene(unittest.TestCase):
         self.assertNotRegex(FILTER.GUIDELINES_FIGURE.pattern, r"(?:\*|\+|\{\d+,\})")
         self.assertNotRegex(FILTER.CONFIRMATION_CONTEXT.pattern, r"(?:\*|\+|\{\d+,\})")
         self.assertNotRegex(FILTER.AFFIRMATION_OPEN.pattern, r"(?:\*|\+|\{\d+,\})")
+
+    def test_definition_row_bound_covers_the_whole_line(self) -> None:
+        form = FILTER.GUIDELINES_POINTS_TO_CATEGORY_PATTERN.definition_run_form
+        self.assertIsNotNone(form)
+        row = "  - **4–6 points** → Category III (fictitious glossary)"
+        bounded = row.ljust(FILTER.GUIDELINES_DEFINITION_ROW_MAX_CHARS)
+        self.assertIsNotNone(form.fullmatch(bounded))
+        self.assertIsNone(form.fullmatch(bounded + " "))
+        self.assertIsNone(form.fullmatch(row + "\n" + row))
 
     def test_refusal_prefix_reach_is_the_longest_prefix_the_refusal_form_matches(self) -> None:
         """The look-behind's bound is derived from the same phrase tables the refusal form is built from."""

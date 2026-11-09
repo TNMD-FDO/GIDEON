@@ -97,7 +97,7 @@ class StreamCheck:
     def _judge(
         self, text: str, decided: int, *, prefix: bool
     ) -> Trip | tuple[Constraint, ...] | None:
-        floor = judge_floor(decided)
+        floor = judge_floor(text, decided)
         opening = text[:MAX_MATCH_CHARS]
         result = self._judge_function(
             (text[floor:],),
@@ -109,7 +109,8 @@ class StreamCheck:
         )
         if isinstance(result, tuple):
             return tuple(
-                Constraint(item.start + floor, item.end + floor) for item in result
+                Constraint(item.start + floor, item.end + floor, open=item.open)
+                for item in result
             )
         return result
 
@@ -133,19 +134,34 @@ class StreamCheck:
             record_stream_trip(self.state, result)
             return ""
         fresh = tuple(result) if isinstance(result, tuple) else ()
-        # Constraints persist until release has passed them; a decided hit is
-        # not re-judged, but its context still travels with it.
-        active = {(item.start, item.end): item for item in entry.constraints}
+        # Closed constraints persist until release passes them. Open runs are
+        # re-judged, so fresh constraints replace every earlier open one.
+        active = {
+            (item.start, item.end): item
+            for item in entry.constraints
+            if not item.open
+        }
         for item in fresh:
             active[(item.start, item.end)] = item
         constraints = [item for item in active.values() if item.end > released]
-        entry.decided = max(decided, len(text) - RESTATEMENT_LOOKAHEAD_CHARS)
+        entry.decided = max(
+            decided,
+            min(
+                (
+                    len(text) - RESTATEMENT_LOOKAHEAD_CHARS,
+                    *(item.start for item in fresh if item.open),
+                )
+            ),
+        )
         target = max(0, len(text) - LAG_CHARS)
         moved = True
         while moved:
             moved = False
             for item in constraints:
-                if item.start < target < item.end:
+                # A constraint may start before the released point (a run
+                # whose top rows an exclusion released): it holds the target
+                # there, and the loop repeats only on a move.
+                if item.start < target < item.end and target != max(released, item.start):
                     target = max(released, item.start)
                     moved = True
         target = max(released, min(target, len(text)))

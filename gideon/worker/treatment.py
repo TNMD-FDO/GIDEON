@@ -8,9 +8,9 @@ from typing import Final, Protocol
 
 from gideon.worker.citations import NewCitation, SectionSpan
 
-PATTERN_SET_ID: Final = "treatment/patterns@2"
-# On: the shipped rules signal 285 of 286 edge-level predictions correctly
-# (precision 0.997) on the CaseHOLD overruling sentences, measured by
+PATTERN_SET_ID: Final = "treatment/patterns@3"
+# On: the shipped rules signal 284 of 285 edge-level predictions correctly
+# (precision 0.996) on the CaseHOLD overruling sentences, measured by
 # `python3 -m tools.treatment measure`; the switch needs 0.95.
 SIGNAL_PATTERN: Final = True
 TREATMENT_SIGNALS: Final = (
@@ -75,6 +75,11 @@ _PROCEDURAL_OBJECTS = frozenset((
     "objection", "objections", "exception", "exceptions", "motion", "motions",
     "demurrer", "demurrers",
 ))
+_PROCEDURAL_BEFORE_WORDS = _PROCEDURAL_OBJECTS | frozenset(("contention", "contentions"))
+_PROCEDURAL_BEFORE_PHRASES = re.compile(
+    r"\b(?:(?:assignments?|points?)\s+of\s+error|on\s+(?:the\s+)?authority\s+of)\b",
+    re.IGNORECASE,
+)
 _PROCEDURAL_PHRASE_HEADS = frozenset((
     "assignment", "assignments", "point", "points",
 ))
@@ -110,6 +115,7 @@ class PatternRules:
     direction: bool
     attribution: str
     semicolon_boundary: bool
+    procedural_before: bool
 
     def __post_init__(self) -> None:
         if self.window <= 0:
@@ -121,10 +127,10 @@ class PatternRules:
 
 
 # The baseline rule set is never edited.
-RULES_1: Final[PatternRules] = PatternRules(300, False, 3, False, True, "sentence", False)
-# The shipped set: the baseline with hyphenated spellings read and procedural
-# objects excluded, the measured arm with the best recall above the bar.
-RULES: Final[PatternRules] = PatternRules(300, True, 3, True, True, "sentence", False)
+RULES_1: Final[PatternRules] = PatternRules(300, False, 3, False, True, "sentence", False, False)
+# The shipped set: the baseline with hyphenated spellings read, nearby procedural
+# objects excluded, and procedural objects before a performed verb excluded.
+RULES: Final[PatternRules] = PatternRules(300, True, 3, True, True, "sentence", False, True)
 PATTERN_WINDOW: Final = RULES.window
 
 
@@ -254,6 +260,13 @@ def _procedural_object(fragment: str, before: list[re.Match[str]], verb_end: int
     return False
 
 
+def _procedural_before(fragment: str, words: list[str], verb_start: int) -> bool:
+    return (
+        any(word in _PROCEDURAL_BEFORE_WORDS for word in words)
+        or _PROCEDURAL_BEFORE_PHRASES.search(fragment, 0, verb_start) is not None
+    )
+
+
 def _excluded(
     fragment: str, verb_start: int, verb_end: int, form: str,
     rules: PatternRules,
@@ -269,7 +282,13 @@ def _excluded(
         ))
     ):
         return True
-    return rules.procedural_objects and _procedural_object(fragment, before, verb_end)
+    if rules.procedural_objects and _procedural_object(fragment, before, verb_end):
+        return True
+    return (
+        rules.procedural_before
+        and _DIRECTION.match(fragment, verb_end) is None
+        and _procedural_before(fragment, words, verb_start)
+    )
 
 
 def occurrences(fragment: str, rules: PatternRules = RULES) -> tuple[Occurrence, ...]:

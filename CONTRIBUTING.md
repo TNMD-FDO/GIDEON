@@ -49,3 +49,43 @@ public issue or pull request.
   through `python3 -m tools.redact --site /etc/gideon/site.yaml` before it is
   added, which writes those placeholders; `tests/test_office_values.py` holds
   the whole tree to that rule and names the fix in every finding.
+
+## Writing public prose
+
+Write for the reader of each document:
+
+- The README is for a receiving office's computer systems administrator
+  (CSA), who decides whether and how to install.
+- The overview, `docs/OVERVIEW.md`, is for an attorney or office manager.
+- `CONTRIBUTING.md` and `SECURITY.md` are for a contributor, developer, or
+  security researcher.
+- The runbooks are for a CSA who has installed GIDEON.
+- Release notes and the changelog are for every user and the receiving
+  office's CSA.
+
+Follow these rules:
+
+- Address the operator as "you."
+- Keep one idea per sentence, with at most 30 words.
+- Start a new sentence for each new fact.
+- Do not use an em-dash to connect clauses.
+- Use "never" only for a hard refusal the software makes.
+- Put a command once, in the step that runs it.
+- Keep tracker vocabulary out of public prose: slice, ticket, TRIP, effort,
+  and cycle.
+- Define an operator term where each document first uses it. CSA, apply,
+  provision, the quiet window, the eval identity, and the build box are
+  operator terms.
+- Use "the server" in the README and the overview.
+- You may use "the box" in a runbook because command output uses it.
+
+The gate holds these public documents to the 30-word sentence limit and names
+each line to split.
+
+This sentence fails the style guide:
+
+> "**Login** — Use the CSA's own Linux login with `sudo`, never root; this login will own `/opt/gideon`."
+
+The passing form is:
+
+> "**Login.** Sign in with your own Linux account, one that can `sudo`. Don't use root. This account will own `/opt/gideon`."
