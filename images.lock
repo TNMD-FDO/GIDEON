@@ -27,8 +27,8 @@ images:
   # engine has come up healthy on the box under the new image and after
   # `engine verify` passes; an engine-image change requires that check.
   vllm-openai:
-    source: docker.io/vllm/vllm-openai:v0.27.1
-    digest: sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
+    source: docker.io/vllm/vllm-openai:v0.33.0
+    digest: sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
   # General's metasearch:
   # SearXNG's published image, run as shipped, resolved on the box with
   # `skopeo inspect` on 2026-09-08 — a three-platform index (amd64, arm64,

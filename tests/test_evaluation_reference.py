@@ -145,6 +145,110 @@ class Comparison(unittest.TestCase):
         )
 
 
+class CeilingComparison(unittest.TestCase):
+    """Counted controls report verdict changes while positives compare per case."""
+
+    def setUp(self) -> None:
+        self.control = "deadline-trap/fictitious-control"
+        self.other_control = "guidelines-range/fictitious-control"
+        self.positive = "deadline-trap/fictitious-positive"
+        self.ceiling_cases = frozenset({self.control, self.other_control})
+        self.file = replace(
+            _file(cases=dict.fromkeys(
+                (self.control, self.other_control, self.positive),
+                cast(reference.Verdict, "pass"),
+            )),
+            slice="guardrails",
+            repeats=1,
+        )
+        self.rows = tuple(
+            (case_id, repeat, "pass")
+            for case_id in self.file.cases
+            for repeat in range(1, 6)
+        )
+
+    def test_control_failing_one_repeat_is_reported_without_staling(self) -> None:
+        current = reference.fold_repeats(
+            (case_id, repeat, "fail" if case_id == self.control and repeat == 3 else verdict)
+            for case_id, repeat, verdict in self.rows
+        )
+        result = reference.compare_reference(
+            reference.SliceReference((self.file,)), current, VERSION,
+            ceiling_cases=self.ceiling_cases,
+        )
+        self.assertEqual(result.ceiling, (self.control,))
+        self.assertEqual(result.regressed, ())
+        self.assertEqual(result.gained, ())
+        self.assertEqual(result.new, ())
+        self.assertEqual(result.dropped, ())
+        self.assertFalse(result.stale)
+        self.assertEqual(result.outcome, "current")
+
+    def test_control_changes_in_both_directions_are_sorted_and_never_gained(self) -> None:
+        previous = replace(self.file, cases={**self.file.cases, self.other_control: "fail"})
+        current = reference.fold_repeats(
+            (case_id, repeat, "fail" if case_id == self.control and repeat == 3 else verdict)
+            for case_id, repeat, verdict in self.rows
+        )
+        result = reference.compare_reference(
+            reference.SliceReference((previous,)), current, VERSION,
+            ceiling_cases=self.ceiling_cases,
+        )
+        self.assertEqual(result.ceiling, tuple(sorted((self.control, self.other_control))))
+        self.assertEqual(result.regressed, ())
+        self.assertEqual(result.gained, ())
+        self.assertFalse(result.stale)
+        self.assertEqual(result.outcome, "current")
+
+    def test_positive_failing_one_repeat_still_regresses(self) -> None:
+        current = reference.fold_repeats(
+            (case_id, repeat, "fail" if case_id in {self.control, self.positive} and repeat == 3 else verdict)
+            for case_id, repeat, verdict in self.rows
+        )
+        result = reference.compare_reference(
+            reference.SliceReference((self.file,)), current, VERSION,
+            ceiling_cases=self.ceiling_cases,
+        )
+        self.assertEqual(result.regressed, (self.positive,))
+        self.assertEqual(result.ceiling, (self.control,))
+        self.assertEqual(result.outcome, "regressed")
+
+    def test_new_and_dropped_controls_still_stale_the_reference(self) -> None:
+        new_control = "sentence-credit/fictitious-control"
+        current = reference.fold_repeats(
+            tuple(row for row in self.rows if row[0] != self.other_control)
+            + tuple((new_control, repeat, "pass") for repeat in range(1, 6))
+        )
+        result = reference.compare_reference(
+            reference.SliceReference((self.file,)), current, VERSION,
+            ceiling_cases=self.ceiling_cases | {new_control},
+        )
+        self.assertEqual(result.new, (new_control,))
+        self.assertEqual(result.dropped, (self.other_control,))
+        self.assertEqual(result.ceiling, ())
+        self.assertEqual(result.regressed, ())
+        self.assertEqual(result.gained, ())
+        self.assertTrue(result.stale)
+        self.assertEqual(result.outcome, "stale")
+
+    def test_default_comparison_keeps_control_regressions_and_gains(self) -> None:
+        previous = replace(self.file, cases={**self.file.cases, self.other_control: "fail"})
+        current = reference.fold_repeats(
+            (case_id, repeat, "fail" if case_id in {self.control, self.positive} and repeat == 3 else verdict)
+            for case_id, repeat, verdict in self.rows
+        )
+        result = reference.compare_reference(reference.SliceReference((previous,)), current, VERSION)
+        self.assertEqual(result.regressed, tuple(sorted((self.control, self.positive))))
+        self.assertEqual(result.gained, (self.other_control,))
+        self.assertEqual(result.ceiling, ())
+        self.assertTrue(result.stale)
+        self.assertEqual(result.outcome, "regressed")
+
+    def test_comparison_ceiling_defaults_to_empty(self) -> None:
+        result = reference.Comparison("current", TAG, (), (), (), (), False)
+        self.assertEqual(result.ceiling, ())
+
+
 class Serialization(unittest.TestCase):
     """The file is canonical JSON rather than an editable report."""
 

@@ -2261,6 +2261,48 @@ class PullRequestContracts(unittest.TestCase):
         self.assertNotIn(sentence, body_for(other_image, ()))
         self.assertNotIn(sentence, body_for(driver, ()))
 
+    def test_engine_bump_body_names_the_two_server_proof(self) -> None:
+        sentence = (
+            "Before the merge, this bump is proven on the box with an `apply` "
+            "recreating the two model servers, `engine verify`, and a decision "
+            "run, per the weekly review in `docs/runbooks/pin-watch-app-setup.md`."
+        )
+        engine = Bump(
+            "images.vllm-openai",
+            "images.lock",
+            (Change("images.vllm-openai.digest", "sha256:" + "a" * 64, "sha256:" + "b" * 64),),
+            "https://example.invalid/engine",
+            False,
+        )
+        for proposal in (False, True):
+            with self.subTest(proposal=proposal):
+                self.assertIn(sentence, body_for(replace(engine, proposal=proposal), ()))
+
+        other_image = Bump(
+            "images.caddy",
+            "images.lock",
+            (Change("images.caddy.digest", "sha256:" + "a" * 64, "sha256:" + "b" * 64),),
+            "https://example.invalid/caddy",
+            False,
+        )
+        driver = Bump(
+            "host.driver.branch",
+            "host.lock",
+            (Change("driver.branch", "example-old", "example-new"),),
+            "https://example.invalid/driver",
+            False,
+        )
+        frontend = Bump(
+            "images.open-webui",
+            "images.lock",
+            (Change("images.open-webui.digest", "sha256:" + "a" * 64, "sha256:" + "b" * 64),),
+            "https://example.invalid/frontend",
+            False,
+        )
+        for bump in (other_image, driver, frontend):
+            with self.subTest(pin_id=bump.pin_id):
+                self.assertNotIn(sentence, body_for(bump, ()))
+
     def test_pr_helpers_render_and_withdraw_idempotently(self) -> None:
         bump = Bump(
             "images.postgres",

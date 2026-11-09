@@ -421,6 +421,7 @@ class CommittedLock(unittest.TestCase):
                 "kv-cache-dtype": "fp8",
                 "gpu-memory-utilization": 0.92,
                 "reasoning-parser": "qwen3",
+                "no-enable-prefix-caching": True,
             },
         )
 

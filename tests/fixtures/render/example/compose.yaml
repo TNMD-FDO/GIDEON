@@ -418,7 +418,7 @@ services:
       - "gideon"
     mem_limit: 4000000000
   gideon-generator:
-    image: "ghcr.io/tnmd-fdo/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967"
+    image: "ghcr.io/tnmd-fdo/vllm-openai@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e"
     restart: "unless-stopped"
     environment:
       VLLM_USE_DEEP_GEMM: "0"
@@ -464,6 +464,7 @@ services:
       - "0.92"
       - "--reasoning-parser"
       - "qwen3"
+      - "--no-enable-prefix-caching"
     devices:
       - "nvidia.com/gpu=GPU-11111111-1111-1111-1111-111111111111"
     volumes:
@@ -484,7 +485,7 @@ services:
       - "integration"
     mem_limit: 32000000000
   gideon-embed:
-    image: "ghcr.io/tnmd-fdo/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967"
+    image: "ghcr.io/tnmd-fdo/vllm-openai@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e"
     restart: "unless-stopped"
     environment:
       HF_HUB_OFFLINE: "1"

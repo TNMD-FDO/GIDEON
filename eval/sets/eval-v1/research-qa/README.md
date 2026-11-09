@@ -309,7 +309,9 @@ ASCII-only JSON object ending in a newline. Its keys, in this order, are:
   whitespace, and its length equals `end - start`.
 - `labels` — exactly `["synthetic"]` or
   `["synthetic", "closed-book-answerable"]`. The second label records the
-  closed-book reading described below.
+  closed-book reading described below. A case corrected at intake carries
+  `["synthetic"]` alone, because the closed-book reading judged the drafted
+  answer, not the reader's replacement.
 - `template` — a registered versioned template id prefixed by the category,
   one of the current templates in the table or an earlier registered version.
   `TEMPLATES` and `TEMPLATE_DIGESTS` in
@@ -319,8 +321,13 @@ ASCII-only JSON object ending in a newline. Its keys, in this order, are:
 - `cluster_id` — the first gold entry's source id, so cases from one document
   share a statistical cluster.
 - `review` — `by`, the CSA role id matching `CSA-[1-9][0-9]*`, then `on`, the
-  ISO date of the batch review. A zero-tolerance category uses exactly that
-  pair. Other categories add `read`, a boolean: true for a marked case, false
+  ISO date of the batch review. An uncorrected zero-tolerance case uses exactly
+  that pair. A treatment case corrected at intake appends `corrected`, a
+  non-empty mapping of the corrected keys among `verb`, `qualifier`, and
+  `actor`, in that order, to their drafted values. This preserves the reading
+  the reader changed; every saved value is in vocabulary and differs from the
+  corresponding value in `expected.relation`. Sampled categories add `read`,
+  a boolean: true for a marked case, false
   for a case admitted on the batch's sample without an individual read. An
   attorney role id cannot stand in for the CSA's review.
 - `notes` — a short process note or empty, never question content.
@@ -604,7 +611,16 @@ asks what that citing opinion performs or reports, never the cited case's standi
 The kind agrees with the standing and the risk rules above. A `none` answer
 claims only that no risk state is recorded and identifies the non-holding
 standing of the negative language; it never claims that no court has
-overruled the case. An answer
+overruled the case. Correct the draft when its actor, verb, or qualifier was
+misread and the cited case and standing are right, so the case keeps the
+reader's relation. Use `actor=citing` when the citing opinion itself acted;
+otherwise use the cluster of the citation the sentence names after the
+direction phrase, from the block's `Citations:` line. Reject a disputed cited
+case or standing, a verb whose object is not the cited case, or a sentence
+that states no treatment, because those disputes leave the drawn relation
+unsupported. Supply your own expected answer, naming what the citing opinion
+in its standing performs or reports, the verb and qualifier, the cited case,
+and the actor. An answer
 calling the case good law, valid, or current is rejected, since an absent or
 weaker recorded signal proves none of those claims.
 
@@ -711,8 +727,8 @@ root unless `--set` supplies another root of the same version.
 | Step | What the CSA does |
 |---|---|
 | Draft | Choose the category, count, seed, and empty output directory; keep the generation, facts, walk, and summary rows as the batch record. |
-| Read | Read each `required` block in `sheet.txt`: for treatment, confirm the actor in `Relation:`; for trap, confirm that the overruling window overrules the asked doctrine and check the recorded year. Check any `Listed:` row id above the header, then the question, expected answer, canonical quote and coordinates, closed-book answer, score, and label. Check the answer's case name and party order against the record; use the reporter cites and public-original link to settle the opinion's meaning. Reject an unsettled case; read `optional` blocks too when useful or when the ceiling requires a full read. |
-| Mark | Copy `marks.template.txt` to `marks.txt`, or regenerate the template with `--template`. Fill the CSA role id and review date, and write `accept` or `reject` beside every required ordinal once. Additional ordinal lines are allowed for optional cases the CSA read. |
+| Read | Read each `required` block in `sheet.txt`: for treatment, confirm the actor in `Relation:` using the sentence's recorded clusters in `Citations:`; for trap, confirm that the overruling window overrules the asked doctrine and check the recorded year. Check any `Listed:` row id above the header, then the question, expected answer, canonical quote and coordinates, closed-book answer, score, and label. Check the answer's case name and party order against the record; use the reporter cites and public-original link to settle the opinion's meaning. Correct a treatment relation under the checklist above, or reject an unsettled case; read `optional` blocks too when useful or when the ceiling requires a full read. |
+| Mark | Copy `marks.template.txt` to `marks.txt`, or regenerate the template with `--template`. Fill the CSA role id and review date, and mark every required ordinal once with `accept`, `reject`, or, for treatment, `correct <key>=<value> …` followed by a bar and your expected answer as the block's `Correct:` line states. Additional ordinal lines are allowed for optional cases the CSA read. |
 | Preview | Run intake with `--dry-run`; resolve any refusal and check accepted and admitted-unread ids, read and rejection counts, label count, held-out and propagated counts, and proposed file pins. |
 | Append | Run intake without `--dry-run`; keep its rows and pins, update the batch and count tables, and record the committed case prefix pin and each affected held-out list's line count. |
 
@@ -720,16 +736,16 @@ The four draft outputs stay outside the checkout:
 
 | File | What it holds |
 |---|---|
-| `sheet.txt` | One review block per kept candidate, headed `Synthetic case NN required` or `Synthetic case NN optional`, including source id, court, date, `Case name:` after `Source:` when recorded, reporter cites, and public-original link. Treatment prints `Relation:` with its actor, followed by `Listed: <row id>` for a listed pair, above the header. The cited case's parties, citations, court without a decision date, public-original link, and edge facts appear inside the block. Trap prints `Listed: <row id>` above the header. Near-miss blocks add `Near miss:` after `Original:`: the asked court and map name, invented premise, or `overruled by <overruling case name> (<year>)`, with citations and source id for a pair, followed by the behavior word. A trap pair then adds `Overruling window: sha256 <hash> [<start>, <end>)` and the canonical window's text. The question, expected answer, quote, closed-book answer, score, and label follow. |
+| `sheet.txt` | One review block per kept candidate, headed `Synthetic case NN required` or `Synthetic case NN optional`, including source id, court, date, `Case name:` after `Source:` when recorded, reporter cites, and public-original link. Treatment prints `Relation:` with its actor, followed by `Listed: <row id>` for a listed pair, above the header. The cited case's parties, citations, court without a decision date, public-original link, and edge facts appear inside the block. After `Edge:`, `Citations:` lists the sentence's resolved case citations without added dates, each with its cluster, marking the cited case and any reported actor; `Correct:` states the mark form and allowed verbs and qualifiers, so the reader can name a correction from the recorded sentence. Trap prints `Listed: <row id>` above the header. Near-miss blocks add `Near miss:` after `Original:`: the asked court and map name, invented premise, or `overruled by <overruling case name> (<year>)`, with citations and source id for a pair, followed by the behavior word. A trap pair then adds `Overruling window: sha256 <hash> [<start>, <end>)` and the canonical window's text. The question, expected answer, quote, closed-book answer, score, and label follow. |
 | `drafts.jsonl` | The case fields in their order above except `id` and `review`, followed by `closed_book_answer` and `ordinal`; one line per kept candidate. |
 | `marks.template.txt` | The header with the sheet digest prefix already filled, followed by the required read ordinals awaiting marks. |
-| `manifest.json` | Format 4, set root and digest, category file prefix pin or absence, template and reading ids and digests, generation, seed, asked count, read share and ordinals, entries, discards, sheet digest, and sheet byte count. Each entry records its ordinal, source id, canonical hash, document id, coordinates, quote length and hash, closed-book score and label, `listed` (the known-overruled row id for a trap pair or matching treatment pair, otherwise null), and exact drafts-line hash. No case name, question, answer, quote, or overruling-window text is in the manifest. |
+| `manifest.json` | Format 5, set root and digest, category file prefix pin or absence, template and reading ids and digests, generation, seed, asked count, read share and ordinals, entries, discards, sheet digest, and sheet byte count. Each entry records its ordinal, source id, canonical hash, document id, coordinates, quote length and hash, closed-book score and label, `listed` (the known-overruled row id for a trap pair or matching treatment pair, otherwise null), `citations`, and exact drafts-line hash. For treatment, `citations` is the non-empty list of distinct resolved case-citation cluster ids in sentence order, including the cited cluster and any integer actor; it is null for every other category. These ids hold a correction to the sentence's recorded citations. No case name, raw citation text, question, answer, quote, or overruling-window text is in the manifest. |
 
 Each discard has `reason`, `source_id`, `edge`, and `kind`, in that order.
 `edge` is null, a citation id, or a trap pair's listed row id, each id of 64 lowercase hexadecimal characters;
 `kind` is null or one of the treatment or attribution kind words. Discards are
 unique by `(source_id, edge, kind)` and may share a kept entry's source id.
-Kept entries remain unique by source id. Only manifest format 4 is accepted;
+Kept entries remain unique by source id. Only manifest format 5 is accepted;
 an older format requires a new draft of the category and a new sheet review.
 
 The draft writes an empty checkpoint before the first proposal and replaces
@@ -749,14 +765,26 @@ The marks header and lines are:
 synthetic: <CSA role id> <sheet digest prefix> <ISO date>
 01 accept
 02 reject
+03 correct actor=12345 qualifier=on_other_grounds | <expected answer>
 ```
 
 Use the sheet digest prefix supplied by the template, at least 12 lowercase
 hexadecimal characters, and the date of the CSA's read. Marks may arrive in any
 order; intake assigns ids in ordinal order. Every required read ordinal must
 be marked once; optional ordinals may be marked once too. An empty batch takes
-the header alone and appends nothing. Blank lines are ignored. There is
-no correction mark: reject a disputed draft and re-draft it.
+the header alone and appends nothing. Blank lines are ignored. On a treatment
+manifest, `NN correct <key>=<value> … | <expected answer>` changes one to three
+of `actor`, `verb`, and `qualifier`, each once and in any order, with single
+spaces between pairs. Use the verbs and qualifiers on the sheet's `Correct:`
+line. The actor is `citing` or a positive cluster id from the block's
+`Citations:` line other than the cited cluster. Intake replaces `citing` with
+the citing source id. Supply your own non-empty expected answer after the
+first ` | ` following the pairs; any later bar stays in the answer. Intake
+strips surrounding answer whitespace. Every corrected value must differ
+from the drafted value, because a correction records a changed reading.
+The `citing`, `standing`, and `cited` fields stay fixed to the drawn opinion,
+its standing, and cited case; reject a dispute of those fields. Other
+categories take `accept` or `reject` alone.
 
 Intake holds the manifest's shape, the first recorded number of drafts lines'
 SHA-256 and facts, and the SHA-256 of the first `sheet_bytes` sheet bytes before
@@ -787,6 +815,24 @@ summary: accepted N, admitted unread N, rejected N, closed-book-answerable N
 read: M of K cases (share 1/S), rejected R
 set digest: moved|unchanged since the draft
 ```
+
+On a treatment manifest, a corrected ordinal replaces its accepted row, and
+the `corrected:` line follows `summary:` and precedes `read:`:
+
+```text
+03: corrected research-qa-treatment-NNN (qualifier, actor)
+...
+summary: accepted N, admitted unread 0, rejected N, closed-book-answerable N
+corrected: N (verb=n, qualifier=n, actor=n)
+read: M of K cases (share 1/1), rejected R
+```
+
+The row lists changed keys in `verb`, `qualifier`, `actor` order. The first
+count on `corrected:` is corrected ordinals; each key's count is corrections
+containing that key, so one case can contribute to several keys. This line
+appears on treatment alone, including when all counts are zero. Corrected
+cases count in `accepted` and carry no closed-book label, because the reader's
+answer was not the closed-book candidate's reference.
 
 An accepted or admitted-unread row omits the label when absent. `Read` counts
 every marked ordinal, including optional ones; rejections here include every
@@ -825,7 +871,12 @@ Rows and refusals contain no recorded case name, question, answer, quote, or ove
 an invented caption may appear in a near-miss row. A refusal goes to
 stderr as `<stage>: refused — <problem>. Fix: <fix>`, exits 1, and stops the
 command; usage errors exit 2. Intake refuses before printing any success rows.
-The main refusal stages and their remedies are:
+The table below lists the main refusal stages and remedies. Correction
+refusals name the marks line and the relevant key; their fix is printed as:
+
+```text
+Use NN correct <key>=<value> … | <expected answer> with keys among actor, verb, and qualifier, as the sheet's Correct: line states, then retry.
+```
 
 | Stage | Problem | Fix |
 |---|---|---|
@@ -841,10 +892,16 @@ The main refusal stages and their remedies are:
 | Draft `write` | The output directory or files cannot be written. | Choose a writable, empty output directory outside the checkout. |
 | Intake `manifest` / `drafts` | The manifest is invalid, a draft differs from its recorded hash or facts, or the sheet digest differs. | Restore the outputs from one synthetic draft and review them again. An edited sheet refuses before marks are read. |
 | Intake `manifest` | A treatment or trap generation has the sample suffix, or another category's generation lacks it. | Run `python3 -m tools.synthetic.draft` again with a production caselaw generation for treatment or trap, or a sample for other categories, then review the new sheet. |
-| Intake `manifest` | The format is unsupported, including older format-1 and format-2 manifests. | Draft this category again with `python3 -m tools.synthetic.draft` and review the new sheet. |
+| Intake `manifest` | The format is unsupported, including every manifest older than format 5. | Draft this category again with `python3 -m tools.synthetic.draft` and review the new sheet. |
 | Intake `manifest` | The read share or read ordinals differ from the recomputed sample, or the sheet byte count is invalid. | Restore the unedited manifest from the draft or draft again; the sample cannot be reduced by hand. |
 | Intake `marks` | The header, CSA role, date, or an ordinal's mark is invalid, repeated, or outside the manifest. | Use a CSA role id, an ISO date, and one `accept` or `reject` per marked ordinal. Findings name the marks line. |
 | Intake `marks` | The sheet digest prefix differs from the manifest. | Run `python3 -m tools.synthetic.intake <manifest> --template`, then complete the regenerated template. |
+| Intake `marks` | `line N: correction keys must be among actor, verb, and qualifier, each once` — an unknown, fixed, repeated, or missing key. | Follow the correction fix above; change only the allowed keys once. |
+| Intake `marks` | `line N: correction needs an expected answer after \|` — a missing separator or a blank answer. | Follow the correction fix above; supply your own expected answer after the separator. |
+| Intake `marks` | `line N: correction <key> is outside its vocabulary` — an invalid verb, qualifier, or actor form. | Follow the correction fix above; use the sheet's vocabulary and actor form. |
+| Intake `marks` | `line N: correction actor is not a recorded citation of the sentence other than the cited` — an unrecorded actor cluster or the cited cluster. | Follow the correction fix above; choose `citing` or a recorded cluster other than the cited. |
+| Intake `marks` | `line N: correction <key> equals the drafted value` — the named key did not change. | Follow the correction fix above; name only keys whose values you change. |
+| Intake `marks` | `line N: correction is for a treatment manifest alone` — another category has no correction form. | Follow the correction fix above on a treatment manifest; use `accept` or `reject` on other categories. |
 | Intake `marks` | A required read ordinal is missing. | Mark every read ordinal once with `accept` or `reject`; the finding names the first missing ordinal and its line. |
 | Intake `marks` | More than one in five of the required sample is rejected while some cases remain unmarked. | Read every case and mark every ordinal `accept` or `reject`, then retry. |
 | Intake `set` | The set version differs, the court map or set cannot load, the category prefix changed, or a gold document is already cased. | Use the matching set version, restore its files, re-draft an edited category, or reject the already-cased ordinal. |
@@ -895,7 +952,11 @@ reference runs and stays out of tuning.
 The batch table records every draft the reader read, newest first, including
 a batch rejected whole, since its discards and rejections are part of the record.
 `Kept` is the draft's kept count; `Accepted` is the total committed by intake,
-including cases admitted unread. A category may have more than one batch row,
+including corrected cases and cases admitted unread. `Corrected` breaks down
+the corrected cases by key: `none`, or the nonzero counts as `verb n,
+qualifier n, actor n` in that order, omitting zero-count keys. Copy those
+counts from intake's `corrected:` line, because they record which keys changed,
+not a separate judgement of the cases. A category may have more than one batch row,
 including an interrupted partial batch followed by later drafts. Its accepted
 counts across those rows sum to its committed file and the category count
 above. `Read` and `Rejected` are M and R from intake's
@@ -904,22 +965,22 @@ Discards and the closed-book count come from the draft summary; the reader is
 the CSA role id. A category with no accepted case has a zero split count
 and no committed category file.
 
-| Date | Category | Template | Generation | Seed | Asked | Kept | Read | Rejected | Accepted | Discards by reason | Closed-book-answerable | Reader | Held out | Propagated |
-|---|---|---|---|---:|---:|---:|---:|---:|---:|---|---:|---|---:|---|
-| 2026-11-04 | `trap` | `trap@2` | `caselaw__corpus-2026-10-13__qwen3-embedding-8b-1024-bf16` | 20261104 | 15 | 15 | 15 | 10 | 5 | list-qualified 35, overruling-uncited 21, truncated 5, document-short 3, not-found 2 | 2 | CSA-1 | 2 | none |
-| 2026-11-02 | `treatment` | `treatment@3` | `caselaw__corpus-2026-10-13__qwen3-embedding-8b-1024-bf16` | 20261102 | 30 | 30 | 30 | 18 | 12 | no-state-kind 23245, cited-absent 4431, state-outranked 3891, nearest-cite 1124, active-direction 260, recounted 160, procedural-disposition 107, conditional-verb 97, agent-unresolved 38, actor-drawn 14, same-cluster 10, too-short 7, already-cased 6, closed-book-failed 4, same-document 3, document-short 2 | 4 | CSA-1 | 6 | none |
-| 2026-10-30 | `treatment` | `treatment@3` | `caselaw__corpus-2026-10-21__qwen3-embedding-8b-1024-bf16__sample` | 20261030 | 30 | 16 | 16 | 10 | 6 | unpublished 394, no-state-kind 206, cited-absent 66, nearest-cite 42, state-outranked 40, active-direction 17, conditional-verb 7, agent-unresolved 2, closed-book-failed 2, same-document 2, too-short 2 | 0 | CSA-1 | 3 | none |
-| 2026-10-28 | `treatment` | `treatment@2` | `caselaw__corpus-2026-10-21__qwen3-embedding-8b-1024-bf16__sample` | 20261028 | 30 | 22 | 22 | 22 | 0 | unpublished 394, no-state-kind 206, cited-absent 66, nearest-cite 42, state-outranked 40, active-direction 17, closed-book-failed 4, same-document 2, too-short 2, truncated 1 | 0 | CSA-1 | 0 | none |
-| 2026-10-18 | `poisoned-premise` | `poisoned-premise@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261020 | 15 | 15 | 15 | 7 | 8 | premise-in-record 5320, unpublished 414, document-short 28, not-found 4, closed-book-failed 2 | 0 | CSA-1 | 5 | none |
-| 2026-10-18 | `trap` | `trap@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261019 | 25 | 25 | 25 | 15 | 10 | unpublished 414, document-short 17, truncated 6, closed-book-failed 1 | 0 | CSA-1 | 5 | existence 1, retrieval 1, synthesis 1, unanswerable 2 |
-| 2026-10-18 | `unanswerable` | `unanswerable@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261018 | 40 | 40 | 40 | 14 | 26 | unpublished 414, document-short 47, closed-book-failed 21, not-found 5, truncated 3 | 0 | CSA-1 | 13 | existence 1, retrieval 4, synthesis 7 |
-| 2026-10-17 | `existence` | `existence@2` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261018 | 20 | 20 | 20 | 3 | 17 | document-short 36, truncated 11, closed-book-failed 6, not-found 1 | 8 | CSA-1 | 0 | none |
-| 2026-10-17 | `retrieval` | `retrieval@2` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261019 | 57 | 57 | 12 | 2 | 55 | document-short 84, closed-book-failed 33, already-cased 23, truncated 10, not-found 7 | 10 | CSA-1 | 0 | none |
-| 2026-10-16 | `synthesis` | `synthesis@2` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261017 | 50 | 50 | 10 | 2 | 48 | document-short 86, truncated 37, closed-book-failed 17, not-found 5 | 10 | CSA-1 | 0 | none |
-| 2026-10-16 | `section-attribution` | `section-attribution@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261016 | 40 | 40 | 40 | 21 | 19 | no-kind 5871, unpublished 409, same-document 26, closed-book-failed 20, not-found 18, truncated 1 | 10 | CSA-1 | 0 | none |
-| 2026-10-16 | `treatment` | `treatment@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261016 | 30 | 16 | 16 | 16 | 0 | unpublished 409, no-state-kind 140, cited-absent 55, state-outranked 55, closed-book-failed 39, same-document 20, short-document 2, truncated 1 | 4 | CSA-1 | 0 | none |
-| 2026-10-16 | `retrieval` | `retrieval@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261016 | 80 | 35 | 35 | 12 | 23 | document-short 55, truncated 20, closed-book-failed 20, not-found 6 | 10 | CSA-1 | 0 | none |
-| 2026-10-15 | `lookup` | `lookup@1` | `caselaw__corpus-2026-10-13__qwen3-embedding-8b-1024-bf16__sample` | 20261015 | 40 | 40 | 40 | 10 | 30 | too-short 87, closed-book-failed 71, not-found 1, truncated 1 | 6 | CSA-1 | 0 | none |
+| Date | Category | Template | Generation | Seed | Asked | Kept | Read | Rejected | Accepted | Corrected | Discards by reason | Closed-book-answerable | Reader | Held out | Propagated |
+|---|---|---|---|---:|---:|---:|---:|---:|---:|---|---|---:|---|---:|---|
+| 2026-11-04 | `trap` | `trap@2` | `caselaw__corpus-2026-10-13__qwen3-embedding-8b-1024-bf16` | 20261104 | 15 | 15 | 15 | 10 | 5 | none | list-qualified 35, overruling-uncited 21, truncated 5, document-short 3, not-found 2 | 2 | CSA-1 | 2 | none |
+| 2026-11-02 | `treatment` | `treatment@3` | `caselaw__corpus-2026-10-13__qwen3-embedding-8b-1024-bf16` | 20261102 | 30 | 30 | 30 | 18 | 12 | none | no-state-kind 23245, cited-absent 4431, state-outranked 3891, nearest-cite 1124, active-direction 260, recounted 160, procedural-disposition 107, conditional-verb 97, agent-unresolved 38, actor-drawn 14, same-cluster 10, too-short 7, already-cased 6, closed-book-failed 4, same-document 3, document-short 2 | 4 | CSA-1 | 6 | none |
+| 2026-10-30 | `treatment` | `treatment@3` | `caselaw__corpus-2026-10-21__qwen3-embedding-8b-1024-bf16__sample` | 20261030 | 30 | 16 | 16 | 10 | 6 | none | unpublished 394, no-state-kind 206, cited-absent 66, nearest-cite 42, state-outranked 40, active-direction 17, conditional-verb 7, agent-unresolved 2, closed-book-failed 2, same-document 2, too-short 2 | 0 | CSA-1 | 3 | none |
+| 2026-10-28 | `treatment` | `treatment@2` | `caselaw__corpus-2026-10-21__qwen3-embedding-8b-1024-bf16__sample` | 20261028 | 30 | 22 | 22 | 22 | 0 | none | unpublished 394, no-state-kind 206, cited-absent 66, nearest-cite 42, state-outranked 40, active-direction 17, closed-book-failed 4, same-document 2, too-short 2, truncated 1 | 0 | CSA-1 | 0 | none |
+| 2026-10-18 | `poisoned-premise` | `poisoned-premise@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261020 | 15 | 15 | 15 | 7 | 8 | none | premise-in-record 5320, unpublished 414, document-short 28, not-found 4, closed-book-failed 2 | 0 | CSA-1 | 5 | none |
+| 2026-10-18 | `trap` | `trap@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261019 | 25 | 25 | 25 | 15 | 10 | none | unpublished 414, document-short 17, truncated 6, closed-book-failed 1 | 0 | CSA-1 | 5 | existence 1, retrieval 1, synthesis 1, unanswerable 2 |
+| 2026-10-18 | `unanswerable` | `unanswerable@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261018 | 40 | 40 | 40 | 14 | 26 | none | unpublished 414, document-short 47, closed-book-failed 21, not-found 5, truncated 3 | 0 | CSA-1 | 13 | existence 1, retrieval 4, synthesis 7 |
+| 2026-10-17 | `existence` | `existence@2` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261018 | 20 | 20 | 20 | 3 | 17 | none | document-short 36, truncated 11, closed-book-failed 6, not-found 1 | 8 | CSA-1 | 0 | none |
+| 2026-10-17 | `retrieval` | `retrieval@2` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261019 | 57 | 57 | 12 | 2 | 55 | none | document-short 84, closed-book-failed 33, already-cased 23, truncated 10, not-found 7 | 10 | CSA-1 | 0 | none |
+| 2026-10-16 | `synthesis` | `synthesis@2` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261017 | 50 | 50 | 10 | 2 | 48 | none | document-short 86, truncated 37, closed-book-failed 17, not-found 5 | 10 | CSA-1 | 0 | none |
+| 2026-10-16 | `section-attribution` | `section-attribution@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261016 | 40 | 40 | 40 | 21 | 19 | none | no-kind 5871, unpublished 409, same-document 26, closed-book-failed 20, not-found 18, truncated 1 | 10 | CSA-1 | 0 | none |
+| 2026-10-16 | `treatment` | `treatment@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261016 | 30 | 16 | 16 | 16 | 0 | none | unpublished 409, no-state-kind 140, cited-absent 55, state-outranked 55, closed-book-failed 39, same-document 20, short-document 2, truncated 1 | 4 | CSA-1 | 0 | none |
+| 2026-10-16 | `retrieval` | `retrieval@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261016 | 80 | 35 | 35 | 12 | 23 | none | document-short 55, truncated 20, closed-book-failed 20, not-found 6 | 10 | CSA-1 | 0 | none |
+| 2026-10-15 | `lookup` | `lookup@1` | `caselaw__corpus-2026-10-13__qwen3-embedding-8b-1024-bf16__sample` | 20261015 | 40 | 40 | 40 | 10 | 30 | none | too-short 87, closed-book-failed 71, not-found 1, truncated 1 | 6 | CSA-1 | 0 | none |
 
 The superseded-version batch was read in full and kept five of fifteen. Eight
 rejections were overruling windows that recount, distinguish, or announce

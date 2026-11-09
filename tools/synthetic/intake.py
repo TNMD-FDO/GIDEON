@@ -1,4 +1,4 @@
-"""Append CSA-reviewed synthetic cases after holding their draft and sheet digests."""
+"""Append accepted or reader-corrected synthetic cases under draft and sheet holds."""
 
 import argparse
 import hashlib
@@ -20,7 +20,12 @@ from tools.segmenter.manifest import write_atomic
 from tools.synthetic import manifest
 
 _HEX: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
-_MARK_LINE: Final[re.Pattern[str]] = re.compile(r"([0-9]+)\s+(accept|reject)")
+_MARK_LINE: Final[re.Pattern[str]] = re.compile(r"([0-9]+)\s+(accept|reject|correct)(?=\s|$)(.*)")
+_CORRECTION_PAIRS: Final[re.Pattern[str]] = re.compile(r"[a-z]+=[^\s=|]*(?: [a-z]+=[^\s=|]*){0,2}")
+_CORRECTION_FIX: Final[str] = (
+    "Use NN correct <key>=<value> … | <expected answer> with keys among actor, verb, and qualifier, "
+    "as the sheet's Correct: line states, then retry."
+)
 _MANIFEST_FIX: Final[str] = "Use a manifest from synthetic draft, then retry."
 _DRAFT_FIX: Final[str] = "Restore the drafts and sheet from this synthetic draft, then review them again."
 _SET_FIX: Final[str] = "Restore the evaluation set, then retry."
@@ -53,13 +58,23 @@ class DraftCase:
 
 
 @dataclass(frozen=True, slots=True)
+class Correction:
+    """A located reader correction whose answer stays out of diagnostics."""
+
+    line: int
+    values: Mapping[str, str | int]
+    answer: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class Marks:
-    """The CSA's role, review date, marked ordinals, and accepted ordinals."""
+    """The CSA's role, date, marked and accepted ordinals, and corrections."""
 
     by: str
     on: str
     marked: frozenset[int]
     accepted: frozenset[int]
+    corrections: Mapping[int, Correction]
 
 
 def _hex(value: object) -> bool:
@@ -126,6 +141,7 @@ def _load_manifest(path: Path) -> Manifest:
         if not isinstance(entry, dict) or tuple(entry) != manifest.ENTRY_KEYS:
             raise _manifest_problem(f"entry {ordinal:02d} keys or order")
         score, label = entry["closed_book_score"], entry["label"]
+        citations = entry["citations"]
         if (
             type(entry["ordinal"]) is not int or entry["ordinal"] != ordinal
             or judgments.coordinate_findings(entry)
@@ -134,6 +150,12 @@ def _load_manifest(path: Path) -> Manifest:
             or type(entry["length"]) is not int or entry["length"] != entry["end"] - entry["start"]
             or type(score) is not int or score not in (0, 1, 2, 3)
             or label != (synthetic.CLOSED_BOOK_LABEL if score >= synthetic.CLOSED_BOOK_SCORE else None)
+            or (category != "treatment" and citations is not None)
+            or (category == "treatment" and (
+                not isinstance(citations, list) or not citations
+                or any(type(cluster) is not int or cluster <= 0 for cluster in citations)
+                or len(citations) != len(set(citations))
+            ))
         ):
             raise _manifest_problem(f"entry {ordinal:02d}")
         seen.add(entry["source_id"])
@@ -201,11 +223,66 @@ def _drafts(path: Path, provenance: Manifest) -> tuple[DraftCase, ...]:
             or not isinstance(answer, str) or not answer.strip() or "\n" in answer or "\r" in answer
         ):
             raise IntakeError("drafts", f"ordinal {ordinal:02d}: draft facts differ from the manifest", _DRAFT_FIX)
+        if provenance.category == "treatment":
+            expected = value["expected"]
+            relation = expected.get("relation") if isinstance(expected, dict) else None
+            citations = cast(list[int], entry["citations"])
+            if (
+                not isinstance(relation, dict) or relation.get("cited") not in citations
+                or (type(relation.get("actor")) is int and relation["actor"] not in citations)
+            ):
+                raise IntakeError("drafts", f"ordinal {ordinal:02d}: draft facts differ from the manifest", _DRAFT_FIX)
         cases.append(DraftCase(ordinal, value))
     return tuple(cases)
 
 
-def _marks(path: Path, provenance: Manifest) -> Marks:
+def _correction_problem(number: int, problem: str) -> IntakeError:
+    return IntakeError("marks", f"line {number}: {problem}", _CORRECTION_FIX)
+
+
+def _correction(text: str, number: int, entry: Mapping[str, object], draft: DraftCase) -> Correction:
+    pairs, bar, answer = text.partition(" | ")
+    if not bar or not answer.strip():
+        raise _correction_problem(number, "correction needs an expected answer after |")
+    keys_problem = "correction keys must be among actor, verb, and qualifier, each once"
+    if _CORRECTION_PAIRS.fullmatch(pairs.strip()) is None:
+        raise _correction_problem(number, keys_problem)
+    parsed: dict[str, str | int] = {}
+    for pair in pairs.strip().split(" "):
+        key, value = pair.split("=", 1)
+        if key not in synthetic.CORRECTED_KEYS or key in parsed:
+            raise _correction_problem(number, keys_problem)
+        parsed[key] = value
+    values = {key: parsed[key] for key in synthetic.CORRECTED_KEYS if key in parsed}
+    expected = cast(Mapping[str, object], draft.value["expected"])
+    relation = cast(Mapping[str, object], expected["relation"])
+    checked: dict[str, object] = dict(values)
+    if "actor" in values:
+        actor_text = cast(str, values["actor"])
+        if actor_text == "citing":
+            checked["actor"] = relation["citing"]
+        elif re.fullmatch(r"[0-9]+", actor_text) is not None:
+            try:
+                values["actor"] = checked["actor"] = int(actor_text)
+            except ValueError as error:
+                raise _correction_problem(number, "correction actor is outside its vocabulary") from error
+        else:
+            raise _correction_problem(number, "correction actor is outside its vocabulary")
+    rules = evalset.corrected_rules(checked)
+    if rules:
+        key = rules[0].rsplit(".", 1)[1]
+        raise _correction_problem(number, f"correction {key} is outside its vocabulary")
+    actor = checked.get("actor")
+    gold = cast(Sequence[Mapping[str, object]], draft.value["gold"])[0]
+    if type(actor) is int and (actor not in cast(list[int], entry["citations"]) or actor == gold["cluster"]):
+        raise _correction_problem(number, "correction actor is not a recorded citation of the sentence other than the cited")
+    for key in checked:
+        if checked[key] == relation.get(key):
+            raise _correction_problem(number, f"correction {key} equals the drafted value")
+    return Correction(number, values, answer.strip())
+
+
+def _marks(path: Path, provenance: Manifest, cases: Sequence[DraftCase]) -> Marks:
     fix = "Put synthetic: <CSA role id> <sheet digest prefix> <ISO date> on line 1, then retry."
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -224,12 +301,13 @@ def _marks(path: Path, provenance: Manifest) -> Marks:
         raise IntakeError("marks", "line 1: review date is invalid", "Enter an ISO date in the marks header, then retry.")
     seen: set[int] = set()
     accepted: set[int] = set()
+    corrections: dict[int, Correction] = {}
     for number, line in enumerate(lines[1:], start=2):
         if not line.strip():
             continue
         match = _MARK_LINE.fullmatch(line.strip())
         problem = None
-        if match is None:
+        if match is None or (match[2] != "correct" and match[3]):
             problem = "mark must be an ordinal and accept or reject"
         else:
             ordinal = int(match[1])
@@ -239,7 +317,12 @@ def _marks(path: Path, provenance: Manifest) -> Marks:
                 problem = "ordinal is marked twice"
             else:
                 seen.add(ordinal)
-                if match[2] == "accept":
+                if match[2] == "correct":
+                    if provenance.category != "treatment":
+                        raise _correction_problem(number, "correction is for a treatment manifest alone")
+                    corrections[ordinal] = _correction(match[3], number, provenance.entries[ordinal - 1], cases[ordinal - 1])
+                    accepted.add(ordinal)
+                elif match[2] == "accept":
                     accepted.add(ordinal)
         if problem is not None:
             raise IntakeError("marks", f"line {number}: {problem}", "Use each marked ordinal once with accept or reject, then retry.")
@@ -251,7 +334,7 @@ def _marks(path: Path, provenance: Manifest) -> Marks:
         if rejected * synthetic.SAMPLE_REJECTION_CEILING > len(provenance.read_ordinals):
             raise IntakeError("marks", f"{rejected} of {len(provenance.read_ordinals)} read cases rejected exceeds the ceiling",
                               "Read every case and mark every ordinal accept or reject, then retry.")
-    return Marks(role, on, frozenset(seen), frozenset(accepted))
+    return Marks(role, on, frozenset(seen), frozenset(accepted), corrections)
 
 
 def _court_ids() -> frozenset[str]:
@@ -300,7 +383,7 @@ def intake(manifest_path: Path, marks_path: Path, *, set_root: Path | None,
 
     provenance = _load_manifest(manifest_path)
     cases = _drafts(manifest_path, provenance)
-    marks = _marks(marks_path, provenance)
+    marks = _marks(marks_path, provenance, cases)
     target = provenance.set_root if set_root is None else set_root
     if target.resolve().name != provenance.set_root.name:
         raise IntakeError("set", "set version differs from the manifest", "Use a set with the manifest's version, then retry.")
@@ -342,16 +425,28 @@ def intake(manifest_path: Path, marks_path: Path, *, set_root: Path | None,
     records: list[evalset.Case] = []
     rows: list[str] = []
     labelled = 0
-    review_keys = evalset.SHAPE_REGISTRY[("research-qa", provenance.category)].review_keys_for(synthetic.SYNTHETIC_ORIGIN)
+    spec = evalset.SHAPE_REGISTRY[("research-qa", provenance.category)]
     for draft_case in cases:
         if draft_case.ordinal in marks.marked and draft_case.ordinal not in marks.accepted:
             rows.append(f"{draft_case.ordinal:02d}: rejected")
             continue
         case_id = f"research-qa-{provenance.category}-{next_number:03d}"
-        review_values = {"by": marks.by, "on": marks.on, "read": draft_case.ordinal in marks.marked}
+        correction = marks.corrections.get(draft_case.ordinal)
+        review_values: dict[str, object] = {"by": marks.by, "on": marks.on, "read": draft_case.ordinal in marks.marked}
+        review_keys = spec.review_keys_for(synthetic.SYNTHETIC_ORIGIN, corrected=correction is not None)
+        if correction is not None:
+            expected = dict(cast(Mapping[str, object], draft_case.value["expected"]))
+            relation = dict(cast(Mapping[str, object], expected["relation"]))
+            review_values["corrected"] = {key: relation[key] for key in correction.values}
+            relation.update({key: relation["citing"] if key == "actor" and value == "citing" else value
+                             for key, value in correction.values.items()})
+            expected.update(answer=correction.answer, relation=relation)
         review = {key: review_values[key] for key in review_keys}
         record = {key: (case_id if key == "id" else review if key == "review" else draft_case.value[key])
                   for key in synthetic.CASE_KEYS}
+        if correction is not None:
+            record["expected"] = expected
+            record["labels"] = [synthetic.SYNTHETIC_ORIGIN]
         findings = evalset.case_findings(record, relative, len(existing_cases) + len(added) + 1, known_courts)
         if findings:
             raise IntakeError("validate", f"ordinal {draft_case.ordinal:02d}: case line failed the eval-set shape", "Draft this case again and have the CSA review it, then retry.")
@@ -364,8 +459,11 @@ def intake(manifest_path: Path, marks_path: Path, *, set_root: Path | None,
         next_number += 1
         label = synthetic.CLOSED_BOOK_LABEL in cast(list[str], record["labels"])
         labelled += int(label)
-        disposition = "accepted" if draft_case.ordinal in marks.marked else "admitted unread"
-        rows.append(f"{draft_case.ordinal:02d}: {disposition} {case_id}" + (f" {synthetic.CLOSED_BOOK_LABEL}" if label else ""))
+        if correction is not None:
+            rows.append(f"{draft_case.ordinal:02d}: corrected {case_id} ({', '.join(correction.values)})")
+        else:
+            disposition = "accepted" if draft_case.ordinal in marks.marked else "admitted unread"
+            rows.append(f"{draft_case.ordinal:02d}: {disposition} {case_id}" + (f" {synthetic.CLOSED_BOOK_LABEL}" if label else ""))
     payload = (previous or b"") + b"".join(added)
     held_clusters = {loaded.cases_by_id[case_id].get("cluster_id") for case_id in loaded.held_out_ids}
     forced = {cast(str, record["id"]) for record in records if record["cluster_id"] in held_clusters}
@@ -419,6 +517,9 @@ def intake(manifest_path: Path, marks_path: Path, *, set_root: Path | None,
     rejected = len(marks.marked - marks.accepted)
     print(f"summary: accepted {len(marks.accepted)}, admitted unread {len(cases) - len(marks.marked)}, "
           f"rejected {rejected}, closed-book-answerable {labelled}", file=stdout)
+    if provenance.category == "treatment":
+        corrected = Counter(key for correction in marks.corrections.values() for key in correction.values)
+        print(f"corrected: {len(marks.corrections)} ({', '.join(f'{key}={corrected[key]}' for key in synthetic.CORRECTED_KEYS)})", file=stdout)
     print(f"read: {len(marks.marked)} of {len(cases)} cases (share 1/{provenance.read_share}), rejected {rejected}", file=stdout)
     print(f"set digest: {'unchanged' if loaded.digest == provenance.set_digest else 'moved'} since the draft", file=stdout)
 

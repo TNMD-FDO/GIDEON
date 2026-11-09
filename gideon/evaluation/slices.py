@@ -31,9 +31,12 @@ class SliceSpec:
     keeps none: a triple passes when its grading came back on-schema, which the
     slice's own gate already refuses on, so a regression list would say it twice.
     ``guardrails`` compares because the decision runs and the nightly run pair
-    and gate against its reference; a control's per-case verdict is "not
-    replaced, no leak", so a control newly replaced since the reference is a
-    per-case regression, whatever the judge said. Its runner also has the
+    and gate against its reference. Its family ceilings gate controls by count,
+    so ``ceiling_cases`` names them from the loaded set and the comparison
+    leaves them out of the regression and gain lists, reporting those whose
+    verdicts changed. The ``smoke`` composite keeps ``ceiling_cases`` as None
+    because no ceiling counts its sample controls, so they still compare per
+    case. The ``guardrails`` runner also has the
     judge read the declined and disclaimed controls with ``false-refusal@1``,
     a figure it reports and never gates. The turns surface makes ``eval
     run``'s ``preconditions`` resolve turn access and probe the door for a
@@ -70,6 +73,7 @@ class SliceSpec:
     gate_fix: str
     categories: frozenset[tuple[str, str]]
     turn_calls: Callable[[LoadedSet, str], int] | None
+    ceiling_cases: Callable[[LoadedSet, str], frozenset[str]] | None = None
     decision: DecisionMetric | None = None
 
     def __post_init__(self) -> None:
@@ -204,6 +208,7 @@ _GUARDRAILS: Final[SliceSpec] = SliceSpec(
         }
     ),
     turn_calls=guardrails_slice.turn_calls,
+    ceiling_cases=guardrails_slice.ceiling_cases,
     decision=guardrails_slice.FALSE_REFUSAL,
 )
 _GENERAL_SMOKE: Final[SliceSpec] = SliceSpec(

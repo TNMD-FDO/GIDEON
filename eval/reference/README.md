@@ -53,6 +53,12 @@ from another eval-set version is reported as `other-version` and is replaced
 only by the deliberate reference command. A malformed or partial reference
 is a refusal, never an absence.
 
+Cases a slice's ceiling counts — named by its registry entry, the guardrail
+families' controls today — leave `regressed` and `gained` because their ceiling
+gates them by count. They stay in `new` and `dropped`. Those whose folded
+verdict changed appear on a `ceiling` line, which never fails the gate or makes
+the reference stale.
+
 The files exclude the run id, timestamps, latency, metrics, judge output,
 `git_sha`, `kind`, `stack`, and case text. These values vary between runs or
 are not the release identity; the tag and the set digest carry the identity
@@ -74,9 +80,9 @@ came back on-schema, which that slice's gate already refuses on.
 `gideon eval reference --run <id>` reads the recorded run through the
 read-only metrics role, checks its clean tagged provenance and set identity,
 then writes one file per id list. A list with no evaluated case still gets an
-empty `cases` object. The command reports gained, new, and dropped counts and
-whether the files were `written` or `unchanged`; it refuses to write over a
-regression.
+empty `cases` object. The command reports gained, new, dropped, and ceiling
+counts and whether the files were `written` or `unchanged`; it refuses to
+write over a regression among cases outside the slice's ceiling set.
 
 Every release runs the comparison at its own tag for the slices whose gate
 the release owns: `extraction`, and `smoke` on the CI sibling. `current` with exit 0

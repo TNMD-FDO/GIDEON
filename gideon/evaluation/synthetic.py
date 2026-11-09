@@ -5,8 +5,9 @@ holding as governing law. The latter uses a citation-centred, paragraph-bounded
 window of the overruling opinion alongside the overruled opinion's own text.
 
 Treatment relations use RELATION_KEYS, ACTOR_WORDS, and relation_line to name
-performed or reported treatment. The sentence-pass rules resolve by/in and
-comma direction phrases, discard actor-drawn citations, and read performed
+performed or reported treatment; CORRECTED_KEYS names the reader-correctable
+fields. The sentence-pass rules resolve by/in and comma direction phrases,
+discard actor-drawn citations, and read performed
 forms only in holding sections; other no-phrase reads are recounted.
 TREATMENT_DISCARDS names these and the proximity, active-direction,
 procedural-disposition, conditional-verb, and unresolved-agent reasons.
@@ -40,6 +41,7 @@ DISCARD_REASONS: Final[tuple[str, ...]] = (
 )
 RELATION_KEYS: Final[tuple[str, ...]] = ("citing", "standing", "verb", "qualifier", "cited", "actor")
 ACTOR_WORDS: Final[tuple[str, ...]] = ("performed", "reported")
+CORRECTED_KEYS: Final[tuple[str, ...]] = ("verb", "qualifier", "actor")
 TREATMENT_DISCARDS: Final[tuple[str, ...]] = (
     "nearest-cite", "active-direction", "procedural-disposition", "conditional-verb", "agent-unresolved",
     "actor-drawn", "recounted",

@@ -74,7 +74,12 @@ from gideon.evaluation.conditions import ConditionsReader, EngineConditions
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_cases
 from gideon.evaluation.extraction_slice import run_extraction
 from gideon.evaluation.results import CaseResult, RunContext, SliceResult
-from gideon.evaluation.slices import SLICE_RUNNERS, SMOKE_PARTS, CallSurface
+from gideon.evaluation.slices import (
+    BUILD_GATES_PARTS,
+    SLICE_RUNNERS,
+    SMOKE_PARTS,
+    CallSurface,
+)
 from gideon.extraction import KEYED_TYPES, SECTION_TYPES, ExactObject, extract
 from gideon.extraction.scoring import MIN_RECALL
 from gideon.host import backuplock, models, nogpu, report, site, stack
@@ -348,12 +353,13 @@ def _reference_files(
     *,
     eval_set_version: str | None = None,
     reference_verdicts: Mapping[str, reference.Verdict] | None = None,
+    slice_name: str = "extraction",
 ) -> None:
     verdicts = {result.case_id: cast(reference.Verdict, result.verdict) for result in results}
     if reference_verdicts is not None:
         verdicts = dict(reference_verdicts)
     version = loaded.version if eval_set_version is None else eval_set_version
-    for list_name, ids in loaded.slice_lists["extraction"].items():
+    for list_name, ids in loaded.slice_lists[slice_name].items():
         value = reference.ReferenceFile(
             format=1,
             product_version=gideon.__version__,
@@ -361,13 +367,13 @@ def _reference_files(
             eval_set_version=version,
             hardware_profile="fictitious-profile",
             tag=f"v{gideon.__version__}",
-            slice="extraction",
+            slice=slice_name,
             list=list_name,
             repeats=1,
             set_digest=loaded.digest,
             cases={case_id: verdicts[case_id] for case_id in ids if case_id in verdicts},
         )
-        path = checkout / reference.REFERENCE_ROOT / "extraction" / f"{list_name}.json"
+        path = checkout / reference.REFERENCE_ROOT / slice_name / f"{list_name}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(reference.serialize_reference(value), encoding="utf-8")
 
@@ -1003,6 +1009,61 @@ class Command(unittest.TestCase):
         self.assertIn(target, stdout)
         self.assertLess(stdout.index("record: ok — run"), stdout.index("gate: refuse"))
         self.assertIn("\\set run_verdict 'fail'", write_sql or "")
+
+    def test_replaced_control_reports_ceiling_and_records_a_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = _reference_checkout(directory)
+            loaded = load_set(checkout / SET_ROOT).loaded
+            assert loaded is not None
+            clean = _passing_selection_runner(loaded, "guardrails", _run_context())
+            target = next(
+                result.case_id for result in clean.results
+                if cast(list[str], loaded.cases_by_id[result.case_id]["labels"])[1] == "control"
+            )
+            _reference_files(checkout, loaded, clean.results, slice_name="guardrails")
+
+            def fixture_runner(
+                eval_set: LoadedSet, slice_name: str, context: RunContext,
+            ) -> SliceResult:
+                result = _passing_selection_runner(eval_set, slice_name, context)
+                return replace(result, results=tuple(
+                    replace(row, verdict="fail", metrics={"class": "replaced"})
+                    if row.case_id == target else row
+                    for row in result.results
+                ))
+
+            prepared = command._Prepared(
+                served_model_name=None,
+                turns=None,
+                ranked=None,
+                checkpoint=lambda: None,
+                started=NOW,
+                forced=False,
+                overrides={},
+                record=command._RecordFacts("fictitious-profile", "a" * 40, False),
+            )
+            host = EvalHost()
+            with (
+                patch.object(command, "_prepare", return_value=prepared),
+                patch.dict(SLICE_RUNNERS, {
+                    "guardrails": replace(SLICE_RUNNERS["guardrails"], runner=fixture_runner),
+                }),
+            ):
+                code, stdout, stderr = _invoke(
+                    ["eval", "run", "--slice", "guardrails"],
+                    **_run_kwargs(host, checkout=checkout),
+                )
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        _assert_comparison_lines(self, stdout, "current", "pass")
+        self.assertIn(f"ceiling {target}", stdout.splitlines())
+        self.assertFalse(any(line.startswith("regressed ") for line in stdout.splitlines()))
+        self.assertIn("record: ok — run", stdout)
+        self.assertIn("gate: ok", stdout)
+        write_sql = next(
+            input_text for argv, input_text in host.calls
+            if argv[0] == "docker" and input_text is not None and "INSERT INTO eval_runs" in input_text
+        )
+        self.assertIn("\\set run_verdict 'pass'", write_sql or "")
 
     def test_other_version_refuses_after_record_with_writer_fix(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2423,6 +2484,19 @@ class RunnerSelection(unittest.TestCase):
 
 class SliceRegistry(unittest.TestCase):
     """Contracts for the registered slices' categories, settings, and surfaces."""
+
+    def test_only_guardrails_names_ceiling_cases_in_every_registry(self) -> None:
+        for registry_name, registry in (
+            ("slices", SLICE_RUNNERS),
+            ("smoke parts", SMOKE_PARTS),
+            ("build gate parts", BUILD_GATES_PARTS),
+        ):
+            for name, spec in registry.items():
+                with self.subTest(registry=registry_name, name=name):
+                    if name == "guardrails":
+                        self.assertTrue(callable(spec.ceiling_cases))
+                    else:
+                        self.assertIsNone(spec.ceiling_cases)
 
     def test_count_gates_entry_reads_only_stores_and_keeps_no_reference(self) -> None:
         from gideon.evaluation.countgates_slice import run_count_gates

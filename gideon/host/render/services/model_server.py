@@ -25,7 +25,7 @@ from gideon.host.render.services import (
     secret_wrapper,
 )
 
-# vLLM v0.27.1's image supplies ``[vllm, serve]`` as its entrypoint and no
+# vLLM v0.33.0's image supplies ``[vllm, serve]`` as its entrypoint and no
 # command. The wrapper replaces that entrypoint to read the mounted API-key
 # file before execing the same server.
 ENGINE_SERVER: Final = "vllm serve"
@@ -37,7 +37,7 @@ ENGINE_USAGE_SWITCHES: Final[Mapping[str, str]] = {
 # Prometheus's default metrics path — are the lines vLLM's access log excludes:
 # render provisions both probes, so render silences what it causes, and a
 # request's own line keeps its shape. The option takes one comma-separated
-# string on v0.27.1, never two arguments. Render also mounts the route guard
+# string on v0.33.0, never two arguments. Render also mounts the route guard
 # and names it with --middleware beside this access-log filter.
 # exempt: no figure — a decision.
 ENGINE_HEALTH_PATH: Final = "/health"

@@ -18,7 +18,7 @@ from unittest.mock import patch
 import gideon
 from gideon.cli import main
 from gideon.evaluation import reference, reference_command
-from gideon.evaluation.evalset import SET_ROOT, load_set
+from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_cases
 from gideon.host import report
 from gideon.host.sysio import Command, PathLike
 from tools.exportboundary import absent_from_export
@@ -172,9 +172,10 @@ def _write_references(
     cases: Mapping[str, reference.Verdict],
     *,
     eval_set_version: str | None = None,
+    slice_name: str = "extraction",
 ) -> None:
     version = loaded.version if eval_set_version is None else eval_set_version
-    for list_name, ids in loaded.slice_lists["extraction"].items():
+    for list_name, ids in loaded.slice_lists[slice_name].items():
         value = reference.ReferenceFile(
             format=reference.FORMAT_VERSION,
             product_version=gideon.__version__,
@@ -182,16 +183,33 @@ def _write_references(
             eval_set_version=version,
             hardware_profile="fictitious-profile",
             tag=f"v{gideon.__version__}",
-            slice="extraction",
+            slice=slice_name,
             list=list_name,
             repeats=1,
             set_digest=loaded.digest,
             cases={case_id: cases[case_id] for case_id in ids if case_id in cases},
             verdict="pass",
         )
-        path = checkout / reference.REFERENCE_ROOT / "extraction" / f"{list_name}.json"
+        path = checkout / reference.REFERENCE_ROOT / slice_name / f"{list_name}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(reference.serialize_reference(value), encoding="utf-8")
+
+
+def _guardrails_document(loaded: LoadedSet, failures: frozenset[str]) -> dict[str, object]:
+    return _document(
+        loaded,
+        slice="guardrails",
+        repeats=5,
+        results=[
+            {
+                "case_id": case_id,
+                "repeat": repeat,
+                "verdict": "fail" if case_id in failures and repeat == 3 else "pass",
+            }
+            for case_id in select_cases(loaded, "guardrails").counted
+            for repeat in range(1, 6)
+        ],
+    )
 
 
 def _invoke(host: WriterHost, checkout: Path, run_id: str = RUN_ID) -> tuple[int, str, str]:
@@ -284,6 +302,37 @@ class CheckRefusals(unittest.TestCase):
         self.assertIn("remove every reference file", stdout)
         self.assertFalse(host.writes)
 
+    def test_failed_guardrail_positive_refuses_by_id_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = _checkout(directory)
+            loaded = _loaded(checkout)
+            counted = select_cases(loaded, "guardrails").counted
+            target = next(
+                case_id for case_id in counted
+                if cast(list[str], loaded.cases_by_id[case_id]["labels"])[1] == "positive"
+            )
+            control = next(
+                case_id for case_id in counted
+                if cast(list[str], loaded.cases_by_id[case_id]["labels"])[1] == "control"
+            )
+            _write_references(
+                checkout, loaded,
+                dict.fromkeys(counted, cast(reference.Verdict, "pass")),
+                slice_name="guardrails",
+            )
+            paths = sorted((checkout / reference.REFERENCE_ROOT / "guardrails").glob("*.json"))
+            before = {path: path.read_bytes() for path in paths}
+            host = WriterHost(_guardrails_document(loaded, frozenset({target, control})))
+            code, stdout, stderr = _invoke(host, checkout)
+            self.assertEqual({path: path.read_bytes() for path in paths}, before)
+        self.assertEqual((code, stderr), (1, ""), stdout)
+        self.assertIn(f"check: refuse — recorded run regresses 1 reference case: {target}", stdout)
+        self.assertNotIn(control, stdout)
+        self.assertIn("Repair the regression or supersede", stdout)
+        self.assertIn("remove every reference file", stdout)
+        self.assertNotIn("write: ok", stdout)
+        self.assertFalse(host.writes)
+
     def test_unsigned_result_refuses_with_signoff_fix(self) -> None:
         if absent_from_export(RESEARCH_QA_CASES_PATH, ROOT):
             self.skipTest("in an export the only sign-off-taking cases are absent, so none is unsigned")
@@ -360,6 +409,53 @@ class ReadRefusals(unittest.TestCase):
 
 class Writing(unittest.TestCase):
     """Writing is partitioned, owned, canonical, and repeatable."""
+
+    def test_control_failures_write_references_and_report_ceiling_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = _checkout(directory)
+            loaded = _loaded(checkout)
+            counted = select_cases(loaded, "guardrails").counted
+            controls_by_family: dict[str, str] = {}
+            for case_id in counted:
+                case = loaded.cases_by_id[case_id]
+                if cast(list[str], case["labels"])[1] == "control":
+                    controls_by_family.setdefault(cast(str, case["category"]), case_id)
+            failures = frozenset(controls_by_family.values())
+            self.assertTrue(failures)
+            _write_references(
+                checkout, loaded,
+                dict.fromkeys(counted, cast(reference.Verdict, "pass")),
+                slice_name="guardrails",
+            )
+            host = WriterHost(_guardrails_document(loaded, failures))
+            code, stdout, stderr = _invoke(host, checkout)
+            self.assertEqual((code, stderr), (0, ""), stdout)
+            self.assertIn(
+                f"check: ok — reference current; no regression; ceiling {len(failures)}",
+                stdout,
+            )
+            self.assertIn(
+                f"write: ok — gained 0, new 0, dropped 0, ceiling {len(failures)}; written",
+                stdout,
+            )
+            expected_paths = {
+                checkout / reference.REFERENCE_ROOT / "guardrails" / f"{name}.json"
+                for name in loaded.slice_lists["guardrails"]
+            }
+            self.assertEqual(set(host.writes), expected_paths)
+            result = reference.read_reference(
+                checkout, "guardrails", loaded.slice_lists["guardrails"], loaded.version,
+            )
+            self.assertEqual(result.findings, ())
+            assert result.reference is not None
+            cases = {
+                case_id: verdict for file in result.reference.files
+                for case_id, verdict in file.cases.items()
+            }
+            self.assertEqual(cases, {
+                case_id: "fail" if case_id in failures else "pass" for case_id in counted
+            })
+            self.assertTrue(all(file.repeats == 5 for file in result.reference.files))
 
     def test_format_two_writes_the_recorded_generation_and_run_verdict(self) -> None:
         for generation in (None, "caselaw__corpus-2099-01-03__fictitious-embedding__sample"):

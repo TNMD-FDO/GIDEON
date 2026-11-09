@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from collections.abc import Callable
 from dataclasses import replace
+from itertools import combinations
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
@@ -1236,6 +1237,16 @@ class SyntheticCases(unittest.TestCase):
         edition = SHAPE_REGISTRY[("research-qa", "edition")]
         self.assertEqual(edition.synthetic_keys, ())
         self.assertEqual(edition.review_keys_for(synthetic.SYNTHETIC_ORIGIN), ("by", "on"))
+        for (suite, category), spec in SHAPE_REGISTRY.items():
+            for origin in (synthetic.SYNTHETIC_ORIGIN, "harvest", "invented", "variant", None):
+                with self.subTest(suite=suite, category=category, origin=origin):
+                    self.assertEqual(spec.review_keys_for(origin, corrected=False), spec.review_keys_for(origin))
+                    self.assertEqual(
+                        spec.review_keys_for(origin, corrected=True),
+                        ("by", "on", "corrected")
+                        if origin == synthetic.SYNTHETIC_ORIGIN and (suite, category) == ("research-qa", "treatment")
+                        else spec.review_keys_for(origin),
+                    )
 
     def test_existence_shape_has_question_fields_and_takes_no_signoff(self) -> None:
         spec = SHAPE_REGISTRY[("research-qa", "existence")]
@@ -1680,6 +1691,79 @@ class SyntheticCases(unittest.TestCase):
         gold = cast(list[dict[str, object]], record["gold"])
         self.assertRegex(str(gold[0]["pattern_set"]), f"^{PATTERN_SET_PATTERN}$")
         self.assertEqual(case_findings(record, synthetic.case_path("treatment"), 1), ())
+
+    def test_corrected_treatment_review_loads_each_key_subset_and_actor_form(self) -> None:
+        for size in range(1, len(synthetic.CORRECTED_KEYS) + 1):
+            for keys in combinations(synthetic.CORRECTED_KEYS, size):
+                for reported in (False, True):
+                    with self.subTest(keys=keys, reported=reported), tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory) / "eval-v9"
+                        record = _synthetic_case(category="treatment")
+                        relation = cast(dict[str, object], cast(dict[str, object], record["expected"])["relation"])
+                        gold = cast(list[dict[str, object]], record["gold"])[0]
+                        relation["actor"] = cast(int, gold["cluster"]) + 1 if reported else gold["source_id"]
+                        drafted = {
+                            "verb": next(value for value in TREATMENT_SIGNALS if value != relation["verb"]),
+                            "qualifier": next(value for value in QUALIFIERS if value != relation["qualifier"]),
+                            "actor": gold["source_id"] if reported else cast(int, gold["cluster"]) + 1,
+                        }
+                        cast(dict[str, object], record["review"])["corrected"] = {key: drafted[key] for key in keys}
+                        relative = synthetic.case_path("treatment")
+                        self.assertEqual(case_findings(record, relative, 7, ("ca6",)), ())
+                        _write(root, relative, synthetic.case_line(record).rstrip("\n"))
+                        result = load_set(root, ("ca6",))
+                        self.assertTrue(result.ok, result.findings)
+                        assert result.loaded is not None
+                        self.assertEqual(result.loaded.cases_by_id[cast(str, record["id"])], record)
+
+    def test_corrected_review_is_for_synthetic_treatment_alone(self) -> None:
+        records = [_synthetic_case(category=category) for category in synthetic.PLANNED_COUNTS if category != "treatment"]
+        records.append(_research_qa_case(category="treatment"))
+        for record in records:
+            with self.subTest(category=record["category"], labels=record["labels"]):
+                cast(dict[str, object], record["review"])["corrected"] = {"actor": "fictional/drafted-source"}
+                self.assert_refused(record, "review keys or order")
+
+    def test_corrected_review_requires_a_nonempty_ordered_key_subset(self) -> None:
+        values: tuple[object, ...] = (
+            None, [], SENTINEL, {},
+            {"actor": "fictional/drafted-source", "verb": TREATMENT_SIGNALS[0]},
+            *({key: SENTINEL} for key in synthetic.RELATION_KEYS if key not in synthetic.CORRECTED_KEYS),
+            {"extra": SENTINEL},
+        )
+        for corrected in values:
+            with self.subTest(corrected=corrected):
+                record = _synthetic_case(category="treatment")
+                cast(dict[str, object], record["review"])["corrected"] = corrected
+                self.assert_refused(record, "review.corrected keys")
+        record = _synthetic_case(category="treatment")
+        review = cast(dict[str, object], record["review"])
+        record["review"] = {"corrected": {"actor": "fictional/drafted-source"}, **review}
+        self.assert_refused(record, "review keys or order")
+
+    def test_corrected_review_values_are_in_vocabulary_without_value_diagnostics(self) -> None:
+        value: object
+        for key in synthetic.CORRECTED_KEYS:
+            for value in (None, SENTINEL, "", True, False, 0, -1, 1.5, [], {}):
+                with self.subTest(key=key, value=value):
+                    record = _synthetic_case(category="treatment")
+                    cast(dict[str, object], record["review"])["corrected"] = {key: value}
+                    self.assert_refused(record, f"review.corrected.{key}")
+                    findings = case_findings(record, synthetic.case_path("treatment"), 7, ("ca6",))
+                    self.assertEqual(tuple(finding.rule for finding in findings), (f"review.corrected.{key}",))
+
+    def test_corrected_review_drafted_values_must_differ_from_the_relation(self) -> None:
+        for key in synthetic.CORRECTED_KEYS:
+            for reported in (False, True):
+                with self.subTest(key=key, reported=reported):
+                    record = _synthetic_case(category="treatment")
+                    relation = cast(dict[str, object], cast(dict[str, object], record["expected"])["relation"])
+                    gold = cast(list[dict[str, object]], record["gold"])[0]
+                    relation["actor"] = cast(int, gold["cluster"]) + 1 if reported else gold["source_id"]
+                    cast(dict[str, object], record["review"])["corrected"] = {key: relation[key]}
+                    self.assert_refused(record, f"review.corrected.{key} equals the relation")
+                    findings = case_findings(record, synthetic.case_path("treatment"), 7, ("ca6",))
+                    self.assertEqual(tuple(finding.rule for finding in findings), (f"review.corrected.{key} equals the relation",))
 
     def test_treatment_relation_keys_are_required_exact_and_ordered(self) -> None:
         for mutation in ("missing", "not-mapping", "reverse", "extra", *synthetic.RELATION_KEYS):

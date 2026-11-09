@@ -7,6 +7,8 @@ is one reviewed research question. A harvest case's signed answer lives in the
 sign-offs file; a synthetic case carries its own expected answer and retraced
 gold evidence, with a treatment case's expected relation and actor held to that
 gold: the actor is the citing source id or a cluster other than the cited.
+A corrected synthetic treatment review preserves the drafted relation values,
+in vocabulary and differing from the reader's relation.
 A case is unsigned iff its shape takes a sign-off, it carries no
 expected of its own, and no sign-off or label names it — it loads, and a
 selection keeps it out of what a gate counts.
@@ -203,12 +205,14 @@ class ShapeSpec:
             keys.append("supersedes")
         return tuple(keys)
 
-    def review_keys_for(self, origin: str | None) -> tuple[str, ...]:
-        """Synthetic reviews carry the reader, date, and sampled read status."""
+    def review_keys_for(self, origin: str | None, *, corrected: bool = False) -> tuple[str, ...]:
+        """Return review keys for the origin, read status, and treatment corrections."""
 
         from gideon.evaluation import synthetic
 
         if origin == synthetic.SYNTHETIC_ORIGIN:
+            if corrected and (self.suite, self.category) == ("research-qa", "treatment"):
+                return ("by", "on", "corrected")
             return ("by", "on") if self.zero_tolerance else ("by", "on", "read")
         return self.review_keys
 
@@ -639,6 +643,28 @@ def valid_iso_date(value: object) -> bool:
         return False
 
 
+def corrected_rules(corrected: object) -> tuple[str, ...]:
+    """Return review rules violated by a correction's drafted relation values."""
+
+    from gideon.evaluation import judgments, synthetic
+    from gideon.host.render.worker import QUALIFIERS, TREATMENT_SIGNALS
+
+    if (
+        not isinstance(corrected, Mapping) or not corrected
+        or tuple(corrected) != tuple(key for key in synthetic.CORRECTED_KEYS if key in corrected)
+    ):
+        return ("review.corrected keys",)
+    checks = {
+        "verb": corrected.get("verb") in TREATMENT_SIGNALS,
+        "qualifier": corrected.get("qualifier") in QUALIFIERS,
+        "actor": (
+            isinstance(corrected.get("actor"), str)
+            and judgments.SOURCE_ID_PATTERN.fullmatch(cast(str, corrected["actor"])) is not None
+        ) or (_int(corrected.get("actor")) and cast(int, corrected["actor"]) > 0),
+    }
+    return tuple(f"review.corrected.{key}" for key in corrected if not checks[key])
+
+
 def _validate_review(
     spec: ShapeSpec,
     review: object,
@@ -651,7 +677,7 @@ def _validate_review(
 ) -> None:
     from gideon.evaluation import synthetic
 
-    keys = spec.review_keys_for(origin)
+    keys = spec.review_keys_for(origin, corrected=isinstance(review, dict) and "corrected" in review)
     if not isinstance(review, dict) or tuple(review) != keys:
         findings.append(Finding(file, case_id, line, "review keys or order", _CASE_FIX))
         return
@@ -666,6 +692,9 @@ def _validate_review(
         findings.append(Finding(file, case_id, line, "review.on ISO date", _CASE_FIX))
     if "read" in keys and not isinstance(review.get("read"), bool):
         findings.append(Finding(file, case_id, line, "review.read bool", _CASE_FIX))
+    if "corrected" in keys:
+        findings.extend(Finding(file, case_id, line, rule, _CASE_FIX)
+                        for rule in corrected_rules(review["corrected"]))
     if spec.is_question_case and origin != synthetic.SYNTHETIC_ORIGIN:
         flags = review.get("accepted_flags")
         if (
@@ -1057,6 +1086,12 @@ def _validate_synthetic_fields(
                 for key, valid in relation_checks.items():
                     if not valid:
                         findings.append(Finding(file, case_id, line, f"expected.relation.{key}", _CASE_FIX))
+    review = record.get("review")
+    corrected = review.get("corrected") if isinstance(review, Mapping) else None
+    if relation is not None and isinstance(corrected, Mapping) and not corrected_rules(corrected):
+        for key, drafted in corrected.items():
+            if relation_checks[key] and drafted == relation[key]:
+                findings.append(Finding(file, case_id, line, f"review.corrected.{key} equals the relation", _CASE_FIX))
     gold = record.get("gold")
     if not isinstance(gold, list) or not gold:
         findings.append(Finding(file, case_id, line, "gold non-empty list", _CASE_FIX))

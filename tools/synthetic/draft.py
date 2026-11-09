@@ -11,7 +11,8 @@ actor-drawn, agent-unresolved, and recounted edges before generation. Listed
 pairs precede the remaining seeded draw, capped at count // LISTED_SHARE kept
 pairs. A listed result consumed after that cap is reached is dropped whole,
 with no row, discard, or figures, so rows and ordinals match a serial walk.
-Performed or reported actors appear in the prompt and on the sheet.
+Performed or reported actors appear in the prompt and on the sheet. Resolved
+sentence citations reach the manifest and the sheet's correction guidance.
 """
 
 import argparse
@@ -823,18 +824,18 @@ def _canonical_text(io: DraftHost, document: synthetic.DrawDocument | Overruling
 def _treatment_sentence_pass(
     io: DraftHost, rendered_dir: PathLike, document: synthetic.DrawDocument,
     edges: Sequence[Edge],
-) -> tuple[str | tuple[int, str] | None, ...]:
-    """Resolve actors or discards with one text and row read per document."""
+) -> tuple[tuple[str | tuple[int, str] | None, tuple[tuple[int, str], ...]], ...]:
+    """Resolve actors, discards, and sentence citations with one document read."""
 
     text = _canonical_text(io, document)
     if synthetic.procedural_disposition(text):
-        return ("procedural-disposition",) * len(edges)
+        return (("procedural-disposition", ()),) * len(edges)
     sections, citations = _document_rows(io, rendered_dir, document, text)
-    results: list[str | tuple[int, str] | None] = []
+    results: list[tuple[str | tuple[int, str] | None, tuple[tuple[int, str], ...]]] = []
     for edge in edges:
         retraced = _treatment_sentence(rendered_dir, edge, text, sections, citations)
         if isinstance(retraced, synthetic.Discard):
-            results.append(None)
+            results.append((None, ()))
             continue
         case_cites = tuple(row for row in citations if row.cite_type == "case_cite"
                            and retraced.start <= row.char_start < row.char_end <= retraced.end)
@@ -845,18 +846,19 @@ def _treatment_sentence_pass(
         actor_cite = min((row for row in case_cites if phrase is not None and row.char_start - retraced.start >= phrase),
                          key=lambda row: row.char_start, default=None)
         others = tuple(row for row in case_cites if row.citation_id != edge.citation_id and row is not actor_cite)
+        result: str | tuple[int, str] | None
         if synthetic.nearest_cite(
             edge.verb_start, edge.verb_end, (edge.citation_start, edge.citation_end),
             ((row.char_start, row.char_end) for row in others),
         ):
-            results.append("nearest-cite")
+            result = "nearest-cite"
         elif phrase is None and synthetic.active_direction(
             retraced.quote, edge.citation_start - retraced.start, edge.citation_end - retraced.start,
             edge.verb_start - retraced.start, edge.verb_end - retraced.start,
         ):
-            results.append("active-direction")
+            result = "active-direction"
         elif synthetic.conditional_verb(retraced.quote, verb_start):
-            results.append("conditional-verb")
+            result = "conditional-verb"
         else:
             assert edge.cluster is not None
             agent = synthetic.reported_agent(
@@ -864,19 +866,25 @@ def _treatment_sentence_pass(
                 (edge.citation_start - retraced.start, edge.citation_end - retraced.start),
             )
             if agent.state == "actor-drawn":
-                results.append("actor-drawn")
+                result = "actor-drawn"
             elif agent.state == "unresolved":
-                results.append("agent-unresolved")
+                result = "agent-unresolved"
             elif agent.state == "reported":
                 assert agent.cluster is not None and agent.span is not None
                 citation = next(row for row in case_cites if (
                     row.char_start - retraced.start, row.char_end - retraced.start,
                 ) == agent.span)
-                results.append((agent.cluster, citation.raw_cite))
+                result = (agent.cluster, citation.raw_cite)
             elif synthetic.performed_read(retraced.quote, verb_start, verb_end, edge.standing):
-                results.append(None)
+                result = None
             else:
-                results.append("recounted")
+                result = "recounted"
+        resolved: dict[int, str] = {}
+        if not isinstance(result, str):
+            for row in sorted(case_cites, key=lambda row: row.char_start):
+                if row.to_cluster is not None:
+                    resolved.setdefault(row.to_cluster, row.raw_cite)
+        results.append((result, tuple(resolved.items())))
     return tuple(results)
 
 
@@ -924,6 +932,7 @@ def _document(
     actor: tuple[int, str] | None = None,
     pair: Pair | None = None,
     overruling_windows: dict[str, tuple[int, int, str]] | None = None,
+    citations: Sequence[tuple[int, str]] = (),
 ) -> tuple[
     tuple[synthetic.Proposal, synthetic.Retraced, synthetic.ClosedBook] | str,
     Figures, SectionRow | None, tuple[SectionRow, ...],
@@ -978,7 +987,8 @@ def _sheet(ordinal: int, document: synthetic.DrawDocument, facts: OpinionFacts,
            *, required: bool, edge: Edge | None = None, target: SectionRow | None = None,
            sections: Sequence[SectionRow] = (), category: str = "",
            court_names: Mapping[str, str] | None = None, actor: tuple[int, str] | None = None,
-           pair: Pair | None = None, overruling_window: tuple[int, int, str] | None = None) -> str:
+           pair: Pair | None = None, overruling_window: tuple[int, int, str] | None = None,
+           citations: Sequence[tuple[int, str]] = ()) -> str:
     suffix = manifest.SHEET_REQUIRED if required else manifest.SHEET_OPTIONAL
     extra: tuple[str, ...] = ()
     relation: tuple[str, ...] = ()
@@ -999,6 +1009,15 @@ def _sheet(ordinal: int, document: synthetic.DrawDocument, facts: OpinionFacts,
             "Cited original: " + manifest.original_link(edge.cited.cites),
             f"Kind: {document.kind} | verb {edge.signal} | qualifier {edge.qualifier} | standing {edge.standing}",
             f"Edge: {edge.citation_id} | signal {edge.signal_id} | pattern set {edge.pattern_set}",
+            "Citations: " + "; ".join(
+                f"{raw_cite} (cluster {cluster}"
+                + (", cited" if cluster == edge.cluster else "")
+                + (", actor" if actor is not None and cluster == actor[0] else "") + ")"
+                for cluster, raw_cite in citations
+            ),
+            f"Correct: {ordinal:02d} correct actor=<citing or a cluster above other than the cited> "
+            f"verb=<{'|'.join(TREATMENT_SIGNALS)}> qualifier=<{'|'.join(QUALIFIERS)}> "
+            "| <your expected answer>; name only the keys you change",
         )
     elif target is not None:
         other_types = sorted({section.section_type for section in sections
@@ -1150,6 +1169,7 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
         # Workers write distinct row ids; sheets read after their futures complete.
         overruling_windows: dict[str, tuple[int, int, str]] = {}
         actors: dict[str, tuple[int, str] | None] = {}
+        citations: dict[str, tuple[tuple[int, str], ...]] = {}
         edge: Edge | None
         pair: Pair | None
         court_names: Mapping[str, str] = {}
@@ -1302,12 +1322,13 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                             )
                             read_documents.add(document.doc_id)
                             unread -= len(candidates)
-                            for candidate, sentence_result in zip(candidates, sentence_results, strict=True):
+                            for candidate, (sentence_result, sentence_citations) in zip(candidates, sentence_results, strict=True):
                                 if isinstance(sentence_result, str):
                                     discard(candidate.source_id, sentence_result, candidate.item, candidate.kind)
                                     skipped[sentence_result] += 1
                                 else:
                                     actors[candidate.item] = sentence_result
+                                    citations[candidate.item] = sentence_citations
                                     eligible[candidate.kind] += 1
                                     eligible["performed" if sentence_result is None else "reported"] += 1
                                     eligible["listed" if edges[candidate.item].listed_row is not None else "unlisted"] += 1
@@ -1346,6 +1367,7 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                         _document, io, rendered_dir, target.served_model_name,
                         template, document, facts[document.opinion_id], edges.get(document.item), court_names,
                         actors.get(document.item), pairs.get(document.item), overruling_windows,
+                        citations.get(document.item, ()),
                     )))
                     return True
                 return False
@@ -1412,11 +1434,13 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                         edge=edge, target=section_target, sections=sections,
                         category=category, court_names=court_names, actor=actor,
                         pair=pair, overruling_window=overruling_windows.get(document.item),
+                        citations=citations.get(document.item, ()),
                     ))
                     entries.append(dict(zip(manifest.ENTRY_KEYS, (
                         ordinal, document.source_id, document.sha256, document.doc_id, retraced.start, retraced.end,
                         len(retraced.quote), hashlib.sha256(retraced.quote.encode("utf-8")).hexdigest(),
                         reading.score, reading.label, edge.listed_row if edge is not None else pair.row_id if pair is not None else None,
+                        [cluster for cluster, _ in citations[document.item]] if edge is not None else None,
                         hashlib.sha256(line).hexdigest(),
                     ), strict=True)))
                     closed_book_count += int(reading.label is not None)

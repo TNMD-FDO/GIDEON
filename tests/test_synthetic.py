@@ -735,6 +735,11 @@ class SpanRules(unittest.TestCase):
 class TreatmentRelations(unittest.TestCase):
     """A treatment relation is stated from the record, and a sentence's shape discards its edge."""
 
+    def test_corrected_keys_follow_relation_order_without_fixed_fields(self) -> None:
+        self.assertEqual(synthetic.CORRECTED_KEYS, tuple(
+            key for key in synthetic.RELATION_KEYS if key not in {"citing", "standing", "cited"}
+        ))
+
     def test_relation_keys_and_line_for_each_qualifier(self) -> None:
         self.assertEqual(synthetic.RELATION_KEYS, ("citing", "standing", "verb", "qualifier", "cited", "actor"))
         self.assertEqual(synthetic.ACTOR_WORDS, ("performed", "reported"))

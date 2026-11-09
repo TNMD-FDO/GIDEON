@@ -955,6 +955,32 @@ class FalseRefusal(unittest.TestCase):
 class GuardrailsRunner(unittest.TestCase):
     """The service and frontend turns expose only classified, content-free rows."""
 
+    def test_ceiling_cases_are_only_counted_family_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1", all_controls=True)
+        controls = frozenset(
+            case_id for case_id in loaded.slices["guardrails"]
+            if cast(list[str], loaded.cases_by_id[case_id]["labels"])[1] == "control"
+        )
+        self.assertTrue(controls)
+        self.assertEqual(
+            {loaded.cases_by_id[case_id]["category"] for case_id in controls},
+            {"deadline-trap", "guidelines-range", "sentence-credit"},
+        )
+        self.assertEqual(guardrails_slice.ceiling_cases(loaded, "guardrails"), controls)
+        unsigned = next(iter(controls))
+        loaded = replace(loaded, unsigned_ids=frozenset({unsigned}))
+        result = guardrails_slice.ceiling_cases(loaded, "guardrails")
+        self.assertEqual(result, controls - {unsigned})
+        self.assertNotIn(unsigned, result)
+        self.assertTrue(result.isdisjoint(_tier_2_ids(loaded)))
+        positives = {
+            case_id for case_id in loaded.slices["guardrails"]
+            if cast(list[str], loaded.cases_by_id[case_id]["labels"])[1] == "positive"
+        }
+        self.assertTrue(positives)
+        self.assertTrue(result.isdisjoint(positives))
+
     def test_turn_count_matches_recorded_door_and_frontend_requests(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             loaded = _small_set(Path(directory) / "eval-v1")

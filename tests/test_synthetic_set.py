@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import tempfile
+from collections import Counter
 from pathlib import Path
 from typing import Final, cast
 from unittest import TestCase
@@ -88,7 +89,8 @@ class SyntheticSetContract(TestCase):
         lines = [line for line in record.splitlines() if line.startswith("|")]
         self.assertGreaterEqual(len(lines), 3, "add the committed batch rows")
         columns = tuple(part.strip() for part in lines[0].strip("|").split("|"))
-        self.assertTrue({"Category", "Accepted", "Closed-book-answerable", "Read", "Rejected"} <= set(columns))
+        self.assertTrue({"Category", "Accepted", "Corrected", "Closed-book-answerable", "Read", "Rejected"} <= set(columns))
+        self.assertEqual(columns[columns.index("Accepted") + 1], "Corrected")
         rows = []
         for line in lines[2:]:
             cells = tuple(part.strip().strip("`") for part in line.strip("|").split("|"))
@@ -217,7 +219,9 @@ class SyntheticSetContract(TestCase):
             for case in cases:
                 with self.subTest(category=category, case_id=case["id"]):
                     review = cast(dict[str, object], case["review"])
-                    self.assertEqual(tuple(review), spec.review_keys_for(synthetic.SYNTHETIC_ORIGIN))
+                    self.assertEqual(tuple(review), spec.review_keys_for(
+                        synthetic.SYNTHETIC_ORIGIN, corrected="corrected" in review,
+                    ))
                     self.assertIsNotNone(re.fullmatch(r"CSA-[1-9][0-9]*", cast(str, review["by"])))
                     if not spec.zero_tolerance:
                         self.assertIsInstance(review["read"], bool)
@@ -288,6 +292,32 @@ class SyntheticSetContract(TestCase):
                     int(row["Read"]) - int(row["Rejected"])
                     for row in rows if row["Category"] == category
                 ))
+
+    def test_batch_correction_counts_match_committed_treatment_reviews(self) -> None:
+        recorded: Counter[str] = Counter()
+        for row in self._batch_rows():
+            with self.subTest(category=row["Category"], date=row["Date"]):
+                cell = row["Corrected"]
+                if row["Category"] != "treatment":
+                    self.assertEqual(cell, "none")
+                if cell == "none":
+                    continue
+                pairs = []
+                for part in cell.split(", "):
+                    match = re.fullmatch(rf"({'|'.join(synthetic.CORRECTED_KEYS)}) ([1-9][0-9]*)", part)
+                    self.assertIsNotNone(match, "Corrected must be none or ordered nonzero key counts")
+                    assert match is not None
+                    pairs.append((match[1], int(match[2])))
+                keys = tuple(key for key, _count in pairs)
+                self.assertEqual(keys, tuple(key for key in synthetic.CORRECTED_KEYS if key in keys))
+                recorded.update(dict(pairs))
+        committed = Counter(
+            key for case in self.cases.get("treatment", ())
+            for key in cast(dict[str, object], cast(dict[str, object], case["review"]).get("corrected", {}))
+        )
+        for key in synthetic.CORRECTED_KEYS:
+            with self.subTest(key=key):
+                self.assertEqual(recorded[key], committed[key])
 
     def test_readme_counts_match_the_committed_cases(self) -> None:
         readme = (ROOT / README_PATH).read_text(encoding="utf-8")

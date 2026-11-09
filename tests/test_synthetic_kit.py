@@ -13,7 +13,7 @@ import threading
 import unittest
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import asdict, replace
+from dataclasses import FrozenInstanceError, asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,6 +36,8 @@ from gideon.host.render.worker import (
     PATTERN_SET_ID,
     PIPELINE_VERSION,
     PRECEDENTIAL_VALUES,
+    QUALIFIERS,
+    TREATMENT_SIGNALS,
 )
 from gideon.host.report import Problem
 from gideon.host.sysio import PathLike
@@ -48,6 +50,7 @@ QUESTION = "FICTITIOUS PRIVATE QUESTION SENTINEL"
 ANSWER = "FICTITIOUS PRIVATE REFERENCE SENTINEL"
 CLOSED = "FICTITIOUS PRIVATE CLOSED-BOOK SENTINEL"
 REASON = "FICTITIOUS PRIVATE READING SENTINEL"
+CORRECTED_ANSWER = "FICTITIOUS PRIVATE CORRECTED ANSWER SENTINEL"
 CASE_NAME = "Fictitious Petitioner v. Imaginary Respondent"
 PASSAGE = (
     "In this fictitious opinion, the court required written notice before the hearing. "
@@ -764,6 +767,7 @@ class Draft(unittest.TestCase):
                 self.assertEqual(tuple(entry), manifest.ENTRY_KEYS)
                 self.assertEqual(entry["draft_sha256"], hashlib.sha256(line).hexdigest())
                 self.assertIsNone(entry["listed"])
+                self.assertIsNone(entry["citations"])
                 case = json.loads(line)
                 self.assertEqual(tuple(case), manifest.DRAFT_KEYS)
                 gold = case["gold"][0]
@@ -1353,7 +1357,7 @@ class Draft(unittest.TestCase):
 class NearMissDraft(unittest.TestCase):
     """Near misses are checked against the record before generation."""
 
-    def test_draw_slots_sheet_and_format_four_intake_for_each_category(self) -> None:
+    def test_draw_slots_sheet_and_format_five_intake_for_each_category(self) -> None:
         for category in ("unanswerable", "poisoned-premise"):
             with self.subTest(category=category), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -1369,7 +1373,8 @@ class NearMissDraft(unittest.TestCase):
                 for path in out.iterdir():
                     self.assertEqual(path.read_bytes(), (repeat / path.name).read_bytes())
                 value = json.loads((out / "manifest.json").read_bytes())
-                self.assertEqual(value["format"], 4)
+                self.assertEqual(value["format"], 5)
+                self.assertTrue(all(entry["citations"] is None for entry in value["entries"]))
                 self.assertEqual(tuple(value), manifest.MANIFEST_KEYS)
                 records = [json.loads(line) for line in (out / "drafts.jsonl").read_bytes().splitlines()]
                 sheet = (out / "sheet.txt").read_text()
@@ -2113,7 +2118,7 @@ class TreatmentDraft(unittest.TestCase):
                              "skipped 2 (active-direction=0, actor-drawn=0, agent-unresolved=1, conditional-verb=1, nearest-cite=0, procedural-disposition=0, recounted=0)")
             self.assertIn("kinds negative=2, caution=0, none=1, performed=1, reported=2, listed=2, unlisted=1", output)
             provenance = json.loads((root / "draft/manifest.json").read_bytes())
-            self.assertEqual(provenance["format"], 4)
+            self.assertEqual(provenance["format"], 5)
             self.assertEqual(provenance["discards"], [
                 {"reason": reason, "source_id": host.manifest_rows[index]["source_id"],
                  "edge": host.edge_rows[index]["citation_id"], "kind": kind}
@@ -2245,6 +2250,44 @@ class TreatmentDraft(unittest.TestCase):
                 self.assertEqual(case["closed_book_answer"], synthetic.CLOSED_BOOK_UNFINISHED)
                 self.assertEqual(case["labels"], [synthetic.SYNTHETIC_ORIGIN])
                 self.assertEqual(len(host.bodies), 2)
+
+    def test_treatment_entry_citations_and_sheet_correction_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            host = TreatmentHost(3)
+            code, output, errors = _run(host, root, root / "draft", count=3, category="treatment")
+            self.assertEqual((code, errors), (0, ""), output)
+            provenance = json.loads((root / "draft/manifest.json").read_bytes())
+            cases = [json.loads(line) for line in (root / "draft/drafts.jsonl").read_bytes().splitlines()]
+            sheet = (root / "draft/sheet.txt").read_text()
+            for case, entry in zip(cases, provenance["entries"], strict=True):
+                gold = case["gold"][0]
+                relation = case["expected"]["relation"]
+                resolved: dict[int, str] = {}
+                for row in sorted(host.citation_rows[entry["doc_id"]], key=lambda row: cast(int, row["char_start"])):
+                    start, end = cast(int, row["char_start"]), cast(int, row["char_end"])
+                    if (row["cite_type"] == "case_cite" and row["to_cluster"] is not None
+                            and gold["start"] <= start < end <= gold["end"]):
+                        resolved.setdefault(cast(int, row["to_cluster"]), cast(str, row["raw_cite"]))
+                self.assertEqual(entry["citations"], list(resolved))
+                self.assertIn(relation["cited"], entry["citations"])
+                if type(relation["actor"]) is int:
+                    self.assertIn(relation["actor"], entry["citations"])
+                citations_line = "Citations: " + "; ".join(
+                    f"{raw_cite} (cluster {cluster}"
+                    + (", cited" if cluster == relation["cited"] else "")
+                    + (", actor" if cluster == relation["actor"] else "") + ")"
+                    for cluster, raw_cite in resolved.items()
+                )
+                correction_line = (
+                    f"Correct: {entry['ordinal']:02d} correct actor=<citing or a cluster above other than the cited> "
+                    f"verb=<{'|'.join(TREATMENT_SIGNALS)}> qualifier=<{'|'.join(QUALIFIERS)}> "
+                    "| <your expected answer>; name only the keys you change"
+                )
+                edge_line = f"Edge: {gold['citation_id']} | signal {gold['signal_id']} | pattern set {gold['pattern_set']}"
+                self.assertIn(f"{edge_line}\n{citations_line}\n{correction_line}\nQuestion: ", sheet)
+                for raw_cite in resolved.values():
+                    self.assertNotIn(raw_cite, json.dumps(entry))
 
     def test_three_kinds_gold_slots_sentence_sheet_and_intake(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2927,7 +2970,7 @@ def _family_case(value: Mapping[str, object], category: str, number: int) -> dic
 
 
 def _review_fixture(root: Path, count: int = 2, *, category: str = "lookup") -> tuple[Path, Path, Path, tuple[str, ...]]:
-    host = SyntheticHost(count)
+    host = TreatmentHost(count) if category == "treatment" else SyntheticHost(count)
     code, output, errors = _run(host, root, root / "draft", count=max(1, count), category=category)
     assert (code, errors) == (0, ""), (output, errors)
     manifest_path = root / "draft/manifest.json"
@@ -2974,7 +3017,7 @@ class Intake(unittest.TestCase):
     """A digest-held CSA review admits a sampled or fully read batch atomically."""
 
     def assert_private_absent(self, text: str) -> None:
-        for private in (QUESTION, ANSWER, CLOSED, REASON, PASSAGE, CASE_NAME):
+        for private in (QUESTION, ANSWER, CLOSED, REASON, PASSAGE, CASE_NAME, CORRECTED_ANSWER):
             self.assertNotIn(private, text)
 
     def assert_refusal(self, result: tuple[int, str, str], *expected: str) -> None:
@@ -2985,13 +3028,234 @@ class Intake(unittest.TestCase):
         self.assertIn("Fix:", errors)
         self.assert_private_absent(output + errors)
 
-    def test_old_formats_refuse_with_draft_command_and_format_four_appends(self) -> None:
+    def test_corrections_append_reader_values_preserve_drafted_values_and_uncorrected_bytes(self) -> None:
+        for scenario in ("actor-cluster", "actor-citing", "qualifier", "verb", "multiple"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                set_root, manifest_path, marks_path, known_courts = _review_fixture(root, 3, category="treatment")
+                provenance = json.loads(manifest_path.read_bytes())
+                drafts_path = manifest_path.parent / "drafts.jsonl"
+                drafts = [json.loads(line) for line in drafts_path.read_bytes().splitlines()]
+                entry = next(entry for entry in provenance["entries"] if len(entry["citations"]) > 1)
+                ordinal = entry["ordinal"]
+                if scenario == "actor-cluster":
+                    def performed(value: dict[str, object]) -> None:
+                        relation = cast(dict[str, object], cast(dict[str, object], value["expected"])["relation"])
+                        relation["actor"] = relation["citing"]
+                    _rewrite_draft(manifest_path, ordinal, performed)
+                    drafts = [json.loads(line) for line in drafts_path.read_bytes().splitlines()]
+                draft_case = drafts[ordinal - 1]
+                relation = draft_case["expected"]["relation"]
+                values: dict[str, str | int]
+                if scenario == "actor-cluster":
+                    values = {"actor": next(cluster for cluster in entry["citations"] if cluster != relation["cited"])}
+                elif scenario == "actor-citing":
+                    values = {"actor": "citing"}
+                else:
+                    verb = next(value for value in TREATMENT_SIGNALS if value != relation["verb"])
+                    qualifier = next(value for value in QUALIFIERS if value != relation["qualifier"])
+                    values = {"verb": verb} if scenario == "verb" else {"qualifier": qualifier}
+                    if scenario == "multiple":
+                        values = {"actor": "citing", "qualifier": qualifier, "verb": verb}
+                baseline = root / "baseline" / set_root.name
+                shutil.copytree(set_root, baseline)
+                result = _run_intake(manifest_path, marks_path, known_courts, set_root=baseline)
+                self.assertEqual((result[0], result[2]), (0, ""), result[1])
+                baseline_lines = (baseline / synthetic.case_path("treatment")).read_bytes().splitlines(keepends=True)
+                answer = f"{CORRECTED_ANSWER} — the reader's relation | including a second bar."
+                lines = marks_path.read_text().splitlines()
+                lines[ordinal] = f"{ordinal:02d} correct " + " ".join(f"{key}={value}" for key, value in values.items()) + f" |   {answer}   "
+                marks_path.write_text("\n".join(lines) + "\n")
+                loaded_manifest = intake._load_manifest(manifest_path)
+                marks = intake._marks(marks_path, loaded_manifest, intake._drafts(manifest_path, loaded_manifest))
+                correction = marks.corrections[ordinal]
+                ordered_keys = tuple(key for key in synthetic.CORRECTED_KEYS if key in values)
+                self.assertEqual(tuple(correction.values), ordered_keys)
+                self.assertEqual(correction.values, values)
+                self.assertEqual(correction.line, ordinal + 1)
+                self.assertEqual(correction.answer, answer)
+                self.assertEqual(marks.marked, frozenset(range(1, len(drafts) + 1)))
+                self.assertEqual(marks.accepted, marks.marked)
+                self.assertNotIn(CORRECTED_ANSWER, repr(marks))
+                self.assertFalse(hasattr(correction, "__dict__"))
+                with self.assertRaises(FrozenInstanceError):
+                    correction.line = 999  # type: ignore[misc]
+                before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+                with patch.object(intake, "write_atomic") as write:
+                    dry = _run_intake(manifest_path, marks_path, known_courts, dry_run=True)
+                self.assertEqual((dry[0], dry[2]), (0, ""), dry[1])
+                write.assert_not_called()
+                self.assertEqual({path: path.read_bytes() for path in root.rglob("*") if path.is_file()}, before)
+                real = _run_intake(manifest_path, marks_path, known_courts)
+                self.assertEqual(real, dry)
+                case_path = set_root / synthetic.case_path("treatment")
+                case_lines = case_path.read_bytes().splitlines(keepends=True)
+                cases = [json.loads(line) for line in case_lines]
+                corrected = cases[ordinal - 1]
+                self.assertEqual(corrected["expected"], {
+                    **draft_case["expected"], "answer": answer,
+                    "relation": {**relation, **{
+                        key: relation["citing"] if key == "actor" and value == "citing" else value
+                        for key, value in values.items()
+                    }},
+                })
+                self.assertEqual(corrected["review"], {
+                    "by": marks.by, "on": marks.on,
+                    "corrected": {key: relation[key] for key in ordered_keys},
+                })
+                self.assertEqual(tuple(corrected["review"]), ("by", "on", "corrected"))
+                self.assertEqual(tuple(corrected["review"]["corrected"]), ordered_keys)
+                self.assertEqual(corrected["labels"], [synthetic.SYNTHETIC_ORIGIN])
+                for key in synthetic.CASE_KEYS:
+                    if key not in {"id", "expected", "review", "labels"}:
+                        self.assertEqual(corrected[key], draft_case[key])
+                for index, (line, baseline_line) in enumerate(zip(case_lines, baseline_lines, strict=True), start=1):
+                    if index != ordinal:
+                        self.assertEqual(line, baseline_line)
+                self.assertEqual(evalset.held_out_path(case_path).read_bytes(),
+                                 evalset.held_out_path(baseline / synthetic.case_path("treatment")).read_bytes())
+                row = f"{ordinal:02d}: corrected {corrected['id']} ({', '.join(ordered_keys)})"
+                self.assertIn(row, real[1].splitlines())
+                labelled = sum(synthetic.CLOSED_BOOK_LABEL in case["labels"] for case in cases)
+                summary = f"summary: accepted {len(drafts)}, admitted unread 0, rejected 0, closed-book-answerable {labelled}"
+                counts = ", ".join(f"{key}={int(key in values)}" for key in synthetic.CORRECTED_KEYS)
+                output_lines = real[1].splitlines()
+                summary_index = output_lines.index(summary)
+                self.assertEqual(output_lines[summary_index + 1], f"corrected: 1 ({counts})")
+                self.assertTrue(output_lines[summary_index + 2].startswith("read:"))
+                result_set = evalset.load_set(set_root, known_courts)
+                self.assertTrue(result_set.ok, result_set.findings)
+                self.assert_private_absent(real[1] + real[2])
+                self.assertTrue(all(byte < 128 for byte in case_path.read_bytes()))
+                self.assertIn(CORRECTED_ANSWER.encode(), case_path.read_bytes())
+                for path in root.rglob("*"):
+                    # The reader's marks are the input carrying the answer.
+                    if path.is_file() and path not in {case_path, marks_path}:
+                        self.assertNotIn(CORRECTED_ANSWER.encode(), path.read_bytes(), str(path))
+
+    def test_correction_refusals_are_located_content_free_and_atomic(self) -> None:
+        for scenario in (
+            "verb-vocabulary", "qualifier-vocabulary", "actor-vocabulary", "actor-zero", "actor-negative",
+            "actor-source", "actor-unrecorded", "actor-cited", "citing-key", "standing-key", "cited-key",
+            "unknown-key", "duplicate-key", "no-key", "missing-bar", "blank-answer", "double-space",
+            "verb-equal", "qualifier-equal", "actor-equal", "citing-equal", "other-category", "duplicate-mark",
+        ):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                category = "lookup" if scenario == "other-category" else "treatment"
+                set_root, manifest_path, marks_path, known_courts = _review_fixture(root, 3, category=category)
+                provenance = json.loads(manifest_path.read_bytes())
+                drafts = [json.loads(line) for line in (manifest_path.parent / "drafts.jsonl").read_bytes().splitlines()]
+                entry = provenance["entries"][0]
+                if category == "treatment":
+                    entry = next(entry for entry in provenance["entries"] if len(entry["citations"]) > 1)
+                    if scenario == "citing-equal":
+                        entry = next(entry for entry in provenance["entries"] if len(entry["citations"]) == 1)
+                ordinal = entry["ordinal"]
+                relation = drafts[ordinal - 1]["expected"].get("relation", {})
+                invalid_value = CORRECTED_ANSWER.replace(" ", "_")
+                pairs = "verb=" + invalid_value
+                problem = "correction keys must be among actor, verb, and qualifier, each once"
+                if scenario.endswith("-vocabulary"):
+                    key = scenario.removesuffix("-vocabulary")
+                    pairs = f"{key}={invalid_value}"
+                    problem = f"correction {key} is outside its vocabulary"
+                elif scenario in {"actor-zero", "actor-negative", "actor-source"}:
+                    pairs = "actor=" + {"actor-zero": "0", "actor-negative": "-1", "actor-source": "fictional/drafted-source"}[scenario]
+                    problem = "correction actor is outside its vocabulary"
+                elif scenario in {"actor-unrecorded", "actor-cited"}:
+                    cluster = max(entry["citations"]) + 1 if scenario == "actor-unrecorded" else relation["cited"]
+                    pairs = f"actor={cluster}"
+                    problem = "correction actor is not a recorded citation of the sentence other than the cited"
+                elif scenario.endswith("-key") and scenario not in {"duplicate-key", "no-key"}:
+                    pairs = f"{scenario.removesuffix('-key')}={invalid_value}"
+                elif scenario == "duplicate-key":
+                    pairs = "actor=citing actor=citing"
+                elif scenario == "no-key":
+                    pairs = ""
+                elif scenario == "double-space":
+                    pairs = "actor=citing  qualifier=none"
+                elif scenario.endswith("-equal"):
+                    key = scenario.removesuffix("-equal")
+                    if key == "citing":
+                        key, value = "actor", "citing"
+                    else:
+                        value = str(relation[key])
+                    pairs = f"{key}={value}"
+                    problem = f"correction {key} equals the drafted value"
+                elif scenario == "other-category":
+                    problem = "correction is for a treatment manifest alone"
+                correction_line = f"{ordinal:02d} correct {pairs} | {CORRECTED_ANSWER}"
+                if scenario == "no-key":
+                    correction_line = f"{ordinal:02d} correct | {CORRECTED_ANSWER}"
+                elif scenario == "missing-bar":
+                    correction_line = f"{ordinal:02d} correct {pairs}"
+                    problem = "correction needs an expected answer after |"
+                elif scenario == "blank-answer":
+                    correction_line = f"{ordinal:02d} correct {pairs} |   "
+                    problem = "correction needs an expected answer after |"
+                elif scenario == "duplicate-mark":
+                    correction_line = f"{ordinal:02d} correct actor=citing | {CORRECTED_ANSWER}\n{ordinal:02d} accept"
+                lines = marks_path.read_text().splitlines()
+                lines[ordinal] = correction_line
+                marks_path.write_text("\n".join(lines) + "\n")
+                before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+                with patch.object(intake, "write_atomic") as write:
+                    result = _run_intake(manifest_path, marks_path, known_courts)
+                write.assert_not_called()
+                self.assert_refusal(result, "marks: refused")
+                self.assertNotIn(invalid_value, result[2])
+                if scenario == "duplicate-mark":
+                    self.assertIn(f"line {ordinal + 2}: ordinal is marked twice", result[2])
+                else:
+                    self.assertEqual(result[2],
+                                     f"marks: refused — line {ordinal + 1}: {problem}. Fix: "
+                                     "Use NN correct <key>=<value> … | <expected answer> with keys among actor, verb, and qualifier, "
+                                     "as the sheet's Correct: line states, then retry.\n")
+                self.assertEqual({path: path.read_bytes() for path in root.rglob("*") if path.is_file()}, before)
+                self.assertFalse((set_root / synthetic.case_path(category)).exists())
+
+    def test_treatment_manifest_citations_are_nonempty_distinct_positive_ints(self) -> None:
+        invalid: tuple[object, ...] = (None, [], [1, 1], ["123"], [None], [[]], [True], [1.5], [0], [-1])
+        for citations in invalid:
+            with self.subTest(citations=citations), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                _set_root, manifest_path, marks_path, known_courts = _review_fixture(root, 3, category="treatment")
+                provenance = json.loads(manifest_path.read_bytes())
+                provenance["entries"][0]["citations"] = citations
+                manifest_path.write_text(json.dumps(provenance))
+                before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+                self.assert_refusal(_run_intake(manifest_path, marks_path, known_courts), "manifest: refused", "entry 01")
+                self.assertEqual({path: path.read_bytes() for path in root.rglob("*") if path.is_file()}, before)
+
+    def test_treatment_draft_cited_and_integer_actor_must_be_in_manifest_citations(self) -> None:
+        for key in ("cited", "actor"):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                _set_root, manifest_path, marks_path, known_courts = _review_fixture(root, 3, category="treatment")
+                provenance = json.loads(manifest_path.read_bytes())
+                entry = next(entry for entry in provenance["entries"] if len(entry["citations"]) > 1)
+                missing = max(entry["citations"]) + 1
+                def mutate(value: dict[str, object], key: str = key, missing: int = missing) -> None:
+                    relation = cast(dict[str, object], cast(dict[str, object], value["expected"])["relation"])
+                    relation[key] = missing
+                _rewrite_draft(manifest_path, entry["ordinal"], mutate)
+                # The updated digest must pass before the facts hold refuses.
+                current = json.loads(manifest_path.read_bytes())["entries"][entry["ordinal"] - 1]
+                line = (manifest_path.parent / "drafts.jsonl").read_bytes().splitlines(keepends=True)[entry["ordinal"] - 1]
+                self.assertEqual(current["draft_sha256"], hashlib.sha256(line).hexdigest())
+                before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+                self.assert_refusal(_run_intake(manifest_path, marks_path, known_courts), "drafts: refused",
+                                    f"ordinal {entry['ordinal']:02d}: draft facts differ from the manifest")
+                self.assertEqual({path: path.read_bytes() for path in root.rglob("*") if path.is_file()}, before)
+
+    def test_old_formats_refuse_with_draft_command_and_format_five_appends(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             set_root, manifest_path, marks_path, known_courts = _review_fixture(Path(directory))
             provenance = json.loads(manifest_path.read_bytes())
-            self.assertEqual(provenance["format"], 4)
+            self.assertEqual(provenance["format"], 5)
             path = set_root / synthetic.case_path("lookup")
-            for old_format in (1, 2, 3):
+            for old_format in (1, 2, 3, 4):
                 with self.subTest(format=old_format):
                     provenance["format"] = old_format
                     manifest_path.write_text(json.dumps(provenance))
@@ -3526,6 +3790,7 @@ class Intake(unittest.TestCase):
             ("length", 1), ("quote_sha256", "bad"), ("draft_sha256", "bad"),
             ("closed_book_score", None), ("closed_book_score", True), ("closed_book_score", 4),
             ("label", None), ("label", "unknown"),
+            ("citations", []), ("citations", [123]),
         )
         for key, value in cases:
             with self.subTest(key=key, kind=type(value).__name__), tempfile.TemporaryDirectory() as directory:
@@ -3939,10 +4204,10 @@ class SharedManifest(unittest.TestCase):
         self.assertEqual(len(manifest.DISCARD_REASONS), len(set(manifest.DISCARD_REASONS)))
 
     def test_manifest_format_key_order_and_sheet_suffixes(self) -> None:
-        self.assertEqual(manifest.MANIFEST_FORMAT, 4)
+        self.assertEqual(manifest.MANIFEST_FORMAT, 5)
         self.assertEqual(manifest.ENTRY_KEYS, (
             "ordinal", "source_id", "sha256", "doc_id", "start", "end", "length",
-            "quote_sha256", "closed_book_score", "label", "listed", "draft_sha256",
+            "quote_sha256", "closed_book_score", "label", "listed", "citations", "draft_sha256",
         ))
         self.assertEqual(manifest.MANIFEST_KEYS, (
             "format", "set_root", "set_digest", "category", "case_pin", "template",

@@ -127,7 +127,15 @@ def _check(
             f"recorded run names unsigned cases: {' '.join(unsigned_ids)}",
             _UNSIGNED_FIX,
         )
-    comparison = reference.compare_reference(reference_result.reference, current, loaded.version)
+    comparison = reference.compare_reference(
+        reference_result.reference,
+        current,
+        loaded.version,
+        ceiling_cases=(
+            slice_spec.ceiling_cases(loaded, run.slice)
+            if slice_spec is not None and slice_spec.ceiling_cases is not None else ()
+        ),
+    )
     if comparison.outcome == "regressed":
         count = len(comparison.regressed)
         noun = "case" if count == 1 else "cases"
@@ -200,7 +208,7 @@ def _write(
     status = "written" if changed else "unchanged"
     return (
         f"gained {len(comparison.gained)}, new {len(comparison.new)}, "
-        f"dropped {len(comparison.dropped)}; {status}"
+        f"dropped {len(comparison.dropped)}, ceiling {len(comparison.ceiling)}; {status}"
     )
 
 
@@ -267,7 +275,7 @@ def run_reference(
         StageResult(
             "check",
             True,
-            f"reference {comparison.outcome}; no regression",
+            f"reference {comparison.outcome}; no regression; ceiling {len(comparison.ceiling)}",
             "",
         )
     )

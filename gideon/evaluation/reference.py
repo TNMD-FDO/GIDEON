@@ -11,13 +11,16 @@ reader reports structural findings through the eval-set loader's ``Finding``
 shape, and its comparison only operates on already-loaded values.  A regression
 is a reference ``pass`` that is a current ``fail``; gains, new cases, and
 dropped cases make a reference stale but never make the gate fail.
+Cases gated by a ceiling leave the regression and gain lists because the
+ceiling gates them by count; their changed verdicts are reported separately
+and never make the reference stale.
 """
 
 import json
 import re
 import stat
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, cast
@@ -126,7 +129,7 @@ class ReferenceLoadResult:
 
 @dataclass(frozen=True, slots=True)
 class Comparison:
-    """The four per-case differences and the resulting reference outcome."""
+    """The per-case differences, reported ceiling flips, and reference outcome."""
 
     outcome: ReferenceOutcome
     tag: str | None
@@ -135,6 +138,7 @@ class Comparison:
     new: tuple[str, ...]
     dropped: tuple[str, ...]
     stale: bool
+    ceiling: tuple[str, ...] = ()
 
 
 def serialize_reference(reference: ReferenceFile) -> str:
@@ -449,8 +453,16 @@ def compare_reference(
     reference: SliceReference | None,
     current: Mapping[str, Verdict],
     eval_set_version: str,
+    *,
+    ceiling_cases: Collection[str] = (),
 ) -> Comparison:
-    """Compare current per-case verdicts with a loaded slice reference."""
+    """Compare current per-case verdicts with a loaded slice reference.
+
+    Cases in ``ceiling_cases`` leave the regression and gain lists because
+    their ceiling gates them by count. Their changed verdicts are reported on
+    ``ceiling`` without making the reference stale; new and dropped cases
+    still make it stale regardless of whether a ceiling counts them.
+    """
 
     if reference is None or not reference.files:
         return Comparison("absent", None, (), (), (), (), False)
@@ -465,22 +477,34 @@ def compare_reference(
         for value in files
         for case_id, verdict in value.cases.items()
     }
+    ceiling_ids = frozenset(ceiling_cases)
     regressed = tuple(
         sorted(
             case_id
             for case_id, verdict in reference_cases.items()
-            if verdict == "pass" and current_cases.get(case_id) == "fail"
+            if case_id not in ceiling_ids
+            and verdict == "pass" and current_cases.get(case_id) == "fail"
         )
     )
     gained = tuple(
         sorted(
             case_id
             for case_id, verdict in reference_cases.items()
-            if verdict == "fail" and current_cases.get(case_id) == "pass"
+            if case_id not in ceiling_ids
+            and verdict == "fail" and current_cases.get(case_id) == "pass"
         )
     )
     new = tuple(sorted(set(current_cases) - set(reference_cases)))
     dropped = tuple(sorted(set(reference_cases) - set(current_cases)))
+    ceiling = tuple(
+        sorted(
+            case_id
+            for case_id in ceiling_ids
+            if case_id in reference_cases
+            and case_id in current_cases
+            and reference_cases[case_id] != current_cases[case_id]
+        )
+    )
     stale = bool(gained or new or dropped)
     outcome: ReferenceOutcome
     if regressed:
@@ -489,4 +513,4 @@ def compare_reference(
         outcome = "stale"
     else:
         outcome = "current"
-    return Comparison(outcome, files[0].tag, regressed, gained, new, dropped, stale)
+    return Comparison(outcome, files[0].tag, regressed, gained, new, dropped, stale, ceiling=ceiling)

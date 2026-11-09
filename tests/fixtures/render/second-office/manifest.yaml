@@ -3,7 +3,7 @@ release: "fixture"
 inputs:
   site_sha256: "3032cbc05ff6133992600e2f7b9f12e8488f068b2a747e88a45159753d250cb1"
   host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
-  models_lock_sha256: "5b6c96654a692957e29b620f2bb366c714cc42713f551e85f54bc3c78430b340"
+  models_lock_sha256: "a0b64a1d76a1e796f6b12e51eee12b09ab9a7b585cf666e0700829b2eab226e1"
   egress_sha256: "e22abee0f29547aedd38bb2ca9ca9f0d2cd3dc4b28c9d6df72ae4fad53d0d3af"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
@@ -15,7 +15,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "43057d76ccab79ede12b19ba54377f364196644af64060e181f86015b193b213"
+    sha256: "f3cd7663e47b20eaea958e9c657f1c5bbc8e07499dbb970788fc4a79dfbc7927"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -241,8 +241,8 @@ services:
   qdrant: "46b503ebd02fc1440e97937b83c10f7ab893c707cc2ca51f063e6e62c5c0a8f9"
   opensearch: "aa4a5bf38ec2561d6f7b58d2fef80690b7ac9ab560eb8e99054cc8a20af0f027"
   open-webui: "afd3ec2b31ba2950037ad572b7e0c7235b9ccccdb56eb249236e4e0ae7444075"
-  gideon-generator: "4c80fd0ba4f007e832667070ec3a95d1096c652a7dfdc80610bab1ecbeb7f863"
-  gideon-embed: "244f64023c1b1e686580f375bed0ec1ab09752655d05d5a691e1eaec5341d72f"
+  gideon-generator: "8cdb38ca9883e9689053bb4962d060c856c461d02048d210167c53f8eb4a79b0"
+  gideon-embed: "09ab865ba6e5b5e3969a297005e61812b751f5326207cb99d5281ef7e654c8ff"
   gideon-api: "eb181ec7e750354a40c46b5d09519bc91b5db66b3bfe1eb190b674e33b1361b7"
   gideon-worker: "b0f4a0d00bb1c7d62cf5b1c3f0417bce2dfe53fa9ac445a11caa038f95a82393"
   gideon-egress: "eaa0cce20818c30032a33977c8606d993f8afaf73850ff2743240643c26e3c49"

@@ -345,6 +345,15 @@ def body_for(
                 f"per the weekly review in `{APP_SETUP_RUNBOOK_PATH}`.",
             )
         )
+    if bump.pin_id == "images.vllm-openai":
+        lines.extend(
+            (
+                "",
+                "Before the merge, this bump is proven on the box with an `apply` "
+                "recreating the two model servers, `engine verify`, and a decision "
+                f"run, per the weekly review in `{APP_SETUP_RUNBOOK_PATH}`.",
+            )
+        )
     if bump.pin_id == "host.gh_runner":
         lines.append("")
         lines.append(

@@ -180,8 +180,11 @@ profiles:
         revision: "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
         gpu: 0
         # The shipped baseline, verbatim. Flag keys are vLLM's without their
-        # `--` prefix (render restores it); `true` is a bare flag. Not set, by
-        # decision: enable-prefix-caching / mamba-cache-mode (E39),
+        # `--` prefix (render restores it); `true` is a bare flag. Prefix
+        # caching is set off by decision (E39): vLLM v0.32.0 (#50991) defaults
+        # it on for hybrid Mamba/GDN models, so no-enable-prefix-caching keeps
+        # it off. mamba-cache-mode stays unset: a deprecated no-op from
+        # v0.33.0, moot while caching is off. Not set, by decision:
         # default-chat-template-kwargs (thinking stays the model's default,
         # E40), any speculative-decoding flag (E44); sampling is the model's
         # generation_config.json, the engine's default. The three scheduler
@@ -198,7 +201,9 @@ profiles:
           served_name: gideon-generator
           env:
             # Mandatory on SM120: block-scaled FP8 crashes through DeepGEMM
-            # (vLLM #47436).
+            # (vLLM #47436); v0.33.0 excludes qwen3_5_text from DeepGEMM on
+            # SM120 by code, but the switch stays until a run without it is
+            # measured.
             VLLM_USE_DEEP_GEMM: "0"
             HF_HUB_OFFLINE: "1"
             HF_HOME: /data/models
@@ -212,6 +217,7 @@ profiles:
             kv-cache-dtype: fp8
             gpu-memory-utilization: 0.92
             reasoning-parser: qwen3
+            no-enable-prefix-caching: true
         files:
           LICENSE:
             sha256: sha256:bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a
@@ -469,10 +475,11 @@ profiles:
         # tokens; a longer one is refused with a 400, never truncated.
         # no-enable-chunked-prefill: chunked prefill, the engine's default for
         # this model, can leave a request exactly at the window unanswered
-        # (an open upstream scheduler bug). Measured on the reference box, a
-        # text at the edge hung past two minutes with it on, alone and among
-        # concurrent requests, and never with it off, where every step then
-        # takes a whole prompt, the default step budget being the window.
+        # (an upstream scheduler bug fixed at v0.33.0, vLLM #48039). Measured
+        # on the reference box, a text at the edge hung past two minutes with
+        # it on, alone and among concurrent requests, and never with it off,
+        # where every step then takes a whole prompt, the default step budget
+        # being the window.
         # gpu-memory-utilization: a per-process budget the server fills at
         # start, its KV cache taking whatever the weights leave, of the card's
         # total as the process reports it; 0.25 reads as 24 GB of a 96 GB card

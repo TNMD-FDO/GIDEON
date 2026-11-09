@@ -414,6 +414,7 @@ def _compare_reference(
     loaded: LoadedSet,
     slice_name: str,
     slice_result: SliceResult,
+    slice_spec: SliceSpec,
     *,
     checkout: Path,
     host: Host,
@@ -422,7 +423,9 @@ def _compare_reference(
 
     Returns the comparison and the eval-set version the reference names, empty
     when no reference file was read. The comparison is folded from each
-    result's case id, repeat, and verdict alone.
+    result's case id, repeat, and verdict, with the registry's ceiling cases
+    left out of the regression and gain lists because their ceilings gate
+    them by count.
     """
 
     reference_result = reference.read_reference(
@@ -446,6 +449,10 @@ def _compare_reference(
             reference_result.reference,
             current,
             loaded.version,
+            ceiling_cases=(
+                slice_spec.ceiling_cases(loaded, slice_name)
+                if slice_spec.ceiling_cases is not None else ()
+            ),
         )
 
     reference_files = () if reference_result.reference is None else reference_result.reference.files
@@ -459,6 +466,7 @@ def _compare_reference(
         ("gained", comparison.gained),
         ("new", comparison.new),
         ("dropped", comparison.dropped),
+        ("ceiling", comparison.ceiling),
     ):
         if ids:
             print(f"{name} {' '.join(ids)}")
@@ -1748,6 +1756,7 @@ def _run_body(
             loaded,
             slice_name,
             slice_result,
+            slice_spec,
             checkout=seams.checkout,
             host=seams.host,
         )

@@ -20,6 +20,7 @@ or ``disclaimed`` are also read by the judge for withheld doctrine; its count
 and disagreements are reported and never gated. Positive answers are never read. Rows carry ids, classes,
 pattern ids, fixed codes, and, on an answered positive that carried its
 figure, the derived keys that matched, never answer text.
+``ceiling_cases`` names the controls for the registry's reference comparison.
 
 The tier-2 cases measure General's instruction, which the service places, and
 its own refusal of arithmetic no family catches. They run at the door, which
@@ -933,6 +934,21 @@ def run_guardrails(eval_set: LoadedSet, slice_name: str, context: RunContext) ->
     if context.judge_prompt_id is not None:
         collected = _read_controls(eval_set, context, collected)
     return _slice_result(tuple(collected), tuple(opening))
+
+
+def ceiling_cases(eval_set: LoadedSet, slice_name: str) -> frozenset[str]:
+    """Name the counted controls gated by the over-trip and false-refusal ceilings.
+
+    The role comes from the loaded set, never a result's metrics, so the
+    reference comparison uses the same controls the family ceilings count.
+    """
+
+    return frozenset(
+        case_id
+        for case_id in select_cases(eval_set, slice_name).counted
+        if eval_set.cases_by_id[case_id]["suite"] == "guardrails"
+        and cast(list[str], eval_set.cases_by_id[case_id]["labels"])[1] == "control"
+    )
 
 
 def turn_calls(eval_set: LoadedSet, slice_name: str) -> int:

@@ -3,7 +3,7 @@ release: "fixture"
 inputs:
   site_sha256: "0193b145520c2f0c0171a5c991fedbba99b9b32736b55785e97b63d308b95aa5"
   host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
-  models_lock_sha256: "5b6c96654a692957e29b620f2bb366c714cc42713f551e85f54bc3c78430b340"
+  models_lock_sha256: "a0b64a1d76a1e796f6b12e51eee12b09ab9a7b585cf666e0700829b2eab226e1"
   egress_sha256: "e22abee0f29547aedd38bb2ca9ca9f0d2cd3dc4b28c9d6df72ae4fad53d0d3af"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
