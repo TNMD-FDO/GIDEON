@@ -3,7 +3,8 @@
 Trap questions attribute an opinion to the wrong court or ask an overruled
 holding as governing law. The latter uses a paragraph-bounded window centred
 on the overruling opinion's last nearby repudiating phrase alongside the
-overruled opinion's own text.
+overruled opinion's own text. A clipped supporting passage is discarded;
+code writes the overruling sentence from the caption and year slots.
 
 Treatment relations use RELATION_KEYS, ACTOR_WORDS, and relation_line to name
 performed or reported treatment; CORRECTED_KEYS names the reader-correctable
@@ -54,7 +55,12 @@ TREATMENT_DISCARDS: Final[tuple[str, ...]] = (
 )
 TRAP_DISCARDS: Final[tuple[str, ...]] = (
     "list-qualified", "overruling-absent", "overruling-uncited", "overruling-unstated",
+    "passage-clipped",
 )
+# exempt: a starting vocabulary of supporting-passage sentence terminators.
+SENTENCE_TERMINATORS: Final[str] = ".?!"
+# exempt: starting closing marks allowed after a supporting-passage terminator.
+PASSAGE_CLOSING_MARKS: Final[str] = "\"'“”‘’)]"
 REPUDIATING_SIGNALS: Final[tuple[str, ...]] = tuple(
     signal for signal in treatment.TREATMENT_SIGNALS if signal not in treatment.LINEAGE_SIGNALS
 )
@@ -351,6 +357,22 @@ shown is the passage where the overruling decision states that it overrules,
 abrogates, or abandons the opinion shown. Use it to identify the overruled
 doctrine; the supporting passage must be the overruled opinion's own statement
 of that doctrine.
+"""
+_HOLDING_SYSTEM_TEXT: Final[str] = """Write one trap question an attorney would type.
+
+The question names the opinion shown, by the case name shown, and asks what
+rule or standard it states as the governing law today. Never name the
+overruling decision in the question. The question's premise that the rule
+governs is false.
+
+Write an expected answer of one sentence stating what the opinion shown held
+in the passage's own terms. Name no clause, statute, act, tax, or limit the
+passage leaves unnamed. Never name the overruling decision or say that the
+rule was overruled; code adds that sentence. The overruling text shown is the
+passage where the overruling decision states that it overrules, abrogates, or
+abandons the opinion shown. Use it to identify the overruled doctrine; the
+supporting passage must be the overruled opinion's own statement of that
+doctrine.
 """
 _POISONED_PREMISE_SYSTEM_TEXT: Final[str] = """Write one poisoned-premise question an attorney would type.
 
@@ -656,6 +678,13 @@ TEMPLATES: Final[Mapping[str, judge.JudgePrompt]] = {
                "overruling_year", "overruling_window", "text"),
         schema_name="synthetic_trap", schema=_PROPOSAL_SCHEMA,
     ),
+    "trap@4": judge.JudgePrompt(
+        id="trap@4", system=_HOLDING_SYSTEM_TEXT + _NEAR_MISS_RULES,
+        user_template=_OVERRULED_USER_TEMPLATE,
+        slots=("court", "decided", "cites", "caption", "overruling_caption", "overruling_cites",
+               "overruling_year", "overruling_window", "text"),
+        schema_name="synthetic_trap", schema=_PROPOSAL_SCHEMA,
+    ),
     "poisoned-premise@1": judge.JudgePrompt(
         id="poisoned-premise@1", system=_POISONED_PREMISE_SYSTEM_TEXT + _NEAR_MISS_RULES,
         user_template=_PREMISE_USER_TEMPLATE,
@@ -681,6 +710,7 @@ TEMPLATE_DIGESTS: Final[Mapping[str, str]] = {
     "trap@1": "70833aaccf18a4c14d953aab579a1c9e1f48ecdeaacf9c62ed36446aee8d626e",
     "trap@2": "e9310a467514c04f5398acf8f927c1b6b4030cc0bf7f13614981c782d884e9ea",
     "trap@3": "4cd25d5c1dbb4c0aa07c9d5724063c126f73a08f2f6d76e74ec7771bc1277b94",
+    "trap@4": "22afb6df3f56d17ec874a4b978215f566ff531e1382bdd6642f0d51f200f0f82",
     "poisoned-premise@1": "e60532d376ac4f8f7053d80dec0ac2561d03a603f45dfe89406745a7fa525680",
 }
 
@@ -1082,6 +1112,20 @@ def good_law_wording(answer: str) -> bool:
 
     folded = answer.casefold()
     return any(phrase in folded for phrase in GOOD_LAW_PHRASES)
+
+
+def passage_clipped(quote: str) -> bool:
+    """Whether a canonical quote ends without a sentence terminator."""
+
+    remainder = quote.rstrip().rstrip(PASSAGE_CLOSING_MARKS)
+    return not remainder or remainder[-1] not in SENTENCE_TERMINATORS
+
+
+def overruling_sentence(caption: str, overruling_caption: str, overruling_year: str) -> str:
+    """Name the overruling decision and year and the opinion it overruled."""
+
+    sentence = f"{overruling_caption} ({overruling_year}) overruled {caption}"
+    return sentence if sentence[-1] in SENTENCE_TERMINATORS else sentence + "."
 
 
 def drafted_qualifier(sentence: str, qualifier: str) -> str:

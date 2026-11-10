@@ -5,9 +5,9 @@
 # and system python3-yaml, present on every Ubuntu Server. The service's dependency
 # set is built into its image. Exact pins only; the toolchain is moved by a person,
 # never the pin watch.
-ruff==0.16.8
-mypy==2.4.0
-pytest==9.1.1
+ruff==0.17.4
+mypy==2.4.1
+pytest==9.2.0
 # The gate's pytest step runs across worker processes, capped in tools/gate.py.
 # Its one dependency, execnet, is admitted by the environment comparison's closure
 # and pinned nowhere, as pytest's own dependencies are; it moves like the three above.

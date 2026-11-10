@@ -84,7 +84,7 @@ class Registry(unittest.TestCase):
             "lookup@1", "retrieval@1", "synthesis@1", "existence@1",
             "retrieval@2", "synthesis@2", "existence@2",
             "treatment@1", "treatment@2", "treatment@3", "treatment@4", "section-attribution@1",
-            "unanswerable@1", "trap@1", "trap@2", "trap@3", "poisoned-premise@1",
+            "unanswerable@1", "trap@1", "trap@2", "trap@3", "trap@4", "poisoned-premise@1",
         ))
         self.assertEqual(tuple(synthetic.READINGS), ("closed-book@1",))
         for registry, digests in (
@@ -227,6 +227,7 @@ class Registry(unittest.TestCase):
             "OVERRULING_WINDOW_CHARS",
             "LIMITING_PHRASES", "PROCEDURAL_OBJECTS", "PROCEDURAL_PHRASES",
             "PROCEDURAL_SUBJECT", "CLIP_PROBE_WINDOW",
+            "SENTENCE_TERMINATORS", "PASSAGE_CLOSING_MARKS",
         }
         found = set()
         for node in ast.parse(source).body:
@@ -373,6 +374,7 @@ class Registry(unittest.TestCase):
         self.assertEqual(synthetic.PRODUCTION_CATEGORIES, ("treatment", "trap"))
         self.assertEqual(synthetic.TRAP_DISCARDS, (
             "list-qualified", "overruling-absent", "overruling-uncited", "overruling-unstated",
+            "passage-clipped",
         ))
         suffix = (*synthetic.TREATMENT_DISCARDS, *synthetic.TRAP_DISCARDS)
         self.assertEqual(manifest.DISCARD_REASONS[-len(suffix):], suffix)
@@ -397,6 +399,35 @@ class Registry(unittest.TestCase):
         self.assertTrue(text.startswith(prefix))
         self.assertTrue(text.endswith(old_instruction.split("; ", 1)[1]))
         for phrase in (
+            "The overruling text shown is the passage where the overruling decision states",
+            "it overrules, abrogates, or abandons the opinion shown",
+            "Use it to identify the overruled doctrine",
+            "the supporting passage must be the overruled opinion's own statement of that doctrine",
+        ):
+            self.assertIn(phrase, text)
+
+    def test_holding_trap_preserves_the_contract_and_limits_the_generated_answer(self) -> None:
+        prompt = synthetic.TEMPLATES["trap@4"]
+        previous = synthetic.TEMPLATES["trap@3"]
+        self.assertEqual(prompt.slots, previous.slots)
+        self.assertEqual(prompt.user_template, previous.user_template)
+        self.assertEqual(prompt.schema_name, previous.schema_name)
+        self.assertIs(prompt.schema, previous.schema)
+        self.assertEqual(judge.prompt_digest(prompt), synthetic.TEMPLATE_DIGESTS[prompt.id])
+        for predecessor in ("trap@1", "trap@2", "trap@3"):
+            with self.subTest(predecessor=predecessor):
+                digest = synthetic.TEMPLATE_DIGESTS[predecessor]
+                self.assertEqual(judge.prompt_digest(synthetic.TEMPLATES[predecessor]), digest)
+                self.assertNotEqual(synthetic.TEMPLATE_DIGESTS[prompt.id], digest)
+        self.assertEqual(prompt.system.split("\n\n")[:2], previous.system.split("\n\n")[:2])
+        tail = previous.system[previous.system.index("Copy a supporting passage"):]
+        self.assertTrue(prompt.system.endswith(tail))
+        text = " ".join(prompt.system.split())
+        for phrase in (
+            "one sentence stating what the opinion shown held in the passage's own terms",
+            "Name no clause, statute, act, tax, or limit the passage leaves unnamed",
+            "Never name the overruling decision or say that the rule was overruled",
+            "code adds that sentence",
             "The overruling text shown is the passage where the overruling decision states",
             "it overrules, abrogates, or abandons the opinion shown",
             "Use it to identify the overruled doctrine",
@@ -910,6 +941,41 @@ class SpanRules(unittest.TestCase):
                 self.assertTrue(synthetic.good_law_wording(f"Fictitious prefix{phrase}suffix."))
         self.assertFalse(synthetic.good_law_wording(ANSWER))
         self.assertFalse(synthetic.good_law_wording(""))
+
+
+class PassageEndings(unittest.TestCase):
+    """Supporting quotes end at sentences, and overruling text comes from slots."""
+
+    def test_terminators_and_closing_marks_allow_complete_passages(self) -> None:
+        for terminator in (".", "?", "!"):
+            for closing in ("", '"', "'", "“", "”", "‘", "’", ")", "]", '”)]'):
+                for whitespace in ("", " \n\t\u2003"):
+                    quote = "The fictitious court required notice" + terminator + closing + whitespace
+                    with self.subTest(quote=quote):
+                        self.assertFalse(synthetic.passage_clipped(quote))
+
+    def test_clipped_and_empty_passages_are_rejected(self) -> None:
+        for quote in (
+            "", " \n\t\u2003", '”)]', "The fictitious court required notice",
+            "The fictitious court required notice;", "The fictitious court required notice,",
+            "The fictitious court required notice—", 'The fictitious court required notice”]',
+            "The fictitious court required notice.1", "Fictitious Reporter 123",
+            "The fictitious court required notice \n\t\u2003",
+        ):
+            with self.subTest(quote=quote):
+                self.assertTrue(synthetic.passage_clipped(quote))
+
+    def test_overruling_sentence_names_the_caption_slots_and_year(self) -> None:
+        caption = "Fable v. Example"
+        overruling_caption = "Imaginary v. Pretend"
+        overruling_year = "2002"
+        sentence = synthetic.overruling_sentence(caption, overruling_caption, overruling_year)
+        self.assertEqual(sentence, f"{overruling_caption} ({overruling_year}) overruled {caption}.")
+        self.assertFalse(synthetic.passage_clipped(sentence))
+
+    def test_a_caption_ending_in_a_period_takes_no_second_one(self) -> None:
+        sentence = synthetic.overruling_sentence("Fable v. Example Co.", "Imaginary v. Pretend", "2002")
+        self.assertEqual(sentence, "Imaginary v. Pretend (2002) overruled Fable v. Example Co.")
 
 
 class SentenceClipping(unittest.TestCase):

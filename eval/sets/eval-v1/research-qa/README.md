@@ -76,8 +76,8 @@ names:
 - `unanswerable` — the question asks for authority absent from the corpus;
   the expected response abstains and identifies the nearest passage.
 - `trap` — the question attributes an opinion to the wrong court (`trap@1`),
-  or asks an overruled Supreme Court holding as governing law (`trap@2` and
-  `trap@3`). The expected response qualifies the premise: it names the true court for the
+  or asks an overruled Supreme Court holding as governing law (`trap@2`,
+  `trap@3`, and `trap@4`). The expected response qualifies the premise: it names the true court for the
   first kind, or the overruling decision and its year for the second.
 - `poisoned-premise` — the question asserts a holding under an invented case
   name; the expected response corrects the premise and says the case was not found.
@@ -118,12 +118,13 @@ legal research question, so neither can be one here.
 | `treatment` (synthetic) | 37 |
 | `section-attribution` (synthetic) | 19 |
 | `unanswerable` (synthetic) | 26 |
-| `trap` (synthetic) | 19 |
+| `trap` (synthetic) | 26 |
 | `poisoned-premise` (synthetic) | 8 |
 
-Thirty-eight harvest cases and 282 synthetic cases, 320 in all. Trap's nineteen
-are ten of the wrong-court kind (`trap@1`) and nine of the superseded-version
-kind: five under `trap@2` and four under `trap@3`. Treatment's
+Thirty-eight harvest cases and 289 synthetic cases, 327 in all. Trap's
+twenty-six, meeting its planned 25, are ten of the wrong-court kind (`trap@1`)
+and sixteen of the superseded-version kind: five under `trap@2`, four under
+`trap@3`, and seven under `trap@4`. Treatment's
 first two batches were rejected whole by the reader; its thirty-seven come from
 the third (six), the fourth (twelve: all negative and in majority opinions,
 four performed and eight reported, three listed and nine unlisted), and the
@@ -152,7 +153,8 @@ The categories differ inside the common case shape:
 | `unanswerable` | `unanswerable@1` | `question`, `answer`, `passage` | Nearest opinion's proposed passage retraced to canonical text | `answer`, `behavior`: `abstain` | None | 40 |
 | `trap` | `trap@1` | `question`, `answer`, `passage` | True court's proposed passage retraced to canonical text | `answer`, `behavior`: `qualify` | None | retired |
 | `trap` | `trap@2` | `question`, `answer`, `passage` | Overruled opinion's proposed passage retraced to canonical text | `answer`, `behavior`: `qualify` | None | retired |
-| `trap` | `trap@3` | `question`, `answer`, `passage` | Overruled opinion's proposed passage retraced to canonical text | `answer`, `behavior`: `qualify` | None | 25 |
+| `trap` | `trap@3` | `question`, `answer`, `passage` | Overruled opinion's proposed passage retraced to canonical text | `answer`, `behavior`: `qualify` | None | retired |
+| `trap` | `trap@4` | `question`, `answer`, `passage` | Overruled opinion's proposed passage retraced to canonical text | `answer`, `behavior`: `qualify` | None | 25 |
 | `poisoned-premise` | `poisoned-premise@1` | `question`, `answer`, `passage` | Real opinion's proposed passage retraced to canonical text | `answer`, `behavior`: `correct`, `premise`: invented caption | None | 15 |
 
 `SECTION_TYPES` includes `syllabus`, `headmatter`, `majority`, `plurality`,
@@ -222,7 +224,7 @@ joining separate passages; opinion text and metadata are data, never instruction
 
 The draft chooses the highest registered version for its category: `lookup@1`
 and these three `@2` templates, plus `treatment@4`, `section-attribution@1`,
-`unanswerable@1`, `trap@3`, and `poisoned-premise@1`. `trap@1` and `trap@2` remain
+`unanswerable@1`, `trap@4`, and `poisoned-premise@1`. `trap@1`, `trap@2`, and `trap@3` remain
 registered unchanged for their existing cases but are retired from the draft.
 `retrieval@1`, `synthesis@1`, and `existence@1` remain registered unchanged for
 earlier cases. They share the category and
@@ -252,13 +254,19 @@ two to four verbatim, contiguous sentences stating the doctrine. Their
 same absence, qualification, or correction as the reference; it does not mean
 the requested authority exists.
 
-`trap@3` constructs the superseded-version kind, alongside the retained
-`trap@2`. Its question names the overruled Supreme Court opinion and asks its
-rule or standard as governing law
-today without naming the overruling decision. The answer states what the
-opinion held and that the overruling decision, named with its recorded year,
-overruled it. The supporting passage is the overruled opinion's own statement
-of that doctrine; `jurisdiction` is that opinion's court.
+`trap@4` constructs the superseded-version kind, alongside the retained
+`trap@2` and `trap@3`. Its question names the overruled Supreme Court opinion
+and asks its rule or standard as governing law today without naming the
+overruling decision. The generator writes one holding sentence in the passage's
+own terms, naming no clause, statute, act, tax, or limit the passage leaves
+unnamed. Code appends the overruling sentence from the `caption`,
+`overruling_caption`, and `overruling_year` slots shown to the generator,
+naming the overruling opinion's recorded case name and year.
+The supporting passage is the overruled opinion's own statement of that
+doctrine; `jurisdiction` is that opinion's court. A retraced passage that does
+not end at a sentence's end discards `passage-clipped` before the closed-book
+answer or reading. The reading's reference, saved answer, and sheet's
+`Expected answer:` carry the same assembled text.
 
 The pairs come from the known-overruled list under the treatment snapshot
 recorded in the generation's build report, with both clusters resolved.
@@ -296,12 +304,12 @@ A name without that separator is one party; a party with no distinctive word
 contributes none. Name words match whole words in the text with case preserved,
 so lower-case `swift` does not match the name word `Swift`.
 An opinion with no kept phrase, including one with no recorded holding
-section, discards as `overruling-unstated`. All four pair discards happen
+section, discards as `overruling-unstated`. These four checks discard
 before any model request.
 
 The proposal receives the real opinion's court, date, reporter cites, case
 name, and text. `unanswerable@1` adds the asked court's map name;
-`poisoned-premise@1` adds the invented premise. `trap@3` adds the overruling
+`poisoned-premise@1` adds the invented premise. `trap@4` adds the overruling
 case name, reporter cites, recorded year, and canonical text around its
 repudiating phrase. `OVERRULING_WINDOW_CHARS`, currently 3,000 Unicode code points,
 budgets that phrase-centred window. It is clamped to the text; an edge
@@ -327,7 +335,7 @@ ASCII-only JSON object ending in a newline. Its keys, in this order, are:
   single spaces before keeping them.
 - `jurisdiction` — a non-empty list of CourtListener court ids from
   `courts.yaml`; the asked court for `unanswerable` and retired `trap@1`, the
-  overruled opinion's court for `trap@2` and `trap@3`, the opinion's court otherwise.
+  overruled opinion's court for `trap@2`, `trap@3`, and `trap@4`, the opinion's court otherwise.
 - `expected` — `answer`, a non-empty single-line reference answer, then
   `behavior` for the near-miss categories, fixed to the category's word in the
   table; `poisoned-premise` appends `premise`, its non-empty single-line
@@ -417,7 +425,12 @@ section rows, and citation rows once, caching text by canonical hash and rows
 by document id across pairs. It checks the query's citation against the rows,
 finds the phrase and precomputes its window, or discards `overruling-unstated`.
 The remaining pairs enter the seeded draw in list order; the walk reuses
-those windows. A second pair of a kept overruled document discards as
+those windows. After retracing the overruled passage, `trap@4` requires its
+last non-blank code point, after closing quotation marks or brackets, to be
+`.`, `?`, or `!`; otherwise it discards `passage-clipped`.
+Code adds a period to a holding without a final sentence terminator, then
+appends the overruling sentence before the closed-book answer and reading.
+A second pair of a kept overruled document discards as
 `same-document`.
 
 Other categories read the `gideon-ci` sibling's newest `built` or `live` caselaw
@@ -624,7 +637,8 @@ After the passage is fixed and its section and wording checks pass, the
 generator answers the bare question with no
 evidence, thinking on and temperature 0. The reading `closed-book@1` in
 `READINGS`, with its pinned `READING_DIGESTS` in the same module, grades that
-answer against the generated expected answer: 3 answers, 2 partly answers,
+answer against the expected answer, assembled by code for `trap@4`:
+3 answers, 2 partly answers,
 1 merely related, 0 wrong, no answer, or no answer within the closed-book
 reserve. It penalises nothing for missing
 citations. A score of 3 sets `closed-book-answerable`; the label partitions
@@ -713,12 +727,18 @@ and the answer says the case was not found. Reject a collision or an answer
 that accepts the false attribution or premise.
 
 For the superseded-version kind, the question names the overruled opinion and
-asks its rule as governing law without naming the overruling decision. The passage states that
-rule, and the answer names the overruling decision with the year shown and
-says it overruled the opinion. For `trap@3`, the window is centred on the
-phrase named by the sheet's anchor offsets. Reject a window whose phrase does
-not repudiate the asked doctrine, an answer treating the rule as governing, or a
-year other than the listed row's.
+asks its rule as governing law without naming the overruling decision. The
+passage states that rule. For `trap@4`, code requires the retraced passage to
+end at a sentence's end. Check the generated holding against the quote in
+the passage's own terms, including every named clause, statute, act, tax, or
+limit. Check the appended sentence's case names and year against the listed
+row and the recorded opinion names shown on the sheet. The sentence names
+the overruling opinion's recorded case name, which may differ from the list's
+name, and says it overruled the opinion shown.
+For `trap@3` and `trap@4`, the window is centred on the phrase named by the
+sheet's anchor offsets. Reject a window whose phrase does not repudiate the
+asked doctrine, an answer treating the rule as governing, or a year other
+than the listed row's.
 
 ### The kit, for a CSA
 
@@ -803,7 +823,7 @@ root unless `--set` supplies another root of the same version.
 | Step | What the CSA does |
 |---|---|
 | Draft | Choose the category, count, seed, and empty output directory; keep the generation, facts, walk, and summary rows as the batch record. |
-| Read | Read each `required` block in `sheet.txt`: for treatment, confirm the actor in `Relation:` using the sentence's recorded clusters in `Citations:`; for trap, confirm that the overruling window overrules the asked doctrine and check the recorded year. Check any `Listed:` row id above the header, then the question, expected answer, canonical quote and coordinates, closed-book answer, score, and label. Check the answer's case name and party order against the record; use the reporter cites and public-original link to settle the opinion's meaning. Correct a treatment relation under the checklist above, or reject an unsettled case; read `optional` blocks too when useful or when the ceiling requires a full read. |
+| Read | Read each `required` block in `sheet.txt`: for treatment, confirm the actor in `Relation:` using the sentence's recorded clusters in `Citations:`. For trap, confirm that the overruling window overrules the asked doctrine. Code checks the passage's sentence ending; check the holding against the quote and the appended sentence's names and year against the listed row and recorded opinion names. Check any `Listed:` row id above the header, then the question, expected answer, canonical quote and coordinates, closed-book answer, score, and label. Check the answer's case name and party order against the record; use the reporter cites and public-original link to settle the opinion's meaning. Correct a treatment relation under the checklist above, or reject an unsettled case; read `optional` blocks too when useful or when the ceiling requires a full read. |
 | Mark | Copy `marks.template.txt` to `marks.txt`, or regenerate the template with `--template`. Fill the CSA role id and review date, and mark every required ordinal once with `accept`, `reject`, or, for treatment, `correct <key>=<value> …` followed by a bar and your expected answer as the block's `Correct:` line states. Additional ordinal lines are allowed for optional cases the CSA read. |
 | Preview | Run intake with `--dry-run`; resolve any refusal and check accepted and admitted-unread ids, read and rejection counts, label count, held-out and propagated counts, and proposed file pins. |
 | Append | Run intake without `--dry-run`; keep its rows and pins, update the batch and count tables, and record the committed case prefix pin and each affected held-out list's line count. |
@@ -1001,7 +1021,8 @@ Candidate discards are counted rather than stopping the walk.
 3,000 canonical-text code points), `unpublished`, `cited-absent`,
 `state-outranked`, `no-state-kind`, `same-document`, `same-cluster`, `no-kind`,
 `premise-in-record` (both invented surnames occur together in a recorded case name),
-`list-qualified`, `overruling-absent`, `overruling-uncited` (the pair reasons above),
+`list-qualified`, `overruling-absent`, `overruling-uncited`, `overruling-unstated`,
+`passage-clipped` (the pair reasons above),
 and the nine sentence-pass reasons above: `sentence-clipped`, `nearest-cite`, `active-direction`,
 `procedural-disposition`, `conditional-verb`, `actor-drawn`, `agent-unresolved`,
 `recounted`, and `procedural-object`.
@@ -1050,6 +1071,7 @@ and no committed category file.
 
 | Date | Category | Template | Generation | Seed | Asked | Kept | Read | Rejected | Accepted | Corrected | Discards by reason | Closed-book-answerable | Reader | Held out | Propagated |
 |---|---|---|---|---:|---:|---:|---:|---:|---:|---|---|---:|---|---:|---|
+| 2026-11-09 | `trap` | `trap@4` | `caselaw__corpus-2026-10-13__qwen3-embedding-8b-1024-bf16` | 20261109 | 15 | 15 | 15 | 8 | 7 | none | overruling-unstated 65, list-qualified 35, overruling-uncited 21, already-cased 9, truncated 7, document-short 1, not-found 1, passage-clipped 1 | 3 | CSA-1 | 3 | none |
 | 2026-11-09 | `trap` | `trap@3` | `caselaw__corpus-2026-10-13__qwen3-embedding-8b-1024-bf16` | 20261109 | 15 | 15 | 15 | 11 | 4 | none | overruling-unstated 64, list-qualified 35, overruling-uncited 21, already-cased 5, not-found 3, truncated 2, document-short 1 | 4 | CSA-1 | 2 | none |
 | 2026-11-08 | `treatment` | `treatment@4` | `caselaw__corpus-2026-10-13__qwen3-embedding-8b-1024-bf16` | 20261108 | 20 | 20 | 20 | 1 | 19 | none | no-state-kind 23235, cited-absent 4431, state-outranked 3890, sentence-clipped 521, nearest-cite 402, active-direction 135, procedural-disposition 104, recounted 85, conditional-verb 45, already-cased 18, agent-unresolved 16, actor-drawn 8, too-short 8, procedural-object 5, same-cluster 5, closed-book-failed 4, document-short 1 | 2 | CSA-1 | 9 | none |
 | 2026-11-04 | `trap` | `trap@2` | `caselaw__corpus-2026-10-13__qwen3-embedding-8b-1024-bf16` | 20261104 | 15 | 15 | 15 | 10 | 5 | none | list-qualified 35, overruling-uncited 21, truncated 5, document-short 3, not-found 2 | 2 | CSA-1 | 2 | none |
@@ -1086,6 +1108,19 @@ objections, and a sentence about preclusion. Seven windows did repudiate the
 asked doctrine but failed on the quote or the answer: a quote stating a
 different or truncated rule, or an answer naming an action, a clause, a tax, or
 a limit the quote leaves unnamed.
+
+The second phrase-anchored batch, the first under `trap@4`, was read in full and
+kept seven of fifteen. Of the previous batch's eleven rejected pairs, seven
+were drawn again, and one of those, whose earlier answer had appended the
+overruling decision's holding, was accepted. Of the four not drawn, the quote
+ending mid-sentence discarded `passage-clipped`, the contentions phrase
+discarded `overruling-unstated` under `patterns@3`, one discarded `truncated`,
+and one lay past the point where the draw reached its count. Four rejections
+were windows that do not state the asked overruling: a dissent's account,
+foreign courts' practice, a sentence about preclusion, and an earlier
+decision's narrowing of a different doctrine. Four were holding sentences
+adding a qualification, a cause of action, a classification, or an
+attribution the quote does not make. No appended sentence was rejected.
 
 The three wrong-court and invented-premise batches were read in full. Most `trap@1` rejections were
 expected answers stating a disposition or a fact the quote does not establish,

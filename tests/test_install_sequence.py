@@ -1,4 +1,7 @@
-"""Contracts for install prerequisites and matching steps in both documents."""
+"""Contracts for install prerequisites and matching steps in both documents.
+
+Prerequisite labels accept both ``**Hardware** — text`` and ``**Hardware.** text``.
+"""
 
 from __future__ import annotations
 
@@ -124,7 +127,7 @@ def _items(scope: list[Line], start: int) -> dict[str, Line]:
         if match:
             if current_label is not None and current is not None:
                 items[current_label] = current
-            current_label = match.group("label")
+            current_label = match.group("label").removesuffix(".")
             current = Line(line.number, match.group("text"))
         elif line.text and not line.text[0].isspace():
             break
@@ -435,10 +438,29 @@ class SeededText(unittest.TestCase):
     def runbook_source(self) -> str:
         return self.source.replace("## Install", "## 1. Example sequence")
 
+    def period_source(self) -> str:
+        return self.source.replace("** —", ".**")
+
     def test_valid_wrapped_list(self) -> None:
         self.assertEqual(rule_prerequisites(README, self.source, self.expected), [])
         self.assertEqual(
             _steps(_scope(README, self.source))[0].commands, ("example command",)
+        )
+
+    def test_valid_period_label_list(self) -> None:
+        self.assertIn("- **Hardware.** `", self.period_source())
+        self.assertEqual(
+            rule_prerequisites(README, self.period_source(), self.expected), []
+        )
+
+    def test_period_label_wrong_figure(self) -> None:
+        self.check(
+            self.period_source().replace("111 GB VRAM", "112 GB VRAM"), "Hardware vram"
+        )
+
+    def test_period_label_wrong_os_version(self) -> None:
+        self.check(
+            self.period_source().replace("987.65", "987.66"), "Operating system version"
         )
 
     def test_missing_list(self) -> None:

@@ -16,7 +16,7 @@ version: 1
 images:
   caddy:
     source: docker.io/library/caddy:2.11
-    digest: sha256:df7f1c2fb114453b951de51a98efc010db1655a92c2e86be6706714e2417a78d
+    digest: sha256:ce773ec7a742ce15ee6bf2bb5f65882b9e2a4487b10733e6f1484f86e6b5d8bc
   open-webui:
     source: ghcr.io/open-webui/open-webui:v0.11.3
     digest: sha256:41daa0cf2561a5d4c8d1ff31ee2a98d93ab4d3ac2605cac69366ff6a3374a933
@@ -73,8 +73,8 @@ images:
   # Hub wherever the upstream publishes there; the DCGM exporter is nvcr.io
   # only and cAdvisor moved to GHCR at v0.53.0.
   prometheus:
-    source: docker.io/prom/prometheus:v3.14.0
-    digest: sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
+    source: docker.io/prom/prometheus:v3.16.0
+    digest: sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
   grafana:
     source: docker.io/grafana/grafana-oss:13.0.2
     digest: sha256:5dad0df181cb644a14e13617b913b261a54f7d4fd4510721dba420929f35bea2
@@ -91,8 +91,8 @@ images:
     source: ghcr.io/google/cadvisor:v0.60.6
     digest: sha256:b8e7d1093144fd088f425ff003d75a4aa405de075db78dae3bc563730b1bd07a
   blackbox-exporter:
-    source: docker.io/prom/blackbox-exporter:v0.28.0
-    digest: sha256:e753ff9f3fc458d02cca5eddab5a77e1c175eee484a8925ac7d524f04366c2fc
+    source: docker.io/prom/blackbox-exporter:v0.29.1
+    digest: sha256:ea1c7aa3ef3f307cd03e85f34abb604478ccb90b567fc690da0cd9776da76b13
   postgres:
     build: images/postgres
     base: docker.io/library/postgres:18

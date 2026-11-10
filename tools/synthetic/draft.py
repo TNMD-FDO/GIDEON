@@ -1,11 +1,13 @@
 """Draft treatment and overruled trap pairs from production, other cases from the sibling's sample.
 
-Trap pairs use the generation's recorded treatment snapshot, rejecting qualified
+The trap@4 pairs use the generation's recorded treatment snapshot, rejecting qualified
 rows and absent or uncited overruling opinions. Before the draw, an anchor pass
 reads each surviving overruling opinion's text and rows once and rejects pairs
 with no nearby holding-section repudiation as overruling-unstated. Their sheets
 show the canonical window around the last kept phrase and its anchor offsets
-beside the overruled passage.
+beside the overruled passage. The generator writes the holding alone; a clipped
+retraced passage is discarded, and code appends the overruling sentence from
+the caption and year slots before the closed-book answer and reading.
 
 Treatment's sentence pass runs on demand in draw order, once per document up
 to PASS_DOCUMENTS, and counts unreached candidates as unread. It filters
@@ -777,6 +779,15 @@ def _candidate(
         return retraced.reason
     if target is not None and not synthetic.within_section(retraced, target.char_start, target.char_end):
         return "off-section"
+    if pair is not None:
+        if synthetic.passage_clipped(retraced.quote):
+            return "passage-clipped"
+        holding = proposal.answer.rstrip()
+        if not holding.endswith(tuple(synthetic.SENTENCE_TERMINATORS)):
+            holding += "."
+        proposal = replace(proposal, answer=holding + " " + synthetic.overruling_sentence(
+            values["caption"], values["overruling_caption"], values["overruling_year"],
+        ))
     return _closed_book(io, rendered_dir, served_model_name, proposal, retraced, figures)
 
 

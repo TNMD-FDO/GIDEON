@@ -64,6 +64,7 @@ PINNED_PREFIXES: Final[dict[str, tuple[tuple[int, str], ...]]] = {
         (10, "8418643e8fde64cbf1983c6e445385e96a3b139aac02db1387da7b4e9e0cab34"),
         (15, "d6cd0ac75d47099a09a0ecf6c69680a0b86af579cdcfb5104bb6da75ed554875"),
         (19, "4858a8103551fc0373d369da4bad8a495119ae0455b3162b23bf365b9f127b6c"),
+        (26, "a6b584e3d7cf258289341dd712cc6e51f10ff418adc7db5987516e06296445e8"),
     ),
     "poisoned-premise": (
         (8, "07d9a8813503eb84daca569c763f4bdd490cec503b4570a6edf2ee3ed81f0bb7"),

@@ -74,6 +74,7 @@ _CURATED_ALLOWLIST: tuple[str, ...] = (
     "gcr.io",
     "github.blog",
     "gnu.org",
+    "golang.org",
     "google.com",
     "googleapis.com",
     "googlesource.com",

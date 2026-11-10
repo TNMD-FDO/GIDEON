@@ -879,7 +879,7 @@ class Draft(unittest.TestCase):
                 self.assertEqual((code, errors), (0, ""), output)
                 value = json.loads((root / "draft/manifest.json").read_bytes())
                 self.assertEqual(value["asked"], count)
-                version = 4 if category == "treatment" else 3 if category == "trap" else 2 if category in ("retrieval", "synthesis", "existence") else 1
+                version = 4 if category in ("treatment", "trap") else 2 if category in ("retrieval", "synthesis", "existence") else 1
                 self.assertEqual(value["template"], f"{category}@{version}")
                 self.assertIn(f"order: exhausted, kept 1 of {count}", output)
 
@@ -1570,7 +1570,7 @@ class PairDraft(unittest.TestCase):
             pair = host.pair_rows[0]
             overruling = cast(dict[str, object], pair["overruling"])
             self.assertEqual(provenance["generation"], host.generations[0].gen_id)
-            self.assertEqual(provenance["template"], "trap@3")
+            self.assertEqual(provenance["template"], "trap@4")
             self.assertEqual(provenance["entries"][0]["listed"], pair["row_id"])
             self.assertEqual(provenance["discards"], [
                 {"reason": reason, "source_id": row["source_id"], "edge": row["row_id"], "kind": None}
@@ -1584,7 +1584,10 @@ class PairDraft(unittest.TestCase):
             self.assertEqual(case["notes"], f"known-overruled row {pair['row_id']}")
             self.assertEqual(case["jurisdiction"], [host.documents[0]["court"]])
             self.assertEqual(case["cluster_id"], pair["source_id"])
-            self.assertEqual(case["expected"], {"answer": ANSWER, "behavior": "qualify"})
+            expected_answer = ANSWER + ". " + synthetic.overruling_sentence(
+                CASE_NAME, cast(str, overruling["case_name"]), str(pair["overruling_year"]),
+            )
+            self.assertEqual(case["expected"], {"answer": expected_answer, "behavior": "qualify"})
             gold = case["gold"][0]
             canonical = host.texts[cast(int, pair["opinion_id"])]
             self.assertEqual(gold, {
@@ -1621,6 +1624,114 @@ class PairDraft(unittest.TestCase):
             self.assertIn(f"01: {pair['source_id']} {pair['row_id']} [{gold['start']}, {gold['end']})", output)
             self.assert_private_absent(host, output + errors + (out / "manifest.json").read_text())
 
+    def test_clipped_passage_discards_with_the_row_before_closed_book_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            host = PairHost()
+            pair = host.pair_rows[0]
+            clipped = PASSAGE.removesuffix(".")
+            host.replies = [_proposal(clipped)]
+            out = root / "draft"
+            code, output, errors = _run(host, root, out, category="trap", count=1)
+            self.assertEqual((code, errors), (0, ""), output)
+            self.assertEqual(len(host.bodies), 1)
+            self.assertEqual(host.replies, [])
+            provenance_text = (out / "manifest.json").read_text()
+            provenance = json.loads(provenance_text)
+            self.assertEqual(provenance["template"], "trap@4")
+            self.assertEqual(provenance["entries"], [])
+            self.assertEqual(provenance["discards"], [{
+                "reason": "passage-clipped", "source_id": pair["source_id"],
+                "edge": pair["row_id"], "kind": None,
+            }])
+            self.assertEqual((out / "drafts.jsonl").read_bytes(), b"")
+            self.assertEqual((out / "sheet.txt").read_text(), "")
+            self.assertIn("summary: kept 0, discarded 1 (passage-clipped=1)", output)
+            self.assertEqual(host.released, [backuplock.ENGINE_LOCK.path])
+            self.assert_private_absent(host, output + errors + provenance_text)
+            self.assertNotIn(clipped, output + errors + provenance_text)
+
+    def test_assembled_answer_is_shared_by_the_draft_sheet_and_reading(self) -> None:
+        for ending in ("", ".", "?", "!", ". \n\t"):
+            with self.subTest(ending=ending), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                host = PairHost()
+                pair = host.pair_rows[0]
+                overruling = cast(dict[str, object], pair["overruling"])
+                self.assertNotEqual(overruling["case_name"], pair["overruling_name"])
+                holding = ANSWER + ending
+                host.replies = [
+                    _reply({"question": QUESTION, "answer": holding, "passage": PASSAGE}),
+                    _reply({"answer": CLOSED}), _verdict(),
+                ]
+                out = root / "draft"
+                code, output, errors = _run(host, root, out, category="trap", count=1)
+                self.assertEqual((code, errors), (0, ""), output)
+                self.assertEqual(len(host.bodies), 3)
+                self.assertEqual(host.replies, [])
+                expected_holding = ANSWER + (ending.strip() or ".")
+                expected_answer = expected_holding + " " + synthetic.overruling_sentence(
+                    cast(str, host.documents[0]["case_name"]),
+                    cast(str, overruling["case_name"]), str(pair["overruling_year"]),
+                )
+                case = json.loads((out / "drafts.jsonl").read_bytes())
+                self.assertEqual(case["expected"], {"answer": expected_answer, "behavior": "qualify"})
+                self.assertEqual(case["gold"][0]["quote"], PASSAGE)
+                sheet = (out / "sheet.txt").read_text()
+                self.assertEqual(
+                    [line for line in sheet.splitlines() if line.startswith("Expected answer:")],
+                    ["Expected answer: " + expected_answer],
+                )
+                user = cast(list[dict[str, str]], host.bodies[0]["messages"])[1]["content"]
+                self.assertIn(f"Case name: {host.documents[0]['case_name']}\n", user)
+                self.assertIn(f"Overruling case name: {overruling['case_name']}\n", user)
+                self.assertIn(f"Overruling year: {pair['overruling_year']}\n", user)
+                reading = cast(list[dict[str, str]], host.bodies[2]["messages"])[1]["content"]
+                reference = reading.split("<reference-answer>\n", 1)[1].split("\n</reference-answer>", 1)[0]
+                self.assertEqual(reference, expected_answer)
+                self.assertNotIn(str(pair["overruling_name"]), expected_answer)
+                provenance_text = (out / "manifest.json").read_text()
+                self.assertEqual(json.loads(provenance_text)["discards"], [])
+                self.assertEqual(host.released, [backuplock.ENGINE_LOCK.path])
+                self.assert_private_absent(host, output + errors + provenance_text)
+
+    def test_contentions_discard_but_they_are_overruled_anchors(self) -> None:
+        for phrase, kept in (
+            (f"In {CASE_NAME}, the contentions are overruled.", False),
+            (f"To the extent {CASE_NAME} states the invented notice rule, they are overruled.", True),
+        ):
+            with self.subTest(phrase=phrase), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                host = PairHost()
+                host.set_overruling_text(0, phrase)
+                pair = host.pair_rows[0]
+                out = root / "draft"
+                code, output, errors = _run(host, root, out, category="trap", count=1)
+                self.assertEqual((code, errors), (0, ""), output)
+                provenance_text = (out / "manifest.json").read_text()
+                provenance = json.loads(provenance_text)
+                self.assertEqual(provenance["template"], "trap@4")
+                if kept:
+                    self.assertEqual(provenance["discards"], [])
+                    self.assertEqual(provenance["entries"][0]["listed"], pair["row_id"])
+                    self.assertEqual(len(host.bodies), 3)
+                    start = phrase.index("overruled")
+                    end = start + len("overruled")
+                    self.assertIn(f"anchor [{start}, {end})\n{phrase}\n", (out / "sheet.txt").read_text())
+                    user = cast(list[dict[str, str]], host.bodies[0]["messages"])[1]["content"]
+                    self.assertIn(f"<overruling-text>\n{phrase}\n</overruling-text>", user)
+                else:
+                    self.assertEqual(provenance["entries"], [])
+                    self.assertEqual(provenance["discards"], [{
+                        "reason": "overruling-unstated", "source_id": pair["source_id"],
+                        "edge": pair["row_id"], "kind": None,
+                    }])
+                    self.assertEqual(host.bodies, [])
+                    self.assertIn("unstated 1\n", output)
+                self.assertEqual(host.released, [backuplock.ENGINE_LOCK.path])
+                self.assert_private_absent(host, output + errors + provenance_text)
+                self.assertNotIn(phrase, output + errors + provenance_text)
+
     def test_late_repudiation_centres_the_window_and_records_its_anchor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1653,7 +1764,7 @@ class PairDraft(unittest.TestCase):
                 (out / "sheet.txt").read_text(),
             )
             provenance_text = (out / "manifest.json").read_text()
-            self.assertEqual(json.loads(provenance_text)["template"], "trap@3")
+            self.assertEqual(json.loads(provenance_text)["template"], "trap@4")
             for private in (phrase, window):
                 self.assertNotIn(private, output + errors + provenance_text)
             self.assert_private_absent(host, output + errors + provenance_text)
@@ -1671,7 +1782,7 @@ class PairDraft(unittest.TestCase):
             self.assertEqual((code, errors), (0, ""), output)
             provenance_text = (out / "manifest.json").read_text()
             provenance = json.loads(provenance_text)
-            self.assertEqual(provenance["template"], "trap@3")
+            self.assertEqual(provenance["template"], "trap@4")
             self.assertEqual(provenance["discards"], [{
                 "reason": "overruling-unstated", "source_id": unstated["source_id"],
                 "edge": unstated["row_id"], "kind": None,
@@ -1731,7 +1842,7 @@ class PairDraft(unittest.TestCase):
             self.assertEqual(len(host.bodies), 3 * len(host.pair_rows))
             provenance_text = (out / "manifest.json").read_text()
             provenance = json.loads(provenance_text)
-            self.assertEqual(provenance["template"], "trap@3")
+            self.assertEqual(provenance["template"], "trap@4")
             self.assertEqual({entry["listed"] for entry in provenance["entries"]},
                              {pair["row_id"] for pair in host.pair_rows})
             self.assertIn("near-miss: listed pairs 3, drawable 3, qualified 0, absent 0, uncited 0, unstated 0\n", output)
@@ -1904,7 +2015,12 @@ class PairDraft(unittest.TestCase):
                     self.assertEqual((result, intake_errors), (0, ""), intake_output)
                     case = json.loads(case_path.read_bytes())
                     self.assertEqual(case["id"], "research-qa-trap-001")
-                    self.assertEqual(case["expected"], {"answer": ANSWER, "behavior": "qualify"})
+                    pair = host.pair_rows[0]
+                    overruling = cast(dict[str, object], pair["overruling"])
+                    expected_answer = ANSWER + ". " + synthetic.overruling_sentence(
+                        CASE_NAME, cast(str, overruling["case_name"]), str(pair["overruling_year"]),
+                    )
+                    self.assertEqual(case["expected"], {"answer": expected_answer, "behavior": "qualify"})
                     self.assertEqual(case["notes"], f"known-overruled row {host.pair_rows[0]['row_id']}")
                     self.assertTrue(evalset.load_set(root / "eval-v9", known_courts).ok)
                 self.assert_private_absent(host, output + errors + intake_output + intake_errors)

@@ -28,7 +28,7 @@ _TEXT_ROOTS = (
     Path("config"),
     Path("docs/runbooks"),
 )
-_TEXT_FILES = (Path("README.md"),)
+_TEXT_FILES = (Path("README.md"), Path("docs/commands.md"))
 _SKIP_DIRECTORIES = {
     ".git",
     ".mypy_cache",

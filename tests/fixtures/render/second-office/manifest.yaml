@@ -2,7 +2,7 @@
 release: "fixture"
 inputs:
   site_sha256: "3032cbc05ff6133992600e2f7b9f12e8488f068b2a747e88a45159753d250cb1"
-  host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
+  host_lock_sha256: "56b34abc306f9fbaf92b8b48f9beaa6a942c481573f06c6edc8d9b890b69d1bd"
   models_lock_sha256: "a0b64a1d76a1e796f6b12e51eee12b09ab9a7b585cf666e0700829b2eab226e1"
   egress_sha256: "e22abee0f29547aedd38bb2ca9ca9f0d2cd3dc4b28c9d6df72ae4fad53d0d3af"
   hardware_profile: "2x96v-256d"
@@ -15,7 +15,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "f3cd7663e47b20eaea958e9c657f1c5bbc8e07499dbb970788fc4a79dfbc7927"
+    sha256: "fed7b25c1fb53486305cfa449b1770e85388b6376a99ac333aa5cdf9ccfeee4b"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -233,8 +233,8 @@ files:
     owners:
       - "dcgm-exporter"
 services:
-  caddy: "6ab86c4b4080e9f36a8a33ac2c17068802e1161844d10a4474b8285c69c1650f"
-  prometheus: "9b4417e59fa00d36fa6b4e73406cde7d5fd6749334c41556a49e932c36c0c351"
+  caddy: "b93db40dbf399647b37d0c4e4f5861817e6773f56a65839d0a9722fa66acb300"
+  prometheus: "a86213f62ad1d778bbffa7d0c842864d7e8f6af24426db1e17c4b8c33d04d9d6"
   node-exporter: "a581b1f8a717fdaab3b3e0ffa46114516da01f2c51c85838380c168d506632df"
   grafana: "e989e41db628460bdae25dfc5bb12bb155d4fa2572680907dabae30a8086578a"
   postgres: "3b43ac0eb8dbc26b40af79838dcccf2d78b6476c3c2bbe27855cac32eeef8c7e"
@@ -249,7 +249,7 @@ services:
   dcgm-exporter: "80440fa3a0466766fec774772d26eed3389e9f239c1e1c0d96d81a5f7cc62a85"
   postgres-exporter: "d36e03785dee0d52e65763c1d7f6dda2c4c09b17c129d7e8439fe5994338bfe7"
   cadvisor: "7bd0e221d909e45fc1555750f1839250774b89d6333a0fb7b0443bcca62ec837"
-  blackbox-exporter: "5b3942cc5a72cac952fe8085233662b727ad6e9ee6caf933d7f4590572db8024"
+  blackbox-exporter: "1a7dc7ea8be37e01373bd6c61a9927a3822291e787f0965539998884139aed53"
 top_level: "88b192fa9ed8633c202f0466a972c6b3a050f779d6afd94aea51ee3e5e33e149"
 top_level_parts:
   static: "9d8f1896c9ac3c179131b112cf67afcceeee7672c19635149ea32c986c4dcb6a"
