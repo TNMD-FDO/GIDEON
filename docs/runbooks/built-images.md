@@ -1,202 +1,89 @@
-# Building a GIDEON image (CSA runbook material)
+# Building a GIDEON image
 
-GIDEON's own images — `postgres`, Postgres 18 plus pgBackRest;
-`gideon`, the Python service image; and `opensearch`, the server with its metrics plugin —
-are built **on the box, never by CI**: a build is not byte-reproducible, so
-`images.lock` records the digest that was actually pushed, and the hosted checks
-prove the lock is self-consistent (`inputs_digest` recomputed from the base
-digest, the build arguments, and the Dockerfile). The release registry on the
-box (`/data/registry`, in the backup set) is the only place a built digest
-exists before 1.0; at the public flip CI copies the pinned digest to GHCR, it
-does not rebuild.
+GIDEON's own images are `postgres`, Postgres 18 plus pgBackRest; `gideon`, the Python service image; and `opensearch`, the server with its metrics plugin. They are built **on the box, never by CI** because a build is not byte-reproducible. The lock `images.lock` records the digest that was actually pushed, and the hosted checks prove the lock is self-consistent by recomputing `inputs_digest` from the base digest, the build arguments, and the Dockerfile.
+
+The release registry on the box (`/data/registry`, in the backup set) is the only place a built digest exists before 1.0. At the public flip CI copies the pinned digest to GHCR; it does not rebuild.
 
 ## 1. When a build is due
 
-- A **pin-watch proposal** on a built pin: the base (`images.postgres`, the
-  stock base moved) or any watched build argument — one watched at an apt
-  index, as `images.postgres.build_args.PGBACKREST_VERSION` is (PGDG published
-  a newer pgBackRest), or one watched on PyPI (`pypi_project` in the lock's
-  `watch` entry; a newer stable release). Its hosted checks are red by design
-  until the rebuild.
-- A change under `images/<name>/` — the Dockerfile is a build input, so the
-  lock's `inputs_digest` stops matching and the hosted checks go red.
+- A **pin-watch proposal** on a built pin moves the base (`images.postgres`, the stock base moved) or a watched build argument. An argument may be watched at an apt index, as `images.postgres.build_args.PGBACKREST_VERSION` is when PGDG publishes a newer pgBackRest, or on PyPI (`pypi_project` in the lock's `watch` entry; a newer stable release). Its hosted checks are red by design until the rebuild.
+- A change under `images/<name>/` requires a rebuild because the Dockerfile is a build input. The lock's `inputs_digest` stops matching and the hosted checks go red.
 - A new built pin, written with `digest: unbuilt` and `inputs_digest: unbuilt`.
 
-For `images.opensearch`, pin-watch proposes a base move but watches neither
-plugin build argument. Type the matching plugin version (the base tag plus `.0`)
-and the release page's asset digest into the lock by hand before building.
+For `images.opensearch`, pin-watch proposes a base move but watches neither plugin build argument. Type the matching plugin version (the base tag plus `.0`) and the release page's asset digest into the lock by hand before building.
 
-A pin-watch pull request on a model pin is not an image build. Decide it with
-`docs/runbooks/model-upgrade.md` before merging it.
+A pin-watch pull request on a model pin is not an image build. Decide it with `docs/runbooks/model-upgrade.md` before merging it.
 
 ## 2. The order: build → record → commit → merge (never the reverse)
 
-On the box, in a checkout of the branch that carries the change (for a proposal
-pull request: `git fetch origin && git checkout pin-watch/<pin id>`):
+The order is fixed because a build is not byte-reproducible: the lock records the digest that was actually pushed, so the record can only follow the build.
 
-1. `python3 -m gideon registry mirror` (Docker access). Expected before a
-   build: `postgres/base: present` (or `mirrored` on a base bump) and
-   `postgres: failed — … Fix: Build and push it with …` — the lock names a
-   digest the registry does not hold yet.
-2. `sudo python3 -m tools.imagebuild postgres --to 127.0.0.1:5000` — probes the
-   build's egress, builds from the mirrored base by digest, runs the smoke
-   check (`pgbackrest version`), pushes, then prunes GIDEON's own records from
-   the shared build cache: the base pulls from the release registry and the
-   steps built on them, by one filter over their ids, never a bare prune,
-   since the cache is shared with the box's other tenant and each project
-   removes only its own. It then records `digest` and `inputs_digest`
-   in `images.lock` and regenerates `tests/fixtures/render/`. Files it writes
-   stay owned by you (ownership is restored after `sudo`). A failed smoke
-   check pushes nothing and leaves the lock untouched. Every build after a
-   prune is cold: the base comes from the loopback registry, apt and pip
-   through the `image-build` egress group (§4).
-3. `sudo python3 -m tools.imagebuild postgres --to 127.0.0.1:5000 --check` — proves
-   the registry's image against the lock: digest present, labels equal the
-   lock's inputs, smoke check passes. It pulls, so it needs the Docker access the
-   build has. The self-hosted CI runs the same check
-   after every merge (`tests/contract/built_images.py`).
-4. Commit `images.lock` and `tests/fixtures/render/` on the branch and push.
-   The hosted checks go green; the next pin-watch run reports the branch
-   `completed` and touches it no further (a rebase, if `main` moved, is yours
-   at merge time).
-5. Merge when green. The push-only chain runs `mirror-images` (with the
-   built-image contract) then `frontend-contract`; a human tags the release
-   after the merge and green checks. The running stack moves at the
-   `gideon upgrade <tag>` to that release:
-   the store tier is recreated onto the new image, so Postgres restarts for
-   about a minute — choose the moment.
+Work on the box in a checkout of the branch that carries the change. For a proposal pull request, check it out with `git fetch origin && git checkout pin-watch/<pin id>`.
 
-The `gideon` build follows the same five steps with `python3 -m tools.imagebuild
-gideon`. Its smoke runs Python's `importlib.metadata.version` over the thirty-one
-image packages after importing `starlette`, `uvicorn`, `httpx`, `psycopg`,
-`procrastinate`, `eyecite`, and `tiktoken`. It also asks eyecite to find one full citation in
-a fictitious reporter string and tiktoken to count a fictitious BPE merge. The smoke
-refuses an image whose default user is root, and refuses unless
-the driver loads on the binary libpq implementation and its two distributions
-report the same version — one build argument installs both wheels; `--check`
-repeats that smoke against the recorded built digest. The image is the
-interpreter and dependency set of `gideon-api`, `gideon-worker`, and
-`gideon-egress`, while the applying checkout is mounted into the running
-containers. A Procrastinate
-bump carries more than the rebuild: §6.
+1. `python3 -m gideon registry mirror` needs Docker access. Expected before a build: `postgres/base: present` (or `mirrored` on a base bump) and `postgres: failed — … Fix: Build and push it with …`. The second row fails because the lock names a digest the registry does not hold yet.
+2. `sudo python3 -m tools.imagebuild postgres --to 127.0.0.1:5000` probes the build's egress, builds from the mirrored base by digest, runs the smoke check (`pgbackrest version`), and pushes the image. A failed smoke check pushes nothing and leaves the lock untouched.
 
-The `opensearch` build also follows steps 1–5. Run `sudo python3 -m
-tools.imagebuild opensearch --to 127.0.0.1:5000`, then `sudo python3 -m
-tools.imagebuild opensearch --to 127.0.0.1:5000 --check`. Its smoke uses
-`cat` as the entrypoint to read
-`/usr/share/opensearch/plugins/prometheus-exporter/plugin-descriptor.properties`
-and checks the installed plugin version without starting the node.
+   After the push, the tool prunes GIDEON's own records from the shared build cache: the base pulls from the release registry and the steps built on them. It uses one filter over their ids and does not run a bare prune, because the cache is shared with the box's other tenant and each project removes only its own.
 
-The `gideon` Dockerfile builds `fast-diff-match-patch` from its pinned source in a builder
-stage because upstream has no CPython 3.14 wheel. The final stage installs that
-wheel with the other pinned binary packages. Hosted checks do not compile it;
-the box build and smoke check prove it. Remove the builder stage when upstream
-publishes a compatible wheel.
+   The tool then records `digest` and `inputs_digest` in `images.lock` and regenerates `tests/fixtures/render/`. Files it writes stay owned by you, since ownership is restored after `sudo`.
+
+   Every build after a prune is cold. The base comes from the loopback registry, and apt and pip reach their indexes through the `image-build` egress group (§4).
+3. `sudo python3 -m tools.imagebuild postgres --to 127.0.0.1:5000 --check` proves the registry's image against the lock: the digest is present, its labels equal the lock's inputs, and the smoke check passes. The check pulls the image, so it needs the same Docker access as the build. The self-hosted CI runs the same check after every merge (`tests/contract/built_images.py`).
+4. Commit `images.lock` and `tests/fixtures/render/` on the branch and push. The hosted checks go green. The next pin-watch run reports the branch `completed` and touches it no further. If `main` moved, rebase the branch at merge time.
+5. Merge when green. The push-only chain runs `mirror-images` with the built-image contract, then `frontend-contract`, and a person tags the release after the merge and green checks. The running stack moves at the `gideon upgrade <tag>` to that release, which recreates the store tier onto the new image, so Postgres restarts for about a minute. Choose the moment for that upgrade.
+
+The `gideon` build follows the same five steps with `python3 -m tools.imagebuild gideon`. Its smoke runs Python's `importlib.metadata.version` over the thirty-one image packages after importing `starlette`, `uvicorn`, `httpx`, `psycopg`, `procrastinate`, `eyecite`, and `tiktoken`. It also asks eyecite to find one full citation in a fictitious reporter string and tiktoken to count a fictitious BPE merge.
+
+The smoke refuses an image whose default user is root. It also refuses unless the driver loads on the binary libpq implementation and its two distributions report the same version, since one build argument installs both wheels. The build's `--check` repeats that smoke against the recorded built digest.
+
+The image is the interpreter and dependency set of `gideon-api`, `gideon-worker`, and `gideon-egress`, while the applying checkout is mounted into the running containers. A Procrastinate bump carries more than the rebuild: §6.
+
+The `opensearch` build also follows steps 1–5. Run `sudo python3 -m tools.imagebuild opensearch --to 127.0.0.1:5000`, then `sudo python3 -m tools.imagebuild opensearch --to 127.0.0.1:5000 --check`. Its smoke uses `cat` as the entrypoint to read `/usr/share/opensearch/plugins/prometheus-exporter/plugin-descriptor.properties` and checks the installed plugin version without starting the node.
+
+The `gideon` Dockerfile builds `fast-diff-match-patch` from its pinned source in a builder stage because upstream has no CPython 3.14 wheel. The final stage installs that wheel with the other pinned binary packages. Hosted checks do not compile it, so the box build and smoke check prove it. Remove the builder stage when upstream publishes a compatible wheel.
 
 ### Several proposals for one image
 
-An image with several watched arguments can have several proposals open at
-once, one pull request each. Complete them with one build:
+An image with several watched arguments can have several proposals open at once, one pull request each. Complete them with one build:
 
-1. Check out one proposal's branch (`git checkout pin-watch/<pin id>`) and type
-   the other proposals' values into the image's `build_args` there, each as its
-   own pull request's title shows it (`old → new`).
-2. Build, check, and commit as in steps 1–4. When the build's own consistency
-   check fails because a dependency must move too (a new release requiring a
-   newer version of another watched argument), move that argument on the same
-   branch and build again. The pin watch judges the branch `completed` on the
-   proposal's own paths alone, so the extra move does not reopen it.
-3. Merge as in step 5. Leave the sibling pull requests open: the next pin-watch
-   run finds `main` carrying each one's value and withdraws it.
+1. Check out one proposal's branch (`git checkout pin-watch/<pin id>`) and type the other proposals' values into the image's `build_args` there, each as its own pull request's title shows it (`old → new`).
+2. Build, check, and commit as in steps 1–4. When the build's own consistency check fails because a new release requires a newer version of another watched argument, move that argument on the same branch and build again. The pin watch judges the branch `completed` on the proposal's own paths alone, so the extra move does not reopen it.
+3. Merge as in step 5. Leave the sibling pull requests open. The next pin-watch run finds `main` carrying each one's value and withdraws it.
 
 ## 3. Reading the rows
 
-- `postgres/base: present | mirrored` — the stock base, kept in the same
-  repository under its own tag; a rebuild starts FROM it, so a build needs no
-  egress for the base.
-- `postgres: present` — the built digest the lock names is in the registry.
-- `gideon/base: present | mirrored` and `gideon: present` have the same
-  meanings for the service image and its built digest.
-- `opensearch/base: present | mirrored` and `opensearch: present` have the same
-  meanings for the server image and its built digest.
-- `postgres: pruned — <size> reclaimed from <n> of <m> records` — the cache
-  removed after the push. Fewer pruned than named means a build running at
-  that moment held the rest, which the next build's prune takes.
-- `postgres: pruned — nothing to prune` — no owned cache records were found;
-  no prune command ran. A base whose layers the daemon's image store already
-  held enters the cache without a `pulled from` description, so its layers and
-  the steps above them are not GIDEON's by the tool's rule and stay; the
-  `postgres` and `opensearch` builds can print this row. Those records are
-  shared with the images the box keeps, so pruning them would free little.
-- `postgres: prune failed — … Fix: Run sudo docker buildx prune --builder default --all --force --filter … by hand`
-  — the lock and fixtures are still written and the `built` row still prints,
-  but the run exits 1. Run the printed command, then re-run image build with
-  `--check`. Its `--all` reaches only the named ids and lets records shared
-  with the image store go. The `gideon` and `opensearch` prune rows have the
-  same meanings.
-- `postgres: failed — … Fix: Build and push it with …` or the same row for
-  `opensearch` — build as above, or,
-  after a `/data/registry` loss, restore the registry from the backup set
-  (`gideon restore --from staging`, or `--from target`;
-  `/data/registry` is one of the set's file roots, so restoring the set brings
-  the registry back too); on the build box a target restore seeds the registry
-  from the set at `fetch`, before anything in the run needs a built image, so
-  a wiped box restores in one run (see `docs/runbooks/backup-restore.md §5`).
-  Until then `apply` refuses at its registry stage.
-- Two builds from the same inputs produce two digests. The lock records the
-  one pushed last; earlier ones stay in the registry until `registry gc`
-  exists.
+- `postgres/base: present | mirrored` names the stock base, kept in the same repository under its own tag. A rebuild starts FROM it, so a build needs no egress for the base.
+- `postgres: present` means the built digest the lock names is in the registry.
+- `gideon/base: present | mirrored` and `gideon: present` have the same meanings for the service image and its built digest.
+- `opensearch/base: present | mirrored` and `opensearch: present` have the same meanings for the server image and its built digest.
+- `postgres: pruned — <size> reclaimed from <n> of <m> records` reports the cache removed after the push. Fewer pruned than named means a build running at that moment held the rest, which the next build's prune takes.
+- `postgres: pruned — nothing to prune` means no owned cache records were found and no prune command ran. A base whose layers the daemon's image store already held enters the cache without a `pulled from` description, so its layers and the steps above them are not GIDEON's by the tool's rule and stay. The `postgres` and `opensearch` builds can print this row. Those records are shared with the images the box keeps, so pruning them would free little.
+- `postgres: prune failed — … Fix: Run sudo docker buildx prune --builder default --all --force --filter … by hand` means the lock and fixtures are still written and the `built` row still prints, but the run exits 1. Run the printed command, then re-run image build with `--check`. Its `--all` reaches only the named ids and lets records shared with the image store go. The `gideon` and `opensearch` prune rows have the same meanings.
+- `postgres: failed — … Fix: Build and push it with …` or the same row for `opensearch` calls for a build as above, or, after a `/data/registry` loss, a restore of the registry from the backup set. Run `gideon restore --from staging` or `--from target`; `/data/registry` is one of the set's file roots, so restoring the set brings the registry back too.
+
+  The build box is the host declared through provisioning to make the acceptance VM, serve the release registry, and run the organisation's CI runner. On the build box, a target restore seeds the registry from the set at `fetch`, before anything in the run needs a built image, so a wiped box restores in one run (see `docs/runbooks/backup-restore.md §5`). Until then `apply`, which brings the running stack in line with the site file and verifies it, refuses at its registry stage.
+- Two builds from the same inputs produce two digests. The lock records the one pushed last; earlier ones stay in the registry until `registry gc` exists.
 
 ## 4. Egress
 
-The bases come from the loopback registry. Inside the builds, apt reaches
-`apt.postgresql.org` and `deb.debian.org`, the `gideon` build reaches
-`pypi.org` and `files.pythonhosted.org`, and the `opensearch` build reaches
-`github.com` and `release-assets.githubusercontent.com` for the plugin zip and
-its redirect — the allowlist's `image-build` group
-(`config/egress.yaml`), probed by the tool before it builds and never by
-preflight, because an office never builds. Behind `egress_proxy` the tool
-passes Docker's predefined proxy build arguments, which Docker keeps out of
-the image history and cache.
+The bases come from the loopback registry. Inside the builds, apt reaches `apt.postgresql.org` and `deb.debian.org`, the `gideon` build reaches `pypi.org` and `files.pythonhosted.org`, and the `opensearch` build reaches `github.com` and `release-assets.githubusercontent.com` for the plugin zip and its redirect.
+
+These destinations form the allowlist's `image-build` group (`config/egress.yaml`). The tool probes it before it builds. Preflight does not probe it because an office does not build. Behind `egress_proxy` the tool passes Docker's predefined proxy build arguments, which Docker keeps out of the image history and cache.
 
 ## 5. Docker access
 
-The tool needs Docker: run it with `sudo` (it restores ownership of the files
-it writes to you) or as a member of the docker group. Nothing it does needs
-root otherwise. The prune needs the same Docker access as the build and
-touches no record of another project's.
+The tool needs Docker: run it with `sudo` (it restores ownership of the files it writes to you) or as a member of the docker group. Nothing it does needs root otherwise. The prune needs the same Docker access as the build and touches no record of another project's.
 
 ## 6. A Procrastinate bump
 
-The worker's queue tables are GIDEON's own migration, never the library's own
-apply: `migrations/0007_procrastinate_queue.sql` is Procrastinate 3.10.0's
-`procrastinate/sql/schema.sql` byte for byte, followed by the worker role's
-grants. A pin-watch proposal that moves `PROCRASTINATE_VERSION` is red at
-`tests/test_worker_schema.py` whenever the new wheel's schema moved, because that
-test holds the installed `schema.sql` to a recorded digest and the wheel's newest
-migration file to a recorded name. Complete such a bump on the proposal's branch:
+The worker's queue tables are GIDEON's own migration and do not use the library's own apply: `migrations/0007_procrastinate_queue.sql` is Procrastinate 3.10.0's `procrastinate/sql/schema.sql` byte for byte, followed by the worker role's grants. A pin-watch proposal that moves `PROCRASTINATE_VERSION` is red at `tests/test_worker_schema.py` whenever the new wheel's schema moved, because that test holds the installed `schema.sql` to a recorded digest and the wheel's newest migration file to a recorded name. Complete such a bump on the proposal's branch:
 
-1. Install the proposal's pins in a checkout's development environment and
-   list the wheel's `procrastinate/sql/migrations/*.sql`
-   files whose version prefix is above the old pin's version, in filename order
-   (a `pre` file sorts before a `post` file of the same version).
-2. Read the diff of `schema.sql` between the two versions beside those files;
-   the files reproduce the new schema from the old.
-3. Write the next GIDEON migration from those files in that order, each
-   statement as the file has it, and grant `gideon_worker` whatever new table or
-   sequence the worker's queries reach. A file that adds an enum value and uses
-   it goes in two GIDEON migrations, since the runner applies each in one
-   transaction and a value added inside one cannot be used until it commits.
-4. Move the test's recorded digest and newest file name to the new wheel's.
-   Never edit `0007_procrastinate_queue.sql`: an applied migration is history.
-5. Build, check, and commit as in §2. The worker waits at its start until its
-   schema answers a probe; if the new migration adds an object the worker needs
-   from its first query, move the probe in `gideon/worker/__main__.py` to it.
+1. Install the proposal's pins in a checkout's development environment and list the wheel's `procrastinate/sql/migrations/*.sql` files whose version prefix is above the old pin's version, in filename order (a `pre` file sorts before a `post` file of the same version).
+2. Read the diff of `schema.sql` between the two versions beside those files; the files reproduce the new schema from the old.
+3. Write the next GIDEON migration from those files in that order, each statement as the file has it, and grant `gideon_worker` whatever new table or sequence the worker's queries reach. A file that adds an enum value and uses it goes in two GIDEON migrations, since the runner applies each in one transaction and a value added inside one cannot be used until it commits.
+4. Move the test's recorded digest and newest file name to the new wheel's. Do not edit `0007_procrastinate_queue.sql`: an applied migration is history.
+5. Build, check, and commit as in §2. The worker waits at its start until its schema answers a probe; if the new migration adds an object the worker needs from its first query, move the probe in `gideon/worker/__main__.py` to it.
 
 ## 7. An eyecite, reporters-db, or courts-db bump
 
-Complete the proposal on its branch with the `gideon` rebuild and `--check` in
-§2. The hosted checks do not install eyecite. Before merging, re-read the
-`case_cite` span rule against the new image and run
-`sudo python3 -m gideon eval run --slice extraction` on the box. Require a green
-`case_cite` row in its report.
+Complete the proposal on its branch with the `gideon` rebuild and `--check` in §2. The hosted checks do not install eyecite. Before merging, re-read the `case_cite` span rule against the new image and run `sudo python3 -m gideon eval run --slice extraction` on the box. Require a green `case_cite` row in its report.

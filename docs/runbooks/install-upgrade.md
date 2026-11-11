@@ -1,48 +1,25 @@
-# Install, upgrade, and rollback (CSA runbook material)
+# Install, upgrade, and rollback
 
-`v0.0.25`. As a receiving office's computer systems administrator (CSA), you run two shell entrypoints: `./install.sh` and `./upgrade.sh`.
-They are three-line wrappers over `python3 -m gideon install` and `python3 -m gideon upgrade`.
-Install runs the existing commands in order.
-Upgrade takes a full backup set before changing the checkout, so rollback can restore the prior state.
-A backup set is everything needed to bring GIDEON back on a bare machine, taken as one unit with a manifest.
-Each install, upgrade, and rollback is an `audit_log` row you can query.
-It is not a log line.
-The acceptance section below records the clean-VM exercise by two CSAs.
-It arrived with `v0.1.0`.
+This runbook arrived with `v0.0.25`. An office's computer systems administrator (CSA) runs two shell entrypoints, `./install.sh` and `./upgrade.sh`, which are three-line wrappers over `python3 -m gideon install` and `python3 -m gideon upgrade`. Install runs the existing commands in order.
+
+Upgrade takes a full backup set before changing the checkout, so rollback can restore the prior state. A backup set is everything needed to bring GIDEON back on a bare machine, taken as one unit with a manifest. Each install, upgrade, and rollback is recorded as an `audit_log` row that can be queried, rather than a log line. The acceptance section below records the clean-VM exercise by two CSAs and arrived with `v0.1.0`.
 
 ## 1. The receiving-office sequence
 
-This sequence takes a new server from cloning the release to a working URL.
-Use it when your office installs GIDEON for the first time.
+This sequence takes a new server through an office's first installation, from cloning the release to a working URL. The later commands run from that checkout, so cloning comes first. Provision runs before the site file exists and again after it is written, because the site-dependent steps are blocked until then. Preflight checks the office services before install runs the phases as one command.
 
 ### Before you begin
 
-- **Operating system** — Use Ubuntu Server 26.04 on `x86_64`.
-  Provision brings the box's host layer to its target state.
-  It refuses any other release or architecture.
-- **Packages** — Install `git` and `python3-yaml` with `sudo apt install -y git python3-yaml`.
-  This is safe to run if they are already installed.
-- **Login** — Sign in with your own Linux account, one that can `sudo`.
-  Don't use root.
-  This account will own `/opt/gideon`.
-- **Hardware** — The reference profile `2x96v-256d` needs 2 × NVIDIA RTX PRO 6000 Blackwell cards (any edition).
-  Each GPU needs 96 GB VRAM.
-  The box needs 256 GB RAM and a 4000 GB data volume.
-  Preflight refuses a shortfall.
-  Alternatively, declare a no-GPU host with `--no-gpu` at step 2.
-  Preflight judges none of these figures on that host.
-- **Download** — Allow about 31 GB of model files at the first apply, including on a no-GPU host.
-  Apply brings the running stack in line with the site file and verifies it.
-- **Office services** — Have the directory, DNS, backup target, certificates, and mail relay ready as described in [office services setup](office-services-setup.md).
+- **Operating system.** Use Ubuntu Server 26.04 on `x86_64`, because provision refuses any other release or architecture. Provision brings the box's host layer to its target state.
+- **Packages.** Install `git` and `python3-yaml` with `sudo apt install -y git python3-yaml`. This is safe to run if they are already installed.
+- **Login.** Sign in with your own Linux account, one that can `sudo`, because that account will own `/opt/gideon`. Do not use root.
+- **Hardware.** The reference profile `2x96v-256d` needs 2 × NVIDIA RTX PRO 6000 Blackwell (any edition), each with 96 GB VRAM, plus 256 GB RAM and a 4000 GB data volume. Preflight refuses a shortfall. Alternatively, declare a no-GPU host with `--no-gpu` at step 2. Preflight judges none of these figures on that host.
+- **Download.** Apply brings the running stack in line with the site file and verifies it. Allow about 31 GB of model files at the first apply, including on a no-GPU host.
+- **Office services.** Have the directory, DNS, backup target, certificates, and mail relay ready as described in [office services setup](office-services-setup.md).
 
-You can re-run every step.
-A refusal prints its fix and exits non-zero.
-Run the same command again after the fix.
+Every step can be re-run. A refusal prints its fix and exits non-zero; make the fix, then run the same command again.
 
-1. **Clone the release** to `/opt/gideon` using your own Linux account.
-   Do not use root.
-   Because `/opt` is root-owned, create and assign the directory first, then clone the release.
-   Run the later commands from `/opt/gideon`:
+1. **Clone the release** to `/opt/gideon` using your own Linux account. Do not use root. Because `/opt` is root-owned, create and assign the directory first, then clone the release. Run the later commands from `/opt/gideon`:
 
    ```bash
    sudo install -d -o <account> -g <account> /opt/gideon
@@ -51,71 +28,36 @@ Run the same command again after the fix.
    git -c gpg.ssh.allowedSignersFile=config/release-signers verify-tag <tag>
    ```
 
-   Run the verification as the checkout's owner.
-   The first clone trusts the key it carries.
-   This proves only that the tag was signed by the key in that tree.
-   Compare its ed25519 fingerprint with `SHA256:1YFQeEq2Jz/7kdmW4zkjXR3QBxvYQlqPUvnsYYD7rHw`.
-   From then on, every `upgrade` verifies the next tag against the installed tree's `config/release-signers`.
+   Run the verification as the checkout's owner. The first clone trusts the key it carries, so this proves only that the tag was signed by the key in that tree. Compare the key's ed25519 fingerprint with `SHA256:1YFQeEq2Jz/7kdmW4zkjXR3QBxvYQlqPUvnsYYD7rHw`. From then on, every `upgrade` verifies the next tag against the installed tree's `config/release-signers`.
 
-   `<account>` is your own Linux login, the one `id -un` prints.
-   Do not use root or a GitHub account.
-   `<tag>` is a release tag.
-   For example, with login `csa` and tag `v0.3.0`, run `sudo install -d -o csa -g csa /opt/gideon`.
-   Then run `git clone --branch v0.3.0 https://github.com/TNMD-FDO/GIDEON /opt/gideon`.
-   Tags are listed newest first in [`CHANGELOG.md`](../../CHANGELOG.md) and on the [repository's tags page](https://github.com/TNMD-FDO/GIDEON/tags).
+   For `<account>`, use your own Linux login, the one `id -un` prints. Do not use root or a GitHub account. `<tag>` is a release tag. For example, with login `csa` and tag `v0.3.0`, run `sudo install -d -o csa -g csa /opt/gideon`, then run `git clone --branch v0.3.0 https://github.com/TNMD-FDO/GIDEON /opt/gideon`. Tags are listed newest first in [`CHANGELOG.md`](../../CHANGELOG.md) and on the [repository's tags page](https://github.com/TNMD-FDO/GIDEON/tags).
 
-   `upgrade` runs git as whoever owns the directory, so no root-owned file lands in the tree.
-   Provision installs a root-owned `/usr/local/bin/gideon` wrapper that runs this checkout as root.
-   Whoever can change the checkout can run code as root.
-   Keep the owner your sudo-holding login, one person.
-   The repository is public, so the clone and `upgrade`'s fetch need no GitHub account or credentials.
-2. **Provision the host**.
-   The command prints one line per step.
-   The first run prints the backup public key and the age identity **once**.
-   The age identity opens the backup set's sealed secrets.
-   Store the identity in the office password manager before going on (`backup-restore.md` §2).
-   A `reboot-required` row for the NVIDIA driver or a kernel means you must reboot.
-   Then run provision again until every step reads `ok`.
-   The `wait-online` step (new in `v0.0.25`) makes the boot-time network wait accept any one link online.
-   A box with an unplugged second port no longer boots with a failed unit.
-   Once provision has run, `gideon <command>` from any directory runs `sudo python3 -m gideon <command>` from `/opt/gideon`.
-   The lines through this step keep the long form, the only form available before it.
-   Every later line names the installed command unless it says why the run has none.
+   `upgrade` runs git as whoever owns the directory, so no root-owned file lands in the tree. Provision installs a root-owned `/usr/local/bin/gideon` wrapper that runs this checkout as root, so whoever can change the checkout can run code as root. Keep the owner your sudo-holding login, one person. The repository is public, so the clone and `upgrade`'s fetch need no GitHub account or credentials.
+2. **Provision the host**. The command prints one line per step. The first run prints the backup public key and the age identity **once**. The age identity opens the backup set's sealed secrets, so store it in the office password manager before going on (`backup-restore.md` §2). If a `reboot-required` row names the NVIDIA driver or a kernel, reboot, then run provision again until every step reads `ok`.
+
+   The `wait-online` step (new in `v0.0.25`) makes the boot-time network wait accept any one link online, so a box with an unplugged second port no longer boots with a failed unit.
+
+   Once provision has run, `gideon <command>` from any directory runs `sudo python3 -m gideon <command>` from `/opt/gideon`. The lines through this step keep the long form, the only form available before it. Every later line names the installed command unless it says why the run has none.
 
    ```bash
    sudo python3 -m gideon host provision
    ```
-3. **Write the site file** at `/etc/gideon/site.yaml` from `config/site.example.yaml`.
-   Place the supplied secrets as described in `office-services-setup.md`.
-   The build box is TNMD-FDO's host declared to make the acceptance VM.
-   On the build box, `gideon registry mirror` pulls the release's images into its loopback registry.
-   The release registry at `v1.0.0` settles where a receiving office pulls its images from.
-   Set `docker_address_pool` when an office host sits in a range Docker could assign to a container network.
-   The next provision writes the pool and restarts Docker once.
-   Announce a window for every container on the box.
-   A network made before the restart keeps its subnet until it is removed.
-   Pause anything that makes networks, such as a CI runner, from just before that provision until it finishes.
-   Preflight's `docker-networks` row refuses while any Docker network's subnet covers a host the site file names or a `lan_cidrs` range.
-   The row names the network and its Compose project.
-4. **Provision again**.
-   The site-dependent steps, `egress-proxy`, `firewall`, `time-sync`, and `timezone`, are blocked until the site file exists.
-   Preflight refuses on any unconverged step.
-   This second run is required because those site-dependent steps cannot converge until the site file exists.
+3. **Write the site file** at `/etc/gideon/site.yaml` from `config/site.example.yaml`. Place the supplied secrets as described in `office-services-setup.md`.
+
+   The build box is TNMD-FDO's host declared to make the acceptance VM. On the build box, `gideon registry mirror` pulls the release's images into its loopback registry. The release registry at `v1.0.0` settles where a receiving office pulls its images from.
+
+   Set `docker_address_pool` when an office host sits in a range Docker could assign to a container network. The next provision writes the pool and restarts Docker once, so announce a window for every container on the box. A network made before the restart keeps its subnet until it is removed. Pause anything that makes networks, such as a CI runner, from just before that provision until it finishes. Preflight's `docker-networks` row refuses while any Docker network's subnet covers a host the site file names or a `lan_cidrs` range, and names the network and its Compose project.
+4. **Provision again**. The site-dependent steps, `egress-proxy`, `firewall`, `time-sync`, and `timezone`, are blocked until the site file exists, so this second run is required. Preflight refuses on any unconverged step.
 
    ```bash
    gideon host provision
    ```
-5. **Preflight**.
-   The command re-checks every provisioning step, then runs the install-time checks: the directory, the relay, the backup target, TLS material, ports, and disk.
-   It exits 0 if and only if nothing refuses.
-   Install opens with the same preflight, so a refusal here is a refusal there.
+5. **Preflight**. The command re-checks every provisioning step, then runs the install-time checks: the directory, the relay, the backup target, TLS material, ports, and disk. It exits 0 if and only if nothing refuses. Install opens with the same preflight, so a refusal here is a refusal there.
 
    ```bash
    sudo ./preflight.sh
    ```
-6. **Install**.
-   The command runs eight phases.
-   Each nested command prints its own rows first, then install prints one phase row after it:
+6. **Install**. The command runs eight phases. Each nested command prints its own rows first, then install prints one phase row after it:
 
    ```bash
    sudo ./install.sh
@@ -123,182 +65,89 @@ Run the same command again after the fix.
 
    | Phase | Runs | What it proves |
    |---|---|---|
-   | `preflight` | the preflight above | the office services are reachable and correct before anything is built |
-   | `apply` | `apply` (thirteen stages) | the stack is up and verified. The first run prints each break-glass password **once**. Break-glass passwords let you sign in as a local administrator when the office directory does not work. It fetches the profile's models into `/data/models` (about 31 GB, 10–30 minutes of office bandwidth). Later runs verify them in about a minute. The engine lock is the box's exclusive claim on the engine. If an evaluation holds it, apply refuses naming its holder. Wait for it to finish. Then re-run install. Its earlier steps are safe to repeat |
-   | `reconcile` | `users reconcile --now` | directory membership is the frontend's role truth. Audit rows are written |
-   | `engine-verify` | `engine verify` | the engine answers at length and in structured form. The guardrail's refusal arrives inside a real chat turn. These checks take three turns as the eval identity, the account GIDEON's own test turns sign in as. They take two to eight minutes. The embedding server returns unit vectors at the lock's width and records a batch's throughput. A failure stops install here with `Do not go live…`, the failing check's name, and that server's logs. A no-GPU host prints one skipped row (`v0.1.22`). If an evaluation holds the engine lock, verify refuses naming its holder. Wait for it to finish. Then re-run install. Its earlier steps are safe to repeat |
-   | `backup` | `backup run` | the first set exists (full on a fresh box, incremental on a re-run) |
-   | `drill` | `backup drill` | that set restores into the throwaway project and the frontend comes up on it |
-   | `audit` | — | one `install` row (phase `applied`) with the phase durations and the set label |
-   | `url` | — | `https://<hostname>/`, the last line printed |
+   | `preflight` | The command runs the preflight above. | The office services are reachable and correct before anything is built. |
+   | `apply` | `apply` runs thirteen stages. | The stack is up and verified. The first run prints each break-glass password **once**. Break-glass passwords provide local administrator sign-in when the office directory does not work. Apply fetches the profile's models into `/data/models` (about 31 GB, 10–30 minutes of office bandwidth). Later runs verify them in about a minute. The engine lock is the box's exclusive claim on the engine. If an evaluation holds it, apply refuses naming its holder. Wait for it to finish, then re-run install. Its earlier steps are safe to repeat. |
+   | `reconcile` | `users reconcile --now` runs. | Directory membership determines the frontend's roles, and audit rows are written. |
+   | `engine-verify` | `engine verify` runs. | The engine answers at length and in structured form, and the guardrail's refusal arrives inside a real chat turn. These checks take three turns over two to eight minutes as the eval identity, the account GIDEON's own test turns sign in as. The embedding server returns unit vectors at the lock's width and records a batch's throughput. A failure stops install here with `Do not go live…`, the failing check's name, and that server's logs. A no-GPU host prints one skipped row (`v0.1.22`). If an evaluation holds the engine lock, verify refuses naming its holder. Wait for it to finish, then re-run install. Its earlier steps are safe to repeat. |
+   | `backup` | `backup run` runs. | The first set exists, full on a fresh box and incremental on a re-run. |
+   | `drill` | `backup drill` runs. | That set restores into the throwaway project, and the frontend comes up on it. |
+   | `audit` | — | One `install` row with phase `applied` records the phase durations and the set label. |
+   | `url` | — | The last line printed is `https://<hostname>/`. |
 
-   A failed phase stops the run.
-   Its fix names the nested command to run by hand (`Run sudo python3 -m gideon backup drill, correct its refusal, then re-run install.`).
-   Re-running install on a live box is safe because every nested command is idempotent.
-   A re-run is a no-op apply, a fresh incremental set, a drill, and the URL.
-   An `install` row with phase `intent` is written once apply has converged the stores.
-   A failure in preflight or apply leaves no row because the writer does not exist yet.
-   Their own rows are the record.
-   **The weights tree** (`v0.1.5`): apply's `models` stage, between `pull` and `recreate`, makes `/data/models` hold the profile's models in the Hugging Face hub-cache layout.
-   Every file is verified against `models.lock`.
-   Run `gideon models pull` for the same converge by hand.
-   A re-run verifies and fetches nothing.
-   The tree is derived state outside the backup set because it is derived from the model lock.
-   After a rebuild, apply fetches it again.
-   The pull keeps the pinned set and the newest previous complete set.
-   This lets `upgrade --rollback` re-apply the previous release without a download.
-   Older sets are removed, and each removal is printed.
-   `/data/models/gideon/pulls.yaml` is the pull's record.
-   A pull that stops mid-file resumes on the next run.
-   A second pull started while one runs refuses naming it.
-   **The engine** (`v0.1.6`): on a GPU host, apply renders `gideon-generator` from the profile's `serve` block.
-   It uses the vLLM image at its `images.lock` digest.
-   The recorded GPU 0 card is reserved by UUID through CDI.
-   `/data/models` is mounted read-only, and no port is published.
-   Apply starts the engine in the `start` stage.
-   The model takes minutes to load.
-   `verify` waits for the model servers together for up to the longest of their allowances from the start stage.
-   This uses the same clock as each container's healthcheck.
-   It reports `model servers healthy N s after start`, the moment the last of them answered.
-   Every other service keeps its one-minute bound.
-   The embedding server, `gideon-embed`, is the engine's sibling on the same image.
-   It uses the recorded GPU 1 card by UUID, with a fixed share of that card held from its start.
-   Its own key, `/etc/gideon/secrets/embed_api_key`, is read inside its container the same way.
-   The same wait applies.
-   It starts only when that share is free on the card.
-   Otherwise its logs name the shortfall, and `verify` fails naming them.
-   The engine's API key is the generated secret `/etc/gideon/secrets/engine_api_key`.
-   The `secrets` stage creates it only when absent.
-   It is read inside the container and does not appear in the Compose file, argv, or a row.
-   Each model server requires its key on every route but `/health` and `/metrics`.
-   GIDEON middleware enforces this, loaded by the engine from a rendered file.
-   A client without the key sees 401 on any other route.
-   The start-up log (the `GPU KV cache size` and `Maximum concurrency` lines) is in the journal at every boot: `sudo journalctl CONTAINER_NAME=gideon-gideon-generator-1 -b`.
-   A vLLM image or model pin bump restarts the engine inside apply after the `models` stage.
-   A rollback to a release without the engine removes its container as an orphan and leaves the key file.
-   On a no-GPU host none of this is rendered.
-   To rotate the key, run `gideon secrets rotate engine_api_key` (`v0.1.40`).
-   The command first refuses when `apply` has pending changes or has not verified.
-   Run `render --diff`.
-   Then run `apply`.
-   The rotation command then prints what it will do.
-   The engine is recreated with a cold start bounded by apply's engine wait.
-   The key's second mount, `gideon-api`, is recreated in seconds.
-   The command writes a new value to the same path as `root:gideon` 0440.
-   It force-recreates the engine once.
-   A file secret is a bind mount, so the new key reaches only a new container.
-   This is the rule `tls reload` follows for Caddy.
-   The command converges the rest as apply does: verify, then record `applied.yaml`.
-   Afterward, `render --diff` reports nothing.
-   Since `v0.2.29` the frontend is not among the consumers: the engine's key left its env file at the cutover.
-   The frontend's own connection key is `gideon_api_key`.
-   Run `gideon secrets rotate gideon_api_key` to recreate `gideon-api` (its mount) and the frontend (its env file's owner).
-   Run `gideon secrets rotate embed_api_key` to recreate the embedding server alone, with a cold start bounded by the same wait.
-   Nothing else consumes its key yet.
-   General is the chat branch your users talk to, with internet search and no case-matter access.
-   Once General is live, rotate in an announced maintenance window if the rotation recreates the engine.
-   A maintenance window is an announced span when General may be unavailable; §2 sets its rules.
-   The cold start makes General unavailable.
-   The command does not gate on the clock.
-   The same command rotates `webui_secret_key`, recreating the frontend once and ending every signed-in session.
-   For `searxng_secret_key`, it recreates SearXNG through the recreate rule.
-   With search off, nothing consumes that key, and the command says so and writes nothing.
-   Rotating `qdrant_api_key` recreates the vector store in seconds.
-   Nothing else consumes that key yet.
-   A `qdrant_read_only_api_key` rotation recreates the store in seconds, then the frontend.
-   Signed-in sessions stay because the session key does not move.
-   For `opensearch_password`, the lexical store is recreated and takes about ten seconds to become healthy.
-   Rotating `opensearch_metrics_password` recreates the lexical store and Prometheus, and the scrape resumes within a minute.
-   For `opensearch_transport_key` and `opensearch_transport_cert`, the lexical store is recreated.
-   Rotating the certificate alone renews it from its standing key before its ten-year end date.
-   Rotating the key re-issues the certificate with it.
-   For the two minted keys, `gideon_admin_api_key` and `gideon_eval_api_key`, the apply-manifest stage removes and re-mints the file.
-   Nothing is recreated.
-   Run `gideon secrets rotate grafana_admin_password` to reset Grafana's stored password through Grafana's own CLI inside the container.
-   It needs no old value.
-   The command then rewrites the file and verifies the sign-in without recreating anything.
-   Use it for a stored password nobody knows.
-   Copy the file's new value into the office password manager.
-   Every other name refuses before any change and names the office's path for that supplied secret.
-   For `tls_key`, replace the files.
-   Then run `tls reload`.
-   For `ldap_bind_password` and `smtp_password`, replace the file.
-   Run `apply`.
-   Then force-recreate Grafana by hand: `sudo docker compose -f /etc/gideon/rendered/compose.yaml up -d --no-deps --force-recreate grafana`.
-   Grafana mounts those files, which the recreate rule does not see.
-   For `proxy_auth`, replace the file.
-   Then run `apply`.
-   A Postgres role password also refuses, because the role itself holds the value.
-   So do `gideon_admin_password` and `gideon_eval_password`, because the frontend's account holds it.
-   The rotation transcript is the record.
-   A restore of a set made before a rotation brings the older value back.
-   After that restore's `apply`, run `secrets rotate <name>` for every secret rotated since the set was made.
+   A failed phase stops the run, and its fix names the nested command to run by hand (`Run sudo python3 -m gideon backup drill, correct its refusal, then re-run install.`). Re-running install on a live box is safe because every nested command is idempotent. A re-run is a no-op apply, a fresh incremental set, a drill, and the URL.
+
+   An `install` row with phase `intent` is written once apply has converged the stores. A failure in preflight or apply leaves no row because the writer does not exist yet. Their own rows are the record.
+
+   **The weights tree** (`v0.1.5`): apply's `models` stage, between `pull` and `recreate`, makes `/data/models` hold the profile's models in the Hugging Face hub-cache layout. Every file is verified against `models.lock`. Run `gideon models pull` for the same converge by hand. A re-run verifies and fetches nothing.
+
+   The tree is derived state outside the backup set because it is derived from the model lock. After a rebuild, apply fetches it again. The pull keeps the pinned set and the newest previous complete set, so `upgrade --rollback` can re-apply the previous release without a download. Older sets are removed, and each removal is printed.
+
+   `/data/models/gideon/pulls.yaml` is the pull's record. A pull that stops mid-file resumes on the next run. A second pull started while one runs refuses naming it.
+
+   **The engine** (`v0.1.6`): on a GPU host, apply renders `gideon-generator` from the profile's `serve` block, using the vLLM image at its `images.lock` digest. The recorded GPU 0 card is reserved by UUID through CDI. `/data/models` is mounted read-only, and no port is published. Apply starts the engine in the `start` stage.
+
+   The model takes minutes to load, so `verify` waits for the model servers together for up to the longest of their allowances from the start stage. This uses the same clock as each container's healthcheck. It reports `model servers healthy N s after start`, the moment the last of them answered. Every other service keeps its one-minute bound.
+
+   The embedding server, `gideon-embed`, is the engine's sibling on the same image. It uses the recorded GPU 1 card by UUID, with a fixed share of that card held from its start. Its own key, `/etc/gideon/secrets/embed_api_key`, is read inside its container, and the same wait applies. It starts only when that share is free on the card; otherwise its logs name the shortfall, and `verify` fails naming them.
+
+   The engine's API key is the generated secret `/etc/gideon/secrets/engine_api_key`. The `secrets` stage creates it only when absent. It is read inside the container and does not appear in the Compose file, argv, or a row. Each model server requires its key on every route but `/health` and `/metrics`. GIDEON middleware enforces this, loaded by the engine from a rendered file, so a client without the key sees 401 on any other route.
+
+   The start-up log (the `GPU KV cache size` and `Maximum concurrency` lines) is in the journal at every boot: `sudo journalctl CONTAINER_NAME=gideon-gideon-generator-1 -b`. A vLLM image or model pin bump restarts the engine inside apply after the `models` stage. A rollback to a release without the engine removes its container as an orphan and leaves the key file. On a no-GPU host none of this is rendered.
+
+   To rotate the key, run `gideon secrets rotate engine_api_key` (`v0.1.40`). The command first refuses when `apply` has pending changes or has not verified. Run `render --diff`, then run `apply`. The rotation command then prints what it will do. The engine is recreated with a cold start bounded by apply's engine wait, and the key's second mount, `gideon-api`, is recreated in seconds. The command writes a new value to the same path as `root:gideon` 0440 and force-recreates the engine once. A file secret is a bind mount, so the new key reaches only a new container. This is the rule `tls reload` follows for Caddy. The command converges the rest as apply does: verify, then record `applied.yaml`. Afterward, `render --diff` reports nothing.
+
+   Since `v0.2.29` the frontend is not among the consumers: the engine's key left its env file at the cutover. The frontend's own connection key is `gideon_api_key`. Run `gideon secrets rotate gideon_api_key` to recreate `gideon-api` (its mount) and the frontend (its env file's owner).
+
+   Run `gideon secrets rotate embed_api_key` to recreate the embedding server alone, with a cold start bounded by the same wait. Nothing else consumes its key yet.
+
+   General is the chat branch users talk to, with internet search and no case-matter access. Once General is live, rotate in an announced maintenance window if the rotation recreates the engine, because the cold start makes General unavailable. A maintenance window is an announced span when General may be unavailable; §2 sets its rules. The command does not gate on the clock.
+
+   The same command rotates `webui_secret_key`, recreating the frontend once and ending every signed-in session. For `searxng_secret_key`, it recreates SearXNG through the recreate rule. With search off, nothing consumes that key, and the command says so and writes nothing.
+
+   Rotating `qdrant_api_key` recreates the vector store in seconds. Nothing else consumes that key yet. A `qdrant_read_only_api_key` rotation recreates the store in seconds, then the frontend. Signed-in sessions stay because the session key does not move.
+
+   For `opensearch_password`, the lexical store is recreated and takes about ten seconds to become healthy. Rotating `opensearch_metrics_password` recreates the lexical store and Prometheus, and the scrape resumes within a minute.
+
+   For `opensearch_transport_key` and `opensearch_transport_cert`, the lexical store is recreated. Rotating the certificate alone renews it from its standing key before its ten-year end date. Rotating the key re-issues the certificate with it.
+
+   For the two minted keys, `gideon_admin_api_key` and `gideon_eval_api_key`, the apply-manifest stage removes and re-mints the file. Nothing is recreated.
+
+   Run `gideon secrets rotate grafana_admin_password` to reset Grafana's stored password through Grafana's own CLI inside the container. It needs no old value. The command then rewrites the file and verifies the sign-in without recreating anything. Use it for a stored password nobody knows. Copy the file's new value into the office password manager.
+
+   Every other name refuses before any change and names the office's path for that supplied secret. For `tls_key`, replace the files, then run `tls reload`.
+
+   For `ldap_bind_password` and `smtp_password`, replace the file, then run `apply`. Grafana mounts those files, which the recreate rule does not see, so force-recreate Grafana by hand afterward: `sudo docker compose -f /etc/gideon/rendered/compose.yaml up -d --no-deps --force-recreate grafana`.
+
+   For `proxy_auth`, replace the file, then run `apply`.
+
+   A Postgres role password also refuses, because the role itself holds the value. So do `gideon_admin_password` and `gideon_eval_password`, because the frontend's account holds it.
+
+   The rotation transcript is the record. A restore of a set made before a rotation brings the older value back. After that restore's `apply`, run `secrets rotate <name>` for every secret rotated since the set was made.
 7. **Hand over the URL**, and test alerts once so the page path is proven through the relay (`observability.md`).
 
    ```bash
    gideon alerts test
    ```
 
-Run `gideon corpus install <label>` to fetch and verify the files a committed lockfile pins.
-It stages and ingests each court's rows, then calls the build for each collection whose inputs changed.
-The build clusters near-duplicate chunks and builds both halves of an index generation, a complete build of one collection's indexes.
-It materializes each cited case's risk state for the generation and writes its build report to the record.
-The install records the label as installed and removes its work directory (the release-files runbook's §10).
-Run `gideon index build caselaw` for the same build directly.
-Run `gideon index build caselaw --sample` to build the eval sample generation on the `gideon-ci` sibling, the standing second stack on the box.
+Run `gideon corpus install <label>` to fetch and verify the files a committed lockfile pins. It stages and ingests each court's rows, then calls the build for each collection whose inputs changed. The build clusters near-duplicate chunks and builds both halves of an index generation, a complete build of one collection's indexes. It materializes each cited case's risk state for the generation and writes its build report to the record. The install records the label as installed and removes its work directory (the release-files runbook's §10). Run `gideon index build caselaw` for the same build directly. Run `gideon index build caselaw --sample` to build the eval sample generation on the `gideon-ci` sibling, the standing second stack on the box.
 
-Run `gideon index promote <generation>` to serve a built generation.
-It runs the build gates as one recorded eval run and refuses on any failure with nothing changed.
-Then it marks the generation live in the record and points both stores' aliases at it.
-The previous generation is retired and kept seven days.
-Run it again after a failure between the two stores.
-Run `gideon backup run --full` after a production promote.
+Run `gideon index promote <generation>` to serve a built generation. It runs the build gates as one recorded eval run and refuses on any failure with nothing changed. Then it marks the generation live in the record and points both stores' aliases at it. The previous generation is retired and kept seven days. Run it again after a failure between the two stores. Run `gideon backup run --full` after a production promote.
 
-Run `gideon index report` to print what the record holds after an install or a build.
-It lists the lockfiles, the generations and their states, and the live or a named generation's documents per court.
-Run `gideon index report <generation>` to read a generation still building.
-A collection's build, by either command, starts only with a passing smoke run of its lockfile on the sibling's sample.
+Run `gideon index report` to print what the record holds after an install or a build. It lists the lockfiles, the generations and their states, and the live or a named generation's documents per court. Run `gideon index report <generation>` to read a generation still building. A collection's build, by either command, starts only with a passing smoke run of its lockfile on the sibling's sample.
 
-**No-GPU host.**
-`sudo python3 -m gideon host provision --no-gpu` writes `/etc/gideon/no-gpu` once.
-It is refused on a host with an NVIDIA device.
-Every later command reads the marker.
-The driver and toolkit steps are skipped.
-The DCGM exporter, its scrape job, the GPU board, and the driver-drift rule are not rendered.
-`--only` on a skipped step refuses and names the marker.
-To leave the mode, remove the marker.
-Then re-run provision.
-The next apply renders the removed files as new.
-The marker is not carried in a backup set.
+**No-GPU host.** `sudo python3 -m gideon host provision --no-gpu` writes `/etc/gideon/no-gpu` once. It is refused on a host with an NVIDIA device. Every later command reads the marker, so the driver and toolkit steps are skipped, and the DCGM exporter, its scrape job, the GPU board, and the driver-drift rule are not rendered. `--only` on a skipped step refuses and names the marker.
 
-**GPU record.**
-The first render on a GPU host, including `render --diff`, writes `/etc/gideon/gpus.yaml` from `nvidia-smi -L` order.
-Later renders bind each `models.lock` GPU position to that recorded card.
-If a recorded card is no longer reported, render refuses with its position and UUID.
-After a card change, remove the file as root with `sudo rm /etc/gideon/gpus.yaml`.
-Then run `gideon render --diff` to re-record the cards.
-Inspect what moves before applying.
-The record is not carried in a backup set.
+To leave the mode, remove the marker, then re-run provision. The next apply renders the removed files as new. The marker is not carried in a backup set.
 
-**Build box.**
-The KVM, registry, runner, and archive-tools steps (`kvm`, `registry`, `gh-runner`, and `archive-tools`) converge only on TNMD's box.
-Declare it once with `gideon host provision --build-box`, which writes `/etc/gideon/build-box`.
-Every other host skips those steps.
-A no-GPU host cannot be declared the build box, nor the build box a no-GPU host.
-The marker is not carried in a backup set.
-If your host already runs the three units when it crosses `v0.1.68`, run `gideon upgrade <tag>`.
-Its provision skips the three with a reason naming the declaration, leaving their units running.
-Its apply renders the host-unit rule and the runner's unit pattern away.
-Then run `gideon host provision --build-box`, which reports the three `ok`.
-Then run `gideon apply`, which renders the rule and the pattern back.
-Keep the transcript as §2 says.
-TNMD's box was declared on 2026-09-16, at `v0.1.71`'s release, before any upgrade.
-Its crossing was recorded with the marker removed to leave the mode, then the three commands.
-To leave the mode, remove the marker.
-Run provision again.
-Then apply.
-The three units stay until you remove them by hand.
-Until then, `restore` refuses on a host whose registry is still active.
+**GPU record.** The first render on a GPU host, including `render --diff`, writes `/etc/gideon/gpus.yaml` from `nvidia-smi -L` order. Later renders bind each `models.lock` GPU position to that recorded card. If a recorded card is no longer reported, render refuses with its position and UUID.
+
+After a card change, remove the file as root with `sudo rm /etc/gideon/gpus.yaml`, then run `gideon render --diff` to re-record the cards. Inspect what moves before applying. The record is not carried in a backup set.
+
+**Build box.** The KVM, registry, runner, and archive-tools steps (`kvm`, `registry`, `gh-runner`, and `archive-tools`) converge only on TNMD's box. Declare it once with `gideon host provision --build-box`, which writes `/etc/gideon/build-box`. Every other host skips those steps. A no-GPU host cannot be declared the build box, nor the build box a no-GPU host. The marker is not carried in a backup set.
+
+When a host already runs the three units as it crosses `v0.1.68`, run `gideon upgrade <tag>`. Its provision skips the three with a reason naming the declaration, leaving their units running. Its apply renders the host-unit rule and the runner's unit pattern away. Then run `gideon host provision --build-box`, which reports the three `ok`, followed by `gideon apply`, which renders the rule and the pattern back. Keep the transcript as §2 says. TNMD's box was declared on 2026-09-16, at `v0.1.71`'s release, before any upgrade. Its crossing was recorded with the marker removed to leave the mode, then the three commands.
+
+To leave the mode, remove the marker, run provision again, then apply. The three units stay until removed by hand. Until then, `restore` refuses on a host whose registry is still active.
 
 ## 6. The acceptance run
 
@@ -437,201 +286,87 @@ The pushed tag's own two-step run was the standing record while the tag-triggere
 
 ## 2. Upgrading: `gideon upgrade <tag>`
 
-This section moves an installed box to a newer release.
-Use it when a release note has arrived and you have a window.
+An upgrade moves an installed box to a newer release after its release note has arrived and a window is available. It takes a full backup set before moving the checkout, so rollback has a way back, then runs the new tree's own commands.
 
-Run as root from any directory against the install home's clean work tree.
-The install home is `/opt/gideon`, which holds the installed release.
-The work tree must have no changes to tracked files.
-An untracked file is no obstacle, so `gideon upgrade <tag> 2>&1 | tee <transcript file>` keeps the command output with the office's records.
-The command runs from the *current* release's tree and hands over to the new tree's own CLI after the checkout.
-Nothing of the new release is loaded into the running process.
-`sudo ./upgrade.sh <tag>` from the checkout runs the same command.
+Run as root from any directory against the install home's clean work tree. The install home is `/opt/gideon`, which holds the installed release, and its work tree must have no changes to tracked files. An untracked file is no obstacle, so `gideon upgrade <tag> 2>&1 | tee <transcript file>` keeps the command output with the office's records. The command runs from the *current* release's tree and hands over to the new tree's own CLI after the checkout; nothing of the new release is loaded into the running process. `sudo ./upgrade.sh <tag>` from the checkout runs the same command.
 
-The installed release's site loader refuses keys it does not know from every command and timer running from `/opt/gideon`.
-`upgrade` loads the site file before checking out the new release.
-Add any key named in a release note's "new site keys" line to `/etc/gideon/site.yaml` only after that release's `upgrade` finishes.
-Then run `sudo gideon host provision`.
-Then run `sudo gideon apply`.
-`docker_address_pool` is the first key that follows this sequence.
+The installed release's site loader refuses keys it does not know from every command and timer running from `/opt/gideon`, and `upgrade` loads the site file before checking out the new release, so a key the new release introduces would stop the upgrade before it starts. Add any key named in a release note's "new site keys" line to `/etc/gideon/site.yaml` only after that release's `upgrade` finishes, then run `sudo gideon host provision` followed by `sudo gideon apply`. `docker_address_pool` is the first key that follows this sequence.
 
-**From go-live.**
-A tag is user-facing from the office's first users.
-Before them, the rules below do not bind.
-The **quiet window** is weeknights 19:00–06:00 and Friday 19:00 to Monday 06:00 in the site's timezone (TNMD: America/Chicago).
-Work is window-bound when it sends requests to the engine on GPU 0.
-The nightly is the one scheduled task that does this.
-`gideon-eval-nightly.timer` fires at 21:00 office time every night, weekends included.
-It runs the `general-smoke` and `guardrails` suites as one `--kind nightly` process under one engine lock claim.
-It refuses outside 19:00–06:00, waits once behind another GIDEON run's lock, and stops each suite at 06:00, recording it partial.
-A **maintenance window** is an announced span inside the quiet window when General may be unavailable.
-Announce it at least one working day ahead, with weekend nights as the default.
-This is the only sanctioned unavailability.
-An engine swap, a driver, engine, or Docker change, and every upgrade on a user-facing tag take a maintenance window.
-Read its cost beforehand from `render --diff`'s recreate row.
-Count on the whole stack only when `provision` or a rollback needs it.
-At least one working day before the window, send the release's note from `docs/release-notes/<tag>.md` to the users.
-Inform the supervisor at least one working day ahead too.
-The release note's `## Breaking` section is what the `version` stage below prints.
-A model upgrade's proof window precedes its tag.
-Announce it under `docs/runbooks/model-upgrade.md` §4.
-Then send the release's note with the tag.
+**From go-live.** A tag is user-facing from the office's first users; before them, the rules below do not bind. The **quiet window** is weeknights 19:00–06:00 and Friday 19:00 to Monday 06:00 in the site's timezone (TNMD: America/Chicago). Work is window-bound when it sends requests to the engine on GPU 0. The nightly is the one scheduled task that does this: `gideon-eval-nightly.timer` fires at 21:00 office time every night, weekends included, and runs the `general-smoke` and `guardrails` suites as one `--kind nightly` process under one engine lock claim. It refuses outside 19:00–06:00, waits once behind another GIDEON run's lock, and stops each suite at 06:00, recording it partial.
+
+A **maintenance window** is an announced span inside the quiet window when General may be unavailable, and this is the only sanctioned unavailability. Announce it at least one working day ahead, with weekend nights as the default. An engine swap, a driver, engine, or Docker change, and every upgrade on a user-facing tag take a maintenance window. Read its cost beforehand from `render --diff`'s recreate row, and count on the whole stack only when `provision` or a rollback needs it.
+
+At least one working day before the window, send the release's note from `docs/release-notes/<tag>.md` to the users and inform the supervisor. The release note's `## Breaking` section is what the `version` stage below prints. A model upgrade's proof window precedes its tag. Announce it under `docs/runbooks/model-upgrade.md` §4, then send the release's note with the tag.
 
 | Stage | What happens | Fix on a refusal |
 |---|---|---|
-| `preconditions` | root, a valid site file, Docker Compose answering, the checkout a git work tree with a clean status, its owner resolved from the directory | Commit or stash as the owner. Then re-run |
-| `fetch` | `git fetch --tags --force origin` runs as the owner. The tag must resolve to a commit. A tag the fetch moved is named with both commits. A failed fetch with the tag already present continues and says so | Fetch by hand as the owner with the same command. Then re-run |
-| `signature` | `git verify-tag` runs as the owner against the installed tree's `config/release-signers`. A lightweight, unsigned, foreign-key, or unverifiable tag refuses before anything is checked out | Confirm the tag on the project's tags page and release note. Then re-run. For a newer signing key, upgrade first to the release whose signers file carries it. Restore a missing signers file by following `docs/runbooks/release-files.md §12` |
-| `version` | the tag's tree must declare the version its name says. A lower version refuses, naming `upgrade --rollback` and `restore`. The same version is a re-run. **A different major prints the release note's `## Breaking` section first and refuses without `--acknowledge-breaking`** | Read the section. Then re-run with the flag |
-| `preflight` | the current tree's install-time checks refuse as `./preflight.sh` does. Provision steps are reported here. An unconverged step warns instead of refusing because the new release's `provision` stage converges it and its `preflight` judges it | Correct the office service it names. Then re-run |
-| `backup` | the pre-upgrade set, `pre-<tag>`, is a full set whose manifest must record the commit the checkout is leaving, rollback's way back. When the plain label exists from an attempt that did not cross the checkout, a suffixed `pre-<tag>-<timestamp>` set is taken. The earlier one may predate later writes. When the checkout already stands at the tag, an earlier attempt crossed it. The newest `pre-<tag>[-…]` set naming another release is **reused** and is not re-taken | the backup's own rows carry the fix |
-| `audit-intent` | one `upgrade` row: from-version, to-tag, both commits, the set label | Correct the Postgres service. Then re-run |
-| `checkout` | `git checkout --detach <tag>` runs as the owner. It is skipped when already there | re-run |
-| `provision` | the **new tree's** `host provision` runs with `--acknowledge-disruption` passed through when given. Its rows are streamed as they happen. It exits 0 on `blocked` and `reboot-required` rows | A failed child names its refusal and the fix to re-run `upgrade <tag>`, with `--acknowledge-disruption` when the provision row asks for it. The next stage judges `blocked` and `reboot-required` |
-| `preflight` | the new tree's preflight gates apply and runs the new release's own readiness checks. An unconverged or `reboot-required` step, or a new office-services requirement, refuses here. Nothing of the product has changed yet | **Reboot if asked. Then re-run `upgrade <tag>`**. The checkout is already made and the set is reused, so the re-run resumes here |
-| `apply` | the new tree's `apply` runs thirteen stages, streamed. A pin bump in `models.lock` fetches the new revision here, before the engine restarts | Run `upgrade --rollback` unless the row names the engine lock's holder. When the row names that holder, nothing was changed. Wait for that evaluation to finish. Then re-run `upgrade <tag>`, which the version stage accepts as a re-run |
-| `verify` | the new tree answers `--version` with the tag's version. The applied record names it. Every service the rendered project declares has a container that is running and healthy on a fresh read | `upgrade --rollback` |
-| `engine-verify` | the new tree's `engine verify` runs as a passthrough child. Its failing row names its own server's logs | Run `upgrade --rollback` unless the row names the engine lock's holder or the model's decline on every attempt. When the row names that holder, nothing was changed. Wait for that evaluation to finish. Then re-run `upgrade <tag>`, which the version stage accepts as a re-run. When the failing row names the model's decline on every attempt (the trip's `answered`, the structured row's `length`), nothing is broken. Run `engine verify` by hand. When it declines again, supersede the case as `eval/engine-verify/README.md` says. Do not run `upgrade --rollback` for that decline |
-| `audit-applied` | the `upgrade` row with the durations | — |
+| `preconditions` | The command requires root, a valid site file, Docker Compose answering, and a checkout that is a git work tree with a clean status. It resolves the owner from the directory. | Commit or stash as the owner, then re-run. |
+| `fetch` | `git fetch --tags --force origin` runs as the owner, and the tag must resolve to a commit. A tag the fetch moved is named with both commits. If the fetch fails but the tag is already present, the command continues and says so. | Fetch by hand as the owner with the same command, then re-run. |
+| `signature` | `git verify-tag` runs as the owner against the installed tree's `config/release-signers`. The command refuses a lightweight, unsigned, foreign-key, or unverifiable tag before anything is checked out. | Confirm the tag on the project's tags page and release note, then re-run. For a newer signing key, upgrade first to the release whose signers file carries it. Restore a missing signers file by following `docs/runbooks/release-files.md §12`. |
+| `version` | The tag's tree must declare the version its name says. A lower version refuses, naming `upgrade --rollback` and `restore`, while the same version is a re-run. **A different major prints the release note's `## Breaking` section first and refuses without `--acknowledge-breaking`**. | Read the section, then re-run with the flag. |
+| `preflight` | The current tree's install-time checks refuse as `./preflight.sh` does and report provision steps here. An unconverged step warns instead of refusing because the new release's `provision` stage converges it and its `preflight` judges it. | Correct the office service it names, then re-run. |
+| `backup` | The pre-upgrade set, `pre-<tag>`, is a full set whose manifest must record the commit the checkout is leaving, rollback's way back. When the plain label exists from an attempt that did not cross the checkout, a suffixed `pre-<tag>-<timestamp>` set is taken because the earlier one may predate later writes. When the checkout already stands at the tag, an earlier attempt crossed it, so the newest `pre-<tag>[-…]` set naming another release is **reused** and is not re-taken. | Follow the fix in the backup's own rows. |
+| `audit-intent` | One `upgrade` row records the from-version, to-tag, both commits, and the set label. | Correct the Postgres service, then re-run. |
+| `checkout` | `git checkout --detach <tag>` runs as the owner and is skipped when already there. | Re-run the command. |
+| `provision` | The **new tree's** `host provision` runs with `--acknowledge-disruption` passed through when given. Its rows are streamed as they happen, and it exits 0 on `blocked` and `reboot-required` rows. | A failed child names its refusal and the fix to re-run `upgrade <tag>`, with `--acknowledge-disruption` when the provision row asks for it. The next stage judges `blocked` and `reboot-required`. |
+| `preflight` | The new tree's preflight gates apply and runs the new release's own readiness checks. An unconverged or `reboot-required` step, or a new office-services requirement, refuses here; nothing of the product has changed yet. | **Reboot if asked. Then re-run `upgrade <tag>`**. The checkout is already made and the set is reused, so the re-run resumes here. |
+| `apply` | The new tree's `apply` runs thirteen stages, streamed. A pin bump in `models.lock` fetches the new revision here, before the engine restarts. | Run `upgrade --rollback` unless the row names the engine lock's holder. When the row names that holder, nothing was changed. Wait for that evaluation to finish, then re-run `upgrade <tag>`, which the version stage accepts as a re-run. |
+| `verify` | The new tree answers `--version` with the tag's version, and the applied record names it. Every service the rendered project declares has a container that is running and healthy on a fresh read. | Run `upgrade --rollback`. |
+| `engine-verify` | The new tree's `engine verify` runs as a passthrough child, and its failing row names its own server's logs. | Run `upgrade --rollback` unless the row names the engine lock's holder or the model's decline on every attempt. When the row names that holder, nothing was changed. Wait for that evaluation to finish, then re-run `upgrade <tag>`, which the version stage accepts as a re-run. When the failing row names the model's decline on every attempt (the trip's `answered`, the structured row's `length`), nothing is broken. Run `engine verify` by hand. When it declines again, supersede the case as `eval/engine-verify/README.md` says. Do not run `upgrade --rollback` for that decline. |
+| `audit-applied` | The `upgrade` row records the durations. | — |
 
-The standing next step after a failure depends on where it happened.
-Before the checkout, correct the problem.
-Then re-run.
-At the new tree's provision or preflight, reboot or correct the problem.
-Then re-run.
-Alternatively, run `upgrade --rollback`, which then only moves the checkout back.
-At or after the new tree's apply, run `upgrade --rollback`.
-Every refusal prints exactly that.
+The standing next step after a failure depends on where it happened. Before the checkout, correct the problem, then re-run. At the new tree's provision or preflight, reboot or correct the problem, then re-run; alternatively, run `upgrade --rollback`, which then only moves the checkout back. At or after the new tree's apply, run `upgrade --rollback`. Every refusal prints exactly that.
 
-An upgrade takes about the time of a preflight before and after the checkout (two relay test messages), one full set, a provision check pass, and an apply.
-A full set takes about 35 s on TNMD's box.
-The `engine-verify` gate adds about two to eight minutes.
-A re-sent sample adds a turn.
-The pre-upgrade set is not pushed.
-The nightly unit pushes.
+An upgrade takes about the time of a preflight before and after the checkout (two relay test messages), one full set, a provision check pass, and an apply. A full set takes about 35 s on TNMD's box, and the `engine-verify` gate adds about two to eight minutes. A re-sent sample adds a turn. The pre-upgrade set is not pushed; the nightly unit pushes.
 
 ## 3. Rolling back: `gideon upgrade --rollback [<tag>]`
 
-This section returns the release and data to the point saved before an upgrade.
-Use it when an upgrade ended red or the new release is wrong.
+A rollback returns the release and data to the point saved before an upgrade when the upgrade ended red or the new release is wrong. It restores the pre-upgrade set and applies the previous release because that set *is* the record of what to restore.
 
-The pre-upgrade set *is* the record of what to restore.
-Its manifest carries the checkout's commit, the release, and the archive boundary.
-Rollback restores that set and applies the previous release, returning both data and product state to the saved point.
-The small record `/data/backup-staging/rollback.json` tracks how far a rollback got.
-It exists only while a rollback is in progress (the `plan` row below).
+The set's manifest carries the checkout's commit, the release, and the archive boundary. Restoring the set returns both data and product state to the saved point. The small record `/data/backup-staging/rollback.json` tracks how far a rollback got and exists only while a rollback is in progress (the `plan` row below).
 
-Before rolling back across the release that introduced `docker_address_pool`, remove the field from `/etc/gideon/site.yaml`.
-The previous release's site loader refuses it, so its rollback stages cannot start while the field is present.
-The restore replaces the site file with the pre-upgrade set's copy.
-That copy did not hold the field because the set includes `/etc/gideon`.
-The daemon's `default-address-pools` key remains.
-The previous release treats it as foreign and keeps it, so the pool still protects new Docker networks.
+Before rolling back across the release that introduced `docker_address_pool`, remove the field from `/etc/gideon/site.yaml`. The previous release's site loader refuses it, so its rollback stages cannot start while the field is present. The restore replaces the site file with the pre-upgrade set's copy. That copy did not hold the field because the set includes `/etc/gideon`. The daemon's `default-address-pools` key remains; the previous release treats it as foreign and keeps it, so the pool still protects new Docker networks.
 
 | Stage | What happens |
 |---|---|
-| `select` | the newest complete `pre-v…` set (with or without a timestamp suffix), or the one for `<tag>` when given. Your other `pre-*` labels and the `pre-rollback-*` safety sets are not candidates. Its commit must exist in the checkout. When the running tree already is the set's release *and* the applied record names it, there is nothing to roll back to. Use `restore --from staging --set <label>` when you want the data back without changing the release. When only the tree is the set's release, a rollback stopped after its checkout. The re-run resumes from the previous tree |
-| `plan` | whether a restore is needed is judged from `rendered/manifest.yaml`. This is the first thing an apply writes, before any stage touches the stores. A manifest still naming the set's release proves the new tree's apply did not complete a render. In that case, rollback only moves the checkout back and re-verifies. Any other release, or a missing or unreadable manifest, means a restore. The verdict is written to `/data/backup-staging/rollback.json` beside `push.json`, recording the rollback in progress. It is updated when the restore is done and removed once the `rollback` row is written. A re-run resumes from that record |
-| `safety` | when a restore is needed and the whole stack is running, the *current* tree takes a full `pre-rollback-<timestamp>` set. Its files, checkout copy, and database describe the release that is running. A partial or stopped stack gets none. The row says that anything written since the upgrade began is not preserved |
-| `audit-intent` | a `rollback` row is written when Postgres answers. When it does not, the reason for many rollbacks, the row is deferred. The applied row later says `intent_recorded: false`, so the deferral is explicit |
-| `stop` | when a restore is needed, `compose down` stops whatever is running. The previous tree's restore finds a stopped stack and takes no pre-restore set of its own |
-| `identity` | reads the selected set's manifest. A set sealed to one recipient was made by a tree that knows no box identity. That tree's nightly would snapshot it, so `/etc/gideon/backup_age_identity` is removed and the row says so. A set sealed to two keeps it so this box can open its own sets. The next `upgrade` mints a fresh one in its provision phase |
-| `checkout` | the tag pointing at the manifest's commit when one does, else the commit. The checkout runs as the owner |
-| `restore` | when needed, the previous tree's `restore --from staging --set <label>` runs. It is verified whole before anything is replaced. Postgres returns to the set's archive boundary |
-| `apply` | the previous tree's `apply` runs. Restore leaves the frontend and ingress down and names apply as the next command. The rollback command runs it here |
-| `verify` | as the forward path, against the set's release |
-| `engine-verify` | the previous tree's `engine verify` runs. If it refuses, read the failing row's own server logs. Run `engine verify` by hand. Do not go live. When the failing row names the model's decline on every attempt (the trip's `answered`, the structured row's `length`), nothing is broken. Run `engine verify` by hand. When it declines again, supersede the case as `eval/engine-verify/README.md` says |
-| `audit-applied` | the `rollback` row |
+| `select` | Rollback selects the newest complete `pre-v…` set (with or without a timestamp suffix), or the one for `<tag>` when given. Other `pre-*` labels on the box and the `pre-rollback-*` safety sets are not candidates. The selected set's commit must exist in the checkout. When the running tree already is the set's release *and* the applied record names it, there is nothing to roll back to. Use `restore --from staging --set <label>` to restore the data without changing the release. When only the tree is the set's release, a rollback stopped after its checkout. The re-run resumes from the previous tree. |
+| `plan` | Whether a restore is needed is judged from `rendered/manifest.yaml`, the first thing an apply writes, before any stage touches the stores. A manifest still naming the set's release proves the new tree's apply did not complete a render. In that case, rollback only moves the checkout back and re-verifies. Any other release, or a missing or unreadable manifest, means a restore. The verdict is written to `/data/backup-staging/rollback.json` beside `push.json`, recording the rollback in progress. The record is updated when the restore is done and removed once the `rollback` row is written. A re-run resumes from that record. |
+| `safety` | When a restore is needed and the whole stack is running, the *current* tree takes a full `pre-rollback-<timestamp>` set. Its files, checkout copy, and database describe the release that is running. A partial or stopped stack gets none. The row says that anything written since the upgrade began is not preserved. |
+| `audit-intent` | A `rollback` row is written when Postgres answers. When Postgres does not answer, which is the reason for many rollbacks, the row is deferred. The applied row later says `intent_recorded: false`, so the deferral is explicit. |
+| `stop` | When a restore is needed, `compose down` stops whatever is running. The previous tree's restore finds a stopped stack and takes no pre-restore set of its own. |
+| `identity` | The command reads the selected set's manifest. A set sealed to one recipient was made by a tree that knows no box identity. That tree's nightly would snapshot the identity, so `/etc/gideon/backup_age_identity` is removed and the row says so. A set sealed to two keeps the identity so this box can open its own sets. The next `upgrade` mints a fresh one in its provision phase. |
+| `checkout` | The command checks out the tag pointing at the manifest's commit when one exists, or the commit otherwise. The checkout runs as the owner. |
+| `restore` | When needed, the previous tree's `restore --from staging --set <label>` runs. The set is verified whole before anything is replaced, and Postgres returns to its archive boundary. |
+| `apply` | The previous tree's `apply` runs. Restore leaves the frontend and ingress down and names apply as the next command. The rollback command runs it here. |
+| `verify` | Verification follows the forward path against the set's release. |
+| `engine-verify` | The previous tree's `engine verify` runs. If it refuses, read the failing row's own server logs, then run `engine verify` by hand. Do not go live. When the failing row names the model's decline on every attempt (the trip's `answered`, the structured row's `length`), nothing is broken. Run `engine verify` by hand. When it declines again, supersede the case as `eval/engine-verify/README.md` says. |
+| `audit-applied` | The `rollback` row is written. |
 
-**What is preserved and what is not.**
-The database, `/etc/gideon`, the registry, and the frontend's bulk data return to the pre-upgrade set's state.
-Anything written after the set was taken lives only in the `pre-rollback-*` safety set, when one could be taken.
-This includes a user's chat during a failed upgrade.
-**Host state converged for the newer release stays converged** because rollback restores the product from its set, not the host's drivers or packages.
-A driver or package rollback is a `host provision` decision you take.
-Rollback does not do it.
+**What is preserved and what is not.** The database, `/etc/gideon`, the registry, and the frontend's bulk data return to the pre-upgrade set's state. Anything written after the set was taken lives only in the `pre-rollback-*` safety set, when one could be taken. This includes a user's chat during a failed upgrade. **Host state converged for the newer release stays converged** because rollback restores the product from its set, not the host's drivers or packages. The office decides on a driver or package rollback through `host provision`; rollback does not do it.
 
-A rollback by `upgrade --rollback` or `restore` to a tag before GIDEON's firewall rules moved into their own chain restores the older firewall writer.
-That writer declares and flushes the shared `DOCKER-USER` chain.
-Its first ufw reload erases a co-tenant application's rules there.
-A co-tenant is another application your office runs on the same box.
-Every later provision run on that older tree erases those rules again until GIDEON upgrades back.
-GIDEON's own published ports stay protected by the older rules.
-Announce the firewall consequence and the hour with the rollback.
-Tell the co-tenant to re-add its rules after the old tree has run.
-Announce the return the same way.
+A rollback by `upgrade --rollback` or `restore` to a tag before GIDEON's firewall rules moved into their own chain restores the older firewall writer. That writer declares and flushes the shared `DOCKER-USER` chain, so its first ufw reload erases a co-tenant application's rules there. A co-tenant is another application the office runs on the same box. Every later provision run on that older tree erases those rules again until GIDEON upgrades back. GIDEON's own published ports stay protected by the older rules. Announce the firewall consequence and the hour with the rollback. Tell the co-tenant to re-add its rules after the old tree has run. Announce the return the same way.
 
-A rollback by `upgrade --rollback` or `restore` to a tag from before the engine's integration network, `gideon_integration`, renders `gideon-generator` on `gideon_gideon` alone.
-The integration network connects the engine and its clients.
-The older sibling tool puts its relay back on `gideon_gideon` at its next `up`.
-`gideon_integration` stays in place with no engine on it.
-A co-tenant's client on that network cannot reach the engine until GIDEON upgrades back or the client's operator moves it back to `gideon_gideon`.
-Announce that consequence and the hour with the rollback.
-Announce the return the same way.
+A rollback by `upgrade --rollback` or `restore` to a tag from before the engine's integration network, `gideon_integration`, renders `gideon-generator` on `gideon_gideon` alone. The integration network connects the engine and its clients. The older sibling tool puts its relay back on `gideon_gideon` at its next `up`. `gideon_integration` stays in place with no engine on it, so a co-tenant's client on that network cannot reach the engine until GIDEON upgrades back or the client's operator moves it back to `gideon_gideon`. Announce that consequence and the hour with the rollback. Announce the return the same way.
 
-Release `v0.3.50` taught `models pull` to record a candidate.
-A rollback by `upgrade --rollback` or `restore` to an earlier tag refuses at the older tree's `models` stage while the build box's pull record holds a `candidates:` map.
-That record is `/data/models/gideon/pulls.yaml`.
-The older parser accepts the four slots alone and names them in its refusal.
-Only the build box meets this, since a shipped lock carries no candidate.
-Delete the `candidates:` map from the record by hand, leaving the four slots as they stand.
-Then re-run the rollback, which resumes where it stopped (the `select` and `plan` rows above).
-Alternatively, re-run the `apply` a by-hand `restore` printed.
-The refusal also offers removing the whole record.
-Do not remove it, since a removed record forgets which sets are complete.
-The older tree's next pull keeps every tree it finds, including the previous set's.
-The older tree leaves the candidate's folder alone as one it does not know.
-The next `models pull <candidate>` on a tree at or above that release records the folder again and fetches nothing.
+Release `v0.3.50` added candidate recording to `models pull`. A rollback by `upgrade --rollback` or `restore` to an earlier tag refuses at the older tree's `models` stage while the build box's pull record holds a `candidates:` map, because the older parser accepts the four slots alone and names them in its refusal. That record is `/data/models/gideon/pulls.yaml`. Only the build box meets this, since a shipped lock carries no candidate. Delete the `candidates:` map from the record by hand, leaving the four slots as they stand, then re-run the rollback, which resumes where it stopped (the `select` and `plan` rows above). Alternatively, re-run the `apply` a by-hand `restore` printed. The refusal also offers removing the whole record. Do not remove it, since a removed record forgets which sets are complete. The older tree's next pull keeps every tree it finds, including the previous set's. The older tree leaves the candidate's folder alone as one it does not know. The next `models pull <candidate>` on a tree at or above that release records the folder again and fetches nothing.
 
 ## 4. Re-runs and refusals
 
-This section explains what you can safely re-run and how to answer common refusals.
-Use it after a command refuses or you edit the site file.
+This section collects safe re-runs and fixes for common refusals after a command refuses or the site file changes. Every command from provision on can be run again, so the same command can follow a refusal once its fix is made.
 
-- Running `install` again on a live box gives you a no-op apply, an incremental set, a drill, and the URL.
-  It is safe at any time.
-- After editing `/etc/gideon/site.yaml`, run `gideon apply` to converge the running stack to the site file.
-  If the edit changed `alerts.*`, follow apply with `gideon alerts test` (`observability.md` §4).
-  Place a renewed certificate in the certificate and key files.
-  Then pick it up with `gideon tls reload`.
-  This is not a site-file edit (`office-services-setup.md` §4).
-- Running `upgrade <tag>` again after a reboot reuses the set because the checkout is already at the tag.
-  The run resumes at the new tree's provision.
-- If provision refuses because running containers lack GIDEON's ownership mark, announce a maintenance window to every project sharing the daemon (§9).
-  The ownership mark identifies host state as GIDEON's.
-  Then re-run `host provision` or `upgrade <tag>` with `--acknowledge-disruption`.
-  When the release running the upgrade has no such flag on `upgrade`, the checkout is already at the tag.
-  From `/opt/gideon`, run `gideon host provision --acknowledge-disruption` by hand.
-  Then re-run `gideon upgrade <tag>`, which resumes at the new tree's provision and reuses the set.
-- Running `upgrade <tag>` again after an attempt that stopped before the checkout takes a fresh suffixed set.
-  The stale plain-label set is left alone.
-  You can prune the stale set by hand.
-- Running `upgrade <tag>` at the tag with no earlier set naming another release means the record is gone.
-  Go back by hand with `restore --from staging --set <label>` of an earlier set.
-- `upgrade <current version>` is a re-run.
-  `upgrade <lower>` refuses, naming `upgrade --rollback` and `restore`.
-- A tag whose tree declares another version refuses.
-  Retag it.
-- A dirty checkout refuses before anything else.
-  Commit or stash as the owner.
-  A root-owned checkout runs git without `sudo -u`.
+- Running `install` again on a live box produces a no-op apply, an incremental set, a drill, and the URL. It is safe at any time.
+- After editing `/etc/gideon/site.yaml`, run `gideon apply` to converge the running stack to the site file. If the edit changed `alerts.*`, follow apply with `gideon alerts test` (`observability.md` §4). Place a renewed certificate in the certificate and key files, then pick it up with `gideon tls reload`. This is not a site-file edit (`office-services-setup.md` §4).
+- Running `upgrade <tag>` again after a reboot reuses the set because the checkout is already at the tag. The run resumes at the new tree's provision.
+- If provision refuses because running containers lack GIDEON's ownership mark, announce a maintenance window to every project sharing the daemon (§9). The ownership mark identifies host state as GIDEON's. Then re-run `host provision` or `upgrade <tag>` with `--acknowledge-disruption`. When the release running the upgrade has no such flag on `upgrade`, the checkout is already at the tag. From `/opt/gideon`, run `gideon host provision --acknowledge-disruption` by hand. Then re-run `gideon upgrade <tag>`, which resumes at the new tree's provision and reuses the set.
+- Running `upgrade <tag>` again after an attempt that stopped before the checkout takes a fresh suffixed set. The stale plain-label set is left alone and can be pruned by hand.
+- Running `upgrade <tag>` at the tag with no earlier set naming another release means the record is gone. Go back by hand with `restore --from staging --set <label>` of an earlier set.
+- `upgrade <current version>` is a re-run. `upgrade <lower>` refuses, naming `upgrade --rollback` and `restore`.
+- A tag whose tree declares another version is refused. Retag it.
+- A dirty checkout refuses before anything else. Commit or stash as the owner. A root-owned checkout runs git without `sudo -u`.
 - `--rollback` with no `pre-v*` set refuses, naming `restore`.
-- Running `--rollback` again after a failure resumes the same command from `/data/backup-staging/rollback.json`.
-  The restore repeats when it did not finish and is skipped when it did.
-  Apply and verify follow.
-  With no record and the running tree and applied record both at the set's release, there is nothing to roll back to.
-  The command refuses.
-  A record naming another set refuses until that rollback is finished (`--rollback <its tag>`) or you remove the file by hand after checking.
-- `restore --set` with `--at` or `--from target` refuses.
-  Use `--at` for a point in time and `--from target` for the off-box copy.
-  A `.partial` or unknown label refuses in `select`, listing the complete labels.
-- Running `secrets rotate <name>` again makes a second rotation: a fresh value, with the consumers recreated again.
-  A rotation that failed after its value was written is finished by `apply`.
-  Apply converges the carriers: the env file's owner, a minted key's re-mint, and the record.
-  It clears the command's pending-change precondition.
-  Where a mounting consumer (the engine) was not reached, run `secrets rotate <name>` once more after that `apply`.
-  A pending `apply` refuses the command until `apply` has run.
-  This includes a site edit, a new checkout, or no verified apply on record.
+- Running `--rollback` again after a failure resumes the same command from `/data/backup-staging/rollback.json`. The restore repeats when it did not finish and is skipped when it did. Apply and verify follow. With no record and the running tree and applied record both at the set's release, there is nothing to roll back to, so the command refuses. A record naming another set refuses until that rollback is finished (`--rollback <its tag>`) or the file is removed by hand after checking.
+- `restore --set` with `--at` or `--from target` refuses. Use `--at` for a point in time and `--from target` for the off-box copy. A `.partial` or unknown label refuses in `select`, listing the complete labels.
+- Running `secrets rotate <name>` again makes a second rotation: a fresh value, with the consumers recreated again. A rotation that failed after its value was written is finished by `apply`. Apply converges the carriers: the env file's owner, a minted key's re-mint, and the record. It clears the command's pending-change precondition. Where a mounting consumer (the engine) was not reached, run `secrets rotate <name>` once more after that `apply`. A pending `apply` refuses the command until `apply` has run. This includes a site edit, a new checkout, or no verified apply on record.
 
 ## 5. The record: TNMD's box, 2026-09-03
 
