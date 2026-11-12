@@ -1,18 +1,21 @@
 """The one gate: environment, lint, types, then tests, stopping at the first failure.
 
-``python3 -m tools.gate [--all] [--masked] [TEST_PATH ...]`` first compares the
-running environment with ``requirements-dev.txt`` through
+``python3 -m tools.gate [--all] [--masked] [--pin-selection] [TEST_PATH ...]``
+first compares the running environment with ``requirements-dev.txt`` through
 ``tools/environment.py``, then runs ``ruff check .``, ``mypy gideon tests tools``,
 and ``pytest -x -n <count>`` across worker processes over the test paths given
 (the whole suite when none), prints the count on one summary line, and exits
-with the first failing child's code. The count comes from the CPUs the process
-may use, under the module's cap. ``-x`` stops the whole session at its first
-failure, which the plugin reports as exit 2. Cases marked
+with the first failing child's code. ``--pin-selection`` runs pytest over the
+paths ``tools/pinselection.py`` returns instead of the whole suite, and the
+summary line names the selection and its module count. The count of workers
+comes from the CPUs the process may use, under the module's cap. ``-x`` stops
+the whole session at its first failure, which the plugin reports as exit 2.
+Cases marked
 ``slow`` are skipped unless ``--all`` is given, which CI's step does. Each tool
 is looked up beside the running interpreter, then under the checkout's
 ``.venv/bin``, then on ``PATH``, so the same command serves CI, the dev seat,
 and a worktree whose ``.venv`` is a link. The gate uses the standard library
-and the sibling ``tools.mask`` only.
+and the siblings ``tools.mask`` and ``tools.pinselection`` only.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import tools.mask
+import tools.pinselection
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS: tuple[str, ...] = ("ruff", "mypy", "pytest")
@@ -177,14 +181,18 @@ def _state(masked: bool, observation: tools.mask.Observation) -> str:
     return "masked"
 
 
-def _summary(label: str, workers: int) -> str:
-    """Return a summary line's closing parenthetical: its label, then the count."""
+def _summary(label: str, workers: int, form: str | None = None) -> str:
+    """Return a summary's parenthetical, with an optional form before its label."""
 
+    if form is not None:
+        label = f"{form}; {label}"
     word = "worker" if workers == 1 else "workers"
     return f"({label}; {workers} {word})"
 
 
-def _refuse(trial: tools.mask.ProbeResult, started: float, workers: int) -> int:
+def _refuse(
+    trial: tools.mask.ProbeResult, started: float, workers: int, form: str | None = None
+) -> int:
     """Print the mask's refusal, then the one red summary line, and return 1."""
 
     refusal = trial.refusal
@@ -193,21 +201,38 @@ def _refuse(trial: tools.mask.ProbeResult, started: float, workers: int) -> int:
     print(f"mask: {refusal.problem}. Fix: {refusal.fix}", file=sys.stderr)
     elapsed = time.monotonic() - started
     print(
-        f"gate: red at mask (exit 1) after {elapsed:.1f}s {_summary('mask refused', workers)}",
+        f"gate: red at mask (exit 1) after {elapsed:.1f}s {_summary('mask refused', workers, form)}",
         flush=True,
     )
     return 1
 
 
 def _environment_refuse(
-    refusal: EnvironmentRefusal, started: float, state: str, workers: int
+    refusal: EnvironmentRefusal, started: float, state: str, workers: int,
+    form: str | None = None,
 ) -> int:
     """Print the gate-owned environment refusal and its red summary."""
 
     print(f"environment: {refusal.problem}. Fix: {refusal.fix}", file=sys.stderr)
     elapsed = time.monotonic() - started
     print(
-        f"gate: red at environment (exit 1) after {elapsed:.1f}s {_summary(state, workers)}",
+        f"gate: red at environment (exit 1) after {elapsed:.1f}s {_summary(state, workers, form)}",
+        flush=True,
+    )
+    return 1
+
+
+def _selection_refuse(started: float, state: str, workers: int, form: str) -> int:
+    """Print the empty-selection refusal and its red summary."""
+
+    print(
+        "selection: the pin selection names no module present in this tree. "
+        "Fix: add the modules a pull request runs to SELECTED in tools/pinselection.py",
+        file=sys.stderr,
+    )
+    elapsed = time.monotonic() - started
+    print(
+        f"gate: red at selection (exit 1) after {elapsed:.1f}s {_summary(state, workers, form)}",
         flush=True,
     )
     return 1
@@ -218,6 +243,7 @@ def main(
     runner: Runner = _run,
     mask: Mask = REAL_MASK,
     cpu_reader: CPUReader = available_cpus,
+    selection: Callable[[Path], Sequence[Path]] = tools.pinselection.selected_paths,
 ) -> int:
     """Run the gate and return the first failing tool's exit code, else 0."""
 
@@ -241,43 +267,63 @@ def main(
         help="use the mask when listed host paths are present (the leaf's rule)",
     )
     parser.add_argument(
+        "--pin-selection",
+        action="store_true",
+        help=(
+            "run pytest over the pin selection in tools/pinselection.py instead of "
+            "the whole suite (the form a pull request's hosted check runs)"
+        ),
+    )
+    parser.add_argument(
         "test_paths",
         nargs="*",
         metavar="TEST_PATH",
         help="test files or directories for pytest (default: the whole suite)",
     )
     options = parser.parse_args(argv)
+    if options.pin_selection and options.test_paths:
+        parser.error("--pin-selection cannot be combined with TEST_PATH")
     started = time.monotonic()
     observation = mask.observe()
     state = _state(options.masked, observation)
     workers = worker_count(cpu_reader())
+    test_paths = options.test_paths
+    form = None
+    if options.pin_selection:
+        selected = selection(ROOT)
+        count = len(selected)
+        word = "module" if count == 1 else "modules"
+        form = f"pin selection, {count} {word}"
+        if not selected:
+            return _selection_refuse(started, state, workers, form)
+        test_paths = tuple(path.relative_to(ROOT).as_posix() for path in selected)
     try:
         comparison = environment_command()
     except EnvironmentRefusal as refusal:
-        return _environment_refuse(refusal, started, state, workers)
+        return _environment_refuse(refusal, started, state, workers, form)
     code = runner(comparison, None)
     if code != 0:
         elapsed = time.monotonic() - started
         print(
-            f"gate: red at environment (exit {code}) after {elapsed:.1f}s {_summary(state, workers)}",
+            f"gate: red at environment (exit {code}) after {elapsed:.1f}s {_summary(state, workers, form)}",
             flush=True,
         )
         return code
 
-    plan = commands(options.test_paths, workers, everything=options.all)
+    plan = commands(test_paths, workers, everything=options.all)
     should_wrap = options.masked and observation.state is tools.mask.ProbeState.READY
 
     if should_wrap:
         trial = mask.probe(plan[2].argv, observation)
         if trial.state is tools.mask.ProbeState.REFUSED:
-            return _refuse(trial, started, workers)
+            return _refuse(trial, started, workers, form)
 
     for tool, command in zip(TOOLS[:2], plan[:2], strict=True):
         code = runner(command.argv, command.stdin)
         if code != 0:
             elapsed = time.monotonic() - started
             print(
-                f"gate: red at {tool} (exit {code}) after {elapsed:.1f}s {_summary(state, workers)}",
+                f"gate: red at {tool} (exit {code}) after {elapsed:.1f}s {_summary(state, workers, form)}",
                 flush=True,
             )
             return code
@@ -285,9 +331,9 @@ def main(
     if should_wrap:
         trial = mask.probe(plan[2].argv, observation)
         if trial.state is tools.mask.ProbeState.REFUSED:
-            return _refuse(trial, started, workers)
+            return _refuse(trial, started, workers, form)
         plan = commands(
-            options.test_paths,
+            test_paths,
             workers,
             everything=options.all,
             mask=mask,
@@ -301,14 +347,15 @@ def main(
         failure_state = "mask failed" if tool == "mask" else state
         print(
             f"gate: red at {tool} (exit {code}) after {elapsed:.1f}s "
-            f"{_summary(failure_state, workers)}",
+            f"{_summary(failure_state, workers, form)}",
             flush=True,
         )
         return code
 
     elapsed = time.monotonic() - started
     scope = "all cases" if options.all else f"{SLOW_MARK} cases skipped, --all runs them"
-    label = f"environment, {', '.join(TOOLS)}; {scope}; {state}"
+    parts = [f"environment, {', '.join(TOOLS)}", form, scope, state]
+    label = "; ".join(part for part in parts if part is not None)
     print(
         f"gate: green in {elapsed:.1f}s {_summary(label, workers)}",
         flush=True,

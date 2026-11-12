@@ -287,9 +287,9 @@ These tools run from a checkout on the build box or in a development virtual env
 
 ### The gate
 
-The gate compares the environment with the tree's pins and then runs lint, type checking, and unit tests, stopping at the first failure. A developer runs it before a commit, and CI runs it too; `--all` includes the slow tests, and `--masked` hides the server's paths from the tests.
+The gate compares the environment with the tree's pins and then runs lint, type checking, and unit tests, stopping at the first failure. A developer runs it before a commit, and CI runs it too; `--all` includes the slow tests, and `--masked` hides the server's paths from the tests. A pull request's hosted check passes `--pin-selection`, which runs only the tests that name a pin file, a render fixture, or a workflow file, so the check finishes inside its time limit; the whole suite runs on the box before the merge and on `main` after it.
 
-**Command.** `python3 -m tools.gate [--all] [--masked] [TEST_PATH ...]`.\
+**Command.** `python3 -m tools.gate [--all] [--masked] [--pin-selection] [TEST_PATH ...]`.\
 **Steps.** [CONTRIBUTING.md](../CONTRIBUTING.md#development-setup-and-the-gate).
 
 ### The image build

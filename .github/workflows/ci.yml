@@ -13,6 +13,8 @@ jobs:
     # hosted because its repository is not private. Each step carries an if on
     # the runner's kind, so no step can run on the wrong one.
     # The gate uses the box's second runner instance, leaving the previous run's box jobs free.
+    # A pull request runs the reduced gate so it returns inside the limit; its
+    # whole-suite verdict is the box gate at its landing and the push gate on main.
     runs-on: ${{ github.event_name == 'push' && github.event.repository.private && fromJSON('["self-hosted", "linux", "x64", "checks"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
@@ -29,10 +31,13 @@ jobs:
         if: runner.environment == 'github-hosted'
         run: pytest tests/test_host_import_boundary.py
       - name: Gate
-        if: runner.environment == 'github-hosted'
-        # Environment comparison, then ruff, mypy, and pytest, stopping at the first failure (tools/gate.py);
-        # --all runs the cases marked slow that the local default skips.
+        if: runner.environment == 'github-hosted' && github.event_name != 'pull_request'
+        # Environment comparison, ruff, mypy, and the whole suite, including slow cases.
         run: python -m tools.gate --all
+      - name: Gate over the pin selection
+        if: runner.environment == 'github-hosted' && github.event_name == 'pull_request'
+        # Environment comparison, ruff, mypy, and the pin selection, including slow cases.
+        run: python -m tools.gate --all --pin-selection
       - name: Build dev environment on the box
         if: runner.environment == 'self-hosted'
         # A fresh venv in the clean checkout from the pushed pin file, with no

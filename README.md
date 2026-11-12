@@ -18,7 +18,7 @@ GIDEON is a public-domain work of the United States government, so any office ma
 
 ## Status
 
-GIDEON is pre-release: it installs, runs the general-purpose assistant, backs up, and upgrades on its first server, but no staff use it yet. Legal research is not built, and another office cannot install until `v1.0.0` publishes the release images, while this tree is `v0.3.196`. [`CHANGELOG.md`](CHANGELOG.md) records what each release changed.
+GIDEON is pre-release: it installs, runs the general-purpose assistant, backs up, and upgrades on its first server, but no staff use it yet. Legal research is not built, and another office cannot install until `v1.0.0` publishes the release images, while this tree is `v0.3.197`. [`CHANGELOG.md`](CHANGELOG.md) records what each release changed.
 
 ## Install
 

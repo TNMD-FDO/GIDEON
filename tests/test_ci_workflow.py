@@ -1,4 +1,4 @@
-"""Check CI runner routing, box label equality, concurrency, and guarded steps."""
+"""Check CI runner routing, box label equality, concurrency, guarded steps, and gate flags."""
 
 from __future__ import annotations
 
@@ -20,10 +20,13 @@ _PRIVATE_PUSH = re.compile(
 _FROM_JSON = re.compile(r"fromJSON\('([^']+)'\)")
 _HOSTED_FALLBACK = re.compile(r"\|\|\s*'ubuntu-latest'\s*}}$")
 _BOX_LABEL = re.compile(r"['\"]self-hosted['\"]")
-_ENVIRONMENTS = {
-    "runner.environment == 'github-hosted'",
-    "runner.environment == 'self-hosted'",
-}
+_STEP_GUARD = re.compile(
+    r"runner\.environment\s*==\s*'(?P<environment>github-hosted|self-hosted)'"
+    r"(?:\s*&&\s*github\.event_name\s*(?P<event>==|!=)\s*'pull_request')?"
+)
+_PULL_REQUEST_GATE = "runner.environment == 'github-hosted' && github.event_name == 'pull_request'"
+_HOSTED_GATE = "runner.environment == 'github-hosted' && github.event_name != 'pull_request'"
+_BOX_GATE = "runner.environment == 'self-hosted'"
 
 
 def _can_name_box(runner: object) -> bool:
@@ -102,20 +105,33 @@ def workflow_findings(workflow: dict[str, Any]) -> list[str]:
         findings.append("checks: timeout")
 
     steps = checks["steps"]
+    hosted: dict[str | None, list[str]] = {"==": [], "!=": [], None: []}
+    box: list[str] = []
     for index, step in enumerate(steps[1:], 1):
-        if step.get("if") not in _ENVIRONMENTS:
+        guard = _STEP_GUARD.fullmatch(str(step.get("if", "")).strip())
+        if guard is None or (
+            guard.group("environment") == "self-hosted" and guard.group("event") is not None
+        ):
             findings.append(f"checks: step {index} environment guard")
-
-    gates: dict[str, list[str]] = {environment: [] for environment in _ENVIRONMENTS}
-    for step in steps[1:]:
+            continue
         run = step.get("run", "")
-        if "-m tools.gate" in run and step.get("if") in gates:
-            gates[step["if"]].append(run)
-    hosted = gates["runner.environment == 'github-hosted'"]
-    box = gates["runner.environment == 'self-hosted'"]
-    if len(hosted) != 1 or "--all" not in hosted[0].split() or "--masked" in hosted[0].split():
-        findings.append("checks: hosted gate flags")
-    if len(box) != 1 or not {"--all", "--masked"}.issubset(box[0].split()):
+        if "-m tools.gate" not in run:
+            continue
+        if guard.group("environment") == "self-hosted":
+            box.append(run)
+        else:
+            hosted[guard.group("event")].append(run)
+
+    if hosted[None]:
+        findings.append("checks: hosted gate events")
+    for event, required, forbidden, finding in (
+        ("==", {"--all", "--pin-selection"}, {"--masked"}, "checks: pull request gate flags"),
+        ("!=", {"--all"}, {"--masked", "--pin-selection"}, "checks: hosted gate flags"),
+    ):
+        commands = hosted[event]
+        if len(commands) != 1 or not required.issubset(commands[0].split()) or forbidden.intersection(commands[0].split()):
+            findings.append(finding)
+    if len(box) != 1 or not {"--all", "--masked"}.issubset(box[0].split()) or "--pin-selection" in box[0].split():
         findings.append("checks: box gate flags")
     return findings
 
@@ -126,6 +142,14 @@ class CiWorkflowTests(unittest.TestCase):
 
     def seeded_findings(self, workflow: dict[str, Any]) -> list[str]:
         return workflow_findings(yaml.safe_load(yaml.safe_dump(workflow)))
+
+    def gate_step(self, workflow: dict[str, Any], condition: str) -> dict[str, Any]:
+        steps = [
+            step for step in workflow["jobs"]["checks"]["steps"]
+            if step.get("if") == condition and "-m tools.gate" in step.get("run", "")
+        ]
+        self.assertEqual(len(steps), 1, f"expected one gate step with {condition}")
+        return steps[0]
 
     def test_checked_in_workflow_follows_runner_contract(self) -> None:
         self.assertEqual(workflow_findings(self.workflow), [])
@@ -230,18 +254,64 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("checks: step 1 environment guard", self.seeded_findings(seed))
 
     def test_seeded_gate_flags_are_checked_for_each_runner(self) -> None:
-        for environment, command, finding in (
-            ("github-hosted", "python -m tools.gate --masked", "checks: hosted gate flags"),
-            ("github-hosted", "python -m tools.gate --all --masked", "checks: hosted gate flags"),
-            ("self-hosted", ".venv/bin/python -m tools.gate --masked", "checks: box gate flags"),
-            ("self-hosted", ".venv/bin/python -m tools.gate --all", "checks: box gate flags"),
+        for condition, command, finding in (
+            (_PULL_REQUEST_GATE, "python -m tools.gate --all", "checks: pull request gate flags"),
+            (_PULL_REQUEST_GATE, "python -m tools.gate --pin-selection", "checks: pull request gate flags"),
+            (_PULL_REQUEST_GATE, "python -m tools.gate --all --pin-selection --masked", "checks: pull request gate flags"),
+            (_HOSTED_GATE, "python -m tools.gate --masked", "checks: hosted gate flags"),
+            (_HOSTED_GATE, "python -m tools.gate --all --masked", "checks: hosted gate flags"),
+            (_HOSTED_GATE, "python -m tools.gate --all --pin-selection", "checks: hosted gate flags"),
+            (_BOX_GATE, ".venv/bin/python -m tools.gate --masked", "checks: box gate flags"),
+            (_BOX_GATE, ".venv/bin/python -m tools.gate --all", "checks: box gate flags"),
+            (_BOX_GATE, ".venv/bin/python -m tools.gate --all --masked --pin-selection", "checks: box gate flags"),
         ):
-            with self.subTest(environment=environment):
+            with self.subTest(condition=condition, command=command):
                 seed = copy.deepcopy(self.workflow)
-                for step in seed["jobs"]["checks"]["steps"]:
-                    if step.get("if") == f"runner.environment == '{environment}'" and "-m tools.gate" in step.get("run", ""):
-                        step["run"] = command
-                        break
-                else:
-                    self.fail(f"no gate step for {environment}")
+                self.gate_step(seed, condition)["run"] = command
                 self.assertIn(finding, self.seeded_findings(seed))
+
+    def test_seeded_pull_request_gate_is_required(self) -> None:
+        seed = copy.deepcopy(self.workflow)
+        step = self.gate_step(seed, _PULL_REQUEST_GATE)
+        seed["jobs"]["checks"]["steps"].remove(step)
+        self.assertIn("checks: pull request gate flags", self.seeded_findings(seed))
+
+    def test_seeded_hosted_gate_events_must_be_complementary(self) -> None:
+        for condition, replacement in (
+            (_PULL_REQUEST_GATE, _HOSTED_GATE),
+            (_HOSTED_GATE, _PULL_REQUEST_GATE),
+        ):
+            with self.subTest(replacement=replacement):
+                seed = copy.deepcopy(self.workflow)
+                self.gate_step(seed, condition)["if"] = replacement
+                findings = self.seeded_findings(seed)
+                self.assertIn("checks: pull request gate flags", findings)
+                self.assertIn("checks: hosted gate flags", findings)
+
+    def test_seeded_hosted_gate_without_event_is_rejected(self) -> None:
+        for condition in (_PULL_REQUEST_GATE, _HOSTED_GATE):
+            with self.subTest(condition=condition):
+                seed = copy.deepcopy(self.workflow)
+                self.gate_step(seed, condition)["if"] = "runner.environment == 'github-hosted'"
+                self.assertIn("checks: hosted gate events", self.seeded_findings(seed))
+
+    def test_seeded_step_guards_reject_extra_or_wrong_event_clauses(self) -> None:
+        for condition, replacement in (
+            (_PULL_REQUEST_GATE, _PULL_REQUEST_GATE + " && always()"),
+            (_HOSTED_GATE, "runner.environment == 'github-hosted' && github.event_name == 'push'"),
+            (_BOX_GATE, _BOX_GATE + " && github.event_name == 'pull_request'"),
+            (_BOX_GATE, _BOX_GATE + " && github.event_name != 'pull_request'"),
+        ):
+            with self.subTest(replacement=replacement):
+                seed = copy.deepcopy(self.workflow)
+                step = self.gate_step(seed, condition)
+                index = seed["jobs"]["checks"]["steps"].index(step)
+                step["if"] = replacement
+                self.assertIn(f"checks: step {index} environment guard", self.seeded_findings(seed))
+
+    def test_step_guards_allow_whitespace_around_clauses(self) -> None:
+        seed = copy.deepcopy(self.workflow)
+        for condition in (_PULL_REQUEST_GATE, _HOSTED_GATE, _BOX_GATE):
+            step = self.gate_step(seed, condition)
+            step["if"] = "  " + condition.replace(" && ", "  &&  ").replace(" == ", "  ==  ") + "  "
+        self.assertEqual(self.seeded_findings(seed), [])

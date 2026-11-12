@@ -125,9 +125,9 @@ A refusal before the run starts prints on stderr, writes nothing, and exits 1. A
 | `month must use YYYY-MM with a valid month` | Supply `--month YYYY-MM`, such as `--month 2026-09`. |
 | `The packet output path must be absolute.` | Name an absolute directory under `/root`, such as `/root/candidates/<YYYY-MM>`. |
 | `The packet would be carried by a backup set or the install home.` | Same: a directory under `/root`. |
-| `The packet would be inside a checkout.` | Name a directory outside every checkout. |
-| `The packet output path is not an empty directory.` / `The packet output directory is not empty.` | Name an absent path or an empty directory; a packet is never written over another. |
+| `The packet would be inside a checkout.` / `The output path could not be checked for a checkout.` | Name a directory outside every checkout. |
+| `The packet output path is not an empty directory.` / `The packet output directory is not empty.` / `The packet output directory could not be inspected.` | Name an absent path or an empty directory; a packet is never written over another. |
 | `The empty packet output directory is not root-owned.` | Create the directory as root, or name an absent path. |
 | `read` — `snapshot reader command could not run` | Check the stack with `gideon status`, then retry. |
 | `read` — `snapshot reader failed with exit code <n>` | Run as root with the stack up, then retry; if it persists, converge the frontend with `gideon apply`, the command that brings the running stack in line with the site file and verifies it. |
-| `write` — `packet files could not be written` | Name an absent path or an empty directory whose parent exists, then retry. |
+| `write` — `packet files could not be written` | Name an absent path or an empty directory outside every checkout, then retry. |

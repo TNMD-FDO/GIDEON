@@ -100,6 +100,7 @@ _CURATED_ALLOWLIST: tuple[str, ...] = (
     "playwright.dev",
     "prometheus.io",
     "prosemirror.net",
+    "protomaps.com",
     "psycopg.org",
     "pypa.io",
     "pypi.org",

@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.197](docs/release-notes/v0.3.197.md) — 2026-11-12 — the install runbook's second half in the natural voice, the hosted PR gate on the pin selection
 - [v0.3.196](docs/release-notes/v0.3.196.md) — 2026-11-11 — the README, guides, command reference, and exported runbooks in the natural voice
 - [v0.3.195](docs/release-notes/v0.3.195.md) — 2026-11-10 — trap@4 meets trap's 25, a command reference, the README rewritten, a natural voice for public prose
 - [v0.3.194](docs/release-notes/v0.3.194.md) — 2026-11-09 — a points-first Sentencing Table run passes, patterns@3 drops pre-verb procedural objects, one public prose guide

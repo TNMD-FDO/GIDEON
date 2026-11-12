@@ -151,23 +151,11 @@ To leave the mode, remove the marker, run provision again, then apply. The three
 
 ## 6. The acceptance run
 
-This section records the maintaining office's proof of the receiving-office sequence on a throwaway VM.
-Use it on the build box at a minor release; a receiving office does not run it.
+This section records the maintaining office's proof of the receiving-office sequence on a throwaway VM. The harness runs on the build box at a minor release; a receiving office does not run it.
 
-The acceptance harness builds a throwaway VM from the pinned image and converts it to the LVM layout used on the box.
-It proves the receiving-office sequence in a clean environment.
-The VM has its own office services.
-It reaches the real directory over NAT.
-The harness runs a STARTTLS + AUTH SMTP sink on the libvirt bridge.
-The VM is its own backup target.
-A throwaway CA is bundled with the office root.
-The sequence is exactly the one in §1 above.
-Every product command runs as `sudo … 2>&1 | tee`, with its transcript retained under `--out`.
+The acceptance harness builds a throwaway VM from the pinned image and converts it to the LVM layout used on the box, proving the receiving-office sequence in a clean environment. The VM has its own office services and reaches the real directory over NAT, while the harness runs a STARTTLS + AUTH SMTP sink on the libvirt bridge. The VM is its own backup target, and a throwaway CA is bundled with the office root. The sequence is exactly the one in §1 above. Every product command runs as `sudo … 2>&1 | tee`, with its transcript retained under `--out`.
 
-The harness prints one row per stage on its own stdout.
-That output, under `sudo … 2>&1 | tee`, is the run's first record.
-A transcript file under `--out` exists for every product command run inside the VM.
-Its name uses the stage's two-digit position in the table:
+The harness prints one row per stage on its own stdout, and that output, under `sudo … 2>&1 | tee`, is the run's first record. A transcript file under `--out` exists for every product command run inside the VM, with a name that uses the stage's two-digit position in the table:
 
 | Stage | Product command in the VM | Transcript under `--out` |
 |---|---|---|
@@ -180,109 +168,43 @@ Its name uses the stage's two-digit position in the table:
 | `restore` (17) | `backup push`, `restore --from target`, `apply` | `17-restore-1-push.txt`, `17-restore-2-restore.txt`, `17-restore-3-apply.txt` |
 | `verify` (18) | `./preflight.sh` | `18-verify-preflight.txt` |
 
-Beside them, `console.log` holds the VM's serial console, the boot transcript when SSH does not answer.
-The `mail/` directory holds every message the sink accepted, with its authenticated user and TLS fact.
-The other stages run on the box: preconditions, image, seed, services, boot, clone, reboot, site, authorize, probe, teardown.
-They leave only their row.
+Beside them, `console.log` holds the VM's serial console, the boot transcript when SSH does not answer. The `mail/` directory holds every message the sink accepted, with its authenticated user and TLS fact. The other stages run on the box and leave only their row: preconditions, image, seed, services, boot, clone, reboot, site, authorize, probe, teardown.
 
-`--until <stage>` stops after a named stage (`provision-2` names the second provision).
-`--keep` leaves the VM defined and running.
-The harness prints its address.
-The run's SSH key and known-hosts file stay under `/var/lib/libvirt/images/gideon-acceptance/<name>/`.
-The next run first tears down a same-named leftover and the sink's firewall rule.
-The harness runs on the build box under a CSA's or the dev seat's own sudo.
-The dev seat is the CSA account the maintaining office's developer uses on the box.
-No runner invokes the harness.
+`--until <stage>` stops after a named stage (`provision-2` names the second provision), while `--keep` leaves the VM defined and running and the harness prints its address. The run's SSH key and known-hosts file stay under `/var/lib/libvirt/images/gideon-acceptance/<name>/`, and the next run first tears down a same-named leftover and the sink's firewall rule. The harness runs on the build box under a CSA's or the dev seat's own sudo. The dev seat is the CSA account the maintaining office's developer uses on the box. No runner invokes the harness.
 
-Acceptance runs happen at minor tags only.
-Run against the local tag before the push, and commit its rows and transcripts as the tag's evidence, the record.
-The same run from the box's checkout re-makes the record at any later tree.
-Patch tags do not run the harness.
-A tag can name any commit its pusher can reach.
-Trust rests with the two CSAs authorized to create a `v*` tag, rather than anything in the tag's tree.
-A `v*` ruleset restricts who can create tags an office clones.
-The release's two-CSA run proves the install sequence in a clean VM and replaces the earlier by-hand exercise.
+Acceptance runs happen at minor and major tags. A patch tag runs the harness only when a change it carries calls for a run, because the box's own upgrade otherwise proves it. Run against the local tag before the push, and commit its rows and transcripts as the tag's evidence, the record; the same run from the box's checkout re-makes the record at any later tree. A tag can name any commit its pusher can reach, so trust rests with the two CSAs authorized to create a `v*` tag, rather than anything in the tag's tree. A `v*` ruleset restricts who can create tags an office clones. The release's two-CSA run proves the install sequence in a clean VM and replaces the earlier by-hand exercise.
 
-Transcripts redact print-once values and age identities before they reach the host.
-An evidence check scans them for a complete age secret or an unredacted print-once line.
-On TNMD's box a complete run takes under six minutes (the plan estimated 45).
-That includes image conversion, boot, two provisions, preflight, install with the drill, `alerts test`, the four rehearsal legs, the push and target restore, and verify.
-The converted image boots in about nine seconds.
-The candidate tree's passing run is `08-acceptance-run-2026-09-03/`.
+Transcripts redact print-once values and age identities before they reach the host, and an evidence check scans them for a complete age secret or an unredacted print-once line. On TNMD's box a complete run takes under six minutes (the plan estimated 45), including image conversion, boot, two provisions, preflight, install with the drill, `alerts test`, the four rehearsal legs, the push and target restore, and verify. The converted image boots in about nine seconds. The candidate tree's passing run is `08-acceptance-run-2026-09-03/`.
 
-**What the runs of this release found.**
-Each issue was fixed in the same release.
-The firewall step's `DOCKER-USER` drops judged every forwarded packet to ports 443 and 5000, including the VM's NAT egress.
-No HTTPS download from the VM could succeed.
-The drops now name the Docker bridge they forward into.
-A fresh cloud image ships empty apt lists, so the first `apt-get install` could not locate `skopeo` or `age`.
-Every install now updates first.
-Python 3.13+ verifies TLS chains strictly.
-The throwaway CA therefore carries a key-usage extension, and each leaf carries its usages and server-auth purpose.
-Apply's registry and pull stages judged every `images.lock` pin, while Compose pulls only the rendered services.
-The DCGM exporter failed digest verification because it is not rendered on a no-GPU host.
-Apply now judges the rendered stack's images.
-The restore's `verify` stage refused an empty root because `sha256sum -c` refuses an empty list.
-`/data/registry` holds nothing on a no-GPU host.
-A root with no files is now verified without the call.
-After the rehearsal's two promotions, a `restore --from target` refused.
-pgBackRest's default recovery follows the cluster's current timeline, which had forked before the set's backup.
-Every set restore now names its own backup, that backup's timeline, and its target.
-This was the third timeline lesson after `v0.0.27`'s two.
-A failed provision row also carries the failed command's own text now, which made the second of these issues visible.
+**What the runs of this release found.** Each issue was fixed in the same release. The firewall step's `DOCKER-USER` drops judged every forwarded packet to ports 443 and 5000, including the VM's NAT egress, so no HTTPS download from the VM could succeed. The drops were changed to name the Docker bridge they forwarded into.
 
-**The `v0.1.0` run.**
-The local-tag acceptance run on TNMD's box ran from 2026-09-03T21:28:56-05:00 to 2026-09-03T21:34:41-05:00, before the push.
-Every stage was ok, exit 0.
-The VM installed to its URL, and `alerts test` delivered through the sink.
-The run completed the four rehearsal legs on `v0.1.1-rc.1`, the push and the target restore.
-Verify confirmed release 0.1.0 by the applied record and the checkout's `--version`.
-The run produced sixteen authenticated TLS messages and thirteen transcripts, then tore down the VM.
-The evidence commit's rows are the standing record.
-The pushed tag's own run, below, was the record until the tag-triggered run was retired.
+A fresh cloud image shipped empty apt lists, so the first `apt-get install` could not locate `skopeo` or `age`. Every install was changed to update first.
 
-**The CI record.**
-The pushed tag's run refused at `boot`.
-Its output directory was relative to the runner's workspace, while libvirt opened the console log from its own working directory.
-Local runs had used an absolute output path.
-The root run also left root-owned bytecode caches in the workspace.
-The next checkout failed because the runner could not remove them.
-Hotfix `v0.1.1` uses an absolute output path and avoids writing bytecode after the harness starts.
-It returns the checkout's caches with the transcripts and lets you dispatch the acceptance workflow again for a selected tag.
-The standing rerun against `v0.1.0` passed every stage from 2026-09-04T02:51:53Z to 2026-09-04T02:57:48Z.
-Its transcripts were preserved as an artifact, and the workspace held nothing root-owned afterward.
-While the workflow stood, a red tag run caused by the harness or workflow, rather than the tag's tree, was re-made the same way.
-The operator dispatched the acceptance workflow at that tag.
+Python 3.13+ verified TLS chains strictly, so the throwaway CA was given a key-usage extension, and each leaf its usages and server-auth purpose.
 
-**The `v0.2.0` run.**
-Both acceptance forms ran against the local tag on TNMD's box from the release worktree before the push.
-The no-GPU install passed every stage in 1252 seconds.
-It completed `alerts test`, four rehearsal legs on `v0.2.1-rc.1`, the push and target restore, producing sixteen authenticated TLS messages and thirteen transcripts.
-The full-restore form then restored the box's newest set from release 0.1.81.
-It passed every stage in 1196 seconds, and the run directory peaked at 155 GB.
-The box itself then upgraded 0.1.82 to 0.2.0 from the checkout on `main`.
-`engine-verify` passed.
-The run transcripts are kept with the release records.
-The pushed tag's own two-step run was the standing record while the tag-triggered run stood.
+Apply's registry and pull stages judged every `images.lock` pin, while Compose pulled only the rendered services. The DCGM exporter failed digest verification because it was not rendered on a no-GPU host, so apply was changed to judge the rendered stack's images.
 
-**The `v0.3.0` run.**
-The tag was cut twice.
-At the first cut, the install form went red twice on the office resolvers answering `0.0.0.0` for `huggingface.co`.
-An allowlist entry for the box cleared that problem.
-The install form also went red once at its in-VM restore, which ran inside the 01:00 backup's minutes.
-The restore passed on the next run started outside that hour.
-The full-restore form then went red at its second `apply`.
-The restored applied record names the build box's nightly units, which the no-GPU VM had not linked.
-`apply` refused to disable them.
-That fix moved the tag.
-At the re-cut tag, the no-GPU install passed every stage in 1137 seconds.
-It produced eleven authenticated TLS messages and thirteen transcripts, with about 52 GB allocated.
-The full-restore form restored the box's newest set from release 0.2.98 and passed every stage in 1101 seconds.
-It peaked at about 168 GB.
-The box then upgraded 0.2.98 to 0.3.0 from `/opt/gideon` in about six minutes.
-Its apply recreated nothing, and `engine-verify` passed.
-The run transcripts are kept with the release records.
-The pushed tag's own two-step run was the standing record while the tag-triggered run stood.
+The restore's `verify` stage refused an empty root because `sha256sum -c` refused an empty list. `/data/registry` held nothing on a no-GPU host, so a root with no files was then verified without the call.
+
+After the rehearsal's two promotions, a `restore --from target` refused because pgBackRest's default recovery followed the cluster's current timeline, which had forked before the set's backup. Every set restore was changed to name its own backup, that backup's timeline, and its target. This was the third timeline lesson after `v0.0.27`'s two.
+
+A failed provision row was also changed to carry the failed command's own text, which made the second of these issues visible.
+
+**The `v0.1.0` run.** The local-tag acceptance run on TNMD's box ran from 2026-09-03T21:28:56-05:00 to 2026-09-03T21:34:41-05:00, before the push. Every stage was ok, exit 0. The VM installed to its URL, and `alerts test` delivered through the sink. The run completed the four rehearsal legs on `v0.1.1-rc.1`, the push and the target restore. Verify confirmed release 0.1.0 by the applied record and the checkout's `--version`. The run produced sixteen authenticated TLS messages and thirteen transcripts, then tore down the VM. The pushed tag's own run, below, was the record until the tag-triggered run was retired, and from then the evidence commit's rows were the standing record.
+
+**The CI record.** The pushed tag's run refused at `boot` because its output directory was relative to the runner's workspace, while libvirt opened the console log from its own working directory. Local runs had used an absolute output path. The root run also left root-owned bytecode caches in the workspace, and the next checkout failed because the runner could not remove them. Hotfix `v0.1.1` used an absolute output path and avoided writing bytecode after the harness started. It returned the checkout's caches with the transcripts and let the acceptance workflow be dispatched again for a selected tag.
+
+The standing rerun against `v0.1.0` passed every stage from 2026-09-04T02:51:53Z to 2026-09-04T02:57:48Z. Its transcripts were preserved as an artifact, and the workspace held nothing root-owned afterward. While the workflow stood, a red tag run caused by the harness or workflow, rather than the tag's tree, was re-made the same way: the operator dispatched the acceptance workflow at that tag.
+
+**The `v0.2.0` run.** Both acceptance forms ran against the local tag on TNMD's box from the release worktree before the push. The no-GPU install passed every stage in 1252 seconds and completed `alerts test`, four rehearsal legs on `v0.2.1-rc.1`, the push and target restore, producing sixteen authenticated TLS messages and thirteen transcripts. The full-restore form then restored the box's newest set from release 0.1.81, passed every stage in 1196 seconds, and peaked at 155 GB in its run directory.
+
+The box itself then upgraded 0.1.82 to 0.2.0 from the checkout on `main`, and `engine-verify` passed. The run transcripts were kept with the release records. The pushed tag's own two-step run was the standing record while the tag-triggered run stood.
+
+**The `v0.3.0` run.** The tag was cut twice. At the first cut, the install form went red twice on the office resolvers answering `0.0.0.0` for `huggingface.co`, and an allowlist entry for the box cleared that problem. The install form also went red once at its in-VM restore, which ran inside the 01:00 backup's minutes; the restore passed on the next run started outside that hour. The full-restore form then went red at its second `apply` because the restored applied record named the build box's nightly units, which the no-GPU VM had not linked, and `apply` refused to disable them. That fix moved the tag.
+
+At the re-cut tag, the no-GPU install passed every stage in 1137 seconds and produced eleven authenticated TLS messages and thirteen transcripts, with about 52 GB allocated. The full-restore form restored the box's newest set from release 0.2.98 and passed every stage in 1101 seconds, peaking at about 168 GB.
+
+The box then upgraded 0.2.98 to 0.3.0 from `/opt/gideon` in about six minutes. Its apply recreated nothing, and `engine-verify` passed. The run transcripts were kept with the release records. The pushed tag's own two-step run was the standing record while the tag-triggered run stood.
 
 ## 2. Upgrading: `gideon upgrade <tag>`
 
@@ -370,66 +292,38 @@ This section collects safe re-runs and fixes for common refusals after a command
 
 ## 5. The record: TNMD's box, 2026-09-03
 
-This section records what happened on TNMD's box and holds no step to follow.
-Use it to compare your run with the recorded install and upgrade.
+This section records the install and upgrade on TNMD's box and holds no step to follow, so a later install or upgrade can be compared against it.
 
-`v0.0.25` reached the box through `sudo ./install.sh`, rather than `upgrade`.
-The release before it had no upgrade command, and the checkout already stood at the tag.
-The first attempt refused at its opening preflight because the release had added the `wait-online` step and provision had not run yet.
-The order §1 gives is enforced.
-After `host provision --only wait-online`, the eight phases ran: a no-op apply, an incremental set, a passing drill, and the URL.
-The records are `08-install-rerun.txt` and `08-wait-online.txt`.
+`v0.0.25` reached the box through `sudo ./install.sh`, rather than `upgrade`, because the release before it had no upgrade command and the checkout already stood at the tag. The first attempt refused at its opening preflight because the release had added the `wait-online` step and provision had not run yet, and the refusal showed that the order §1 gives is enforced. After `host provision --only wait-online`, the eight phases ran: a no-op apply, an incremental set, a passing drill, and the URL. The records were `08-install-rerun.txt` and `08-wait-online.txt`.
 
-The rehearsal ran on throwaway tags, which were not pushed, and found two defects.
-Each was fixed by a hotfix the same afternoon:
+The rehearsal ran on throwaway tags, which were not pushed, and found two defects, each fixed by a hotfix the same afternoon:
 
 | Leg | Command | What it proved |
 |---|---|---|
-| 0 | `upgrade v0.0.26-rc.1` on `v0.0.25` | stalled at the backup stage's readiness probe: a nested `sudo -u` under `sudo-rs`'s `use_pty` and a `compose exec` reading the terminal. It was aborted cleanly, with nothing changed (`08-rehearsal-0-stalled-on-v0.0.25.txt`). Hotfix `v0.0.26` fixed it |
-| A | `upgrade v0.0.27-rc.1` on `v0.0.26` | the full set `pre-v0.0.27-rc.1`, the checkout as the owner, the rc tree's provision 20/20, preflight, apply, verify (`08-rehearsal-1-upgrade.txt`) |
-| A2 | the same again | the set reused, the checkout already at the tag, a clean re-run (same file) |
-| B | `--rollback` | restore needed, the safety set, the stack stopped, the checkout to the `v0.0.26` tag, the previous tree's restore to the boundary, apply, verify, the row (`08-rehearsal-2-rollback.txt`) |
-| C | `upgrade v0.0.27-rc.1` again | the suffixed set `pre-v0.0.27-rc.1-<ts>` (`08-rehearsal-3-upgrade-again.txt`) |
-| D | `--rollback` again | pgBackRest refused the Postgres restore: its auto-selection skipped the set's own backup for one on the pre-rollback timeline. The restore was finished by hand with `--set` (`08-rehearsal-4-rollback.txt`, `-4a-`, `-4b-`). Hotfix `v0.0.27` fixed it |
-| E | `upgrade v0.0.28-rc.1` on `v0.0.27` | as A (`08-rehearsal-5-upgrade.txt`) |
-| F | `--rollback` | first refused by leg D's stale in-progress record, as designed. Then a rollback across two earlier promotions restored the set's own backup, followed by apply, verify, and the row (`08-rehearsal-6-rollback.txt`) |
+| 0 | `upgrade v0.0.26-rc.1` on `v0.0.25` | The run stalled at the backup stage's readiness probe: a nested `sudo -u` under `sudo-rs`'s `use_pty` and a `compose exec` reading the terminal. It was aborted cleanly, with nothing changed (`08-rehearsal-0-stalled-on-v0.0.25.txt`). Hotfix `v0.0.26` fixed it. |
+| A | `upgrade v0.0.27-rc.1` on `v0.0.26` | The run took the full set `pre-v0.0.27-rc.1`, checked out the rc tree as the owner, and completed that tree's provision 20/20, preflight, apply, and verify (`08-rehearsal-1-upgrade.txt`). |
+| A2 | the same again | The run reused the set with the checkout already at the tag and completed a clean re-run (same file). |
+| B | `--rollback` | The run needed a restore, took the safety set, stopped the stack, checked out the `v0.0.26` tag, and ran the previous tree's restore to the boundary, followed by apply, verify, and the row (`08-rehearsal-2-rollback.txt`). |
+| C | `upgrade v0.0.27-rc.1` again | The run took the suffixed set `pre-v0.0.27-rc.1-<ts>` (`08-rehearsal-3-upgrade-again.txt`). |
+| D | `--rollback` again | pgBackRest refused the Postgres restore: its auto-selection skipped the set's own backup for one on the pre-rollback timeline. The restore was finished by hand with `--set` (`08-rehearsal-4-rollback.txt`, `-4a-`, `-4b-`). Hotfix `v0.0.27` fixed it. |
+| E | `upgrade v0.0.28-rc.1` on `v0.0.27` | The run completed the same sequence as A (`08-rehearsal-5-upgrade.txt`). |
+| F | `--rollback` | The run was first refused by leg D's stale in-progress record, as designed. Then a rollback across two earlier promotions restored the set's own backup, followed by apply, verify, and the row (`08-rehearsal-6-rollback.txt`). |
 
-Each rollback's unavailability, from its `stop` row to apply's `verify`, was about three minutes on this box.
-The rehearsal left six labelled sets under `/data/backup-staging/sets/`, pushed and pruned like any set.
+Each rollback's unavailability, from its `stop` row to apply's `verify`, was about three minutes on this box. The rehearsal left six labelled sets under `/data/backup-staging/sets/`, pushed and pruned like any set.
 
-The `wait-online` step converged in one row, and the box was rebooted after the rehearsal.
-The unit's result and the post-boot provision pass are the tail of `08-wait-online.txt`.
-The first real upgrade was `sudo ./upgrade.sh v0.1.1` on 2026-09-03 at 22:56 CDT (`08-upgrade-v0.1.1.txt`).
-It ran from the checkout on `main`, which already declared 0.1.1 because development had moved it past the applied `0.0.27`.
-The `version` row read it as a re-run of 0.1.1, and the fresh pre-upgrade set `pre-v0.1.1` was taken from that tree.
-The way back is therefore `restore --from staging --set pre-v0.1.1` rather than `--rollback`, which would find nothing to do.
-The 0.0.27 tree could not have run it.
-Its firewall check sees the DOCKER-USER block `v0.1.0` rewrote as drift, and its preflight would have refused.
-Every row was ok.
-`fetch` reached GitHub as `fpdadmin`.
-The new tree's provision moved nothing (20/20, the `kvm`, `firewall`, and `gh-runner` state already converged from the candidate tree).
-Apply recreated the services whose files changed.
-Verify confirmed 0.1.1 by `--version`, the applied record, and every service healthy.
-The box runs `v0.1.1`.
-The checkout is back on `main`, whose product code equals the tag.
+The `wait-online` step converged in one row, and the box was rebooted after the rehearsal. The unit's result and the post-boot provision pass were the tail of `08-wait-online.txt`. The first real upgrade was `sudo ./upgrade.sh v0.1.1` on 2026-09-03 at 22:56 CDT (`08-upgrade-v0.1.1.txt`). It ran from the checkout on `main`, which already declared 0.1.1 because development had moved it past the applied `0.0.27`. The `version` row read it as a re-run of 0.1.1, and the fresh pre-upgrade set `pre-v0.1.1` was taken from that tree. The way back was therefore `restore --from staging --set pre-v0.1.1` rather than `--rollback`, which would have found nothing to do. The 0.0.27 tree could not have run it because its firewall check saw the DOCKER-USER block `v0.1.0` rewrote as drift, and its preflight would have refused.
+
+Every row was ok: `fetch` reached GitHub as `fpdadmin`, and the new tree's provision moved nothing (20/20, the `kvm`, `firewall`, and `gh-runner` state already converged from the candidate tree). Apply recreated the services whose files changed, and verify confirmed 0.1.1 by `--version`, the applied record, and every service healthy. The box ran `v0.1.1`, and the checkout was back on `main`, whose product code equalled the tag.
 
 ## 7. Moving a populated image store
 
-This procedure moves Docker's populated image store onto its volume by hand in an announced maintenance window.
-Use it when `host provision` reports `docker-engine: failed` naming a populated package-default containerd root, or `apply` refuses naming that root beside an empty root on the Docker volume.
+This procedure moves Docker's populated image store onto its volume by hand in an announced maintenance window, when `host provision` reports `docker-engine: failed` naming a populated package-default containerd root, or `apply` refuses naming that root beside an empty root on the Docker volume. The image store is containerd's directory for Docker's images; starting the daemon on that empty root would make its existing images and container snapshots disappear, so GIDEON refuses until the store is moved. Every Compose project using the Docker daemon is down during the copy, including any other project sharing it. Tell users before starting.
 
-The image store is containerd's directory for Docker's images.
-Starting the daemon on that empty root would make its existing images and container snapshots disappear.
-Every Compose project using the Docker daemon is down during the copy, including any other project sharing it.
-Tell users before starting.
+The survey runs with the projects up to record the lists that will be compared after the move. The copy and its checks run with every daemon stopped so nothing changes under them, and provision points containerd at the new root only after the copy is verified. The old root stays until acceptance so the move can be rolled back until then.
 
 ### Survey
 
-Keep the GIDEON and any other Compose projects running for the survey.
-Check free space on the root filesystem and the Docker volume.
-Measure the current store.
-Record the image and container lists for comparison after the move.
-The move record directory is root-owned and is kept until acceptance:
+Keep GIDEON and any other Compose projects running for the survey. Check free space on the root filesystem and the Docker volume, measure the current store, and record the image and container lists for comparison after the move. The move record directory is root-owned and is kept until acceptance:
 
 ```sh
 sudo install -d -m 0700 /var/lib/gideon-store-move
@@ -441,21 +335,13 @@ sudo docker system df
 sudo cp -p /etc/containerd/config.toml /var/lib/gideon-store-move/config.toml.shipped
 ```
 
-Check for pending package actions affecting Docker or containerd with `sudo apt-get update -q` and `sudo apt-get -s install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin`.
-If the simulation lists an action, apply it while all projects remain up with `sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin`.
-Then repeat the survey and replace the saved lists and configuration.
-Do not stop the daemons until the simulation reports no pending action.
+Check for pending package actions affecting Docker or containerd with `sudo apt-get update -q` and `sudo apt-get -s install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin`. If the simulation lists an action, apply it while all projects remain up with `sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin`, then repeat the survey and replace the saved lists and configuration. Do not stop the daemons until the simulation reports no pending action, so a package action does not start a daemon on the old root during the move.
 
-On a box with a self-hosted GitHub Actions runner, a running job may hold its own Compose stack on the daemon.
-A package action restarts the daemon under it as Stop does, failing the job.
-Before applying a package action, and again before Stop, run `gh run list --status in_progress` from a clone of each repository the runner serves.
-Wait until it lists no run.
+On a box with a self-hosted GitHub Actions runner, a running job may hold its own Compose stack on the daemon, and a package action restarts the daemon under it as Stop does, failing the job. Before applying a package action, and again before Stop, run `gh run list --status in_progress` from a clone of each repository the runner serves and wait until it lists no run.
 
 ### Stop
 
-Stop the release registry, Docker's socket and service, then containerd.
-`gideon-registry.service` is provisioned on the build box alone.
-On any other box, leave out every command below that names it, here and in the stages after.
+Stop the release registry, Docker's socket and service, then containerd. Since `gideon-registry.service` is provisioned on the build box alone, leave out every command below that names it on any other box, here and in the stages after.
 
 ```sh
 sudo systemctl stop gideon-registry.service
@@ -470,20 +356,11 @@ sudo findmnt -R /var/lib/containerd
 sudo ls -A /var/lib/containerd/tmpmounts
 ```
 
-Each `systemctl is-active` command should print `inactive`.
-Its non-zero status is expected for an inactive unit.
-`pgrep` should print no processes and return status 1.
-Any other failure means its result is unknown.
-`findmnt` should show no mounts under the old root.
-`ls` should print nothing for the empty `tmpmounts` directory.
-If a process, mount, or temporary entry remains, leave the store in place.
-Resolve it before continuing.
+Each `systemctl is-active` command should print `inactive`, with the non-zero status expected for an inactive unit. `pgrep` should print no processes and return status 1; any other failure means its result is unknown. `findmnt` should show no mounts under the old root, and `ls` should print nothing for the empty `tmpmounts` directory. If a process, mount, or temporary entry remains, leave the store in place and resolve it before continuing.
 
 ### Copy
 
-Copy the old root to the Docker volume.
-The command preserves hard links, ACLs, extended attributes, sparse files, and numeric owners.
-If interrupted, run the same command again to resume the copy:
+Copy the old root to the Docker volume with the command below, which preserves hard links, ACLs, extended attributes, sparse files, and numeric owners. If interrupted, run the same command again to resume the copy:
 
 ```sh
 sudo mkdir -p /var/lib/docker/containerd
@@ -492,15 +369,13 @@ sudo rsync -aHAXxS --numeric-ids /var/lib/containerd/ /var/lib/docker/containerd
 
 ### Verify
 
-With all daemons still stopped, run a second dry pass.
-It must exit successfully and print no itemized differences:
+With all daemons still stopped, run a second dry pass, which must exit successfully and print no itemized differences:
 
 ```sh
 sudo rsync -aHAXxS --numeric-ids -n -i /var/lib/containerd/ /var/lib/docker/containerd/
 ```
 
-Compare the roots' inode counts and apparent byte counts.
-Also compare the counts of character-device whiteouts under `io.containerd.snapshotter.v1.overlayfs/snapshots` and directories carrying the `trusted.overlay.opaque` extended attribute:
+Compare the roots' inode counts and apparent byte counts, along with the counts of character-device whiteouts under `io.containerd.snapshotter.v1.overlayfs/snapshots` and directories carrying the `trusted.overlay.opaque` extended attribute:
 
 ```sh
 sudo bash -o pipefail -c 'find /var/lib/containerd | wc -l'
@@ -523,18 +398,11 @@ for root in sys.argv[1:]:
 ' /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots /var/lib/docker/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots
 ```
 
-All four counts must match.
-Whiteouts are device nodes, and opaque markers are extended attributes.
-A plain file copy would lose overlay state.
-Do not provision if the dry pass reports a difference or any count differs.
+All four counts must match. Whiteouts are device nodes and opaque markers are extended attributes, so a plain file copy would lose overlay state. Do not provision if the dry pass reports a difference or any count differs.
 
 ### Provision
 
-A package action during provision must not start a daemon on the old root.
-Hold every package maintainer script back with a temporary `policy-rc.d` for the one step.
-If `/usr/sbin/policy-rc.d` already exists, it is the host's own policy.
-Stop and resolve it rather than overwrite it.
-From `/opt/gideon`, write the new containerd root and restart the managed daemons:
+A package action during provision must not start a daemon on the old root, so hold every package maintainer script back with a temporary `policy-rc.d` for the one step. If `/usr/sbin/policy-rc.d` already exists, it is the host's own policy; stop and resolve it rather than overwrite it. From `/opt/gideon`, write the new containerd root and restart the managed daemons:
 
 ```sh
 cd /opt/gideon
@@ -546,24 +414,13 @@ sudo systemctl start gideon-registry.service
 sudo containerd config dump
 ```
 
-Remove `/usr/sbin/policy-rc.d` whether or not provision succeeds.
-The daemons are stopped, so provision cannot list the running containers it would otherwise guard.
-The flag acknowledges the window already announced.
-`--only` runs only when every step before `docker-engine` has converged.
-If the box's first provision met the refusal before its site file existed, write the site file before the survey.
-Then run `gideon host provision` once more before the survey.
-It converges the rest and refuses at `docker-engine` again.
+Remove `/usr/sbin/policy-rc.d` whether or not provision succeeds. The daemons are stopped, so provision cannot list the running containers it would otherwise guard; the flag acknowledges the window already announced. `--only` runs only when every step before `docker-engine` has converged. If the box's first provision met the refusal before its site file existed, write the site file and run `gideon host provision` once more before the survey. That provision run converges the rest and refuses at `docker-engine` again.
 
-Confirm Docker's socket and service, containerd, and on the build box the registry are active.
-Confirm `containerd config dump` reports `/var/lib/docker/containerd` as the root.
-If provision or that check fails, keep both roots.
-Use the rollback below.
+Confirm Docker's socket and service, containerd, and on the build box the registry are active, then confirm `containerd config dump` reports `/var/lib/docker/containerd` as the root. If provision or that check fails, keep both roots and use the rollback below.
 
 ### Check and accept
 
-Wait for the containers that were running in the survey to return and for their health checks to pass.
-Save fresh lists.
-Compare them with the survey; both diffs must exit zero:
+Wait for the containers that were running in the survey to return and for their health checks to pass, then save fresh lists and compare them with the survey. Both diffs must exit zero:
 
 ```sh
 sudo bash -o pipefail -c 'docker image ls --digests --format "{{.Repository}}\t{{.Tag}}\t{{.Digest}}\t{{.ID}}" | sort > /var/lib/gideon-store-move/images.after'
@@ -575,9 +432,7 @@ sudo du -sb /var/lib/docker/containerd
 sudo df -h / /var/lib/docker
 ```
 
-Do not accept the move until both list comparisons are identical, no unhealthy container is reported, and the engine is healthy.
-Every surveyed project must also have returned to its surveyed state before you accept the move.
-Record the responsible operator's confirmation with the move record:
+Do not accept the move until both list comparisons are identical, no unhealthy container is reported, and the engine is healthy. Every surveyed project must also have returned to its surveyed state before you accept the move. Record the responsible operator's confirmation with the move record:
 
 ```sh
 printf '%s\n' '<operator confirmation>' | sudo tee /var/lib/gideon-store-move/accept.txt >/dev/null
@@ -585,8 +440,7 @@ printf '%s\n' '<operator confirmation>' | sudo tee /var/lib/gideon-store-move/ac
 
 ### Remove
 
-Only after acceptance, confirm once more that `containerd config dump` names `/var/lib/docker/containerd` and that the surveyed projects are healthy.
-Then remove the old root and the temporary move record:
+Only after acceptance, confirm once more that `containerd config dump` names `/var/lib/docker/containerd` and that the surveyed projects are healthy, then remove the old root and the temporary move record:
 
 ```sh
 sudo rm -rf /var/lib/containerd /var/lib/gideon-store-move
@@ -597,10 +451,7 @@ The closing provision, from `/opt/gideon`, should report every step converged.
 
 ### Roll back before acceptance
 
-Rollback is available after the stop and before acceptance.
-Stop the registry, Docker socket and service, and containerd.
-Then restore the saved configuration.
-Start the old root:
+Rollback is available after the stop and before acceptance. Stop the registry, Docker socket and service, and containerd, then restore the saved configuration and start the old root:
 
 ```sh
 sudo systemctl stop gideon-registry.service
@@ -611,53 +462,26 @@ sudo systemctl start containerd.service
 sudo containerd config dump
 ```
 
-Continue only when `containerd config dump` reports `/var/lib/containerd` as the root.
-Otherwise stop and remove nothing.
-Then start the rest:
+Continue only when `containerd config dump` reports `/var/lib/containerd` as the root; otherwise stop and remove nothing. Then start the rest:
 
 ```sh
 sudo systemctl start docker.socket docker.service
 sudo systemctl start gideon-registry.service
 ```
 
-Wait for the surveyed projects to return.
-Save fresh image and container lists.
-Compare them with the saved lists in `/var/lib/gideon-store-move`.
-Confirm the old root is active before removing the copied `/var/lib/docker/containerd` root.
-Keep both roots until those checks pass.
+Wait for the surveyed projects to return, then save fresh image and container lists and compare them with the saved lists in `/var/lib/gideon-store-move`. Confirm the old root is active before removing the copied `/var/lib/docker/containerd` root, keeping both roots until those checks pass.
 
 ## 8. Moving an occupied `/data` onto the data volume
 
-This procedure moves existing `/data` contents onto the data volume.
-Use it when `host provision` reports `disk-layout: unfixable` and names entries held by an unmounted `/data`.
+This procedure moves existing `/data` contents onto the data volume when `host provision` reports `disk-layout: failed` and names entries held by an unmounted `/data`.
 
-The directory is on the root filesystem.
-Another application's data may have been written there before GIDEON provisioned its volume.
-Mounting the volume would hide that data.
-Announce the move to the owning operator.
-Use a maintenance window.
-The owning application stays down from **Stop** until **Start and accept**.
+The directory is on the root filesystem and may hold another application's data written before GIDEON provisioned its volume. Mounting the volume would hide that data, so announce the move to the owning operator and use a maintenance window. The owning application stays down from **Stop** until **Start and accept**. The directory is set aside by a rename so provision can create and mount the volume in its place, and the volume is inventoried before the first copy so nothing already on it is overwritten. The set-aside tree is removed only after the owning operator accepts the move.
 
-Keep a root-owned record in `/var/lib/gideon-data-move` until acceptance.
-Each completed stage writes a stamp there.
-`copy.started` is written *before* copying.
-On an interrupted run, inspect the stamps.
-Continue at the unfinished stage.
-Do not repeat the volume inventory after `copy.started` exists: it would count the move's own copies as preexisting data.
-Stop if a command fails or a required tool is unavailable.
-Repair that condition before continuing.
+Keep a root-owned record in `/var/lib/gideon-data-move` until acceptance. Each completed stage writes a stamp there, and `copy.started` is written *before* copying. On an interrupted run, inspect the stamps and continue at the unfinished stage. Do not repeat the volume inventory after `copy.started` exists, because it would count the move's own copies as preexisting data. Stop if a command fails or a required tool is unavailable, and repair that condition before continuing.
 
 ### Survey
 
-Confirm `/data` is a directory and not a mount point.
-Start a new record only when `/var/lib/gideon-data-move` is absent.
-If a survey was interrupted before its stamp, inspect the record.
-Repeat the survey only while the original `/data` is still in place.
-Skip the new-record absence check on that repeat.
-Record the sorted top-level names as NUL-delimited data.
-Record each entry's owner, group, mode, and apparent size.
-Check root filesystem free space and the data's apparent size.
-Check that `lsof` and `rsync` are available before the stop:
+Confirm `/data` is a directory and not a mount point, and start a new record only when `/var/lib/gideon-data-move` is absent. If a survey was interrupted before its stamp, inspect the record and repeat the survey only while the original `/data` is still in place, skipping the new-record absence check on that repeat. Record the sorted top-level names as NUL-delimited data and each entry's owner, group, mode, and apparent size. Check root filesystem free space and the data's apparent size, and check that `lsof` and `rsync` are available before the stop:
 
 ```sh
 sudo test -d /data
@@ -675,13 +499,7 @@ command -v lsof
 command -v rsync
 ```
 
-The NUL-delimited record keeps names containing spaces or newlines intact.
-The following check must succeed and print nothing.
-GIDEON owns these top-level names and will re-own them.
-A co-tenant keeps its data outside them.
-If one of those top-level names is present, stop.
-Have the owning operator rename that entry on their side.
-Then repeat the survey before stamping it:
+The NUL-delimited record keeps names containing spaces or newlines intact. The following check must succeed and print nothing, because GIDEON owns these top-level names and will re-own them, while a co-tenant keeps its data outside them. If one of those top-level names is present, stop and have the owning operator rename that entry on their side, then repeat the survey before stamping it:
 
 ```sh
 sudo test -s /var/lib/gideon-data-move/entries.nul
@@ -695,9 +513,7 @@ while IFS= read -r -d "" name; do
 done < /var/lib/gideon-data-move/entries.nul'
 ```
 
-Use Docker's listing to record running containers with a bind mount sourced from `/data` or a path below it.
-With `pipefail` enabled, a failed Docker listing or inspection stops the survey.
-The record may be empty:
+Use Docker's listing to record running containers with a bind mount sourced from `/data` or a path below it. With `pipefail` enabled, a failed Docker listing or inspection stops the survey; the record may be empty:
 
 ```sh
 set -o pipefail
@@ -710,12 +526,7 @@ sudo touch /var/lib/gideon-data-move/survey.done
 
 ### Stop
 
-The owning operator stops their application by its own commands.
-Confirm no process holds a path under `/data` open, no running container mounts it, and no nested mount remains.
-`lsof` should print nothing and return status 1.
-Output, a diagnostic, or any other status stops the move.
-The Docker and mount listings must succeed and be empty.
-Do not set the stamp until all checks have passed:
+The owning operator stops their application by its own commands. Confirm no process holds a path under `/data` open, no running container mounts it, and no nested mount remains. `lsof` should print nothing and return status 1; output, a diagnostic, or any other status stops the move. The Docker and mount listings must succeed and be empty. Do not set the stamp until all checks have passed:
 
 ```sh
 sudo lsof +D /data                         # expect no output and status 1
@@ -734,11 +545,7 @@ sudo touch /var/lib/gideon-data-move/stop.done
 
 ### Set aside
 
-Rename `/data` on the same filesystem.
-This is an immediate rename, not a copy.
-The set-aside path must be absent.
-Leave `/data` absent for provision to create.
-Do not pre-create it:
+Rename `/data` on the same filesystem, which makes the set-aside immediate because nothing is copied; the set-aside path must be absent first. Leave `/data` absent so that provision creates it, and do not pre-create it:
 
 ```sh
 sudo test ! -e /data.before-gideon-move
@@ -750,10 +557,7 @@ sudo touch /var/lib/gideon-data-move/aside.done
 
 ### Provision
 
-From `/opt/gideon`, converge the volume and mount it.
-On a box that has not finished its first provision, `--only` refuses because its prerequisite has not converged.
-Run the whole provision there instead.
-Proceed only when `findmnt` shows `/data` as an XFS mount point on the data LV and its size is as expected:
+From `/opt/gideon`, converge the volume and mount it. On a box that has not finished its first provision, `--only` refuses because its prerequisite has not converged, so run the whole provision there instead. Proceed only when `findmnt` shows `/data` as an XFS mount point on the data LV and its size is as expected:
 
 ```sh
 cd /opt/gideon
@@ -766,13 +570,7 @@ sudo touch /var/lib/gideon-data-move/provision.done
 
 ### Inventory the volume
 
-Before the first copy, record the mounted volume's own sorted top-level names.
-A volume previously built and left unmounted may already contain the owning application's data.
-Any name shared with the original survey stops the move.
-Do not merge the trees.
-The owning operator reconciles the two copies by hand, keeping, renaming, or removing one, before inventory is repeated and the copy starts.
-Once the inventory is stamped, keep it.
-After `copy.started`, do not re-inventory on a resume:
+Before the first copy, record the mounted volume's own sorted top-level names, because a volume previously built and left unmounted may already contain the owning application's data. Any name shared with the original survey stops the move; do not merge the trees. The owning operator reconciles the two copies by hand, keeping, renaming, or removing one, before inventory is repeated and the copy starts. Once the inventory is stamped, keep it, and after `copy.started`, do not re-inventory on a resume:
 
 ```sh
 sudo bash -o pipefail -c 'find /data -mindepth 1 -maxdepth 1 -printf "%f\0" | sort -z > /var/lib/gideon-data-move/volume.before.nul'
@@ -787,12 +585,7 @@ sudo touch /var/lib/gideon-data-move/inventory.done
 
 ### Copy
 
-Stamp the start **before** the transfer.
-One `rsync` invocation copies the whole recorded entry list under the same names.
-It preserves hard links even between different top-level entries, ACLs, extended attributes, sparse files, and numeric owners.
-`--files-from` needs explicit recursion.
-If interrupted, rerun this same `rsync` command.
-Keep the original survey and volume inventory:
+Stamp the start **before** the transfer, so that a resumed run knows the copy has begun and does not inventory the volume again. One `rsync` invocation copies the whole recorded entry list under the same names, preserving hard links even between different top-level entries, ACLs, extended attributes, sparse files, and numeric owners. `--files-from` needs explicit recursion. If interrupted, rerun this same `rsync` command. Keep the original survey and volume inventory:
 
 ```sh
 sudo test -f /var/lib/gideon-data-move/inventory.done
@@ -803,12 +596,7 @@ sudo touch /var/lib/gideon-data-move/copy.done
 
 ### Verify
 
-With the application still stopped, make a second dry pass over **only the surveyed entries**.
-`rsync` must exit successfully.
-The itemized difference file must be empty.
-Then compare each entry's regular-file count and the sum of those files' sizes on both sides.
-Do not compare whole roots.
-Provision's directories sit beside the copies, and ext4 and XFS can report different directory sizes:
+With the application still stopped, make a second dry pass over **only the surveyed entries**. `rsync` must exit successfully and the itemized difference file must be empty. Then compare each entry's regular-file count and the sum of those files' sizes on both sides. Do not compare whole roots, because provision's directories sit beside the copies, and ext4 and XFS can report different directory sizes:
 
 ```sh
 sudo test -f /var/lib/gideon-data-move/copy.done
@@ -826,10 +614,7 @@ sudo touch /var/lib/gideon-data-move/verify.done
 
 ### Start and accept
 
-The owning operator starts their application and confirms it works on the moved data.
-Record that operator's confirmation and time in the move record.
-From this start onward, the application writes to the volume alone.
-The rollback below is no longer safe:
+The owning operator starts their application and confirms it works on the moved data. Record that operator's confirmation and time in the move record. From this start onward, the application writes to the volume alone, so the rollback below is no longer safe:
 
 ```sh
 printf '%s\n' '<operator confirmation and time>' | sudo tee /var/lib/gideon-data-move/accept.txt >/dev/null
@@ -838,9 +623,7 @@ sudo touch /var/lib/gideon-data-move/start.accepted
 
 ### Remove
 
-Only after acceptance, confirm the data volume is still mounted.
-Then remove the set-aside tree and the move record.
-A closing provision from `/opt/gideon` should report every step converged:
+Only after acceptance, confirm the data volume is still mounted, then remove the set-aside tree and the move record. A closing provision from `/opt/gideon` should report every step converged:
 
 ```sh
 sudo test -f /var/lib/gideon-data-move/start.accepted
@@ -852,20 +635,9 @@ gideon host provision
 
 ### Roll back before the start
 
-Rollback is available from the stop until the owning application starts on the moved data.
-Before **Set aside**, `/data` is still the original directory.
-The owning operator can restart after confirming it is untouched.
-Once the application starts on the moved data, new writes exist only on the volume.
-Moving back would require its operator to stop it and perform and verify a reverse `rsync`, outside this rollback.
+Rollback is available from the stop until the owning application starts on the moved data. Before **Set aside**, `/data` is still the original directory, and the owning operator can restart after confirming it is untouched. Once the application starts on the moved data, new writes exist only on the volume, so moving back would require its operator to stop it and perform and verify a reverse `rsync`, outside this rollback.
 
-After **Set aside**, keep the application down.
-If `/data` is mounted, unmount it.
-If provision has not yet mounted it, confirm it is not a mount point.
-Skip only `umount` in that case.
-In `/etc/fstab`, manually remove the complete managed block if present.
-The block comprises `# GIDEON BEGIN provision:disk-layout`, the UUID line between, and `# GIDEON END provision:disk-layout`.
-Provision will write the block again on the next successful move.
-Leaving it in place would mount the volume over the restored directory at reboot:
+After **Set aside**, keep the application down. If `/data` is mounted, unmount it; if provision has not yet mounted it, confirm it is not a mount point and skip only `umount` in that case. In `/etc/fstab`, manually remove the complete managed block if present, comprising `# GIDEON BEGIN provision:disk-layout`, the UUID line between, and `# GIDEON END provision:disk-layout`. Provision will write the block again on the next successful move. Leaving it in place would mount the volume over the restored directory at reboot:
 
 ```sh
 sudo umount /data                            # only when mounted
@@ -877,32 +649,21 @@ sudo mv -T /data.before-gideon-move /data
 sudo touch /var/lib/gideon-data-move/rollback.done
 ```
 
-The `sed` command must print nothing before restoring `/data`.
-The owning operator then starts their application on the restored directory.
-Keep the rolled-back record for review.
-Archive it under a new name before a fresh attempt so its `copy.started` stamp cannot be mistaken for the new move's state.
-Provision will report the occupied-`/data` refusal again until the move is completed.
-Any copies already on the volume remain there and will appear as shared names at the next attempt's inventory.
-Reconcile them before copying.
+The `sed` command must print nothing before restoring `/data`. The owning operator then starts their application on the restored directory.
+
+Keep the rolled-back record for review, and archive it under a new name before a fresh attempt so its `copy.started` stamp cannot be mistaken for the new move's state. Provision will report the occupied-`/data` refusal again until the move is completed. Any copies already on the volume remain there and will appear as shared names at the next attempt's inventory; reconcile them before copying.
 
 ## 9. Upgrading a shared prerequisite
 
-This procedure upgrades a present Docker Engine, Compose plugin, NVIDIA container toolkit, or driver.
-Use it when provision or preflight reports one below the lock's floor or with closed kernel modules, or an apt rehearsal proposes upgrades or removals.
+This procedure upgrades a present Docker Engine, Compose plugin, NVIDIA container toolkit, or driver when provision or preflight reports one below the lock's floor or with closed kernel modules, or an apt rehearsal proposes upgrades or removals.
 
-Read `host.lock` for the required floor and driver branch.
-Provision installs absent packages but does not upgrade a present prerequisite.
-A driver at or above the branch with open kernel modules is accepted whatever its packaging.
+Read `host.lock` for the required floor and driver branch. Provision installs absent packages but does not upgrade a present prerequisite, so the package change comes before convergence from the release checkout. A driver at or above the branch with open kernel modules is accepted whatever its packaging.
 
-A `reboot-required` row naming a loaded NVIDIA driver that differs from the installed module means the driver was upgraded without its reboot.
-Reboot in an announced window.
-Then re-run provision.
+A `reboot-required` row naming a loaded NVIDIA driver that differs from the installed module means the driver was upgraded without its reboot. Reboot in an announced window, then re-run provision so it reads the driver loaded after the change.
 
 ### Survey
 
-Refresh apt's lists and rehearse the appropriate install before changing packages.
-Read every `Inst` and `Remv` line, including dependencies and other packages on the box.
-If apt cannot run, fix its refusal before proceeding.
+Refresh apt's lists and rehearse the appropriate install before changing packages, reading every `Inst` and `Remv` line for dependencies and other packages on the box as well as the prerequisite. If apt cannot run, fix its refusal before proceeding.
 
 ```sh
 sudo apt-get update -q
@@ -911,25 +672,15 @@ sudo apt-get -s install -y nvidia-container-toolkit
 sudo apt-get -s install -y nvidia-driver-pinning-<branch> nvidia-open
 ```
 
-Run only the rehearsal for the prerequisite being upgraded.
-For a driver upgrade, replace `<branch>` with `host.driver.branch` from `host.lock`.
-Resolve any other proposed change with its owner before the window.
+Run only the rehearsal for the prerequisite being upgraded, replacing `<branch>` with `host.driver.branch` from `host.lock` for a driver upgrade. Resolve any other proposed change with its owner before the window.
 
 ### Announce
 
-Announce a maintenance window at least one working day ahead to users and every project sharing the daemon.
-A Docker upgrade restarts every container on the box.
-A driver upgrade needs a reboot.
-Agree on the timing with the other projects' operators before starting.
-When `host provision`'s co-tenant guard names running containers, use that list to announce the window to their projects.
-`--acknowledge-disruption` acknowledges the disruption on the re-run but does not announce the window.
+Announce a maintenance window at least one working day ahead to users and every project sharing the daemon, because a Docker upgrade restarts every container on the box and a driver upgrade needs a reboot. Agree on the timing with the other projects' operators before starting. When `host provision`'s co-tenant guard names running containers, use that list to announce the window to their projects; `--acknowledge-disruption` acknowledges the disruption on the re-run but does not announce the window.
 
 ### Upgrade
 
-During the window, choose the applicable sequence below.
-Stop if any command fails.
-Do not continue to provision until the package change succeeds.
-Upgrade Docker's five packages together:
+During the window, choose the applicable sequence below. Stop if any command fails, and do not continue to provision until the package change succeeds, since provision does not upgrade a present prerequisite. Upgrade Docker's five packages together:
 
 ```sh
 sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
@@ -941,10 +692,7 @@ Upgrade the toolkit as one package:
 sudo apt-get install -y nvidia-container-toolkit
 ```
 
-For a driver, release the hold.
-Install the branch pinning package before the driver.
-Restore the hold.
-Reboot:
+For a driver, release the hold to allow the package change, install the branch pinning package before the driver, then restore the hold and reboot:
 
 ```sh
 sudo apt-mark unhold nvidia-open
@@ -954,8 +702,7 @@ sudo apt-mark hold nvidia-open
 sudo reboot
 ```
 
-After a driver reboot, re-run provision (Converge, next).
-Its toolkit step regenerates the CDI specification when it no longer matches a fresh `nvidia-ctk cdi generate`.
+After a driver reboot, re-run provision (Converge, next) so its toolkit step regenerates the CDI specification when it no longer matches a fresh `nvidia-ctk cdi generate`.
 
 ### Converge
 
@@ -972,113 +719,62 @@ After a driver or Docker change, verify the engine once services are running aga
 gideon engine verify
 ```
 
-A merged `host.minimums.*` or `host.driver.branch` bump makes provision and preflight refuse until this procedure is followed (`docs/runbooks/release-files.md §9`).
-Provision does not upgrade a present prerequisite itself.
+A merged `host.minimums.*` or `host.driver.branch` bump makes provision and preflight refuse until this procedure is followed (`docs/runbooks/release-files.md §9`), because provision does not upgrade a present prerequisite itself.
 
 ## 10. Changing a moved box-wide setting
 
-This procedure changes a moved box-wide setting or Docker address pool that GIDEON will not change.
-Use it when provision, preflight, or `upgrade`'s provision stage reports one that falls short.
+This procedure changes a moved box-wide setting or Docker address pool that GIDEON will not change, when provision, preflight, or `upgrade`'s provision stage reports one that falls short.
 
-The row names the setting or key, the value found, and the value needed.
-Agree the value with the box's other operators.
-Make the applicable change below.
-Then re-run provision from the release checkout.
+The row names the setting or key, the value found, and the value needed, so agree the value with the box's other operators before making the applicable change below. Then re-run provision from the release checkout.
 
 ### Time zone
 
-If the host's zone should match `office.timezone` in `/etc/gideon/site.yaml`, change it with `sudo timedatectl set-timezone <zone>`.
-If the host's zone is right, correct `office.timezone` instead.
-Do this in an announced window.
-Every timer on the box follows the zone, and a persistent timer can catch up once after the change.
+If the host's zone should match `office.timezone` in `/etc/gideon/site.yaml`, change it with `sudo timedatectl set-timezone <zone>`; if the host's zone is right, correct `office.timezone` instead. Do this in an announced window because every timer on the box follows the zone, and a persistent timer can catch up once after the change.
 
 ### SSH login rule
 
-Keep a working SSH session open.
-Read the effective `passwordauthentication` and `kbdinteractiveauthentication` values with `sudo sshd -T`.
-Use `sudo grep -riE '^[[:space:]]*(PasswordAuthentication|KbdInteractiveAuthentication)' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/` to find the file setting either value ahead of `/etc/ssh/sshd_config.d/00-gideon-key-only.conf`.
-Agree the change with the other operator, since a password login may be theirs.
-Remove or correct the conflicting line.
-Run `sudo systemctl reload ssh`.
-Confirm both effective values are `no` while keeping the session open.
+Keep a working SSH session open while reading the effective `passwordauthentication` and `kbdinteractiveauthentication` values with `sudo sshd -T`. Use `sudo grep -riE '^[[:space:]]*(PasswordAuthentication|KbdInteractiveAuthentication)' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/` to find the file setting either value ahead of `/etc/ssh/sshd_config.d/00-gideon-key-only.conf`. Agree the change with the other operator, since a password login may be theirs, then remove or correct the conflicting line and run `sudo systemctl reload ssh`. Keep the session open until both effective values are confirmed as `no`.
 
 ### Firewall default policy
 
-Agree an announced window because this changes who can reach the box.
-Set the incoming default with `sudo ufw default deny incoming`.
-Then read `sudo ufw status verbose` to confirm the active incoming policy is `deny`.
+Agree an announced window because this changes who can reach the box. Set the incoming default with `sudo ufw default deny incoming`, then read `sudo ufw status verbose` to confirm the active incoming policy is `deny`.
 
 ### Journald storage
 
-Set `Storage=persistent` in the file the refusal names.
-Alternatively, when `Storage=auto` or unset, create `/var/log/journal` with `sudo mkdir -p /var/log/journal`.
-Run `sudo systemctl restart systemd-journald`.
-Read `sudo systemd-analyze cat-config systemd/journald.conf` to confirm the effective value.
-Containers keep running.
-The journal pauses briefly, so this change needs no maintenance window.
+Set `Storage=persistent` in the file the refusal names. Alternatively, when `Storage=auto` or unset, create `/var/log/journal` with `sudo mkdir -p /var/log/journal`. Run `sudo systemctl restart systemd-journald`, then read `sudo systemd-analyze cat-config systemd/journald.conf` to confirm the effective value. Containers keep running and the journal pauses briefly, so this change needs no maintenance window.
 
 ### Apt periodic triggers
 
-Use `sudo grep -r 'Unattended-Upgrade\|Update-Package-Lists' /etc/apt/apt.conf.d/` to find the file setting the refused key to `"0"`.
-Set that key to `"1"` there.
-Read `apt-config dump APT::Periodic` to confirm both triggers are on.
-No maintenance window is needed.
+Use `sudo grep -r 'Unattended-Upgrade\|Update-Package-Lists' /etc/apt/apt.conf.d/` to find the file setting the refused key to `"0"`, set that key to `"1"` there, then read `apt-config dump APT::Periodic` to confirm both triggers are on. No maintenance window is needed.
 
 ### Docker address pool
 
-If the refusal names `default-address-pools` with another value, agree one pool with the box's other operators.
-Docker allocates across every entry in that list, so a second pool defeats the office's choice.
-Use one IPv4 range of /20 or wider, clear of every office network, for Docker to carve into /24 networks.
-Set `docker_address_pool` in `/etc/gideon/site.yaml` to that range.
-Remove the other entries from `/etc/docker/daemon.json` by hand, or have the other operator adopt GIDEON's range.
-Run `sudo systemctl restart docker` in an announced window because the restart reaches every container on the box.
-Then re-run provision from the release checkout, which reads the single entry as its own.
+If the refusal names `default-address-pools` with another value, agree one pool with the box's other operators, because Docker allocates across every entry in that list and a second pool defeats the office's choice. Use one IPv4 range of /20 or wider, clear of every office network, for Docker to carve into /24 networks, and set `docker_address_pool` in `/etc/gideon/site.yaml` to that range. Remove the other entries from `/etc/docker/daemon.json` by hand, or have the other operator adopt GIDEON's range. Run `sudo systemctl restart docker` in an announced window because the restart reaches every container on the box, then re-run provision from the release checkout, which reads the single entry as its own.
 
 ### Containerd root
 
-Work in an announced window because restarting containerd and Docker reaches every container.
-Do not edit `root` first.
+Work in an announced window because restarting containerd and Docker reaches every container, and do not edit `root` first.
 
-Find the root file.
-The row's root is the one containerd runs with.
-Run `sudo containerd --config /etc/containerd/config.toml config dump | grep -E '^(root|imports)'` to see it and the files `config.toml` imports.
-The root file is `/etc/containerd/config.toml` when the row names it.
-When the row names a file `config.toml` imports, `sudo grep -l '^root' /etc/containerd/conf.d/*.toml` finds it.
-Every step below that names the root file means that one file.
+Find the file setting the row's root, which is the one containerd runs with, by running `sudo containerd --config /etc/containerd/config.toml config dump | grep -E '^(root|imports)'` to see the root and the files `config.toml` imports. The root file is `/etc/containerd/config.toml` when the row names it; when the row names a file `config.toml` imports, `sudo grep -l '^root' /etc/containerd/conf.d/*.toml` finds it. Every step below that names the root file means that one file.
 
-Measure the store under the named root with `sudo du -sb <named-root>`.
-Check its snapshotter `snapshots` directory.
+Measure the store under the named root with `sudo du -sb <named-root>` and check its snapshotter `snapshots` directory to determine which move below applies.
 
 If the store is populated, follow `docs/runbooks/install-upgrade.md §7` by hand, substituting the named root for `/var/lib/containerd` throughout:
 
-- At the survey, also save the root file beside the shipped copy with `sudo cp -p <root-file> /var/lib/gideon-store-move/root-file.saved`, before any change.
-  When the root file is `config.toml`, the survey's own copy is that save.
-- At the provision stage, set `root = '/var/lib/docker/containerd'` in the root file by hand before `gideon host provision --only docker-engine` under the same `policy-rc.d` hold.
-  Provision does not rewrite a moved file.
-- A rollback restores the root file from `/var/lib/gideon-store-move/root-file.saved` as well as `config.toml`.
-  Continue only when `containerd config dump` reports the named root, not `/var/lib/containerd`.
+- At the survey, also save the root file beside the shipped copy with `sudo cp -p <root-file> /var/lib/gideon-store-move/root-file.saved`, before any change. When the root file is `config.toml`, the survey's own copy is that save.
+- At the provision stage, set `root = '/var/lib/docker/containerd'` in the root file by hand before `gideon host provision --only docker-engine` under the same `policy-rc.d` hold, because provision does not rewrite a moved file.
+- A rollback restores the root file from `/var/lib/gideon-store-move/root-file.saved` as well as `config.toml`. Continue only when `containerd config dump` reports the named root, not `/var/lib/containerd`.
 - Finish the check, accept, and remove stages over the named root.
 
-If the store is empty, run `sudo cp -p <root-file> <backup-path>`.
-Set `root = '/var/lib/docker/containerd'` in the root file.
-Then run `sudo systemctl restart containerd`.
-Run `sudo systemctl restart docker`.
-To undo it, copy the backup back.
-Run the same two restarts.
+If the store is empty, run `sudo cp -p <root-file> <backup-path>` so there is a copy to restore, then set `root = '/var/lib/docker/containerd'` in the root file and run `sudo systemctl restart containerd` followed by `sudo systemctl restart docker`. To undo it, copy the backup back and run the same two restarts.
 
 ### /data mount
 
-The `disk-layout` row names the `/data` mount's filesystem type and size, and the selected profile's data-volume floor.
-GIDEON does not change an existing mount.
-A first run with a `/data` mount GIDEON did not build is `blocked` until `/etc/gideon/site.yaml` names the hardware profile whose floor judges it.
+The `disk-layout` row names the `/data` mount's filesystem type and size, and the selected profile's data-volume floor. GIDEON does not change an existing mount, and a first run with a `/data` mount GIDEON did not build is `blocked` until `/etc/gideon/site.yaml` names the hardware profile whose floor judges it.
 
-Agree a change with the mount's owner.
-That operator grows the volume or moves its data to a volume meeting the floor.
-Alternatively, the office sets `hardware_profile` in `/etc/gideon/site.yaml` to a profile this host satisfies.
-A filesystem of another type is reformatted only by its owner, after moving its data off, in an announced window.
-Then run provision from the release checkout.
+Agree a change with the mount's owner, who grows the volume or moves its data to a volume meeting the floor. Alternatively, the office sets `hardware_profile` in `/etc/gideon/site.yaml` to a profile this host satisfies. A filesystem of another type is reformatted only by its owner, after moving its data off, in an announced window. Then run provision from the release checkout.
 
-From the release checkout, converge after the hand change:
+From the release checkout, converge after any of the hand changes above:
 
 ```sh
 cd /opt/gideon
@@ -1087,51 +783,25 @@ gideon host provision
 
 ## 11. Removing GIDEON
 
-This procedure takes GIDEON off a box.
-Use it after the office decides to remove GIDEON.
+This procedure takes GIDEON off a box after the office decides to remove GIDEON.
 
-`gideon uninstall` removes the host state that carries GIDEON's ownership mark and reverts no setting another application may rely on.
-It runs unattended and asks nothing.
-Every stage reads before it acts.
+`gideon uninstall` removes the host state that carries GIDEON's ownership mark and reverts no setting another application may rely on. It runs unattended and asks nothing. Every stage reads before it acts, and networks are removed only once nothing is attached, so a container still using a network holds its removal until it leaves.
 
 ### Announce
 
-Removal stops the whole stack, as an upgrade does.
-Announce it to every project sharing the daemon.
-Once users are on the box, use a maintenance window announced to them at least one working day ahead.
-A container on one of GIDEON's networks loses that network.
-Before anything stops, the run's `attached` row lists each container outside GIDEON's ownership mark, by network and project.
-This includes an application using GIDEON's engine.
-Tell their operators before the window.
+Removal stops the whole stack, as an upgrade does, so announce it to every project sharing the daemon. Once users are on the box, use a maintenance window announced to them at least one working day ahead. A container on one of GIDEON's networks loses that network. Before anything stops, the run's `attached` row lists each container outside GIDEON's ownership mark, by network and project, including an application using GIDEON's engine. Tell their operators before the window.
 
 ### Choose plain or `--purge`
 
-A plain run removes GIDEON's Compose projects: the stack, the drill, and the CI sibling.
-It also removes its `gideon-*` units and timers, and its firewall chain with its tagged jump from `DOCKER-USER`.
-Its block in `/etc/ufw/after.rules` goes too, with the `gideon-docker-user` unit and the installed `gideon` command.
-Its Docker networks are removed once nothing is attached.
-The run keeps `/etc/gideon`, GIDEON's directories under `/data`, the stack's volumes, and the drop-in files provision wrote.
-A later install finds the configuration and data where they were.
+A plain run removes GIDEON's Compose projects: the stack, the drill, and the CI sibling. It also removes its `gideon-*` units and timers, and its firewall chain with its tagged jump from `DOCKER-USER`. Its block in `/etc/ufw/after.rules` goes too, with the `gideon-docker-user` unit and the installed `gideon` command. Its Docker networks are removed once nothing is attached. The run keeps `/etc/gideon`, GIDEON's directories under `/data`, the stack's volumes, and the drop-in files provision wrote, so a later install finds the configuration and data where they were.
 
-`--purge` also removes `/etc/gideon` whole.
-That includes the site file, the secrets, the rendered tree, and the box's backup identity.
-It removes each directory `disk-layout` makes under `/data` and the stack's volumes.
-It also removes the four drop-ins that hold a GIDEON fact.
-These are the apt proxy file, the chrony sources file, the network wait-online drop-in, and the needrestart deferral file.
-Chrony and systemd reload after their files are removed.
-Apt and needrestart read their configuration at each run.
+`--purge` also removes `/etc/gideon` whole, including the site file, the secrets, the rendered tree, and the box's backup identity. It removes each directory `disk-layout` makes under `/data` and the stack's volumes, along with the four drop-ins that hold a GIDEON fact: the apt proxy file, the chrony sources file, the network wait-online drop-in, and the needrestart deferral file. Systemd reloads after its drop-in is removed, and chrony reloads its sources when its service is active. Apt and needrestart read their configuration at each run.
 
-Both keep `/data` itself with its volume, mount, and `/etc/fstab` block, along with `/opt/gideon`, the `gideon` account, and every package.
-Docker's `daemon.json`, containerd's configuration, and the image store stay too.
-So does the firewall's default policy, with the tagged `ufw` rules that admit SSH under it.
-The journald, SSH key-only, and automatic-upgrades drop-ins also stay, since each holds a setting the box keeps.
+Both keep `/data` itself with its volume, mount, and `/etc/fstab` block, along with `/opt/gideon`, the `gideon` account, and every package. Docker's `daemon.json`, containerd's configuration, and the image store stay too, as does the firewall's default policy with the tagged `ufw` rules that admit SSH under it. The journald, SSH key-only, and automatic-upgrades drop-ins also stay, since each holds a setting the box keeps.
 
-On the build box the registry and the CI runner are kept by their own installed state.
-This includes the registry's unit with `/data/registry`, and the runner's sudoers file with `/data/acceptance`.
-They stay under `--purge` too and on every later run.
+On the build box the registry and the CI runner are kept by their own installed state, including the registry's unit with `/data/registry`, and the runner's sudoers file with `/data/acceptance`. They stay under `--purge` too and on every later run.
 
-A plain removal keeps `/etc/gideon/backup_age_identity`, so the box's own backup sets still open with it.
-After `--purge`, the sets pushed to the backup target open with the office identity kept in the office password manager.
+A plain removal keeps `/etc/gideon/backup_age_identity`, so the box's own backup sets still open with it. After `--purge`, the sets pushed to the backup target open with the office identity kept in the office password manager.
 
 ### Run
 
@@ -1141,140 +811,67 @@ From any directory:
 gideon uninstall
 ```
 
-Alternatively, run `gideon uninstall --purge`.
-The run removes the installed command.
-Every fix it prints, and every re-run after it, is therefore the long form from the checkout:
+Alternatively, run `gideon uninstall --purge`. The run removes the installed command, so every fix it prints, and every re-run after it, is the long form from the checkout:
 
 ```sh
 cd /opt/gideon
 sudo python3 -m gideon uninstall
 ```
 
-Use `--purge` when the first run had it.
-A re-run finds nothing left to remove, prints every row `ok`, and exits 0.
-Keep the transcript.
-GIDEON's database goes with the stack, so the rows are the record of the removal.
+Use `--purge` when the first run had it. A re-run finds nothing left to remove, prints every row `ok`, and exits 0. Keep the transcript because GIDEON's database goes with the stack, leaving the rows as the record of the removal.
 
 ### A network still held
 
-The last row, `networks`, fails when a container is still attached to one of GIDEON's networks, and names it.
-Everything else is removed by then.
-Tell that container's operator.
-Wait until it has left the network.
-Then re-run from the checkout as above.
-The re-run removes the network.
+The last row, `networks`, fails when a container is still attached to one of GIDEON's networks, and names it. Everything else is removed by then, so tell that container's operator and wait until it has left the network, then re-run from the checkout as above to remove the network.
 
 ### What stays
 
-The closing `Kept:` line names what the command leaves.
-Remove the checkout with `sudo rm -rf /opt/gideon` once nothing more is needed from it.
-The `gideon` account, the packages GIDEON installed, Docker's `daemon.json` keys, and containerd's configuration are shared with whatever else runs on the box.
-Change or remove them only after agreeing it with the box's other operators.
-Unmounting `/data` and removing its `/etc/fstab` block is the data volume owner's decision, in an announced window.
+The closing `Kept:` line names what the command leaves. Remove the checkout with `sudo rm -rf /opt/gideon` once nothing more is needed from it. The `gideon` account, the packages GIDEON installed, Docker's `daemon.json` keys, and containerd's configuration are shared with whatever else runs on the box, so change or remove them only after agreeing it with the box's other operators. Unmounting `/data` and removing its `/etc/fstab` block is the data volume owner's decision, in an announced window.
 
 ## 12. A box that loses memory or a card
 
-This section explains what to do when a GPU host falls below its selected profile's hardware floor.
-Use it when `gideon preflight` refuses on `hardware-profile`, or a model server pages after a card loss.
+This procedure covers a GPU host below its selected profile's hardware floor when `gideon preflight` refuses on `hardware-profile`, or a model server pages after a card loss.
 
-The shortfalls are fewer cards than the profile's count or less DRAM than its floor.
-`gideon install` and `gideon upgrade <tag>` run preflight first.
-An upgrade's refusal here is before its checkout, so nothing of the product has changed (§2).
-The row prints one fix: `Provide the hardware the profile requires, or set hardware_profile in /etc/gideon/site.yaml to a profile this host satisfies, then re-run preflight.`
-`gideon apply` runs no preflight.
-It reads the memory table and the GPU record, so a site-file edit still converges after a lost DIMM.
-Between upgrades two page rules compare the host with the profile every minute: `Memory under profile` and `GPU count under profile` (`docs/runbooks/observability.md §4`).
-Each page names the reading and the floor.
-`gideon status` lists them.
-On a no-GPU host the row passes as skipped.
+The shortfalls are fewer cards than the profile's count or less DRAM than its floor. `gideon install` and `gideon upgrade <tag>` run preflight first, so an upgrade's refusal here is before its checkout and nothing of the product has changed (§2). The row prints one fix: `Provide the hardware the profile requires, or set hardware_profile in /etc/gideon/site.yaml to a profile this host satisfies, then re-run preflight.` `gideon apply` runs no preflight and reads the memory table and the GPU record, so a site-file edit still converges after a lost DIMM. Between upgrades two page rules compare the host with the profile every minute: `Memory under profile` and `GPU count under profile` (`docs/runbooks/observability.md §4`). Each page names the reading and the floor, and `gideon status` lists them. On a no-GPU host the row passes as skipped.
 
-GIDEON changes no hardware and selects no profile by itself.
-Confirm the loss with the reads below.
-Agree the fix with the people under *Who decides*.
-Then converge from the release checkout.
+GIDEON changes no hardware and selects no profile by itself, so confirm the loss with the reads below and agree the fix with the people under *Who decides* before converging from the release checkout.
 
 ### A lost DIMM
 
-The shortfall reads `hardware-profile: refuse — DRAM is <kB> kB (<GB> GB), profile requires <floor> GB`.
-For a non-reference profile, `profile '<name>': ` precedes the shortfall after the dash.
-Every shortfall is joined in one row with `; `, followed by `Fix:` and the fix above.
+The shortfall reads `hardware-profile: refuse — DRAM is <kB> kB (<GB> GB), profile requires <floor> GB`. For a non-reference profile, `profile '<name>': ` precedes the shortfall after the dash. Every shortfall is joined in one row with `; `, followed by `Fix:` and the fix above.
 
-Everything keeps running from the reboot that shows the loss.
-`Memory under profile` fires at the first evaluation after that reboot, since it has no pending period.
-The stack's limits are still the profile's memory table: ceilings sized for the floor, whose sum may now pass the host.
-The `host-memory` row judges a fifth of whatever the host now reads, so the loss lowers that floor rather than tripping it.
-The row warns and does not refuse.
-No limit shrinks by itself.
-A store growing toward its ceiling with less host memory behind it risks the kernel's memory killer.
+Everything keeps running from the reboot that shows the loss, and `Memory under profile` fires at the first evaluation after that reboot, since it has no pending period. The stack's limits are still the profile's memory table: ceilings sized for the floor, whose sum may now pass the host. The `host-memory` row judges a fifth of whatever the host now reads, so the loss lowers that floor rather than tripping it, and the row warns without refusing. No limit shrinks by itself, so a store growing toward its ceiling with less host memory behind it risks the kernel's memory killer.
 
 Read these as root:
 
 - `MemTotal` in `/proc/meminfo`, for the DRAM the host now sees.
 - `sudo dmidecode -t memory`, for the populated slots: a slot reading no module, or fewer populated slots than the box had.
-- The `ce_count` and `ue_count` counters per controller under `/sys/devices/system/edac/mc/`, where the host exposes them.
-  Also read `sudo journalctl -k -b`, the current boot's kernel log, for EDAC or machine-check lines.
-- The server's management log, where a failed or disabled DIMM is logged at boot.
-  On an HPE box, read the Integrated Management Log at the management interface.
+- The `ce_count` and `ue_count` counters per controller under `/sys/devices/system/edac/mc/`, where the host exposes them. Also read `sudo journalctl -k -b`, the current boot's kernel log, for EDAC or machine-check lines.
+- The server's management log, where a failed or disabled DIMM is logged at boot. On an HPE box, read the Integrated Management Log at the management interface.
 
 ### A lost card
 
 The shortfall reads `hardware-profile: refuse — GPU count is <n>, profile requires <count>`, with the same non-reference prefix and fix as above.
 
-The model server bound to the card by UUID stops.
-`Engine down` pages for the generator's card after five minutes.
-`Target down` pages for the embedder's after ten minutes.
-`GPU count under profile` fires at the first evaluation that reads fewer cards while the DCGM exporter stays scrapeable (`docs/runbooks/observability.md §4`).
-While the exporter itself is down, `Target down` is the page and the count rule is quiet.
-The rest of the stack serves.
-With the generator's card gone, General is listed and a turn does not answer.
-With the embedder's card gone, work that embeds through it stops.
-This includes an index build in progress and, from the Research launch, each query's embedding.
+The model server bound to the card by UUID stops. `Engine down` pages for the generator's card after five minutes, while `Target down` pages for the embedder's after ten minutes. `GPU count under profile` fires at the first evaluation that reads fewer cards while the DCGM exporter stays scrapeable (`docs/runbooks/observability.md §4`); while the exporter itself is down, `Target down` is the page and the count rule is quiet. The rest of the stack serves. With the generator's card gone, General is listed and a turn does not answer; with the embedder's card gone, work that embeds through it stops, including an index build in progress and, from the Research launch, each query's embedding.
 
-Every render refuses on the GPU record: `the GPU record /etc/gideon/gpus.yaml names card(s) nvidia-smi -L no longer reports: GPU index <n> UUID <uuid>`.
-Its fix reads `Remove /etc/gideon/gpus.yaml as root, then run gideon render --diff to record today's cards and inspect the diff.`
-`gideon apply` is refused there.
-`gideon upgrade <tag>` refuses at preflight before reaching render.
-Convergence stays refused until the card is back or a profile naming fewer cards is selected and the record is re-recorded.
-Removing the record alone (§1's GPU record paragraph) does not help on a profile naming more cards than the host has.
-Render then refuses on the position the profile assigns beyond the recorded count.
+Every render refuses on the GPU record: `the GPU record /etc/gideon/gpus.yaml names card(s) nvidia-smi -L no longer reports: GPU index <n> UUID <uuid>`. Its fix reads `Remove /etc/gideon/gpus.yaml as root, then run gideon render --diff to record today's cards and inspect the diff.` `gideon apply` is refused there, while `gideon upgrade <tag>` refuses at preflight before reaching render. Convergence stays refused until the card is back or a profile naming fewer cards is selected and the record is re-recorded. Removing the record alone (§1's GPU record paragraph) does not help on a profile naming more cards than the host has, because render then refuses on the position the profile assigns beyond the recorded count.
 
-Read `nvidia-smi -L` against `/etc/gideon/gpus.yaml`: the missing UUID identifies the lost card's recorded position.
-Read `nvidia-smi -q` for the card that remains.
-Read `sudo journalctl -k -b` for the driver's Xid lines.
-Read the management log.
+Read `nvidia-smi -L` against `/etc/gideon/gpus.yaml`: the missing UUID identifies the lost card's recorded position. Read `nvidia-smi -q` for the card that remains, `sudo journalctl -k -b` for the driver's Xid lines, and the management log.
 
 ### The repair, or a lower profile
 
-The hardware owner replaces the DIMM or card in a maintenance window.
-Announce the window to every project sharing the box.
-Once users are on it, announce to them at least one working day ahead too.
-Then converge below.
+The hardware owner replaces the DIMM or card in a maintenance window. Announce the window to every project sharing the box and, once users are on it, to them at least one working day ahead too, then converge below.
 
-When the release's `models.lock` carries a profile with a lower floor, set it as `hardware_profile` in `/etc/gideon/site.yaml`.
-Then converge below.
-`docs/runbooks/release-files.md §4` says what a profile sizes and how each value moves.
-The apply recreates every service whose limit moved, so this takes a window from go-live.
-The costs are a smaller memory table and a lower chunk ceiling for the index.
-A one-card profile puts both model servers on that card with a smaller cache pool, so fewer concurrent users.
-A profile the release does not carry is not an option on the box.
+When the release's `models.lock` carries a profile with a lower floor, set it as `hardware_profile` in `/etc/gideon/site.yaml`, then converge below. `docs/runbooks/release-files.md §4` says what a profile sizes and how each value moves. The apply recreates every service whose limit moved, so this takes a window from go-live. The costs are a smaller memory table and a lower chunk ceiling for the index. A one-card profile puts both model servers on that card with a smaller cache pool, so fewer concurrent users. A profile the release does not carry is not an option on the box.
 
-After a card, both paths require the GPU record to be removed and re-recorded first, as §1's GPU record paragraph says.
-A replacement carries a new UUID.
-A profile naming fewer cards still meets the old record naming the lost card, which every render refuses whatever profile is selected.
-Re-recording the cards the host now has binds the profile's positions.
-`gideon render --diff` shows what moves before the apply.
+After a card, both paths require the GPU record to be removed and re-recorded first, as §1's GPU record paragraph says, because a replacement carries a new UUID. A profile naming fewer cards still meets the old record naming the lost card, which every render refuses whatever profile is selected. Re-recording the cards the host now has binds the profile's positions, and `gideon render --diff` shows what moves before the apply.
 
 ### Who decides
 
-The office's hardware owner decides the repair.
-The CSA decides a profile change, with the developer reading the rung's costs against the office's corpus and users.
-Before go-live, the developer alone decides.
+The office's hardware owner decides the repair, and the CSA decides a profile change, with the developer reading the lower profile's costs against the office's corpus and users. Before go-live, the developer alone decides.
 
-After a card, the record's removal and `gideon render --diff` (§1) come before the block below, on both paths.
-Provision converges the host facts a changed profile judges, the data-volume floor among them.
-Apply converges the memory table and GPU bindings.
-Preflight reads the row pass.
-A non-reference profile warns instead, as its row says.
+After a card, the record's removal and `gideon render --diff` (§1) come before the block below, on both paths. Provision converges the host facts a changed profile judges, the data-volume floor among them, and apply converges the memory table and GPU bindings. Preflight then reads the row as a pass, while a non-reference profile warns instead, as its row says.
 
 From the release checkout, converge after the hand change:
 

@@ -8,7 +8,7 @@ import io
 import sys
 import tempfile
 import unittest
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from unittest import mock
 
@@ -90,6 +90,7 @@ def run_gate(
     runner: RecordingRunner,
     fake: RecordingMask | None = None,
     cpu_reader: gate.CPUReader | None = None,
+    selection: Callable[[Path], Sequence[Path]] = lambda _root: (),
 ) -> tuple[int, str]:
     if fake is None:
         fake = fake_mask()
@@ -100,6 +101,7 @@ def run_gate(
             runner=runner,
             mask=mask_seam(fake),
             cpu_reader=cpu_reader or (lambda: FIXED_CPUS),
+            selection=selection,
         )
     return code, stdout.getvalue()
 
@@ -109,6 +111,7 @@ def run_gate_with_stderr(
     runner: RecordingRunner,
     fake: RecordingMask,
     cpu_reader: gate.CPUReader | None = None,
+    selection: Callable[[Path], Sequence[Path]] = lambda _root: (),
 ) -> tuple[int, str, str]:
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -118,6 +121,7 @@ def run_gate_with_stderr(
             runner=runner,
             mask=mask_seam(fake),
             cpu_reader=cpu_reader or (lambda: FIXED_CPUS),
+            selection=selection,
         )
     return code, stdout.getvalue(), stderr.getvalue()
 
@@ -456,10 +460,244 @@ class Gate(unittest.TestCase):
                 continue
             for target in targets:
                 self.assertIn(
-                    target if target == "tools.mask" else target.partition(".")[0],
-                    {*sys.stdlib_module_names, "tools.mask"},
+                    target if target in {"tools.mask", "tools.pinselection"} else target.partition(".")[0],
+                    {*sys.stdlib_module_names, "tools.mask", "tools.pinselection"},
                     f"{path}:{node.lineno} imports {target}",
                 )
+
+    def test_pinselection_imports_only_standard_library_and_exportboundary(self) -> None:
+        path = ROOT / "tools" / "pinselection.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                targets = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                targets = [node.module or ""]
+            else:
+                continue
+            for target in targets:
+                self.assertIn(
+                    target if target == "tools.exportboundary" else target.partition(".")[0],
+                    {*sys.stdlib_module_names, "tools.exportboundary"},
+                    f"{path}:{node.lineno} imports {target}",
+                )
+
+
+class PinSelection(unittest.TestCase):
+    def setUp(self) -> None:
+        self.paths = (ROOT / "tests" / "test_fictitious_z.py", ROOT / "tests" / "test_fictitious_a.py")
+        self.selection = mock.Mock(return_value=self.paths)
+
+    def test_selection_paths_reach_pytest_alone_after_comparison(self) -> None:
+        for flags, marker, scope in (
+            ([], ("-m", "not slow"), "slow cases skipped, --all runs them"),
+            (["--all"], (), "all cases"),
+        ):
+            with self.subTest(flags=flags):
+                self.selection.reset_mock()
+                runner = RecordingRunner([0, 0, 0, 0])
+                with mock.patch.object(gate.time, "monotonic", side_effect=(10.0, 11.0)):
+                    code, output = run_gate(
+                        ["--pin-selection", *flags], runner, selection=self.selection,
+                    )
+                self.assertEqual(code, 0)
+                self.selection.assert_called_once_with(gate.ROOT)
+                self.assertEqual(runner.commands[0].argv, gate.environment_command())
+                self.assertEqual(runner.commands[1].argv[1:], ("check", "."))
+                self.assertEqual(runner.commands[2].argv[1:], ("gideon", "tests", "tools"))
+                self.assertEqual(
+                    runner.commands[3].argv[1:],
+                    ("-x", "-n", "4", *marker, "tests/test_fictitious_z.py", "tests/test_fictitious_a.py"),
+                )
+                self.assertEqual(
+                    output,
+                    "gate: green in 1.0s (environment, ruff, mypy, pytest; "
+                    f"pin selection, 2 modules; {scope}; unmasked; 4 workers)\n",
+                )
+
+    def test_selection_is_read_once_between_cpu_and_environment(self) -> None:
+        events: list[str] = []
+
+        def read_cpus() -> int:
+            events.append("cpu")
+            return 2
+
+        def select(_root: Path) -> Sequence[Path]:
+            events.append("selection")
+            return self.paths
+
+        def environment() -> tuple[str, ...]:
+            events.append("environment")
+            return ("comparison",)
+
+        cpu_reader = mock.Mock(side_effect=read_cpus)
+        self.selection.side_effect = select
+        comparison = mock.Mock(side_effect=environment)
+        with mock.patch.object(gate, "environment_command", comparison):
+            code, _output = run_gate(
+                ["--pin-selection"], RecordingRunner([0, 0, 0, 0]),
+                cpu_reader=cpu_reader, selection=self.selection,
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(events, ["cpu", "selection", "environment"])
+        cpu_reader.assert_called_once_with()
+        self.selection.assert_called_once_with(gate.ROOT)
+
+    def test_without_flag_does_not_read_selection(self) -> None:
+        code, output = run_gate([], RecordingRunner([0, 0, 0, 0]), selection=self.selection)
+        self.assertEqual(code, 0)
+        self.selection.assert_not_called()
+        self.assertNotIn("pin selection", output)
+
+    def test_mask_wraps_the_selection_pytest(self) -> None:
+        observed = observation(mask.ProbeState.READY, ("/data",))
+        fake = fake_mask(
+            mask.ProbeState.READY, observed.present,
+            (probe_result(mask.ProbeState.READY, observed),) * 2,
+        )
+        runner = RecordingRunner([0, 0, 0, 0])
+        code, output = run_gate(
+            ["--all", "--masked", "--pin-selection"], runner, fake, selection=self.selection,
+        )
+        self.assertEqual(code, 0)
+        expected = (
+            gate.resolve("pytest"), "-x", "-n", "4",
+            "tests/test_fictitious_z.py", "tests/test_fictitious_a.py",
+        )
+        self.assertEqual(fake.probe_commands, [expected, expected])
+        self.assertEqual(fake.wrap_calls, [(expected, observed.present)])
+        self.assertEqual(runner.commands[3].stdin, "".join(word + "\n" for word in expected))
+        self.assertIn("; pin selection, 2 modules; all cases; masked; 4 workers)", output)
+
+    def test_selection_with_test_path_is_usage_error_before_any_observation(self) -> None:
+        fake = fake_mask()
+        runner = RecordingRunner([])
+        cpu_reader = mock.Mock(return_value=2)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(gate, "environment_command") as comparison,
+            mock.patch.object(gate.time, "monotonic") as clock,
+            contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            gate.main(
+                ["--pin-selection", "tests/test_fictitious_z.py"], runner=runner,
+                mask=mask_seam(fake), cpu_reader=cpu_reader, selection=self.selection,
+            )
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(runner.commands, [])
+        self.assertEqual(fake.observe_calls, 0)
+        self.assertEqual(fake.probe_commands, [])
+        self.assertEqual(fake.wrap_calls, [])
+        self.selection.assert_not_called()
+        cpu_reader.assert_not_called()
+        comparison.assert_not_called()
+        clock.assert_not_called()
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("--pin-selection cannot be combined with TEST_PATH", stderr.getvalue())
+
+    def test_empty_selection_refuses_before_comparison_or_mask_probe(self) -> None:
+        self.selection.return_value = ()
+        fake = fake_mask(mask.ProbeState.READY, ("/data",))
+        runner = RecordingRunner([])
+        with (
+            mock.patch.object(gate, "environment_command") as comparison,
+            mock.patch.object(gate.time, "monotonic", side_effect=(10.0, 11.0)),
+        ):
+            code, output, error = run_gate_with_stderr(
+                ["--pin-selection", "--masked"], runner, fake, selection=self.selection,
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(runner.commands, [])
+        self.assertEqual(fake.probe_commands, [])
+        self.assertEqual(fake.wrap_calls, [])
+        comparison.assert_not_called()
+        self.selection.assert_called_once_with(gate.ROOT)
+        self.assertEqual(
+            error,
+            "selection: the pin selection names no module present in this tree. "
+            "Fix: add the modules a pull request runs to SELECTED in tools/pinselection.py\n",
+        )
+        self.assertEqual(
+            output,
+            "gate: red at selection (exit 1) after 1.0s "
+            "(pin selection, 0 modules; masked; 4 workers)\n",
+        )
+
+    def test_singular_module_in_green_and_red_summaries(self) -> None:
+        self.selection.return_value = self.paths[:1]
+        for codes in ([0, 0, 0, 0], [0, 0, 2]):
+            with self.subTest(codes=codes):
+                code, output = run_gate(
+                    ["--pin-selection"], RecordingRunner(codes), selection=self.selection,
+                )
+                self.assertEqual(code, codes[-1])
+                self.assertIn("pin selection, 1 module;", output)
+                self.assertNotIn("1 modules", output)
+
+    def test_each_child_failure_summary_names_the_selection(self) -> None:
+        for index, tool in enumerate(("environment", *gate.TOOLS)):
+            with self.subTest(tool=tool):
+                runner = RecordingRunner([0] * index + [2])
+                with mock.patch.object(gate.time, "monotonic", side_effect=(10.0, 11.0)):
+                    code, output = run_gate(["--pin-selection"], runner, selection=self.selection)
+                self.assertEqual(code, 2)
+                self.assertEqual(len(runner.commands), index + 1)
+                self.assertEqual(
+                    output,
+                    f"gate: red at {tool} (exit 2) after 1.0s "
+                    "(pin selection, 2 modules; unmasked; 4 workers)\n",
+                )
+
+    def test_environment_refusal_summary_names_the_selection(self) -> None:
+        runner = RecordingRunner([])
+        with mock.patch.object(
+            gate, "environment_command",
+            side_effect=gate.EnvironmentRefusal("fictitious environment refusal", "repair the environment"),
+        ):
+            code, output, error = run_gate_with_stderr(
+                ["--pin-selection"], runner, fake_mask(), selection=self.selection,
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(runner.commands, [])
+        self.assertIn("(pin selection, 2 modules; unmasked; 4 workers)", output)
+        self.assertEqual(error, "environment: fictitious environment refusal. Fix: repair the environment\n")
+
+    def test_both_mask_probe_refusal_summaries_name_the_selection(self) -> None:
+        observed = observation(mask.ProbeState.READY, ("/data",))
+        for successful_probes in (0, 1):
+            with self.subTest(successful_probes=successful_probes):
+                refusal = mask.Refusal("fictitious probe refusal", "repair the mask")
+                probes = (probe_result(mask.ProbeState.READY, observed),) * successful_probes
+                fake = fake_mask(
+                    mask.ProbeState.READY, observed.present,
+                    (*probes, probe_result(mask.ProbeState.REFUSED, observed, refusal)),
+                )
+                runner = RecordingRunner([0] * (1 + 2 * successful_probes))
+                code, output, error = run_gate_with_stderr(
+                    ["--pin-selection", "--masked"], runner, fake, selection=self.selection,
+                )
+                self.assertEqual(code, 1)
+                self.assertEqual(len(runner.commands), 1 + 2 * successful_probes)
+                self.assertEqual(fake.wrap_calls, [])
+                self.assertIn("(pin selection, 2 modules; mask refused; 4 workers)", output)
+                self.assertEqual(error, "mask: fictitious probe refusal. Fix: repair the mask\n")
+
+    def test_mask_failure_and_wrapped_pytest_summaries_name_the_selection(self) -> None:
+        observed = observation(mask.ProbeState.READY, ("/data",))
+        for result, tool, state in ((min(mask.MASK_CODES), "mask", "mask failed"), (1, "pytest", "masked")):
+            with self.subTest(tool=tool):
+                fake = fake_mask(
+                    mask.ProbeState.READY, observed.present,
+                    (probe_result(mask.ProbeState.READY, observed),) * 2,
+                )
+                runner = RecordingRunner([0, 0, 0, result])
+                code, output = run_gate(
+                    ["--pin-selection", "--masked"], runner, fake, selection=self.selection,
+                )
+                self.assertEqual(code, result)
+                self.assertIn(f"gate: red at {tool} (exit {result})", output)
+                self.assertIn(f"(pin selection, 2 modules; {state}; 4 workers)", output)
 
 
 if __name__ == "__main__":
