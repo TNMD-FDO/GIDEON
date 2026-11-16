@@ -685,7 +685,7 @@ services:
       - "internal"
     mem_limit: 1000000000
   searxng:
-    image: "ghcr.io/tnmd-fdo/searxng@sha256:1dab138ea70a8ceb4d1c182f5c8f256088406c1742b99e279976157dbe1e9759"
+    image: "ghcr.io/tnmd-fdo/searxng@sha256:932f69dca010db9880bddebb2171f05d8e1a25d04a59149ff65409993d680024"
     restart: "unless-stopped"
     environment:
       GRANIAN_LOG_ACCESS_ENABLED: "false"
@@ -713,7 +713,7 @@ services:
       - "gideon"
     mem_limit: 1000000000
   dcgm-exporter:
-    image: "ghcr.io/tnmd-fdo/dcgm-exporter@sha256:148b0c025e5f2850256816fa33754fbf4733b7a086697a95613fc0ba3db5b003"
+    image: "ghcr.io/tnmd-fdo/dcgm-exporter@sha256:2490e1dfb5baaee6765ef2841813af7d978bb459a566c22c326a8fc27c64eea9"
     restart: "unless-stopped"
     environment:
       TZ: "America/Chicago"

@@ -49,7 +49,7 @@ HEADER_TEXT_INSET = 13  # a header cell's 6 px padding each side and its right b
 KIOSK_SIDE_PADDING = 32  # the kiosk page's 16 px padding on each side
 GRID_COLUMNS = 24  # the dashboard grid's columns
 HEADER_CHAR_WIDTH_BOUND = 9  # an upper bound per header character, not a glyph metric
-GPU_AGGREGATED_FIELD = re.compile(r"max by \(gpu\) \((DCGM_FI_[A-Z0-9_]+)\)(?: / 1024)?")
+GPU_AGGREGATED_FIELD = re.compile(r"max by \(gpu\) \((DCGM_FI_[A-Z0-9_]+)\)(?: / 1073741824)?")
 
 # The time series legend note's bottom cap applies below 992 px, even when
 # placement is right. The 2026-10-17 copies measured at most 22 px per table
@@ -386,16 +386,16 @@ class Dashboards(unittest.TestCase):
         dashboard = json.loads(GrafanaGpuArtifact.emit(inputs()))
         panels = {panel["title"]: panel for panel in _leaf_panels(dashboard)}
         expected = {
-            "GPU utilization": [("DCGM_FI_DEV_GPU_UTIL", "GPU {{gpu}}")],
+            "GPU utilization": [("DCGM_FI_DEV_GPU_UTIL_RATIO", "GPU {{gpu}}")],
             "GPU memory": [
-                ("DCGM_FI_DEV_FB_USED", "GPU {{gpu}} used"),
-                ("DCGM_FI_DEV_FB_FREE", "GPU {{gpu}} free"),
+                ("DCGM_FI_DEV_FB_USED_BYTES", "GPU {{gpu}} used"),
+                ("DCGM_FI_DEV_FB_FREE_BYTES", "GPU {{gpu}} free"),
             ],
             "GPU temperature": [
-                ("DCGM_FI_DEV_GPU_TEMP", "GPU {{gpu}}"),
-                ("DCGM_FI_DEV_GPU_MAX_OP_TEMP", "GPU {{gpu}} limit"),
+                ("DCGM_FI_DEV_GPU_TEMP_CELSIUS", "GPU {{gpu}}"),
+                ("DCGM_FI_DEV_GPU_MAX_OP_TEMP_CELSIUS", "GPU {{gpu}} limit"),
             ],
-            "GPU power": [("DCGM_FI_DEV_POWER_USAGE", "GPU {{gpu}}")],
+            "GPU power": [("DCGM_FI_DEV_BOARD_POWER_WATTS", "GPU {{gpu}}")],
         }
         for title, pairs in expected.items():
             with self.subTest(panel=title):
@@ -1894,6 +1894,23 @@ class GpuBoard(unittest.TestCase):
             self.assertEqual(panels[title]["type"], "timeseries")
 
 
+    def test_gpu_board_utilization_uses_a_ratio_with_percent_unit(self) -> None:
+        dashboard = json.loads(
+            (ROOT / "compose/grafana/dashboards/gpu.json").read_text(encoding="utf-8")
+        )
+        utilization = next(
+            panel for panel in dashboard["panels"] if panel["title"] == "GPU utilization"
+        )
+        defaults = utilization["fieldConfig"]["defaults"]
+        self.assertEqual(defaults["unit"], "percentunit")
+        # An all-zero ratio would otherwise fall back to a 0-100 raw axis, read as 0-10000 %.
+        self.assertEqual((defaults["min"], defaults["max"]), (0, 1))
+        rows = dcgm_counter_rows()
+        for target in utilization["targets"]:
+            with self.subTest(target=target["refId"]):
+                field = gpu_aggregated_field(target["expr"])
+                self.assertIn("ratio", rows[field][1].lower())
+
     def test_gpu_board_memory_uses_gibibyte_unit(self) -> None:
         dashboard = json.loads(
             (ROOT / "compose/grafana/dashboards/gpu.json").read_text(encoding="utf-8")
@@ -1903,7 +1920,7 @@ class GpuBoard(unittest.TestCase):
         )
         self.assertEqual(
             {gpu_aggregated_field(target["expr"]) for target in memory["targets"]},
-            {"DCGM_FI_DEV_FB_USED", "DCGM_FI_DEV_FB_FREE"},
+            {"DCGM_FI_DEV_FB_USED_BYTES", "DCGM_FI_DEV_FB_FREE_BYTES"},
         )
         self.assertEqual(memory["fieldConfig"]["defaults"]["unit"], "gbytes")
         self.assertEqual(memory["fieldConfig"]["defaults"]["min"], 0)
@@ -1918,8 +1935,8 @@ class GpuBoard(unittest.TestCase):
         for target in memory["targets"]:
             with self.subTest(target=target["refId"]):
                 field = gpu_aggregated_field(target["expr"])
-                self.assertIn("MiB", rows[field][1])
-                self.assertEqual(target["expr"], f"max by (gpu) ({field}) / 1024")
+                self.assertIn("bytes", rows[field][1])
+                self.assertEqual(target["expr"], f"max by (gpu) ({field}) / 1073741824")
 
 
     def test_gpu_board_temperature_limit_is_dashed(self) -> None:
@@ -1932,7 +1949,7 @@ class GpuBoard(unittest.TestCase):
         targets = temperature["targets"]
         self.assertEqual(
             [gpu_aggregated_field(target["expr"]) for target in targets],
-            ["DCGM_FI_DEV_GPU_TEMP", "DCGM_FI_DEV_GPU_MAX_OP_TEMP"],
+            ["DCGM_FI_DEV_GPU_TEMP_CELSIUS", "DCGM_FI_DEV_GPU_MAX_OP_TEMP_CELSIUS"],
         )
         self.assertTrue(targets[1]["legendFormat"].endswith(" limit"))
         overrides = temperature["fieldConfig"]["overrides"]
@@ -1953,17 +1970,45 @@ class GpuBoard(unittest.TestCase):
     def test_dcgm_fields_read_by_boards_and_rules_are_collected(self) -> None:
         dashboard_paths = (ROOT / "compose/grafana/dashboards").rglob("*.json")
         alert_paths = (ROOT / "compose/grafana/provisioning/alerting").rglob("*.tmpl")
+        readers = [
+            path.read_text(encoding="utf-8")
+            for path in (*dashboard_paths, *alert_paths)
+        ]
         referenced = {
             name
-            for path in (*dashboard_paths, *alert_paths)
-            for name in re.findall(
-                r"DCGM_FI_[A-Z0-9_]+", path.read_text(encoding="utf-8")
-            )
+            for text in readers
+            for name in re.findall(r"DCGM_FI_[A-Z0-9_]+", text)
         }
         rows = dcgm_counter_rows()
         self.assertTrue(referenced)
         self.assertEqual(referenced - rows.keys(), set())
-        self.assertEqual(rows["DCGM_FI_DRIVER_VERSION"][0], "label")
+        self.assertEqual(rows["DCGM_FI_SYSTEM_DRIVER_VERSION"][0], "label")
+        labels = {
+            name
+            for text in readers
+            for grouping in re.findall(r"\b(?:by|without)\s*\(([^)]*)\)", text)
+            for name in re.findall(r"DCGM_FI_[A-Z0-9_]+", grouping)
+        }
+        for text in readers:
+            labels.update(re.findall(r"\{\{\s*(DCGM_FI_[A-Z0-9_]+)\s*\}\}", text))
+            labels.update(re.findall(r"\b(DCGM_FI_[A-Z0-9_]+)\s*(?:=~|!~|!=|=)", text))
+        series = {
+            name
+            for text in readers
+            for name in re.findall(
+                r"\b(?:max|count)\s*(?:by\s*\([^)]*\)\s*)?\(\s*(DCGM_FI_[A-Z0-9_]+)",
+                text,
+            )
+        }
+        self.assertTrue(labels)
+        self.assertTrue(series)
+        self.assertEqual(labels | series, referenced)
+        for name in sorted(labels):
+            with self.subTest(field=name, role="label"):
+                self.assertEqual(rows[name][0], "label")
+        for name in sorted(series):
+            with self.subTest(field=name, role="series"):
+                self.assertNotEqual(rows[name][0], "label")
 
 
     def test_gpu_board_is_not_applicable_in_no_gpu_mode(self) -> None:
@@ -1992,8 +2037,8 @@ class GpuBoard(unittest.TestCase):
             (ROOT / "compose/grafana/dashboards/gpu.json").read_text(encoding="utf-8")
         )
         driver_panel = next(panel for panel in dashboard["panels"] if panel["title"] == "Driver version")
-        self.assertIn("DCGM_FI_DRIVER_VERSION", driver_panel["targets"][0]["expr"])
-        self.assertEqual(driver_panel["targets"][0]["legendFormat"], "{{DCGM_FI_DRIVER_VERSION}}")
+        self.assertIn("DCGM_FI_SYSTEM_DRIVER_VERSION", driver_panel["targets"][0]["expr"])
+        self.assertEqual(driver_panel["targets"][0]["legendFormat"], "{{DCGM_FI_SYSTEM_DRIVER_VERSION}}")
         self.assertEqual(driver_panel["options"]["textMode"], "name")
 
 

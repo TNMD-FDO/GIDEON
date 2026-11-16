@@ -522,9 +522,13 @@ class StoresPreparation(unittest.TestCase):
         loaded = read_lockfile_directory(directory)
         original = loaded.newest_on(None)
         assert original is not None
-        original_date = date.fromisoformat(original.label.removeprefix("corpus-"))
-        selected = replace(original, label=f"corpus-{original_date + timedelta(days=1)}", line="scotus", base=None)
-        other = replace(original, label=f"corpus-{original_date + timedelta(days=2)}", base=None)
+        # After every committed lockfile on any line, so the copy is its line's newest.
+        newest_date = max(
+            date.fromisoformat(path.stem.removeprefix("corpus-"))
+            for path in directory.glob("corpus-*.yaml")
+        )
+        selected = replace(original, label=f"corpus-{newest_date + timedelta(days=1)}", line="scotus", base=None)
+        other = replace(original, label=f"corpus-{newest_date + timedelta(days=2)}", base=None)
         for lockfile in (selected, other):
             shutil.copytree(directory / original.label, directory / lockfile.label)
             (directory / f"{lockfile.label}.yaml").write_text(render_lockfile(lockfile))

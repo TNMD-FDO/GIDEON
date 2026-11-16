@@ -18,10 +18,11 @@ and bounded in every quantifier:
 - a level ``level-N`` is the number under its noun in the family's readings
   or in the ``N/R`` shorthand, never bare; a range ``A-B`` its two bounds,
   and ``A-life`` its numeric bound alone;
-- a category ``category-R`` is the roman numeral word-bounded wherever it
-  stands, matched in capitals — category I's only after "category", since a
-  lone "I" is the pronoun — or the digit or the word within forty characters
-  after "category" in one sentence;
+- a category ``category-R`` is the capital roman numeral, digit, or word
+  directly under a category noun, the numeral or digit after the noun and
+  "is", "would be", or a colon, or the numeral in the ``N/R`` shorthand,
+  never bare; category I's numeral excludes a following apostrophe or a
+  first-person auxiliary or modal from the closed pronoun list;
 - a count ``N-point`` is the number, an optional "criminal history", and
   "point" or "points"; a day, month, or year count is the number, an optional
   qualifier, and the unit singular or plural, a hyphen or spaces between;
@@ -33,7 +34,9 @@ and bounded in every quantifier:
 - a markdown bold mark may sit on either side of any join, as the guardrail's
   count grammar admits it;
 - a level and category pair renders nothing, its two components arriving as
-  their own keys, and so does any other key.
+  their own keys, and so does any other key;
+- each form carries a fixed label: noun, total, placing, chained, shorthand,
+  link, lower, upper, or form.
 """
 
 import re
@@ -42,8 +45,20 @@ from typing import Final
 
 from gideon.guardrail import families, grammar
 
-Figure = tuple[str, tuple[str, ...]]
-"""One derived figure: its normaliser key and its rendered alternatives."""
+Form = tuple[str, str]
+"""One rendered form: its fixed label and regex source."""
+Figure = tuple[str, tuple[Form, ...]]
+"""One derived figure: its normaliser key and its labelled forms."""
+
+NOUN: Final[str] = "noun"
+TOTAL: Final[str] = "total"
+PLACING: Final[str] = "placing"
+CHAINED: Final[str] = "chained"
+SHORTHAND: Final[str] = "shorthand"
+LINK: Final[str] = "link"
+LOWER: Final[str] = "lower"
+UPPER: Final[str] = "upper"
+FORM: Final[str] = "form"
 
 _SP: Final[str] = grammar.SP
 # A markdown bold mark may sit on either side of a join ("**23** days").
@@ -53,7 +68,25 @@ _WORDS: Final[dict[int, str]] = {
 }
 _ROMAN_VALUES: Final[dict[str, int]] = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6}
 _COUNT_QUALIFIERS: Final[tuple[str, ...]] = ("more", *grammar.COUNT_QUALIFIERS)
-_CATEGORY_REACH: Final[int] = 40
+_CATEGORY_NOUN: Final[str] = (
+    rf"(?:\b(?:criminal(?:{grammar.GUIDELINES_WORD_SPACE}|-)history"
+    rf"{grammar.GUIDELINES_WORD_SPACE})?category\b"
+    rf"(?:{grammar.MARK}{grammar.GUIDELINES_WORD_SPACE}of\b)?"
+    rf"|\bCHC|\bcrim\.?{grammar.GUIDELINES_WORD_SPACE}hist\.?"
+    rf"{grammar.GUIDELINES_WORD_SPACE}cat\.?)"
+)
+_CATEGORY_LINKS: Final[tuple[str, ...]] = ("is", "would be", ":")
+_CATEGORY_PRONOUN_WORDS: Final[tuple[str, ...]] = (
+    "am", "can", "cannot", "could", "did", "do", "had", "have", "may", "might",
+    "must", "shall", "should", "was", "will", "would",
+    "can't", "couldn't", "didn't", "don't", "hadn't", "haven't", "mustn't",
+    "shan't", "shouldn't", "wasn't", "won't", "wouldn't",
+)
+_CATEGORY_PRONOUN_GUARD: Final[str] = (
+    rf"(?!{grammar.MARK}(?:['’]|{grammar.GUIDELINES_WORD_SPACE}(?i:"
+    + "|".join(re.escape(word).replace("'", "['’]") for word in _CATEGORY_PRONOUN_WORDS)
+    + r")\b))"
+)
 _FAMILIES: Final[dict[str, families.Family]] = {
     family.name: family for family in families.FAMILIES
 }
@@ -87,7 +120,7 @@ def _numeral(digits: str) -> str:
     return rf"(?i)\b{_number(digits)}\b"
 
 
-def _level(digits: str) -> tuple[str, ...]:
+def _level(digits: str) -> tuple[Form, ...]:
     """A level's noun, total, placing, chained-total, and shorthand readings."""
 
     prefixes = "|".join(grammar.GUIDELINES_LEVEL_PREFIXES)
@@ -111,22 +144,35 @@ def _level(digits: str) -> tuple[str, ...]:
         rf"(?={tail}(?!{_SP}\b(?:{units})\b)[ \t]{{0,3}}(?:[.!?,;:]|\n|$))"
     )
     return (
-        rf"(?i){noun}{tail}",
-        rf"(?i){grammar.GUIDELINES_TOTAL_WORD_PREFIX}{tail}",
-        rf"(?i){grammar.GUIDELINES_PLACING_PREFIX}{tail}",
-        rf"(?i){chained}{tail}",
-        rf"(?i)\b{tail}{grammar.GUIDELINES_OPTIONAL_SPACE}/"
-        rf"{grammar.GUIDELINES_OPTIONAL_SPACE}{grammar.GUIDELINES_ROMAN}\b",
+        (NOUN, rf"(?i){noun}{tail}"),
+        (TOTAL, rf"(?i){grammar.GUIDELINES_TOTAL_WORD_PREFIX}{tail}"),
+        (PLACING, rf"(?i){grammar.GUIDELINES_PLACING_PREFIX}{tail}"),
+        (CHAINED, rf"(?i){chained}{tail}"),
+        (
+            SHORTHAND,
+            rf"(?i)\b{tail}{grammar.GUIDELINES_OPTIONAL_SPACE}/"
+            rf"{grammar.GUIDELINES_OPTIONAL_SPACE}{grammar.GUIDELINES_ROMAN}\b",
+        ),
     )
 
 
-def _category(roman: str) -> tuple[str, ...]:
+def _category(roman: str) -> tuple[Form, ...]:
+    """A category's noun, link, and shorthand readings, excluding the pronoun I."""
+
     value = _ROMAN_VALUES[roman]
-    # A lone "I" is the pronoun, so category I's numeral counts only after its noun.
-    bare = rf"(?i:\bcategory){_JOIN}I\b" if roman == "I" else rf"\b{roman}\b"
+    numeral = roman + (_CATEGORY_PRONOUN_GUARD if roman == "I" else "")
+    join = rf"{grammar.MARK}{grammar.GUIDELINES_OPTIONAL_SPACE}{grammar.MARK}"
+    word_join = rf"{grammar.MARK}{grammar.GUIDELINES_WORD_SPACE}{grammar.MARK}"
+    noun = rf"(?i:{_CATEGORY_NOUN}{join})"
+    links = "|".join(
+        rf"\b{link.replace(' ', word_join)}\b" if link != ":" else link
+        for link in _CATEGORY_LINKS
+    )
+    numeric_tail = rf"(?:{numeral}|{value}){grammar.MARK}(?!\w)"
     return (
-        bare,
-        rf"(?i)\bcategory\b[^.?!\n]{{0,{_CATEGORY_REACH}}}?\b(?:{value}|{_WORDS[value]})\b",
+        (NOUN, rf"{noun}(?:{numeral}|(?i:{_number(str(value))})){grammar.MARK}(?!\w)"),
+        (LINK, rf"{noun}(?i:(?:{links}){join}){numeric_tail}"),
+        (SHORTHAND, rf"\b\d{{1,2}}{join}/{join}{numeral}{grammar.MARK}(?!\w)"),
     )
 
 
@@ -170,27 +216,30 @@ def _season_year(year: str, season: str) -> str:
     return rf"(?i)\b(?:the{_SP})?{season}(?:(?:{_SP}of)?{_SP}{year}|-{year})\b"
 
 
-def _render(key: str) -> tuple[str, ...]:
-    """A key's alternatives by its shape; an unknown shape renders nothing."""
+def _render(key: str) -> tuple[Form, ...]:
+    """A key's labelled forms by its shape; an unknown shape renders nothing."""
 
     if match := re.fullmatch(r"level-(\d+)", key):
         return _level(match.group(1))
     if match := re.fullmatch(r"category-(VI|IV|V|III|II|I)", key):
         return _category(match.group(1))
     if match := re.fullmatch(r"(\d+(?:\.\d+)?)-(point|day|month|year)", key):
-        return (_count(match.group(1), match.group(2)),)
+        return ((FORM, _count(match.group(1), match.group(2))),)
     if match := re.fullmatch(r"(\d+)-life", key):
-        return (_numeral(match.group(1)),)
+        return ((FORM, _numeral(match.group(1))),)
     if match := re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", key):
-        return (_date(*match.groups()),)
+        return ((FORM, _date(*match.groups())),)
     if match := re.fullmatch(r"(\d{1,3})-(\d{1,3})", key):
-        return tuple(_numeral(bound) for bound in match.groups())
+        return tuple(
+            (label, _numeral(bound))
+            for label, bound in zip((LOWER, UPPER), match.groups(), strict=True)
+        )
     if match := re.fullmatch(r"(\d{4})-(\d{2})", key):
-        return (_month_year(*match.groups()),)
+        return ((FORM, _month_year(*match.groups())),)
     if (match := re.fullmatch(r"(\d{4})-([a-z]+)", key)) and match.group(
         2
     ) in grammar.SEASON_WORDS:
-        return (_season_year(*match.groups()),)
+        return ((FORM, _season_year(*match.groups())),)
     return ()
 
 
@@ -205,7 +254,9 @@ def derive(family_name: str, prompt: str, answer: str) -> tuple[Figure, ...]:
         return ()
     derived: list[Figure] = []
     for key in sorted(family.figures(answer) - family.figures(prompt)):
-        kept = tuple(source for source in _render(key) if re.search(source, prompt) is None)
+        kept = tuple(
+            (label, source) for label, source in _render(key) if re.search(source, prompt) is None
+        )
         if kept:
             derived.append((key, kept))
     return tuple(derived)
@@ -214,5 +265,5 @@ def derive(family_name: str, prompt: str, answer: str) -> tuple[Figure, ...]:
 def merge(written: Sequence[str], figures: Sequence[Figure]) -> tuple[str, ...]:
     """The case's ``must_not`` sources: written first, then each figure's forms."""
 
-    derived = (source for _, alternatives in figures for source in alternatives)
+    derived = (source for _, alternatives in figures for _, source in alternatives)
     return tuple(dict.fromkeys((*written, *derived)))

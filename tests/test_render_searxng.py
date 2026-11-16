@@ -33,7 +33,11 @@ from gideon.host.render.compose import (
 from gideon.host.render.egress import EGRESS_SERVICE_NAME
 from gideon.host.render.engine import ENGINE_SERVICE_NAME, MODEL_SERVERS
 from gideon.host.render.facts import HostFacts
+from gideon.host.render.grafana import PUBLIC_REPOSITORY_URL
 from gideon.host.render.searxng import (
+    SEARXNG_CONTACT_URL,
+    SEARXNG_ENGINE_LOG_LEVEL,
+    SEARXNG_ENGINE_LOGGER_PREFIX,
     SEARXNG_LOGGING_PATH,
     SEARXNG_NETWORK_LOG_LEVEL,
     SEARXNG_NETWORK_LOGGER,
@@ -118,7 +122,8 @@ class Settings(unittest.TestCase):
         # bing and google are disabled in upstream's own defaults, and keep_only
         # governs membership alone, so every kept engine is re-enabled by name.
         self.assertEqual(
-            document["engines"], [{"name": engine, "disabled": False} for engine in engines]
+            document["engines"],
+            [{"name": engine, "disabled": False, "inactive": False} for engine in engines],
         )
         self.assertNotIn("google", engines)
         self.assertNotIn("google", str(document))
@@ -128,7 +133,9 @@ class Settings(unittest.TestCase):
         document = searxng_settings_document(with_search(inputs(), "on", engines=engines))
         keep_only = document["use_default_settings"]["engines"]["keep_only"]  # type: ignore[index]
         self.assertEqual(keep_only[-1], "google")
-        self.assertIn({"name": "google", "disabled": False}, document["engines"])  # type: ignore[arg-type]
+        self.assertIn(
+            {"name": "google", "disabled": False, "inactive": False}, document["engines"]  # type: ignore[arg-type]
+        )
 
     def test_a_site_naming_duckduckgo_still_renders_it(self) -> None:
         engines = [*inputs().site.web.engines, "duckduckgo"]
@@ -136,12 +143,23 @@ class Settings(unittest.TestCase):
         keep_only = document["use_default_settings"]["engines"]["keep_only"]  # type: ignore[index]
         self.assertEqual(keep_only[-1], "duckduckgo")
         self.assertIn(
-            {"name": "duckduckgo", "disabled": False}, document["engines"]  # type: ignore[arg-type]
+            {"name": "duckduckgo", "disabled": False, "inactive": False}, document["engines"]  # type: ignore[arg-type]
         )
+
+    def test_every_kept_engine_is_activated_for_the_example_and_all_allowed_names(self) -> None:
+        base = inputs()
+        for engines in (list(base.site.web.engines), list(WEB_ENGINE_VALUES)):
+            with self.subTest(engines=engines):
+                document = searxng_settings_document(with_search(base, "on", engines=engines))
+                entries = document["engines"]
+                assert isinstance(entries, list)
+                self.assertEqual([entry["name"] for entry in entries], engines)
+                for entry in entries:
+                    self.assertIs(entry["inactive"], False)
 
     def test_pinned_defaults_the_two_formats_and_no_secret_key(self) -> None:
         document = searxng_settings_document(inputs())
-        self.assertEqual(document["general"], {"debug": False})
+        self.assertEqual(document["general"], {"debug": False, "contact_url": SEARXNG_CONTACT_URL})
         self.assertEqual(
             document["search"],
             {"formats": ["html", "json"], "autocomplete": "", "favicon_resolver": ""},
@@ -152,6 +170,9 @@ class Settings(unittest.TestCase):
         )
         self.assertNotIn("secret_key", SearxngSettingsArtifact().emit(inputs()))
         self.assertNotIn("proxies", SearxngSettingsArtifact().emit(inputs()))
+
+    def test_the_contact_is_the_public_repository_address(self) -> None:
+        self.assertEqual(SEARXNG_CONTACT_URL, PUBLIC_REPOSITORY_URL)
 
     def test_an_engine_outside_the_release_list_refuses_naming_the_fix(self) -> None:
         bad = with_search(inputs(), "on", engines=["duckduckgo", "braveapi"])
@@ -171,7 +192,7 @@ class Settings(unittest.TestCase):
 
 
 class Logging(unittest.TestCase):
-    def test_logging_document_keeps_granian_and_sets_the_network_logger(self) -> None:
+    def test_logging_document_keeps_granian_and_sets_network_and_engine_levels(self) -> None:
         document = searxng_logging_document()
         text = SearxngLoggingArtifact().emit(inputs())
         self.assertEqual(json.loads(text), document)
@@ -181,7 +202,10 @@ class Logging(unittest.TestCase):
         assert isinstance(loggers, Mapping)
         self.assertEqual(
             set(loggers),
-            {"_granian", "granian.access", SEARXNG_NETWORK_LOGGER},
+            {
+                "_granian", "granian.access", SEARXNG_NETWORK_LOGGER,
+                *(f"{SEARXNG_ENGINE_LOGGER_PREFIX}{engine}" for engine in WEB_ENGINE_VALUES),
+            },
         )
         self.assertEqual(
             loggers["_granian"],
@@ -195,9 +219,25 @@ class Logging(unittest.TestCase):
             loggers[SEARXNG_NETWORK_LOGGER],
             {"level": SEARXNG_NETWORK_LOG_LEVEL},
         )
+        self.assertEqual(SEARXNG_ENGINE_LOGGER_PREFIX, "searx.engines.")
+        self.assertEqual(SEARXNG_ENGINE_LOG_LEVEL, "CRITICAL")
+        for engine in WEB_ENGINE_VALUES:
+            with self.subTest(engine=engine):
+                self.assertEqual(
+                    loggers[f"{SEARXNG_ENGINE_LOGGER_PREFIX}{engine}"],
+                    {"level": SEARXNG_ENGINE_LOG_LEVEL},
+                )
+        self.assertNotIn("searx.engines", loggers)
         self.assertNotIn("handlers", document)
         self.assertNotIn("formatters", document)
         self.assertEqual(text, json.dumps(document, indent=2, sort_keys=True) + "\n")
+
+    def test_logging_bytes_do_not_follow_the_site_engine_list(self) -> None:
+        base = inputs()
+        one = with_search(base, "on", engines=list(WEB_ENGINE_VALUES[:1]))
+        all_engines = with_search(base, "on", engines=list(WEB_ENGINE_VALUES))
+        artifact = SearxngLoggingArtifact()
+        self.assertEqual(artifact.emit(one), artifact.emit(all_engines))
 
 
 class Env(unittest.TestCase):

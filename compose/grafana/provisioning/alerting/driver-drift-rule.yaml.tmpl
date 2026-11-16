@@ -11,7 +11,7 @@
               datasource:
                 type: prometheus
                 uid: prometheus
-              expr: 'count(DCGM_FI_DEV_GPU_UTIL{DCGM_FI_DRIVER_VERSION!="$driver"})'
+              expr: 'count(DCGM_FI_DEV_GPU_UTIL_RATIO{DCGM_FI_SYSTEM_DRIVER_VERSION!="$driver"})'
               instant: true
               intervalMs: 1000
               maxDataPoints: 43200

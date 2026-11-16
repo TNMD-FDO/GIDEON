@@ -52,7 +52,7 @@ alerts:
     # port: 25
   recipients: [csa1@example.org, csa2@example.org]   # page-class alerts go here; no on-call
 
-# hardware_profile: 2x96v-256d      profile section of models.lock; unknown refuses, non-reference warns
+# hardware_profile: 2x96v-256d      profile section of models.lock; 2x96v-256d, the reference, or 1x32v-120d, the one-card trial profile, evaluated on a capped share of a larger card; unknown refuses, non-reference warns
 # registry: ghcr.io/tnmd-fdo       image-reference prefix for every image in images.lock (the two plain-HTTP registries: loopback 127.0.0.1:5000 pre-1.0, and the box's bridge address 192.168.122.1:5000 for the acceptance VM)
 # egress_proxy: ""                 optional; applied to apt, Docker pulls, the CLI, SearXNG, Open WebUI, gideon-egress; credentials in secrets/proxy_auth
 # docker_address_pool: ""          optional; an IPv4 /20 or wider the office keeps clear of its networks (example: 198.18.0.0/16); Docker carves every container network, including the default bridge, as a /24 from daemon.json's default-address-pools
@@ -60,11 +60,12 @@ alerts:
 
 # web:                             General branch search policy
 #   search: on                     off = no web search anywhere; SearXNG not started
-#   engines: [brave, bing, startpage, wikipedia]
+#   engines: [bing, wikipedia]
 #                                  allowed: duckduckgo, brave, bing, startpage,
-#                                  wikipedia, google; DuckDuckGo and Google are
-#                                  available but off by default; DuckDuckGo's bot
-#                                  detection answers a SearXNG instance with a CAPTCHA at every search
+#                                  wikipedia, google; available but off by default:
+#                                  DuckDuckGo (bot-detection CAPTCHA at every search),
+#                                  Google (off upstream), Brave (too many requests),
+#                                  Startpage (CAPTCHA, then suspension)
 #   domain_filter: []              allow-list of result domains, e.g. [law.cornell.edu, uscourts.gov]; empty = any;
 #                                  bare lowercase names only, each covering itself and its subdomains
 

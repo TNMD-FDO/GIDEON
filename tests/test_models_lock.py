@@ -261,6 +261,19 @@ class CommittedLock(unittest.TestCase):
         assert isinstance(raw, Mapping)
         self.assertNotIn("corpus_line", raw)
 
+    def test_trial_profile_names_its_corpus_line(self) -> None:
+        result = load_models_lock(LOCK)
+        self.assertTrue(result.ok, result.errors)
+        assert result.lock is not None and result.document is not None
+        profile = result.lock.profile("1x32v-120d")
+        assert profile is not None
+        profiles = result.document["profiles"]
+        assert isinstance(profiles, Mapping)
+        raw = profiles[profile.name]
+        assert isinstance(raw, Mapping)
+        self.assertIn("corpus_line", raw)
+        self.assertEqual(raw["corpus_line"], profile.corpus_line)
+
     def test_chunk_guards_fit_each_profiles_memory_and_ceiling(self) -> None:
         result = load_models_lock(LOCK)
         self.assertTrue(result.ok, render_errors(result.errors))
@@ -363,13 +376,14 @@ class CommittedLock(unittest.TestCase):
         assert result.lock is not None
         self.assertEqual(result.lock.version, 1)
         self.assertEqual(result.lock.reference, "2x96v-256d")
-        self.assertEqual(len(result.lock.profiles), 1)
+        self.assertEqual(len(result.lock.profiles), 2)
         self.assertEqual(result.lock.candidates, ())
         self.assertIsNone(result.lock.candidate("alternate-embed"))
         assert result.document is not None
         self.assertNotIn("candidates", result.document)
 
-        profile = result.lock.profiles[0]
+        profile = result.lock.profile(result.lock.reference)
+        assert profile is not None
         self.assertEqual(profile.name, result.lock.reference)
         self.assertEqual(
             profile.requires,
@@ -435,32 +449,119 @@ class CommittedLock(unittest.TestCase):
                 self.assertIsNotNone(DIGEST.fullmatch(file.sha256))
                 self.assertGreaterEqual(file.size, 0)
 
+    def test_trial_profile_has_exact_release_facts(self) -> None:
+        result = load_models_lock(LOCK)
+        self.assertTrue(result.ok, render_errors(result.errors))
+        assert result.lock is not None
+        profile = result.lock.profile("1x32v-120d")
+        assert profile is not None
+        self.assertEqual(
+            profile.requires,
+            ProfileRequirements(
+                platform="x86_64",
+                gpu=GpuRequirements(
+                    architecture="Blackwell",
+                    compute_capability="12.0",
+                    model="NVIDIA RTX PRO 4500 Blackwell",
+                    count=1,
+                    vram_gb=32,
+                ),
+                dram_gb=120,
+                data_volume_gb=600,
+            ),
+        )
+        self.assertEqual(profile.corpus_line, "scotus")
+        self.assertEqual(profile.cotenant_reserve_gb(0), 0)
+        self.assertEqual(profile.client_reserve_seqs, 5)
+        self.assertEqual(profile.chunk_guards, ChunkGuards(3, 2, 1200))
+        self.assertEqual(profile.memory_row("qdrant"), MemoryRow("qdrant", 4, None))
+        self.assertEqual(profile.memory_row("gideon-generator"), MemoryRow("gideon-generator", 12, "generator"))
+        self.assertEqual(profile.memory_row("gideon-embed"), MemoryRow("gideon-embed", 3, "embed"))
+        reference = result.lock.profile(result.lock.reference)
+        assert reference is not None
+        self.assertEqual([row.service for row in profile.memory], [row.service for row in reference.memory])
+        self.assertEqual({pin.role for pin in profile.models}, {"generator", "embed"})
+        generator = profile.model("generator")
+        embed = profile.model("embed")
+        assert generator is not None and embed is not None
+        self.assertEqual(generator.serve.served_name, "gideon-generator")
+        self.assertEqual(embed.serve.served_name, "gideon-embed")
+        for model in profile.models:
+            with self.subTest(role=model.role):
+                self.assertEqual(model.gpu, 0)
+                self.assertEqual(dict(model.serve.env), {"HF_HUB_OFFLINE": "1", "HF_HOME": "/data/models"})
+                self.assertIsNotNone(HF_REPO.fullmatch(model.repo))
+                self.assertIsNotNone(REVISION.fullmatch(model.revision))
+                self.assertTrue(model.files)
+                paths = [file.path for file in model.files]
+                self.assertEqual(paths, sorted(paths))
+                for file in model.files:
+                    with self.subTest(path=file.path):
+                        self.assertIsNotNone(FILE_PATH.fullmatch(file.path))
+                        self.assertIsNotNone(DIGEST.fullmatch(file.sha256))
+                        self.assertGreaterEqual(file.size, 0)
+        self.assertNotIn("VLLM_USE_DEEP_GEMM", generator.serve.env)
+        self.assertEqual(
+            dict(generator.serve.flags),
+            {
+                "max-model-len": 262144,
+                "max-num-seqs": 20,
+                "max-num-batched-tokens": 8192,
+                "enable-chunked-prefill": True,
+                "long-prefill-token-threshold": 4096,
+                "scheduling-policy": "priority",
+                "gpu-memory-utilization": 0.7709,
+                "reasoning-parser": "gemma4",
+                "no-enable-prefix-caching": True,
+            },
+        )
+        self.assertEqual(
+            dict(embed.serve.flags),
+            {
+                "runner": "pooling",
+                "convert": "embed",
+                "dtype": "bfloat16",
+                "max-model-len": 4096,
+                "no-enable-chunked-prefill": True,
+                "gpu-memory-utilization": 0.1491,
+                "kv-cache-memory-bytes": 604328510,
+                "hf-overrides": '{"matryoshka_dimensions": [1024]}',
+                "pooler-config": '{"dimensions": 1024}',
+            },
+        )
+        self.assertIs(type(embed.serve.flags["kv-cache-memory-bytes"]), int)
+        space = profile.embedding_space
+        assert space is not None
+        self.assertEqual(space.id, "qwen3-embedding-0-6b-1024-bf16")
+        self.assertEqual(space.dimensions, 1024)
+        self.assertEqual(space.role, "embed")
+
     def test_committed_embedding_space_matches_its_model_flags(self) -> None:
         result = load_models_lock(LOCK)
         self.assertTrue(result.ok, render_errors(result.errors))
         assert result.lock is not None
-        profile = result.lock.profile(result.lock.reference)
-        assert profile is not None
-        space = profile.embedding_space
-        self.assertIsNotNone(space)
-        assert space is not None
-        self.assertIsNotNone(EMBEDDING_SPACE_ID.fullmatch(space.id))
-        pin = profile.model(space.role)
-        self.assertIsNotNone(pin)
-        assert pin is not None
-        self.assertEqual(space.role, "embed")
-        self.assertIs(type(space.dimensions), int)
-        self.assertGreater(space.dimensions, 0)
-        self.assertTrue(pin.serve.served_name)
-        self.assertIn("HF_HOME", pin.serve.env)
-        self.assertTrue(pin.files)
-        hf_overrides = pin.serve.flags["hf-overrides"]
-        pooler_config = pin.serve.flags["pooler-config"]
-        self.assertIsInstance(hf_overrides, str)
-        self.assertIsInstance(pooler_config, str)
-        assert isinstance(hf_overrides, str) and isinstance(pooler_config, str)
-        self.assertEqual(json.loads(hf_overrides)["matryoshka_dimensions"], [space.dimensions])
-        self.assertEqual(json.loads(pooler_config)["dimensions"], space.dimensions)
+        for profile in result.lock.profiles:
+            with self.subTest(profile=profile.name):
+                space = profile.embedding_space
+                self.assertIsNotNone(space)
+                assert space is not None
+                self.assertIsNotNone(EMBEDDING_SPACE_ID.fullmatch(space.id))
+                pin = profile.model(space.role)
+                self.assertIsNotNone(pin)
+                assert pin is not None
+                self.assertEqual(space.role, "embed")
+                self.assertIs(type(space.dimensions), int)
+                self.assertGreater(space.dimensions, 0)
+                self.assertTrue(pin.serve.served_name)
+                self.assertIn("HF_HOME", pin.serve.env)
+                self.assertTrue(pin.files)
+                hf_overrides = pin.serve.flags["hf-overrides"]
+                pooler_config = pin.serve.flags["pooler-config"]
+                self.assertIsInstance(hf_overrides, str)
+                self.assertIsInstance(pooler_config, str)
+                assert isinstance(hf_overrides, str) and isinstance(pooler_config, str)
+                self.assertEqual(json.loads(hf_overrides)["matryoshka_dimensions"], [space.dimensions])
+                self.assertEqual(json.loads(pooler_config)["dimensions"], space.dimensions)
 
     def test_committed_embedding_space_is_typed_for_its_pin(self) -> None:
         result = load_models_lock(LOCK)

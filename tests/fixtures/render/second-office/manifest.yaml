@@ -3,7 +3,7 @@ release: "fixture"
 inputs:
   site_sha256: "3032cbc05ff6133992600e2f7b9f12e8488f068b2a747e88a45159753d250cb1"
   host_lock_sha256: "56b34abc306f9fbaf92b8b48f9beaa6a942c481573f06c6edc8d9b890b69d1bd"
-  models_lock_sha256: "a0b64a1d76a1e796f6b12e51eee12b09ab9a7b585cf666e0700829b2eab226e1"
+  models_lock_sha256: "d7f4c5b8f9db51c6403fd6a0f57e24c473ff3ea28be13748473ebd8b03ebf83a"
   egress_sha256: "e22abee0f29547aedd38bb2ca9ca9f0d2cd3dc4b28c9d6df72ae4fad53d0d3af"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
@@ -15,7 +15,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "fed7b25c1fb53486305cfa449b1770e85388b6376a99ac333aa5cdf9ccfeee4b"
+    sha256: "e78da9af957351978872207d446c3dd2f83a7f4db4529dd28978745520621178"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -59,7 +59,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/rules.yaml":
-    sha256: "fd17659026a68797ea2115c07d539c9f430a6f8e4a08b876fa131d2ddd61b172"
+    sha256: "e2fece172af62c892a2606f06ce045145f87a16f4ac8b4cb3ca470c06ed82d80"
     mode: "0644"
     owners:
       - "grafana"
@@ -79,7 +79,7 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/gpu.json":
-    sha256: "3338fc5e297dabdfd76861f6b49173e8879562224ae77f882b73eb91c675b378"
+    sha256: "0927491d557ee3b17ace2a36e6863607591315c18db0143b7a89377018a72c8f"
     mode: "0644"
     owners:
       - "grafana"
@@ -228,7 +228,7 @@ files:
     mode: "0644"
     owners: []
   "dcgm-exporter/counters.csv":
-    sha256: "6a1829a36a3f1a9846400c59f42be5568d030212086aa6e126e5af6366c4d1ff"
+    sha256: "891c9519e8fe8aa8603d0cae763afc3bdfbf19832589d1c7019abf81afc9c4ac"
     mode: "0644"
     owners:
       - "dcgm-exporter"
@@ -246,7 +246,7 @@ services:
   gideon-api: "eb181ec7e750354a40c46b5d09519bc91b5db66b3bfe1eb190b674e33b1361b7"
   gideon-worker: "b0f4a0d00bb1c7d62cf5b1c3f0417bce2dfe53fa9ac445a11caa038f95a82393"
   gideon-egress: "eaa0cce20818c30032a33977c8606d993f8afaf73850ff2743240643c26e3c49"
-  dcgm-exporter: "80440fa3a0466766fec774772d26eed3389e9f239c1e1c0d96d81a5f7cc62a85"
+  dcgm-exporter: "6fab2abeeebd3394106602a966f1abef6b9280497f7d815ebeda9669516839fe"
   postgres-exporter: "d36e03785dee0d52e65763c1d7f6dda2c4c09b17c129d7e8439fe5994338bfe7"
   cadvisor: "7bd0e221d909e45fc1555750f1839250774b89d6333a0fb7b0443bcca62ec837"
   blackbox-exporter: "1a7dc7ea8be37e01373bd6c61a9927a3822291e787f0965539998884139aed53"

@@ -64,12 +64,16 @@ the `N/R` shorthand ("18/II"), never the bare numeral. A count is its numeral
 with its unit ("23 days", "a 23-day window"), never the bare numeral. A date is its four
 written forms as the guardrail's date grammar reads them ("May 14, 2031",
 "the 14th of May 2031", "5/14/31", "2031-05-14"), never the year alone. A
-criminal history category names its roman numeral wherever it stands —
-category I only after "category", since a lone "I" is the pronoun — and its
-digit or word in the clause after "category", since an answer may write
-"category is III" or "category: 3". The turn harness shows the check beside
-the class of every positive that derives something and names the derived
-keys that matched when the check fails.
+criminal history category is its capital roman numeral, digit, or spelled
+number directly under a category noun ("criminal history category I",
+"CHC III", "category 3"), its numeral or digit after "is", "would be", or a
+colon ("category is III", "category: 3"), or its roman numeral in the `N/R`
+shorthand ("20/III"). A bare numeral and a number past the link match nothing.
+Category I's numeral is excluded when followed directly by a straight or
+typographic apostrophe, or by a space and a first-person auxiliary or modal.
+The turn harness shows the check beside the class of every positive that
+derives something and names each matched derived key with the fixed labels
+of its matching forms when the check fails.
 
 A positive may also carry `must_not`, a list of regular expressions naming
 what the derivation cannot: a figure the prompt resolves under the family's

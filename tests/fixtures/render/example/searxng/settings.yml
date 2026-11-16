@@ -2,21 +2,18 @@
 use_default_settings:
   engines:
     keep_only:
-      - "brave"
       - "bing"
-      - "startpage"
       - "wikipedia"
 engines:
-  - name: "brave"
-    disabled: false
   - name: "bing"
     disabled: false
-  - name: "startpage"
-    disabled: false
+    inactive: false
   - name: "wikipedia"
     disabled: false
+    inactive: false
 general:
   debug: false
+  contact_url: "https://github.com/TNMD-FDO/GIDEON"
 search:
   formats:
     - "html"

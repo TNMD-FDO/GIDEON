@@ -72,6 +72,48 @@ class Family(unittest.TestCase):
 
 
 class EmbedRender(unittest.TestCase):
+    def test_trial_profile_shares_position_zero_with_its_flags_and_memory(self) -> None:
+        loaded = load_models_lock(ROOT / "models.lock")
+        self.assertTrue(loaded.ok, loaded.errors)
+        assert loaded.lock is not None
+        profile = loaded.lock.profile("1x32v-120d")
+        assert profile is not None
+        rendered_inputs = inputs(EXAMPLE)
+        rendered_inputs = replace(
+            rendered_inputs,
+            site=replace(rendered_inputs.site, hardware_profile=profile.name),
+            profile=profile,
+        )
+        self.assertEqual(len(rendered_inputs.facts.gpu_uuids), 2)
+        blocks = service_blocks(rendered_inputs)
+        for member in MODEL_SERVERS:
+            with self.subTest(role=member.role):
+                pin = profile.model(member.role)
+                row = profile.memory_row(member.service_name)
+                assert pin is not None and row is not None
+                block = blocks[member.service_name]
+                assert isinstance(block, Mapping)
+                self.assertEqual(
+                    block["devices"],
+                    [f"nvidia.com/gpu={rendered_inputs.facts.gpu_uuids[0]}"],
+                )
+                self.assertEqual(block["mem_limit"], row.gb * GIGABYTE)
+                command = block["command"]
+                assert isinstance(command, list)
+                flag_names = (
+                    ("gpu-memory-utilization", "max-num-seqs", "reasoning-parser")
+                    if member is GENERATOR
+                    else ("kv-cache-memory-bytes", "max-model-len", "gpu-memory-utilization")
+                )
+                for name in flag_names:
+                    self.assertEqual(command[command.index(f"--{name}") + 1], str(pin.serve.flags[name]))
+                if member is GENERATOR:
+                    self.assertIn("--no-enable-prefix-caching", command)
+                    self.assertNotIn("--kv-cache-dtype", command)
+                    environment = block["environment"]
+                    assert isinstance(environment, Mapping)
+                    self.assertNotIn("VLLM_USE_DEEP_GEMM", environment)
+
     def test_out_of_range_gpu_refusal_names_the_record_and_re_record_step(self) -> None:
         rendered_inputs = inputs(EXAMPLE)
         pin = rendered_inputs.profile.model(EMBED.role)

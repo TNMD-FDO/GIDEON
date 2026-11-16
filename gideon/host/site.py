@@ -84,12 +84,17 @@ _RETENTION_VALUES: Final = ("1d", "7d", "30d", "60d", "90d", "180d", "1y")
 _DRILL_INTERVAL_VALUES: Final = ("1w", "2w", "1m", "3m", "6m", "1y")
 _PROMPT_LOGGING_VALUES: Final = ("metadata_only", "full")
 _WEB_SEARCH_VALUES: Final = ("on", "off")
-# The engines an office may name (the defaults: brave, bing, startpage, and
-# wikipedia; DuckDuckGo and Google are allowed but off by default because
+# The engines an office may name (the defaults: bing and wikipedia): each is
+# the ``name:`` of a default engine in the pinned SearXNG image; ``brave`` is
+# the keyless engine, never ``braveapi``. A release extends the list.
+# DuckDuckGo, Google, Brave, and Startpage are allowed but off by default.
 # DuckDuckGo's bot detection answers a SearXNG instance's request shape with a
-# CAPTCHA at every search): each is the ``name:`` of a default engine in the
-# pinned SearXNG image; ``brave`` is the keyless engine, never ``braveapi``.
-# A release extends the list.
+# CAPTCHA at every search; Google is off in upstream's defaults. On the box
+# with the pinned image, Brave answered none of fifteen fixed searches, each
+# refused as too many requests as on the earlier image. Startpage answered
+# none of fifteen fixed searches, its first request answered with a CAPTCHA
+# and every later one suspended for it. Bing answered all fifteen and
+# Wikipedia all six title searches.
 WEB_ENGINE_VALUES: Final[tuple[str, ...]] = (
     "duckduckgo",
     "brave",
@@ -348,7 +353,7 @@ FIELD_REGISTRY: Final[tuple[FieldSpec, ...]] = (
         "web.engines",
         kind="string list",
         allowed_values=WEB_ENGINE_VALUES,
-        default=["brave", "bing", "startpage", "wikipedia"],
+        default=["bing", "wikipedia"],
         description="Search engines made available to SearXNG.",
     ),
     _field(

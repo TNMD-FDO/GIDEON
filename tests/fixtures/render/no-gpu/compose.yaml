@@ -500,7 +500,7 @@ services:
       - "internal"
     mem_limit: 1000000000
   searxng:
-    image: "ghcr.io/tnmd-fdo/searxng@sha256:1dab138ea70a8ceb4d1c182f5c8f256088406c1742b99e279976157dbe1e9759"
+    image: "ghcr.io/tnmd-fdo/searxng@sha256:932f69dca010db9880bddebb2171f05d8e1a25d04a59149ff65409993d680024"
     restart: "unless-stopped"
     environment:
       GRANIAN_LOG_ACCESS_ENABLED: "false"

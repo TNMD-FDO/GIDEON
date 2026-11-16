@@ -1738,7 +1738,7 @@ class Alerting(unittest.TestCase):
                             ),
                             (
                                 "gideon-gpu-count-under-profile", "GPU count under profile",
-                                '(count(DCGM_FI_DEV_GPU_UTIL) or vector(0)) '
+                                '(count(DCGM_FI_DEV_GPU_UTIL_RATIO) or vector(0)) '
                                 f'and on() (up{{job="{DCGM_JOB_NAME}"}} == 1)', requires.gpu.count,
                                 "The host has {{ $values.A.Value }} GPU(s), "
                                 f"the profile requires {requires.gpu.count}",

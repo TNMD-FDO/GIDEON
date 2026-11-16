@@ -11,6 +11,7 @@ import threading
 import unittest
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 STUB_PATH = ROOT / "tests/contract/sentinel/stub.py"
@@ -26,6 +27,7 @@ def load_stub() -> Any:
 
 
 STUB = load_stub()
+MODES = ("ok", "engine-error", "brave-error")
 
 RESPONSE_START_MARKER = "<stdout has no getvalue>"
 
@@ -96,20 +98,23 @@ class StubServerTests(unittest.TestCase):
     def test_request_line_is_written_before_the_response(self) -> None:
         requests = (
             ("GET", "/health", None),
+            ("GET", "/brave/search?q=fixture-sentinel", None),
             (
                 "POST",
                 "/v1/chat/completions",
                 {"model": STUB.MODEL_ID, "stream": True},
             ),
         )
-        for method, path, body in requests:
-            with self.subTest(method=method, path=path):
-                _status, _headers, _body, log = self.request(method, path, body)
-                self.assertEqual(RecordingStubHandler.response_start_log, log)
-                self.assertTrue(log.endswith("\n"))
+        for mode in MODES:
+            STUB.MODE = mode
+            for method, path, body in requests:
+                with self.subTest(mode=mode, method=method, path=path):
+                    _status, _headers, _body, log = self.request(method, path, body)
+                    self.assertEqual(RecordingStubHandler.response_start_log, log)
+                    self.assertTrue(log.endswith("\n"))
 
-    def test_health_and_models_have_openai_shape_in_both_modes(self) -> None:
-        for mode in ("ok", "engine-error"):
+    def test_health_and_models_have_openai_shape_in_all_modes(self) -> None:
+        for mode in MODES:
             with self.subTest(mode=mode):
                 STUB.MODE = mode
                 status, _headers, body, _log = self.request("GET", "/health")
@@ -120,8 +125,8 @@ class StubServerTests(unittest.TestCase):
                 self.assertEqual(document["object"], "list")
                 self.assertEqual(document["data"][0]["id"], STUB.MODEL_ID)
 
-    def test_chat_completions_return_the_query_object_in_both_modes(self) -> None:
-        for mode in ("ok", "engine-error"):
+    def test_chat_completions_return_the_query_object_in_all_modes(self) -> None:
+        for mode in MODES:
             with self.subTest(mode=mode):
                 STUB.MODE = mode
                 status, _headers, body, _log = self.request(
@@ -135,8 +140,8 @@ class StubServerTests(unittest.TestCase):
                     json.loads(message["content"]), {"queries": [STUB.SENTINEL]}
                 )
 
-    def test_streamed_completion_has_deltas_finish_and_done_in_both_modes(self) -> None:
-        for mode in ("ok", "engine-error"):
+    def test_streamed_completion_has_deltas_finish_and_done_in_all_modes(self) -> None:
+        for mode in MODES:
             with self.subTest(mode=mode):
                 STUB.MODE = mode
                 status, headers, body, _log = self.request(
@@ -152,8 +157,8 @@ class StubServerTests(unittest.TestCase):
                 self.assertEqual(chunks[1]["choices"][0]["delta"]["content"], "Stub completion.")
                 self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "stop")
 
-    def test_search_engines_and_pages_have_their_fixed_shapes_in_both_modes(self) -> None:
-        for mode in ("ok", "engine-error"):
+    def test_search_engines_and_pages_have_their_fixed_shapes_in_all_modes(self) -> None:
+        for mode in MODES:
             with self.subTest(mode=mode):
                 STUB.MODE = mode
                 status, _headers, body, _log = self.request("GET", "/json?q=fixture-sentinel")
@@ -168,11 +173,11 @@ class StubServerTests(unittest.TestCase):
                 self.assertNotIn(STUB.SENTINEL.encode(), body)
 
                 status, _headers, body, _log = self.request("GET", "/search?q=fixture-sentinel")
-                self.assertEqual(status, 200 if mode == "ok" else 500)
-                if mode == "ok":
-                    self.assertEqual(body, b"<html><body></body></html>")
-                else:
+                self.assertEqual(status, 500 if mode == "engine-error" else 200)
+                if mode == "engine-error":
                     self.assertEqual(body, b"stub engine error\n")
+                else:
+                    self.assertEqual(body, b"<html><body></body></html>")
 
                 status, _headers, body, _log = self.request("GET", "/searxng/search")
                 self.assertEqual((status, body), (500, b"stub SearXNG failure\n"))
@@ -180,6 +185,41 @@ class StubServerTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertIn(b"<title>Stub page 2</title>", body)
                 self.assertIn(b"<p>Stub page 2.</p>", body)
+
+    def test_brave_error_page_has_the_bare_query_as_its_first_array_token(self) -> None:
+        STUB.MODE = "brave-error"
+        STUB.SENTINEL = "gideon-sentinel-" + "a" * 12
+        for query in (STUB.SENTINEL, "fictitious query"):
+            with self.subTest(query=query):
+                status, headers, body, log = self.request(
+                    "GET", f"/brave/search?q={quote(query, safe='')}"
+                )
+                self.assertEqual(status, 200)
+                self.assertTrue(headers["content-type"].startswith("text/html"))
+                text = body.decode()
+                self.assertTrue(text.startswith("<script>kit.start(app, element, {data: ["))
+                self.assertTrue(text.endswith("]})</script>"))
+                array = text.split("data: [", 1)[1].split("]", 1)[0]
+                self.assertEqual(array, query)
+                self.assertIn(query, array[:40])
+                marker = "yes" if query == STUB.SENTINEL else "no"
+                self.assertEqual(log.strip(), f"GET /brave/search status=200 sentinel={marker}")
+                self.assertNotIn(query, log)
+                self.assertNotIn("?", log)
+                self.assertEqual(RecordingStubHandler.response_start_log, log)
+
+    def test_brave_route_is_a_logged_404_outside_its_error_mode(self) -> None:
+        for mode in MODES:
+            if mode == "brave-error":
+                continue
+            with self.subTest(mode=mode):
+                STUB.MODE = mode
+                status, _headers, body, log = self.request(
+                    "GET", "/brave/search?q=fixture-sentinel"
+                )
+                self.assertEqual((status, body), (404, b"not found\n"))
+                self.assertEqual(log.strip(), "GET /brave/search status=404 sentinel=yes")
+                self.assertNotIn(STUB.SENTINEL, log)
 
     def test_request_line_is_content_free_and_marks_only_matching_q(self) -> None:
         _status, _headers, _body, log = self.request("GET", "/json?q=fixture-sentinel")

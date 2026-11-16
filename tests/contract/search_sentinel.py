@@ -1,7 +1,7 @@
 """Prove the search sentinel does not enter the stack's retained logs.
 
 This self-hosted contract builds a throwaway Postgres, Open WebUI, SearXNG,
-and standard-library stub stack from the image mirror, drives five managed
+and standard-library stub stack from the image mirror, drives managed
 turns with fresh sentinels, and counts matches in every container journal and
 the frontend audit file.  It runs with the system Python and redirects only
 the product secret directory into the temporary stack.
@@ -19,7 +19,7 @@ import tempfile
 import time
 import unittest
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -42,8 +42,10 @@ from gideon.host.render.owui import (
     owui_environment,
 )
 from gideon.host.render.searxng import (
+    SEARXNG_ENGINE_LOGGER_PREFIX,
     SEARXNG_NETWORK_LOGGER,
     SearxngLoggingArtifact,
+    SearxngSettingsArtifact,
     searxng_logging_document,
     searxng_query_url,
     searxng_secret_environment,
@@ -52,7 +54,7 @@ from gideon.host.render.searxng import (
 from gideon.host.render.services import declared_sources
 from gideon.host.render.services.open_webui import OWUI_COMMAND
 from gideon.host.render.yamlout import dump
-from gideon.host.site import load_site
+from gideon.host.site import WEB_ENGINE_VALUES, load_site
 from gideon.host.sysio import RealHost
 
 MANIFEST = ROOT / "tests/fixtures/render/example/open-webui/manifest.yaml"
@@ -114,6 +116,7 @@ FRONTEND_ENV_KEYS: tuple[str, ...] = (
 LOG_SOURCES: tuple[tuple[str, str, str | None], ...] = (
     ("open-webui", "open-webui", None),
     ("searxng", "searxng", None),
+    ("searxng-rendered", "searxng-rendered", None),
     ("postgres", "postgres", None),
     ("stub", "stub", None),
     ("audit", "open-webui", AUDIT_LOG_FILE),
@@ -190,6 +193,84 @@ def _control_logging_text() -> str:
     return json.dumps(document, indent=2, sort_keys=True) + "\n"
 
 
+def _control_settings_text(inputs: RenderInputs) -> str:
+    """The rendered settings with the last site engine marked inactive."""
+
+    document = dict(searxng_settings_document(inputs))
+    raw_engines = document.get("engines")
+    assert isinstance(raw_engines, list) and raw_engines
+    engines = [dict(entry) for entry in raw_engines]
+    engines[-1]["inactive"] = True
+    document["engines"] = engines
+    return dump(document)
+
+
+def _stub_settings_document(inputs: RenderInputs) -> dict[str, object]:
+    """The rendered defaults with the JSON and Bing engines repointed at the stub."""
+
+    document = dict(searxng_settings_document(inputs))
+    document["use_default_settings"] = {"engines": {"keep_only": []}}
+    # enable_http: SearXNG's engine default refuses a plain-HTTP engine URL
+    # (curl_cffi's InvalidSchema before any request leaves), and the stub
+    # serves plain HTTP on the Compose network.
+    document["engines"] = [
+        {
+            "name": "stub-json",
+            "engine": "json_engine",
+            "shortcut": "sj",
+            "enable_http": True,
+            "search_url": "http://stub:8000/json?q={query}",
+            "url_query": "url",
+            "title_query": "title",
+            "content_query": "content",
+        },
+        {
+            "name": "bing",
+            "engine": "bing",
+            "shortcut": "bi",
+            "enable_http": True,
+            "base_url": "http://stub:8000",
+        },
+    ]
+    return document
+
+
+def _brave_settings_text(inputs: RenderInputs) -> str:
+    """The stub settings plus the shipped Brave engine at its own stub route."""
+
+    document = _stub_settings_document(inputs)
+    raw_engines = document["engines"]
+    assert isinstance(raw_engines, list)
+    document["engines"] = [
+        *(dict(entry) for entry in raw_engines),
+        {
+            "name": "brave",
+            "engine": "brave",
+            "shortcut": "br",
+            "time_range_support": True,
+            "paging": True,
+            "categories": ["general", "web"],
+            "brave_category": "search",
+            "enable_http": True,
+            "base_url": "http://stub:8000/brave/",
+        },
+    ]
+    return dump(document)
+
+
+def _engine_control_logging_text() -> str:
+    """The rendered logging document without the allowed engines' logger levels."""
+
+    document = dict(searxng_logging_document())
+    raw_loggers = document.get("loggers")
+    assert isinstance(raw_loggers, Mapping)
+    engine_loggers = {f"{SEARXNG_ENGINE_LOGGER_PREFIX}{name}" for name in WEB_ENGINE_VALUES}
+    document["loggers"] = {
+        name: dict(value) for name, value in raw_loggers.items() if name not in engine_loggers
+    }
+    return json.dumps(document, indent=2, sort_keys=True) + "\n"
+
+
 class ContractHost(RealHost):
     """The real host with ownership changes suppressed for temp files."""
 
@@ -209,6 +290,11 @@ class SentinelStack:
         self.compose_file = self.directory / "compose.yaml"
         self.logging_file = self.searxng / "logging.json"
         self.control_logging_file = self.searxng / "logging-control.json"
+        self.engine_control_logging_file = self.searxng / "logging-engine-control.json"
+        self.settings_file = self.searxng / "settings.yml"
+        self.brave_settings_file = self.searxng / "settings-brave.yml"
+        self.rendered_settings_file = self.searxng / "settings-rendered.yml"
+        self.control_settings_file = self.searxng / "settings-rendered-control.yml"
         self.inputs = render_inputs()
         self.manifest = dict(owui.load_manifest(ContractHost(), MANIFEST))
         self.passwords = {
@@ -248,37 +334,17 @@ class SentinelStack:
         path.chmod(0o600)
 
     def _write_searxng_files(self) -> None:
-        settings = dict(searxng_settings_document(self.inputs))
-        settings["use_default_settings"] = {"engines": {"keep_only": []}}
-        # enable_http: SearXNG's engine default refuses a plain-HTTP engine URL
-        # (curl_cffi's InvalidSchema before any request leaves), and the stub
-        # serves plain HTTP on the Compose network.
-        settings["engines"] = [
-            {
-                "name": "stub-json",
-                "engine": "json_engine",
-                "shortcut": "sj",
-                "enable_http": True,
-                "search_url": "http://stub:8000/json?q={query}",
-                "url_query": "url",
-                "title_query": "title",
-                "content_query": "content",
-            },
-            {
-                "name": "bing",
-                "engine": "bing",
-                "shortcut": "bi",
-                "enable_http": True,
-                "base_url": "http://stub:8000",
-            },
-        ]
-        (self.searxng / "settings.yml").write_text(dump(settings))
+        self.rendered_settings_file.write_text(SearxngSettingsArtifact().emit(self.inputs))
+        self.control_settings_file.write_text(_control_settings_text(self.inputs))
+        self.settings_file.write_text(dump(_stub_settings_document(self.inputs)))
+        self.brave_settings_file.write_text(_brave_settings_text(self.inputs))
         env = searxng_secret_environment(self.inputs)
         (self.searxng / "env").write_text(
             "".join(f"{name}={value}\n" for name, value in env.items())
         )
         self.logging_file.write_text(SearxngLoggingArtifact().emit(self.inputs))
         self.control_logging_file.write_text(_control_logging_text())
+        self.engine_control_logging_file.write_text(_engine_control_logging_text())
 
     def _write_environment(self) -> None:
         frontend = dict(owui_environment(self.inputs))
@@ -399,6 +465,33 @@ def enumerate_logs(
     return observed
 
 
+def engine_config_findings(rendered_names: Sequence[str], body: object) -> list[str]:
+    """Compare rendered engine names with the loaded names and enabled flags."""
+
+    if not isinstance(body, Mapping) or not isinstance(body.get("engines"), list):
+        return ["SearXNG /config has no readable engine list"]
+    listed: dict[str, object] = {}
+    for entry in body["engines"]:
+        if not isinstance(entry, Mapping):
+            return ["SearXNG /config has an unreadable engine entry"]
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            return ["SearXNG /config has an unreadable engine entry"]
+        listed[name] = entry.get("enabled")
+    findings = [
+        f"rendered engine {name!r} is omitted from /config"
+        for name in rendered_names
+        if name not in listed
+    ]
+    rendered = set(rendered_names)
+    for name, enabled in listed.items():
+        if name not in rendered:
+            findings.append(f"/config lists engine {name!r} that the site does not render")
+        if enabled is not True:
+            findings.append(f"/config engine {name!r} is not enabled")
+    return findings
+
+
 def is_frontend_residual(line: str) -> bool:
     """Recognize only aiohttp's URL-bearing SearXNG failure shape."""
 
@@ -424,7 +517,7 @@ def client_factory(
 
 
 class SearchSentinelContract(unittest.TestCase):
-    """Drive the five ordered search-path log assertions."""
+    """Check the loaded engines, then drive seven ordered search-path log assertions."""
 
     stack: SentinelStack
     original_secrets_dir: Path
@@ -453,9 +546,10 @@ class SearchSentinelContract(unittest.TestCase):
             # The stub and SearXNG start before the frontend: the frontend
             # discovers General from the stub's listing, and bootstrap's
             # live-listing step holds its attachment list on that row.
-            search = cls.stack.compose("up", "-d", "searxng", "stub")
-            cls.stack.require_success(search, "docker compose up searxng stub")
+            search = cls.stack.compose("up", "-d", "searxng", "searxng-rendered", "stub")
+            cls.stack.require_success(search, "docker compose up searxng searxng-rendered stub")
             cls.stack.wait_healthy("searxng")
+            cls.stack.wait_healthy("searxng-rendered")
             cls.stack.wait_healthy("stub")
 
             frontend = cls.stack.compose("up", "-d", "open-webui")
@@ -500,6 +594,50 @@ class SearchSentinelContract(unittest.TestCase):
         finally:
             connection.close()
 
+    def rendered_engine_findings(self) -> list[str]:
+        result = self.stack.compose(
+            "exec", "-T", "searxng-rendered", "wget", "-q", "-O", "-",
+            "http://127.0.0.1:8080/config",
+        )
+        self.stack.require_success(result, "docker compose exec searxng-rendered wget /config")
+        try:
+            body = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            body = None
+        return engine_config_findings(self.stack.inputs.site.web.engines, body)
+
+    def recreate_rendered_searxng(self) -> None:
+        result = self.stack.compose("up", "-d", "--force-recreate", "searxng-rendered")
+        self.stack.require_success(result, "docker compose up searxng-rendered")
+        self.stack.wait_healthy("searxng-rendered")
+
+    def test_0a_rendered_engines_are_loaded_and_enabled(self) -> None:
+        findings = self.rendered_engine_findings()
+        self.assertEqual(
+            findings,
+            [],
+            "\n".join([
+                *findings,
+                "Fix: read the pinned image's searx/settings.yml and the engine's module "
+                "for an unanswered flag or setup rule, then extend searxng_settings_document().",
+            ]),
+        )
+
+    def test_0b_inactive_engine_control_reports_the_omission(self) -> None:
+        omitted = self.stack.inputs.site.web.engines[-1]
+        try:
+            shutil.copy2(self.stack.control_settings_file, self.stack.rendered_settings_file)
+            self.recreate_rendered_searxng()
+            self.assertEqual(
+                self.rendered_engine_findings(),
+                [f"rendered engine {omitted!r} is omitted from /config"],
+            )
+        finally:
+            self.stack.rendered_settings_file.write_text(
+                SearxngSettingsArtifact().emit(self.stack.inputs)
+            )
+            self.recreate_rendered_searxng()
+
     def prepare_run(self, *, mode: str) -> str:
         sentinel = mint_sentinel()
         self.stack.replace_env("STUB_MODE", mode)
@@ -526,6 +664,23 @@ class SearchSentinelContract(unittest.TestCase):
         )
         self.stack.require_success(searxng, "docker compose up searxng")
         self.stack.wait_healthy("searxng")
+
+    def searxng_errors(self) -> Mapping[str, object]:
+        result = self.stack.compose(
+            "exec", "-T", "searxng", "wget", "-q", "-O", "-",
+            "http://127.0.0.1:8080/stats/errors",
+        )
+        self.stack.require_success(result, "docker compose exec searxng wget /stats/errors")
+        try:
+            body = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            body = None
+        if not isinstance(body, Mapping):
+            raise AssertionError(
+                "searxng: /stats/errors is not an engine mapping. "
+                "Fix: read the pinned image's error-statistics response shape."
+            )
+        return body
 
     def managed_turn(self, sentinel: str) -> owuiturn.StoredTurn:
         password = (self.stack.secrets / EVAL_PASSWORD_SECRET).read_text().rstrip(
@@ -634,7 +789,8 @@ class SearchSentinelContract(unittest.TestCase):
         self.assert_zero_counts(observed)
         # The path is proven to have run by the stub's own log (the Bing-shaped
         # request reached it and was answered 500, the JSON engine still
-        # served results) and by SearXNG's hostname-only ErrorContext line.
+        # served results) and by SearXNG's error statistics, since the engine
+        # logger's level drops its ErrorContext warning.
         stub_evidence = self.stack.logs("stub")
         for marker in ("GET /search status=500", "GET /json status=200 sentinel=yes"):
             evidence_count = stub_evidence.count(marker)
@@ -645,13 +801,65 @@ class SearchSentinelContract(unittest.TestCase):
             )
         evidence = self.stack.logs("searxng")
         error_context_count = sum(
-            "ErrorContext" in line and "bing" in line
+            "ErrorContext" in line
             for line in evidence.splitlines()
         )
-        self.assertTrue(
-            error_context_count > 0,
-            f"searxng: expected bing ErrorContext evidence count > 0, got {error_context_count}",
+        self.assertEqual(
+            error_context_count,
+            0,
+            f"searxng: expected ErrorContext count 0, got {error_context_count}",
         )
+        self.assertTrue(
+            "bing" in self.searxng_errors(),
+            "searxng: expected an error-statistics entry for bing",
+        )
+
+    def test_2a_brave_parser_error_is_silenced(self) -> None:
+        shutil.copy2(self.stack.brave_settings_file, self.stack.settings_file)
+        self.recreate_searxng()
+        sentinel = self.prepare_run(mode="brave-error")
+        self.managed_turn(sentinel)
+        self.assert_zero_counts(enumerate_logs(self.stack, sentinel))
+        evidence_count = self.stack.logs("stub").count(
+            "GET /brave/search status=200 sentinel=yes"
+        )
+        self.assertGreater(
+            evidence_count, 0,
+            f"stub: expected Brave request evidence count > 0, got {evidence_count}",
+        )
+        self.assertTrue(
+            "brave" in self.searxng_errors(),
+            "searxng: expected an error-statistics entry for brave. Fix: re-read the "
+            "pinned module's parser and reshape the fixture so it raises.",
+        )
+
+    def test_2b_brave_parser_error_control_finds_the_sentinel(self) -> None:
+        try:
+            shutil.copy2(self.stack.brave_settings_file, self.stack.settings_file)
+            shutil.copy2(self.stack.engine_control_logging_file, self.stack.logging_file)
+            self.recreate_searxng()
+            sentinel = self.prepare_run(mode="brave-error")
+            self.managed_turn(sentinel)
+            observed = enumerate_logs(self.stack, sentinel)
+            self.assert_zero_counts({
+                source: counts for source, counts in observed.items() if source != "searxng"
+            })
+            count, lines = observed["searxng"]
+            self.assertGreater(
+                count, 0,
+                f"searxng: expected Brave control sentinel count > 0, got {count}. "
+                "Fix: if the pinned image stopped printing the parser exception, "
+                "update the record explaining the silence.",
+            )
+            mismatches = sum("unexpected token in data array" not in line for line in lines)
+            self.assertEqual(
+                mismatches, 0,
+                f"searxng: Brave parser-exception shape mismatch count {mismatches}",
+            )
+        finally:
+            self.stack.settings_file.write_text(dump(_stub_settings_document(self.stack.inputs)))
+            self.stack.logging_file.write_text(SearxngLoggingArtifact().emit(self.stack.inputs))
+            self.recreate_searxng()
 
     def test_3_frontend_searxng_error(self) -> None:
         sentinel = self.prepare_run(mode="engine-error")

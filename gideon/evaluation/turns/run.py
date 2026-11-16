@@ -342,7 +342,7 @@ class TurnRow:
     stream_offset: int | None = None
     stream_withdrawn: tuple[classify.StreamTrip, ...] = ()
     answer: str | None = field(default=None, repr=False)
-    figures: tuple[str, ...] = ()
+    figures: classify.MatchedFigures = ()
 
     @property
     def reported_pattern(self) -> str | None:
@@ -995,7 +995,7 @@ def _case_record(
     user: Mapping[str, object] | None,
     verdict: classify.Verdict | None,
     checks: Mapping[str, bool],
-    figures: tuple[str, ...],
+    figures: classify.MatchedFigures,
     elapsed: float | None,
     problem: Problem | None,
     cut: bool,
@@ -1021,7 +1021,7 @@ def _case_record(
         "user": user,
         "verdict": _verdict_data(verdict),
         "checks": dict(checks),
-        "figures": list(figures),
+        "figures": classify.figure_mapping(figures),
         "elapsed": elapsed,
         "problem": _problem_data(problem),
         "cut": cut,
@@ -1040,7 +1040,7 @@ def _service_record(
     assistant: Mapping[str, object] | None,
     verdict: classify.Verdict | None,
     checks: Mapping[str, bool],
-    figures: tuple[str, ...],
+    figures: classify.MatchedFigures,
     elapsed: float | None,
     problem: Problem | None,
     cut: bool,
@@ -1072,7 +1072,7 @@ def _service_record(
         "answer": answer,
         "verdict": _verdict_data(verdict),
         "checks": dict(checks),
-        "figures": list(figures),
+        "figures": classify.figure_mapping(figures),
         "elapsed": elapsed,
         "problem": _problem_data(problem),
         "cut": cut,
@@ -1471,7 +1471,7 @@ def service_turn(
     verdict: classify.Verdict | None = None
     verdict_kind: str | None = None
     checks: dict[str, bool] = {}
-    figures: tuple[str, ...] = ()
+    figures: classify.MatchedFigures = ()
     problem: Problem | None = None
     elapsed: float | None = None
     started: float | None = None
@@ -1647,7 +1647,7 @@ def frontend_turn(
     verdict: classify.Verdict | None = None
     verdict_kind: str | None = None
     checks: dict[str, bool] = {}
-    figures: tuple[str, ...] = ()
+    figures: classify.MatchedFigures = ()
     problem: Problem | None = None
     unidentified: Problem | None = None
     elapsed: float | None = None

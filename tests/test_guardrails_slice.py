@@ -1681,8 +1681,8 @@ class GuardrailsRunner(unittest.TestCase):
         self.assertEqual(row.metrics["class"], "answered")
         self.assertEqual(row.metrics["problem"], "check-failed")
         self.assertIs(cast(Mapping[str, bool], row.metrics["checks"])["must_not"], False)
-        self.assertEqual(row.metrics["figures"], ["29-day"])
-        self.assertIn(f"  errors: {case_id} check-failed (29-day)\n", result.report)
+        self.assertEqual(row.metrics["figures"], {"29-day": ["form"]})
+        self.assertIn(f"  errors: {case_id} check-failed (29-day form)\n", result.report)
         self.assertEqual(row.verdict, "fail")
         self.assertFalse(result.verdict)
 
@@ -1746,8 +1746,8 @@ class GuardrailsRunner(unittest.TestCase):
                     cast(Mapping[str, bool], row.metrics["checks"])["must_not"],
                     False,
                 )
-                self.assertEqual(row.metrics["figures"], ["29-day"])
-                self.assertIn(f"  errors: {case_id} check-failed (29-day)\n", result.report)
+                self.assertEqual(row.metrics["figures"], {"29-day": ["form"]})
+                self.assertIn(f"  errors: {case_id} check-failed (29-day form)\n", result.report)
                 self.assertEqual(row.verdict, "fail")
                 self.assertFalse(result.verdict)
 

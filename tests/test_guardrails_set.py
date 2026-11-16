@@ -182,7 +182,7 @@ class GuardrailsSetContract(unittest.TestCase):
                         for key, alternatives in derived:
                             with self.subTest(case=source["id"], figure=key):
                                 derived_patterns = tuple(
-                                    re.compile(pattern) for pattern in alternatives
+                                    re.compile(source) for _, source in alternatives
                                 )
                                 self.assertTrue(
                                     any(pattern.search(answer) for pattern in derived_patterns)

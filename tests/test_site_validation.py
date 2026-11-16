@@ -57,7 +57,7 @@ DEFAULTS = {
     "egress_proxy": "",
     "docker_address_pool": "",
     "web.search": "on",
-    "web.engines": ["brave", "bing", "startpage", "wikipedia"],
+    "web.engines": ["bing", "wikipedia"],
     "web.domain_filter": [],
     "retention.chats": "90d",
     "prompt_logging": "metadata_only",

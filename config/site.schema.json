@@ -310,9 +310,7 @@
         },
         "engines": {
           "default": [
-            "brave",
             "bing",
-            "startpage",
             "wikipedia"
           ],
           "description": "Search engines made available to SearXNG.",

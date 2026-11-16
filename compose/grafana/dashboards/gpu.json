@@ -7,9 +7,9 @@
     {
       "description": "This shows each graphics card's busy percentage, reported by the card monitor. Use should rise during work and fall at idle; a card staying busy while requests wait can mean overload. Check docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []},
+      "fieldConfig": {"defaults": {"min": 0, "max": 1, "unit": "percentunit"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
-      "targets": [{"expr": "max by (gpu) (DCGM_FI_DEV_GPU_UTIL)", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
+      "targets": [{"expr": "max by (gpu) (DCGM_FI_DEV_GPU_UTIL_RATIO)", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
       "title": "GPU utilization",
       "type": "timeseries"
     },
@@ -19,7 +19,7 @@
       "fieldConfig": {"defaults": {"unit": "gbytes", "min": 0}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
       "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull"]}},
-      "targets": [{"expr": "max by (gpu) (DCGM_FI_DEV_FB_USED) / 1024", "legendFormat": "GPU {{gpu}} used", "refId": "A"}, {"expr": "max by (gpu) (DCGM_FI_DEV_FB_FREE) / 1024", "legendFormat": "GPU {{gpu}} free", "refId": "B"}],
+      "targets": [{"expr": "max by (gpu) (DCGM_FI_DEV_FB_USED_BYTES) / 1073741824", "legendFormat": "GPU {{gpu}} used", "refId": "A"}, {"expr": "max by (gpu) (DCGM_FI_DEV_FB_FREE_BYTES) / 1073741824", "legendFormat": "GPU {{gpu}} free", "refId": "B"}],
       "title": "GPU memory",
       "type": "timeseries"
     },
@@ -28,7 +28,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "celsius"}, "overrides": [{"matcher": {"id": "byRegexp", "options": "/ limit$/"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}]},
       "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
-      "targets": [{"expr": "max by (gpu) (DCGM_FI_DEV_GPU_TEMP)", "legendFormat": "GPU {{gpu}}", "refId": "A"}, {"expr": "max by (gpu) (DCGM_FI_DEV_GPU_MAX_OP_TEMP)", "legendFormat": "GPU {{gpu}} limit", "refId": "B"}],
+      "targets": [{"expr": "max by (gpu) (DCGM_FI_DEV_GPU_TEMP_CELSIUS)", "legendFormat": "GPU {{gpu}}", "refId": "A"}, {"expr": "max by (gpu) (DCGM_FI_DEV_GPU_MAX_OP_TEMP_CELSIUS)", "legendFormat": "GPU {{gpu}} limit", "refId": "B"}],
       "title": "GPU temperature",
       "type": "timeseries"
     },
@@ -37,7 +37,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "watt"}, "overrides": []},
       "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
-      "targets": [{"expr": "max by (gpu) (DCGM_FI_DEV_POWER_USAGE)", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
+      "targets": [{"expr": "max by (gpu) (DCGM_FI_DEV_BOARD_POWER_WATTS)", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
       "title": "GPU power",
       "type": "timeseries"
     },
@@ -47,7 +47,7 @@
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
       "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "none", "graphMode": "none", "textMode": "name"},
-      "targets": [{"expr": "count by (DCGM_FI_DRIVER_VERSION) (DCGM_FI_DEV_GPU_UTIL)", "legendFormat": "{{DCGM_FI_DRIVER_VERSION}}", "refId": "A"}],
+      "targets": [{"expr": "count by (DCGM_FI_SYSTEM_DRIVER_VERSION) (DCGM_FI_DEV_GPU_UTIL_RATIO)", "legendFormat": "{{DCGM_FI_SYSTEM_DRIVER_VERSION}}", "refId": "A"}],
       "title": "Driver version",
       "type": "stat"
     },

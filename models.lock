@@ -1,7 +1,9 @@
 # Model pins and hardware profiles. A hardware profile is a named, evaluated
 # configuration within a release: a `requires` block preflight checks against
 # the host as minimums, and the model set with its GPU assignment and the
-# engine baseline each model is served with. The site file's
+# engine baseline each model is served with. Two profiles ship: the reference
+# and the trial profile `1x32v-120d`, whose quality claim is its own eval
+# and never the reference's. The site file's
 # `hardware_profile` selects one; an unknown name refuses, a non-reference one
 # warns. Model facts live here and nowhere else. The pin watch proposes a
 # newer revision as a pull request; a person merges and tags. A `candidates:`
@@ -557,6 +559,215 @@ profiles:
           tokenizer_config.json:
             sha256: sha256:2f58f4bbd7bbce15d683f525954ef3a92cd82f5e06415a9c513859bf8ab72436
             size: 7256
+          vocab.json:
+            sha256: sha256:ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910
+            size: 2776833
+  # The trial profile: one RTX PRO 4500 Blackwell shared by the generator
+  # and embedder. Its figures are derived starting values, evaluated on the
+  # owned card's capped split. Host-memory and footprint proofs and acceptance
+  # on the named card are owed before an install is offered.
+  1x32v-120d:
+    # Minimums in decimal gigabytes. The host-memory and data-volume floors
+    # are proxies derived from recorded SCOTUS counts and tranche footprints.
+    # The GPU family name admits its Workstation and Server editions.
+    requires:
+      platform: x86_64
+      gpu:
+        architecture: Blackwell
+        compute_capability: "12.0"
+        model: NVIDIA RTX PRO 4500 Blackwell
+        count: 1
+        vram_gb: 32
+      dram_gb: 120
+      data_volume_gb: 600
+    # E9 starting values in decimal gigabytes, corrected from measured RSS.
+    # Reserve rows carry the reference's measured working-set allowances.
+    # Qdrant's row derives from the recorded SCOTUS chunk count and the empty
+    # store's peak; OpenSearch keeps its held heap and off-heap allowance.
+    # Each model row covers its pinned file bytes plus the reference row's
+    # page-cache slack. Retake working-set peaks with max by (compose project,
+    # compose service) of max_over_time(container_memory_working_set_bytes[14d])
+    # on loopback port 9090; read model rows again at a cold start.
+    memory:
+      caddy:
+        gb: 1
+      prometheus:
+        gb: 2
+      node-exporter:
+        gb: 1
+      grafana:
+        gb: 3
+      postgres:
+        gb: 20
+      qdrant:
+        gb: 4
+      opensearch:
+        gb: 13
+      open-webui:
+        gb: 4
+      gideon-generator:
+        gb: 12
+        role: generator
+      gideon-embed:
+        gb: 3
+        role: embed
+      searxng:
+        gb: 1
+      dcgm-exporter:
+        gb: 2
+      postgres-exporter:
+        gb: 1
+      cadvisor:
+        gb: 5
+      blackbox-exporter:
+        gb: 1
+      gideon-api:
+        gb: 1
+      gideon-worker:
+        gb: 12
+      gideon-egress:
+        gb: 1
+    # The trial designates no co-tenant memory on its shared card. E6
+    # corrects the two server budgets from measured card holdings.
+    cotenant_reserve_gb:
+      0: 0
+    # The cap less gideon/host/engine.py's CONCURRENT_SESSIONS_CEILING,
+    # the same rule as the reference; E46 corrects both cap and reserve
+    # against the eval record's engine-condition columns when they land.
+    client_reserve_seqs: 5
+    # The SCOTUS-only corpus line; the lockfiles carry its membership.
+    corpus_line: scotus
+    # This model's own vector space, typed for the embed pin's revision.
+    # Move the id and revision together when its weights or precision change.
+    embedding_space:
+      id: qwen3-embedding-0-6b-1024-bf16
+      role: embed
+      revision: "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+      dimensions: 1024
+    # E9 starting guards derived from the Qdrant row: 4 GB / 1,200 bytes
+    # is about 3.33 M, stated as 3 M; 3 / 1.5 = 2 M. The recorded SCOTUS
+    # cut's 1.388 M chunks fit under the refusal with the build's margin.
+    # Correct the per-chunk figure from the first promoted generation's
+    # measured Qdrant RSS divided by its chunk count.
+    chunk_guards:
+      serving_ceiling_million_chunks: 3
+      build_refusal_million_chunks: 2
+      resident_bytes_per_chunk: 1200
+    models:
+      generator:
+        repo: google/gemma-4-12B-it-qat-w4a16-ct
+        revision: "1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee"
+        gpu: 0
+        # The native window with BF16 KV (no kv-cache-dtype override).
+        # The cap is E46's starting value: the reference's 1,766,022-token
+        # pool / 96 sequences gives about 18,396 tokens per sequence;
+        # the capped split's measured 385,619 / 18,396 = 20.96, floored.
+        # The batched-token and long-prefill numbers carry the reference's
+        # starting values. E39 keeps prefix caching off by the same decision.
+        # The gemma4 parser name was read on v0.32.0 and v0.33.0.
+        serve:
+          served_name: gideon-generator
+          env:
+            # The DeepGEMM switch touches FP8 paths alone; W4A16 has none.
+            HF_HUB_OFFLINE: "1"
+            HF_HOME: /data/models
+          flags:
+            max-model-len: 262144
+            max-num-seqs: 20
+            max-num-batched-tokens: 8192
+            enable-chunked-prefill: true
+            long-prefill-token-threshold: 4096
+            scheduling-policy: priority
+            gpu-memory-utilization: 0.7709
+            reasoning-parser: gemma4
+            no-enable-prefix-caching: true
+        files:
+          README.md:
+            sha256: sha256:68c5824b37ace62bab0bc556ab593cd6a949f1e6d4b80eb9ceb27ca85cbf6cd2
+            size: 29372
+          chat_template.jinja:
+            sha256: sha256:ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4
+            size: 18683
+          config.json:
+            sha256: sha256:aa3ba82096a857e8b9a157df21a50df15a67e889a84b7580a4eb4f2b86c28d78
+            size: 6183
+          generation_config.json:
+            sha256: sha256:c70f87dc2995fc43406c0bcfb41b69c6d31c2d0c033fa09e536ffabc091ae24c
+            size: 255
+          model.safetensors:
+            sha256: sha256:60b6e3989502969d8ae04185d72ecbbc7db63978d5af747a493d53895aa6bfa3
+            size: 10264229896
+          processor_config.json:
+            sha256: sha256:6b938e76555b3e9946890770e1abcd442a4718f34041a58e8139dc8ad34545c9
+            size: 1382
+          recipe.yaml:
+            sha256: sha256:6630bfb0a1138a6e4fcf77da1ab6566241589fed68c155f913a264e11ce75fa7
+            size: 884
+          tokenizer.json:
+            sha256: sha256:cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f
+            size: 32169626
+          tokenizer_config.json:
+            sha256: sha256:13c6e1a5abadc12374393fa5fa352682f7326d8091b60cc66d9cb90e640da9b9
+            size: 3761
+      embed:
+        repo: Qwen/Qwen3-Embedding-0.6B
+        revision: "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+        gpu: 0
+        # The input window is reduced from the reference's; an over-window
+        # input is refused, never truncated. The hidden width is already
+        # 1,024; both dimension settings stay so no client leaves the space.
+        # E6's byte bound sizes the cache for the 4,096-token window at the
+        # reference embedder's measured 48,032 tokens in 6.6 GiB, rounded up
+        # to whole bytes; it replaces the fraction-sized cache while the
+        # fraction remains preflight's budget.
+        # kv-cache-memory-bytes is the canonical flag; kv-cache-memory worked
+        # only as an argparse abbreviation on v0.32.0.
+        serve:
+          served_name: gideon-embed
+          env:
+            HF_HUB_OFFLINE: "1"
+            HF_HOME: /data/models
+          flags:
+            runner: pooling
+            convert: embed
+            dtype: bfloat16
+            max-model-len: 4096
+            no-enable-chunked-prefill: true
+            gpu-memory-utilization: 0.1491
+            kv-cache-memory-bytes: 604328510
+            hf-overrides: '{"matryoshka_dimensions": [1024]}'
+            pooler-config: '{"dimensions": 1024}'
+        files:
+          1_Pooling/config.json:
+            sha256: sha256:37bf193fa101f19101bfad9c31d3eb0f786e247b7b1e5cb7f007d730eed1ddbd
+            size: 313
+          README.md:
+            sha256: sha256:c34d9b7e5a267ad3fdd13227a253686bc90844ff4744a2a6a86c7c905e3d06f3
+            size: 17237
+          config.json:
+            sha256: sha256:b5bf1f51fc45be473a54718cef92448d90a1be001bf9b9a44b8c7f10a19feaa9
+            size: 727
+          config_sentence_transformers.json:
+            sha256: sha256:10667c72ddb772627bf1780cb7f86af8e2ae0032b8c243c731172064105c6961
+            size: 215
+          generation_config.json:
+            sha256: sha256:28396d421a2108acce96383f6a7de78008f7f1b17f807958f3c14c51dbfb65fb
+            size: 117
+          merges.txt:
+            sha256: sha256:8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5
+            size: 1671853
+          model.safetensors:
+            sha256: sha256:0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd
+            size: 1191586416
+          modules.json:
+            sha256: sha256:84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf
+            size: 349
+          tokenizer.json:
+            sha256: sha256:def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a
+            size: 11423705
+          tokenizer_config.json:
+            sha256: sha256:253153d0738ceb4c668d2eff957714dd2bea0b56de772a9fdccd96cbf517e6a0
+            size: 9706
           vocab.json:
             sha256: sha256:ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910
             size: 2776833

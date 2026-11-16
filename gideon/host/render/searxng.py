@@ -8,8 +8,10 @@ builder. All three artifacts exist only while ``web.search`` is on — the
 office's kill switch — and follow that key alone, GPU host or not.
 The logging file keeps granian's own loggers and raises ``searx.network`` to
 ERROR, so the one application warning carrying a query URL is dropped before a
-handler sees it. The rendered settings follow the pinned SearXNG image's
-defaults and the frontend's search requests.
+handler sees it, and sets each allowed engine's own logger to CRITICAL, so an
+engine's crash line, whose text can carry the response, is dropped too. The
+rendered settings follow the pinned SearXNG image's defaults and the
+frontend's search requests.
 """
 
 import json
@@ -27,11 +29,14 @@ SEARXNG_SECRET_NAME: Final[str] = "searxng_secret_key"
 SEARXNG_JOB_NAME: Final[str] = "search"
 SEARXNG_SETTINGS_PATH: Final[str] = "/etc/searxng/settings.yml"
 SEARXNG_LOGGING_PATH: Final[str] = "/etc/searxng/logging.json"
+SEARXNG_CONTACT_URL: Final[str] = "https://github.com/TNMD-FDO/GIDEON"
 # The parent logger covers every per-engine searx.network.<name> logger.  ERROR
 # is the deliberate release decision: Granian's config is applied before the
 # application imports. exempt: no figure.
 SEARXNG_NETWORK_LOGGER: Final[str] = "searx.network"
 SEARXNG_NETWORK_LOG_LEVEL: Final[str] = "ERROR"
+SEARXNG_ENGINE_LOGGER_PREFIX: Final[str] = "searx.engines."
+SEARXNG_ENGINE_LOG_LEVEL: Final[str] = "CRITICAL"
 SEARXNG_ENV_FILE: Final[tuple[Mapping[str, str], ...]] = (
     {"path": "/etc/gideon/rendered/searxng/env", "format": "raw"},
 )
@@ -75,25 +80,30 @@ def searxng_settings_document(inputs: RenderInputs) -> Mapping[str, object]:
             )
     return {
         # The mapping form is what exposes keep_only; a bare `true` does not.
-        # keep_only governs list membership only, and bing
-        # and google are `disabled: true` in upstream's own defaults, so every
-        # kept engine is re-enabled by name below.  Google is off for every
-        # office unless the site file names it.
+        # keep_only governs list membership, disabled whether a kept engine
+        # is on, and inactive whether it loads at all. Upstream disables bing
+        # and google and ships startpage inactive, so every kept engine is
+        # re-enabled and activated by name. Google is off for every office
+        # unless the site file names it.
         "use_default_settings": {"engines": {"keep_only": engines}},
         "engines": [
-            {"name": engine, "disabled": False}
+            {"name": engine, "disabled": False, "inactive": False}
             for engine in engines
         ],
         # Every value below is the pinned image's default made a rendered fact,
-        # except the two formats: the frontend asks for JSON, which SearXNG
-        # refuses with 403 unless listed. Debug off leaves the process at
-        # WARNING; autocomplete and favicon resolvers are the only outbound
-        # calls that are not a search. Both are user-triggered from an HTML
-        # page nobody reaches, and are pinned off so search is the only outbound
-        # call; the limiter and public_instance off need no valkey; no image
-        # proxy. No secret_key here: the env supplies SEARXNG_SECRET, which
-        # the loader lets win.
-        "general": {"debug": False},
+        # except the formats and contact: the frontend asks for JSON, which
+        # SearXNG refuses with 403 unless listed. Wikipedia refuses to set up
+        # without contact_url; the public repository address leaves the box
+        # as its requests' User-Agent suffix and is returned by /config. It
+        # has no version, keeping the file's digest stable across releases.
+        # exempt: policy. Debug off leaves the process at WARNING;
+        # autocomplete and favicon resolvers are pinned off because their
+        # user-triggered calls come from an HTML page nobody reaches. The
+        # shipped tracker_url_remover plugin still fetches the ClearURLs rule
+        # lists at container creation, carrying no user text. The limiter and
+        # public_instance off need no valkey; no image proxy. No secret_key
+        # here: the env supplies SEARXNG_SECRET, which the loader lets win.
+        "general": {"debug": False, "contact_url": SEARXNG_CONTACT_URL},
         "search": {
             "formats": ["html", "json"],
             "autocomplete": "",
@@ -117,8 +127,16 @@ def searxng_logging_document() -> Mapping[str, object]:
     restated as it ships them; with no ``handlers`` or ``formatters`` key here,
     granian's shipped definitions stay. ``searx.network``'s explicit level
     survives the application's later root-level ``basicConfig`` and covers
-    every engine's child logger. No input reaches the document: it is release
-    content, the same on every host.
+    every engine's network child logger. Each allowed engine's own logger is
+    set to CRITICAL because the pinned image logs unexpected exceptions at
+    ERROR with their text; Brave's parser includes up to 40 characters of the
+    response, which may echo a query. A level cannot drop that line and keep
+    the same logger's ErrorContext warning, so both go; ``/stats/errors``
+    carries the failures. exempt: no figure.
+    The parent ``searx.engines`` stays untouched: its loader and setup failures
+    precede any query and are the journal's only word on a missing engine.
+    No input reaches the document: all allowed engine names are release
+    content, the same on every host regardless of the site's engine list.
     """
 
     return {
@@ -136,6 +154,10 @@ def searxng_logging_document() -> Mapping[str, object]:
                 "propagate": False,
             },
             SEARXNG_NETWORK_LOGGER: {"level": SEARXNG_NETWORK_LOG_LEVEL},
+            **{
+                f"{SEARXNG_ENGINE_LOGGER_PREFIX}{engine}": {"level": SEARXNG_ENGINE_LOG_LEVEL}
+                for engine in WEB_ENGINE_VALUES
+            },
         },
     }
 

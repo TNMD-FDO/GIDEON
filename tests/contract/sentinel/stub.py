@@ -2,8 +2,9 @@
 
 Compose healthchecks consume ``/health``; the frontend consumes ``/v1/models``
 and ``/v1/chat/completions``; SearXNG consumes
-``/json`` through its JSON engine and ``/search`` through the shipped Bing
-module; the frontend's failure path uses ``/searxng/search``, and its loader
+``/json`` through its JSON engine, ``/search`` through the shipped Bing module,
+and ``/brave/search`` through the shipped Brave module; the frontend's failure
+path uses ``/searxng/search``, and its loader
 consumes ``/page/<n>``. Every request is logged without its query string so the
 contract can inspect the request path without writing query text. The line is
 written before the first response byte, so a reader holding the stream until
@@ -148,6 +149,13 @@ class StubHandler(BaseHTTPRequestHandler):
                     b"<html><body></body></html>",
                     "text/html; charset=utf-8",
                 )
+        elif route == "/brave/search" and MODE == "brave-error":
+            # The bare query is an invalid first array token, so Brave's
+            # parser raises with its response excerpt containing the sentinel.
+            body = (
+                f"<script>kit.start(app, element, {{data: [{query.get('q', '')}]}})</script>"
+            ).encode()
+            self._send_logged(route, query, 200, body, "text/html; charset=utf-8")
         elif route == "/searxng/search":
             self._send_logged(
                 route, query, 500, b"stub SearXNG failure\n", "text/plain; charset=utf-8"

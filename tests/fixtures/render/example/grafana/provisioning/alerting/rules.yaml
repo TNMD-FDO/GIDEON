@@ -946,7 +946,7 @@ groups:
               datasource:
                 type: prometheus
                 uid: prometheus
-              expr: 'count(DCGM_FI_DEV_GPU_UTIL{DCGM_FI_DRIVER_VERSION!="595.91.07"})'
+              expr: 'count(DCGM_FI_DEV_GPU_UTIL_RATIO{DCGM_FI_SYSTEM_DRIVER_VERSION!="595.91.07"})'
               instant: true
               intervalMs: 1000
               maxDataPoints: 43200
@@ -1052,7 +1052,7 @@ groups:
               datasource:
                 type: prometheus
                 uid: prometheus
-              expr: '(count(DCGM_FI_DEV_GPU_UTIL) or vector(0)) and on() (up{job="dcgm"} == 1)'
+              expr: '(count(DCGM_FI_DEV_GPU_UTIL_RATIO) or vector(0)) and on() (up{job="dcgm"} == 1)'
               instant: true
               intervalMs: 1000
               maxDataPoints: 43200

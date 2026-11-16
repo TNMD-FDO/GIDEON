@@ -1,9 +1,9 @@
 # Rendered by gideon render — never hand-edit. Re-run gideon apply after editing /etc/gideon/site.yaml.
 release: "fixture"
 inputs:
-  site_sha256: "0193b145520c2f0c0171a5c991fedbba99b9b32736b55785e97b63d308b95aa5"
+  site_sha256: "aa8930e46d859b552b00e9993216ea687dece40481daea7fdcd030835329a742"
   host_lock_sha256: "56b34abc306f9fbaf92b8b48f9beaa6a942c481573f06c6edc8d9b890b69d1bd"
-  models_lock_sha256: "a0b64a1d76a1e796f6b12e51eee12b09ab9a7b585cf666e0700829b2eab226e1"
+  models_lock_sha256: "d7f4c5b8f9db51c6403fd6a0f57e24c473ff3ea28be13748473ebd8b03ebf83a"
   egress_sha256: "e22abee0f29547aedd38bb2ca9ca9f0d2cd3dc4b28c9d6df72ae4fad53d0d3af"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
@@ -15,7 +15,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "c2fb0a459281655f83f236b05cef54763effd9dc242d736196e5815c1af15de6"
+    sha256: "1827469a7d3a82474bc5ea7fc13cd03ec5a42f35c16c8dc09bba6586e7749a1a"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -103,7 +103,7 @@ files:
     mode: "0644"
     owners: []
   "searxng/settings.yml":
-    sha256: "ae506e34c5ba6b3d89b9eeb1b3041962892c3f51fe8e46473705403d1eb02080"
+    sha256: "46f5ce133145bab808eaf094e951b4651181a521ccac76ac85b682dcc0285457"
     mode: "0644"
     owners:
       - "searxng"
@@ -113,7 +113,7 @@ files:
     owners:
       - "searxng"
   "searxng/logging.json":
-    sha256: "e301b9bd3e875fd6d3d69d1ca0066ae95efb3df78ae54b63db3c5e131c5215f4"
+    sha256: "09d27631239c2ffd748dac7d55119a0eaf77c81a5ffd5639d217e6c192d28380"
     mode: "0644"
     owners:
       - "searxng"
@@ -219,7 +219,7 @@ services:
   open-webui: "d9d3e04a06aa6f753b02b0668d95612baad66ae91fa8d206be61d3904e3f0437"
   gideon-worker: "c60049f653e72e0f6f659510473561e4ffeb44fc5e1b131a4c0229a7cd9bda9e"
   gideon-egress: "d961fa13530a157ee903e72d7e505dc032d5fa0e658054b6e698cbf11d35bae8"
-  searxng: "790f3d23c5a48d8b2e3c02d12c6615884bb4073095bdf7faa51ccee49aa51c2c"
+  searxng: "a4f26a7f67d7b3093a5544861716df0768127e22091bf4c84c7b2bccb99644bf"
   postgres-exporter: "71024e25f248a0a94b2ea92c4f48813f8b4f95e3d17d41522f300fa9f1407291"
   cadvisor: "6e4def0c2cc0e80a5357574ad6a8e81286c1f29140a78422632c6e860d14d83e"
   blackbox-exporter: "6a9e5f772574462e4ca56c265d56cc298a58bfedcafed60bd16d3ac3caf2f2fe"

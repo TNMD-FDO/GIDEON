@@ -680,7 +680,7 @@ services:
         format: "raw"
     mem_limit: 1000000000
   dcgm-exporter:
-    image: "127.0.0.1:5000/dcgm-exporter@sha256:148b0c025e5f2850256816fa33754fbf4733b7a086697a95613fc0ba3db5b003"
+    image: "127.0.0.1:5000/dcgm-exporter@sha256:2490e1dfb5baaee6765ef2841813af7d978bb459a566c22c326a8fc27c64eea9"
     restart: "unless-stopped"
     environment:
       TZ: "America/Denver"

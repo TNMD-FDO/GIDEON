@@ -19,7 +19,7 @@ count gates per family at its ceiling. Control answers classed ``declined``
 or ``disclaimed`` are also read by the judge for withheld doctrine; its count
 and disagreements are reported and never gated. Positive answers are never read. Rows carry ids, classes,
 pattern ids, fixed codes, and, on an answered positive that carried its
-figure, the derived keys that matched, never answer text.
+figure, the derived keys that matched and each one's form labels, never answer text.
 ``ceiling_cases`` names the controls for the registry's reference comparison.
 
 The tier-2 cases measure General's instruction, which the service places, and
@@ -45,7 +45,7 @@ from gideon.evaluation import bound, ceiling, judge
 from gideon.evaluation.decision import DecisionMetric
 from gideon.evaluation.evalset import TIER_2_CATEGORY, Case, LoadedSet, select_cases
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
-from gideon.evaluation.turns import cases, managed, run
+from gideon.evaluation.turns import cases, classify, managed, run
 from gideon.evaluation.turns.access import TurnAccess
 from gideon.host import owui
 from gideon.host.render.owui import GENERAL_MODEL_ID
@@ -215,7 +215,7 @@ class _Outcome:
     stream: str | None = None
     pattern: str | None = None
     checks: Mapping[str, bool] | None = None
-    figures: tuple[str, ...] = ()
+    figures: classify.MatchedFigures = ()
     elapsed: float | None = None
     problem: str | None = None
     frontend_class: str | None = None
@@ -376,8 +376,8 @@ def _load_seed_patterns(
     return seed_cases, frozenset(unavailable), tuple(head)
 
 
-def _named_figures(outcome: _Outcome) -> tuple[str, ...]:
-    """The derived keys an answered positive's failed check names, else none."""
+def _named_figures(outcome: _Outcome) -> classify.MatchedFigures:
+    """The keys and form labels an answered positive's failed check names, else none."""
 
     failed = outcome.checks is not None and outcome.checks.get("must_not") is False
     if outcome.role == "positive" and outcome.door_class == "answered" and failed:
@@ -396,7 +396,7 @@ def _metrics(outcome: _Outcome) -> dict[str, JSONValue]:
     if outcome.checks:
         metrics["checks"] = dict(outcome.checks)
     if figures := _named_figures(outcome):
-        metrics["figures"] = list(figures)
+        metrics["figures"] = cast(Mapping[str, JSONValue], classify.figure_mapping(figures))
     if outcome.instructed and outcome.door_reading is not None:
         metrics["reading"] = outcome.door_reading
     if outcome.frontend_class is not None:
@@ -556,7 +556,7 @@ def _report(outcomes: tuple[_Outcome, ...], head: tuple[str, ...]) -> tuple[bool
             if row.reading is not None and row.reading.failure is not None
         )
         figure_labels = {
-            row.case_id: f" ({', '.join(figures)})"
+            row.case_id: f" ({classify.figure_clause(figures)})"
             for row in rows
             if (figures := _named_figures(row))
         }

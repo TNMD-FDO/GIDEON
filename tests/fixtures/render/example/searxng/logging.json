@@ -15,6 +15,24 @@
       "level": "INFO",
       "propagate": false
     },
+    "searx.engines.bing": {
+      "level": "CRITICAL"
+    },
+    "searx.engines.brave": {
+      "level": "CRITICAL"
+    },
+    "searx.engines.duckduckgo": {
+      "level": "CRITICAL"
+    },
+    "searx.engines.google": {
+      "level": "CRITICAL"
+    },
+    "searx.engines.startpage": {
+      "level": "CRITICAL"
+    },
+    "searx.engines.wikipedia": {
+      "level": "CRITICAL"
+    },
     "searx.network": {
       "level": "ERROR"
     }

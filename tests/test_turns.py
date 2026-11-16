@@ -1170,20 +1170,23 @@ class TurnHarness(TestCase):
             self.assertEqual(row.record is not None, output_enabled)
             self.assertEqual(row.figures, ())
             if row.record is not None:
-                self.assertEqual(row.record["figures"], [])
+                self.assertEqual(row.record["figures"], {})
             facts = (row.elapsed, row.checks, row.pattern_id, row.stream_pattern_id, row.stream_offset)
             self.assertNotIn(prompt, repr(facts))
             self.assertNotIn(answer, repr(facts))
 
-    def test_service_and_managed_rows_and_records_keep_matched_figure_keys(self) -> None:
+    def test_service_and_managed_rows_and_records_keep_matched_figure_labels(self) -> None:
         answer = "This doctrinal answer contains no deadline."
         for service in (False, True):
-            for word, expected in (("doctrinal", ("example-figure",)), ("unwritten", ())):
+            for word, expected, mapping in (
+                ("doctrinal", (("example-figure", ("form",)),), {"example-figure": ["form"]}),
+                ("unwritten", (), {}),
+            ):
                 with self.subTest(service=service, word=word), TemporaryDirectory() as directory:
                     patterns = (re.compile(rf"\b{word}\b"),)
                     case = cases.Case(
                         "fixture", "Explain a fictitious rule.", "recorded",
-                        must_not=patterns, figures=(("example-figure", patterns),),
+                        must_not=patterns, figures=(("example-figure", (("form", patterns[0]),)),),
                     )
                     spec = run.RunSpec(
                         cases=Path(directory) / "cases.yaml",
@@ -1227,7 +1230,7 @@ class TurnHarness(TestCase):
                     self.assertEqual(row.result.ok, not expected, row.result.detail)
                     self.assertIsNotNone(row.record)
                     assert row.record is not None
-                    self.assertEqual(row.record["figures"], list(expected))
+                    self.assertEqual(row.record["figures"], mapping)
                     self.assertNotIn("figures", cast(dict[str, object], row.record["case"]))
 
     def test_ci_selects_sibling_secrets_before_read_and_uses_plain_http(self) -> None:
@@ -2389,7 +2392,7 @@ class TurnHarness(TestCase):
                 )
                 self.assertEqual(
                     tuple(
-                        (key, tuple(pattern.pattern for pattern in forms))
+                        (key, tuple((label, pattern.pattern) for label, pattern in forms))
                         for key, forms in case.figures
                     ),
                     derived,
@@ -3008,11 +3011,15 @@ class TurnHarness(TestCase):
             loaded = cases.load_cases(path)
         assert isinstance(loaded, cases.CaseSet), loaded
         case = loaded.cases[0]
-        for content, expected in (
-            ("The figures are 30 and 37 at offense level eighteen.", ("30-37", "level-18")),
-            ("Offense level eighteen.", ("level-18",)),
-            ("forbidden", ()),
-            ("The statute is 18 U.S.C. § 922(g).", ()),
+        for content, expected, printed in (
+            (
+                "The figures are 30 and 37 at offense level eighteen.",
+                (("30-37", ("lower", "upper")), ("level-18", ("noun",))),
+                "30-37 lower+upper, level-18 noun",
+            ),
+            ("Offense level eighteen.", (("level-18", ("noun",)),), "level-18 noun"),
+            ("forbidden", (), ""),
+            ("The statute is 18 U.S.C. § 922(g).", (), ""),
         ):
             for kind in ("answered", "declined"):
                 with self.subTest(content=content, kind=kind):
@@ -3025,7 +3032,7 @@ class TurnHarness(TestCase):
                     self.assertEqual(judgement.checks["must_not"], not failed)
                     clause = "must_not failed" if failed else "must_not ok"
                     if expected:
-                        clause += f" ({', '.join(expected)})"
+                        clause += f" ({printed})"
                     self.assertIn(f"; {clause};", judgement.detail)
                     self.assertEqual(judgement.ok, kind == "declined" and not failed)
 
@@ -3034,10 +3041,44 @@ class TurnHarness(TestCase):
             unchecked, classify.Verdict("declined"), "offense level 18", record="the record"
         )
         self.assertTrue(judgement.ok)
-        self.assertEqual(judgement.figures, ("level-18",))
+        self.assertEqual(judgement.figures, (("level-18", ("noun",)),))
         self.assertNotIn("level-18", judgement.detail)
         plain = cases.Case("plain", "prompt", "recorded")
         self.assertEqual(classify.matched_figures(plain, "offense level 18"), ())
+
+    def test_judgement_keeps_multiple_matching_forms_in_order(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "seed.yaml"
+            path.write_text(yaml.safe_dump({
+                "family": "guidelines",
+                "pattern_set_version": 1,
+                "cases": [{
+                    "id": "fictitious",
+                    "kind": "positive",
+                    "prompt": "Calculate a fictitious guideline category.",
+                    "answer": "Criminal history category I.",
+                }],
+            }), encoding="utf-8")
+            loaded = cases.load_cases(path)
+        assert isinstance(loaded, cases.CaseSet), loaded
+        judgement = classify.judge_case(
+            loaded.cases[0], classify.Verdict("answered"),
+            "Criminal history category I, also written 16/I.", record="the record",
+        )
+        self.assertEqual(judgement.figures, (("category-I", ("noun", "shorthand")),))
+        self.assertIn("must_not failed (category-I noun+shorthand)", judgement.detail)
+
+    def test_matched_figure_printed_clause_and_record_mapping(self) -> None:
+        matched = (("category-I", ("noun", "shorthand")), ("30-37", ("lower", "upper")))
+        self.assertEqual(
+            classify.figure_clause(matched), "category-I noun+shorthand, 30-37 lower+upper"
+        )
+        self.assertEqual(
+            classify.figure_mapping(matched),
+            {"category-I": ["noun", "shorthand"], "30-37": ["lower", "upper"]},
+        )
+        self.assertEqual(classify.figure_clause(()), "")
+        self.assertEqual(classify.figure_mapping(()), {})
 
     def test_sources_check_matches_stored_lists_and_reports_failures(self) -> None:
         content = "A clean doctrinal answer."

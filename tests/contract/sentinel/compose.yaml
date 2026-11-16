@@ -98,6 +98,24 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+  searxng-rendered:
+    image: "${SEARXNG_IMAGE}"
+    environment:
+      GRANIAN_LOG_ACCESS_ENABLED: "false"
+      GRANIAN_LOG_CONFIG: /etc/searxng/logging.json
+    env_file:
+      - path: ./searxng/env
+        format: raw
+    volumes:
+      - ./searxng/settings-rendered.yml:/etc/searxng/settings.yml:ro
+      - ./searxng/logging.json:/etc/searxng/logging.json:ro
+    networks: [rendered]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
   stub:
     image: "${OPEN_WEBUI_IMAGE}"
     entrypoint: ["python3", "/stub/stub.py"]
@@ -121,6 +139,9 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
+networks:
+  rendered:
+    internal: true
 secrets:
   postgres_superuser_password:
     file: ./secrets/postgres_superuser_password

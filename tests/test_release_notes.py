@@ -31,6 +31,12 @@ KNOWN_TEMPLATE_HEADINGS: dict[int, tuple[str, ...]] = {
         "## Coverage",
         "## Next maintenance window",
     ),
+    4: (
+        "## What is new",
+        "## What was bumped",
+        "## Coverage",
+        "## Next maintenance window",
+    ),
 }
 # The practice rule is the sentence every pre-launch note carries verbatim.
 PRACTICE_RULE = (
@@ -202,7 +208,7 @@ def note_findings(
                 )
             )
         headings_to_check = list(required)
-        if note_template_version == 3 and "## Breaking" in headings:
+        if note_template_version >= 3 and "## Breaking" in headings:
             headings_to_check.append("## Breaking")
         for heading in headings_to_check:
             if not _section_text(text, heading):
@@ -236,7 +242,7 @@ def note_findings(
                     )
                 )
 
-        if note_template_version == 3:
+        if note_template_version >= 3:
             breaking_heading = "## Breaking"
             if breaking_heading in headings and "## What is new" in headings:
                 breaking_index = headings.index(breaking_heading)
@@ -348,14 +354,25 @@ def _good_note_v3() -> str:
     )
 
 
+def _good_note_v4() -> str:
+    return _good_note_v3().replace("Template: 3", "Template: 4").replace(
+        "## Next maintenance window",
+        "## Trial profile\n\n"
+        "An example one-card profile, evaluated on a capped share of the test card; "
+        "its named card has not yet been evaluated.\n\n"
+        "## Next maintenance window",
+    )
+
+
 class ReleaseNoteTests(unittest.TestCase):
     """Test the release-note artifact and its durable contract."""
 
     def test_template_contract(self) -> None:
-        """The committed template declares version 3 and exactly its required sections."""
+        """The committed template declares version 4 and exactly its required sections."""
 
         if absent_from_export(TEMPLATE.relative_to(ROOT), ROOT):
             self.skipTest("the release-note template is excluded from the public export")
+        self.assertEqual(_template_version(TEMPLATE.read_text(encoding="utf-8")), 4)
         self.assertEqual(template_findings(), [])
 
     def test_each_committed_note_conforms(self) -> None:
@@ -425,32 +442,48 @@ class ReleaseNoteTests(unittest.TestCase):
             good_v3 = _good_note_v3().replace("# GIDEON v0.2.0", "# GIDEON v0.2.12")
             good_v3_path.write_text(good_v3, encoding="utf-8")
             self.assertEqual(note_findings(good_v3_path), [])
+            good_v4 = _good_note_v4().replace("# GIDEON v0.2.0", "# GIDEON v0.2.14")
+            trial_section = (
+                "## Trial profile\n\n"
+                + _section_text(good_v4, "## Trial profile")
+                + "\n\n"
+            )
+            for has_trial in (True, False):
+                with self.subTest(template=4, trial_profile=has_trial):
+                    good_v4_path = root / "v0.2.14.md"
+                    contents = good_v4 if has_trial else good_v4.replace(trial_section, "")
+                    self.assertEqual("## Trial profile" in _headings(contents), has_trial)
+                    good_v4_path.write_text(contents, encoding="utf-8")
+                    self.assertEqual(note_findings(good_v4_path), [])
             major_without_breaking = root / "v1.0.0.md"
-            major_without_breaking.write_text(
-                good_v3.replace("# GIDEON v0.2.12", "# GIDEON v1.0.0").replace(
-                    "## Breaking\n\nThere is no contract change for the office.\n\n", ""
-                ),
-                encoding="utf-8",
-            )
-            major_findings = note_findings(major_without_breaking)
-            self.assertTrue(
-                any("major release note must carry section ## Breaking" in finding for finding in major_findings),
-                major_findings,
-            )
             wrong_position = root / "v0.2.13.md"
-            wrong_position.write_text(
-                good_v3.replace("# GIDEON v0.2.12", "# GIDEON v0.2.13").replace(
-                    "## Breaking\n\nThere is no contract change for the office.\n\n", ""
-                ).replace(
-                    "## Coverage", "## Breaking\n\nThere is no contract change for the office.\n\n## Coverage"
-                ),
-                encoding="utf-8",
-            )
-            position_findings = note_findings(wrong_position)
-            self.assertTrue(
-                any("section ## Breaking must immediately follow ## What is new" in finding for finding in position_findings),
-                position_findings,
-            )
+            for template_version in (3, 4):
+                with self.subTest(template=template_version):
+                    note = good_v3.replace("Template: 3", f"Template: {template_version}")
+                    major_without_breaking.write_text(
+                        note.replace("# GIDEON v0.2.12", "# GIDEON v1.0.0").replace(
+                            "## Breaking\n\nThere is no contract change for the office.\n\n", ""
+                        ),
+                        encoding="utf-8",
+                    )
+                    major_findings = note_findings(major_without_breaking)
+                    self.assertTrue(
+                        any("major release note must carry section ## Breaking" in finding for finding in major_findings),
+                        major_findings,
+                    )
+                    wrong_position.write_text(
+                        note.replace("# GIDEON v0.2.12", "# GIDEON v0.2.13").replace(
+                            "## Breaking\n\nThere is no contract change for the office.\n\n", ""
+                        ).replace(
+                            "## Coverage", "## Breaking\n\nThere is no contract change for the office.\n\n## Coverage"
+                        ),
+                        encoding="utf-8",
+                    )
+                    position_findings = note_findings(wrong_position)
+                    self.assertTrue(
+                        any("section ## Breaking must immediately follow ## What is new" in finding for finding in position_findings),
+                        position_findings,
+                    )
             template_2_major = root / "v2.0.0.md"
             template_2_major.write_text(
                 _good_note_v2().replace("# GIDEON v0.2.0", "# GIDEON v2.0.0"),

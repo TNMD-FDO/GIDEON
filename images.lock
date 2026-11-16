@@ -31,7 +31,7 @@ images:
     digest: sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
   # General's metasearch:
   # SearXNG's published image, run as shipped, resolved on the box with
-  # `skopeo inspect` on 2026-09-08 — a three-platform index (amd64, arm64,
+  # `skopeo inspect` on 2026-11-16 — a three-platform index (amd64, arm64,
   # arm/v7) the mirror copies whole. Its tag is the source commit's committer
   # date with leading zeros dropped, a dash, and the short commit hash
   # (`<year>.<month>.<day>-<hash>`), the same index on Docker Hub and GHCR;
@@ -41,8 +41,8 @@ images:
   # tie. A person completes the bump after the service has come up healthy on
   # the box and one search has run through it.
   searxng:
-    source: docker.io/searxng/searxng:2026.9.7-3e454637f
-    digest: sha256:1dab138ea70a8ceb4d1c182f5c8f256088406c1742b99e279976157dbe1e9759
+    source: docker.io/searxng/searxng:2026.11.15-2d500cb6b
+    digest: sha256:932f69dca010db9880bddebb2171f05d8e1a25d04a59149ff65409993d680024
   # The vector index: Qdrant's default image, resolved on the box with
   # `skopeo inspect --raw` on 2026-10-04. Its multi-platform index includes
   # attestation manifests, which the mirror copies whole. The 1.19 line is
@@ -82,8 +82,8 @@ images:
     source: docker.io/prom/node-exporter:v1.12.1
     digest: sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0
   dcgm-exporter:
-    source: nvcr.io/nvidia/k8s/dcgm-exporter:4.6.1-4.8.4-distroless
-    digest: sha256:148b0c025e5f2850256816fa33754fbf4733b7a086697a95613fc0ba3db5b003
+    source: nvcr.io/nvidia/k8s/dcgm-exporter:4.7.0-4.9.0-distroless
+    digest: sha256:2490e1dfb5baaee6765ef2841813af7d978bb459a566c22c326a8fc27c64eea9
   postgres-exporter:
     source: docker.io/prometheuscommunity/postgres-exporter:v0.20.1
     digest: sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
