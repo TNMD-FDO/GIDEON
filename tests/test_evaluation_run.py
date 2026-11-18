@@ -2456,6 +2456,8 @@ class RunnerSelection(unittest.TestCase):
     """Every registered runner receives only the loader's counted cases."""
 
     def test_every_registered_runner_excludes_a_planted_unsigned_case(self) -> None:
+        from test_golddrop_slice import GoldDropHost, _context
+
         for slice_name, spec in SLICE_RUNNERS.items():
             with self.subTest(slice_name=slice_name):
                 case_id = "extraction-001"
@@ -2478,6 +2480,8 @@ class RunnerSelection(unittest.TestCase):
                     spec.repeats,
                     lambda _line: None,
                 )
+                if slice_name == "judgments":
+                    context = _context(GoldDropHost())
                 result = spec.runner(loaded, slice_name, context)
                 self.assertEqual(result.results, ())
 
@@ -2632,6 +2636,12 @@ class SliceRegistry(unittest.TestCase):
                     CallSurface.RANKED_FILE in spec.surfaces,
                     slice_name == "judgments",
                 )
+        judgments = SLICE_RUNNERS["judgments"]
+        self.assertEqual(
+            judgments.surfaces,
+            frozenset({CallSurface.RANKED_FILE, CallSurface.STORES}),
+        )
+        self.assertTrue(judgments.reaches_box)
 
     def test_only_turn_driven_slices_name_the_turns_surface(self) -> None:
         for slice_name, spec in SLICE_RUNNERS.items():
@@ -3174,10 +3184,6 @@ class ChallengerPair(unittest.TestCase):
                     self.assertEqual(
                         request.record_root_fix(SLICE_RUNNERS["smoke"]),
                         f"Run {prefix} {retry} as root with the stack up, then retry.",
-                    )
-                    self.assertEqual(
-                        request.ranked_required_fix(),
-                        f"Run {prefix} eval run --slice smoke --ranked <file> --stack ci --kind nightly --force, then retry.",
                     )
                     self.assertEqual(
                         request.engine_lock_label(), "gideon eval run --slice smoke --stack ci"

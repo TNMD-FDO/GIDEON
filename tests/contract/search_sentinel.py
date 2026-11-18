@@ -1,10 +1,12 @@
 """Prove the search sentinel does not enter the stack's retained logs.
 
 This self-hosted contract builds a throwaway Postgres, Open WebUI, SearXNG,
-and standard-library stub stack from the image mirror, drives managed
-turns with fresh sentinels, and counts matches in every container journal and
-the frontend audit file.  It runs with the system Python and redirects only
-the product secret directory into the temporary stack.
+and standard-library stub stack from the image mirror. It checks the frontend's
+image policy, the loaded engines, and the absence of plugins and rule-list
+fetches, with controls for the engine and plugin checks. It then drives seven
+ordered managed turns with fresh sentinels and counts matches in every
+container journal and the frontend audit file. It runs with the system Python
+and redirects only the product secret directory into the temporary stack.
 """
 
 import http.client
@@ -68,6 +70,8 @@ HEALTHY_ATTEMPTS = 60
 READY_ATTEMPTS = 90
 FRONTEND_STANDIN_URL = "http://stub:8000/searxng/search"
 CONTROL_LOG_LEVEL = "WARNING"
+RULE_LIST_MARKER = "TRACKER_PATTERNS"
+REMOVER_PLUGIN_ID = "tracker_url_remover"
 
 # These are the interpolation keys supplied by the rendered frontend posture
 # in the sentinel Compose file.  The frontend command rides the same derivation
@@ -205,6 +209,15 @@ def _control_settings_text(inputs: RenderInputs) -> str:
     return dump(document)
 
 
+def _plugin_control_settings_text(inputs: RenderInputs) -> str:
+    """Remove the explicit plugin mapping so the image uses its shipped plugins."""
+
+    document = dict(searxng_settings_document(inputs))
+    assert "plugins" in document, "rendered SearXNG settings must include plugins"
+    del document["plugins"]
+    return dump(document)
+
+
 def _stub_settings_document(inputs: RenderInputs) -> dict[str, object]:
     """The rendered defaults with the JSON and Bing engines repointed at the stub."""
 
@@ -295,6 +308,7 @@ class SentinelStack:
         self.brave_settings_file = self.searxng / "settings-brave.yml"
         self.rendered_settings_file = self.searxng / "settings-rendered.yml"
         self.control_settings_file = self.searxng / "settings-rendered-control.yml"
+        self.plugin_control_settings_file = self.searxng / "settings-rendered-plugin-control.yml"
         self.inputs = render_inputs()
         self.manifest = dict(owui.load_manifest(ContractHost(), MANIFEST))
         self.passwords = {
@@ -336,6 +350,7 @@ class SentinelStack:
     def _write_searxng_files(self) -> None:
         self.rendered_settings_file.write_text(SearxngSettingsArtifact().emit(self.inputs))
         self.control_settings_file.write_text(_control_settings_text(self.inputs))
+        self.plugin_control_settings_file.write_text(_plugin_control_settings_text(self.inputs))
         self.settings_file.write_text(dump(_stub_settings_document(self.inputs)))
         self.brave_settings_file.write_text(_brave_settings_text(self.inputs))
         env = searxng_secret_environment(self.inputs)
@@ -492,6 +507,28 @@ def engine_config_findings(rendered_names: Sequence[str], body: object) -> list[
     return findings
 
 
+def plugin_config_findings(body: object) -> list[str]:
+    """Report listed plugins or an unreadable plugin list or entry."""
+
+    if not isinstance(body, Mapping) or not isinstance(body.get("plugins"), list):
+        return ["SearXNG /config has no readable plugin list"]
+    findings: list[str] = []
+    for entry in body["plugins"]:
+        if not isinstance(entry, Mapping):
+            return ["SearXNG /config has an unreadable plugin entry"]
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            return ["SearXNG /config has an unreadable plugin entry"]
+        findings.append(f"/config lists plugin {name!r}")
+    return findings
+
+
+def rule_list_lines(text: str) -> tuple[str, ...]:
+    """Return the journal lines carrying the rule-list marker."""
+
+    return tuple(line for line in text.splitlines() if RULE_LIST_MARKER in line)
+
+
 def is_frontend_residual(line: str) -> bool:
     """Recognize only aiohttp's URL-bearing SearXNG failure shape."""
 
@@ -517,7 +554,10 @@ def client_factory(
 
 
 class SearchSentinelContract(unittest.TestCase):
-    """Check the loaded engines, then drive seven ordered search-path log assertions."""
+    """Check the image policy, engines, and plugin absence before seven ordered log runs.
+
+    The engine and plugin checks each have a control on the rendered service.
+    """
 
     stack: SentinelStack
     original_secrets_dir: Path
@@ -594,17 +634,19 @@ class SearchSentinelContract(unittest.TestCase):
         finally:
             connection.close()
 
-    def rendered_engine_findings(self) -> list[str]:
+    def rendered_config(self) -> object:
         result = self.stack.compose(
             "exec", "-T", "searxng-rendered", "wget", "-q", "-O", "-",
             "http://127.0.0.1:8080/config",
         )
         self.stack.require_success(result, "docker compose exec searxng-rendered wget /config")
         try:
-            body = json.loads(result.stdout)
+            return json.loads(result.stdout)
         except json.JSONDecodeError:
-            body = None
-        return engine_config_findings(self.stack.inputs.site.web.engines, body)
+            return None
+
+    def rendered_engine_findings(self) -> list[str]:
+        return engine_config_findings(self.stack.inputs.site.web.engines, self.rendered_config())
 
     def recreate_rendered_searxng(self) -> None:
         result = self.stack.compose("up", "-d", "--force-recreate", "searxng-rendered")
@@ -631,6 +673,46 @@ class SearchSentinelContract(unittest.TestCase):
             self.assertEqual(
                 self.rendered_engine_findings(),
                 [f"rendered engine {omitted!r} is omitted from /config"],
+            )
+        finally:
+            self.stack.rendered_settings_file.write_text(
+                SearxngSettingsArtifact().emit(self.stack.inputs)
+            )
+            self.recreate_rendered_searxng()
+
+    def test_0c_rendered_settings_register_no_plugin(self) -> None:
+        findings = plugin_config_findings(self.rendered_config())
+        lines = rule_list_lines(self.stack.logs("searxng-rendered"))
+        self.assertTrue(
+            not findings and not lines,
+            "\n".join([
+                *findings,
+                f"searxng-rendered: expected 0 {RULE_LIST_MARKER} lines, got {len(lines)}",
+                "Fix: read the pinned image's searx/settings_loader.py for how a rendered "
+                "plugins: mapping meets the shipped one, and searx/plugins/ for plugins "
+                "registered outside the settings. Then change searxng_settings_document().",
+            ]),
+        )
+
+    def test_0d_plugin_control_finds_the_remover_and_its_fetch(self) -> None:
+        try:
+            shutil.copy2(self.stack.plugin_control_settings_file, self.stack.rendered_settings_file)
+            self.recreate_rendered_searxng()
+            findings = plugin_config_findings(self.rendered_config())
+            lines = rule_list_lines(self.stack.logs("searxng-rendered"))
+            remover_found = f"/config lists plugin {REMOVER_PLUGIN_ID!r}" in findings
+            self.assertTrue(
+                remover_found and bool(lines),
+                "\n".join([
+                    *findings,
+                    f"searxng-rendered control: expected {REMOVER_PLUGIN_ID!r} in /config "
+                    f"and at least one {RULE_LIST_MARKER} line, got {len(lines)} lines",
+                    "The pinned image no longer registers the shipped plugins from settings "
+                    "without the plugins key, or no longer logs a failed fetch. The assertion's "
+                    "zero proves nothing until the control is revised.",
+                    "Fix: revise the control using searx/settings_loader.py and "
+                    "searx/data/tracker_patterns.py from the pinned image.",
+                ]),
             )
         finally:
             self.stack.rendered_settings_file.write_text(

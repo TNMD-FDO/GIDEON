@@ -36,6 +36,8 @@ Two records yield no query: `HARV-014`, a prompt-writing request, and `HARV-017`
 
 Grades come through the **grading kit**: a **pool** of candidate passages goes in, one **packet** per query per grader comes out, the graders return small **grades files**, and the intake appends the **judgments file** beside this page. The pools come from a generation of either stack through the pool builder below; the kit's own tests run over an invented fixture. Packets, their manifest, and returned grades files are built **outside any checkout** and are never committed — the one committed product is the judgments file.
 
+The export omits the committed judgments file along with the queries it names. A public tree keeps this page and omits both files.
+
 A passage is identified by its **gold-evidence coordinates** — source id,
 canonical-text SHA-256, and a code-point offset range — and never by a chunk id,
 because the corpus is later re-chunked and a grade must survive that change.
@@ -89,6 +91,8 @@ What comes back is `grades-<query id>-<role id>.txt`: a first line `packet: <que
 - `assessment` — `primary` or `second`. Primary lines are the yardstick; second lines exist for κ.
 
 A (query, coordinates, grader) triple appears once, and there is at most one `primary` and one `second` line per (query, coordinates). A line carries nothing of a passage, a question, or a person. A grade is never edited: the supersede rule governs, and the first correction needed opens a ticket that adds a superseding form.
+
+`tests/test_judgments_file.py` pins every committed line by prefix. `PINNED_PREFIXES` holds one pair per successful intake run with the file's line count and the SHA-256 of that many leading lines.
 
 Agreement is Cohen's κ, unweighted over the four grades and again with grades collapsed at relevant = grade ≥ 2 (recall@50's line), primary against second, pooled over every passage both graded. It is computed from the file's own lines, so it is recomputable at any time.
 
@@ -154,6 +158,8 @@ The refusals, each naming the packet by query id and role id and carrying ordina
 
 A successful run appends lines ordered by query id, grader, then coordinates, and prints the count appended, the file's line count and SHA-256, and both κ lines with their pair count, query count, and the role ids that contributed pairs. Where there is no pair, or no variation, the line says so in words and prints no number.
 
+Append the summary's file line count and SHA-256 as a pair in `PINNED_PREFIXES` in `tests/test_judgments_file.py`, after the earlier pairs and in the same commit as the appended grades. Then refill the CI sibling's sample with `index build caselaw --sample` so it holds the judged documents as gold. Check the `gold` row for the number present, any missing documents, and any changed hashes.
+
 ## What the grades measure
 
 ### The ranked list
@@ -177,7 +183,18 @@ query. A list may be empty. Length is never bounded — the metrics read the fir
 fifty — and the run reports the file's SHA-256, which the run row keeps beside
 the definition id.
 
-Run it with `gideon eval run --slice judgments --ranked <file>`, once per leg's file.
+Run it with `gideon eval run --slice judgments --ranked <file> --generation <name>`,
+once per leg's file, adding `--stack ci` when the file was drawn from the CI
+sibling. The run needs root and the record, because it scores the file against
+the generation it was drawn from: it reads that generation's manifest, and an
+entry the manifest does not hold fails the run. The file names no generation,
+so the pairing is kept by procedure. The pool builder writes a `summary.json`
+beside the ranked files naming the stack, the generation, and each file's
+SHA-256; take `--stack` and `--generation` from it, and compare the SHA-256 the
+run's `ranked` row prints with the summary's entry for the leg. The check
+against the manifest cannot do this alone, since two generations holding the
+same documents under the same hashes, such as two arms built over one sample,
+pass each other's files.
 
 ### The metrics, `judgments@1`
 
@@ -228,23 +245,67 @@ defined and prints that count, so the three populations differ at those edges.
 **Below twenty-five judged queries** the set detects regressions and ranks
 nothing, which the run's summary says whenever it applies.
 
-**Three known limits, stated and not solved.** A chunk that swallows two graded
+**Three known limits under `judgments@1`.** A chunk that swallows two graded
 passages earns the higher grade alone, so a large-chunk arm cannot reach 1.0 on
 such a query; the gold-span crossing rate is the companion figure to read beside
 it. And a judged passage whose canonical text the index under test does not hold
 reads as not retrieved, since a ranked list states nothing about what that index
 holds: it deflates recall@50 and nDCG@10 without a word. That bites at a corpus
 bump or a canonicalizer change, not at Phase A, whose pools are drawn from the
-very index its arms are scored on. The drop rule arrives with the input that
-can prove absence, as this definition's next `@N`. And a chunk wholly inside a
-graded passage meets it at the passage's grade even when the chunk omits the
-sentence that earned it, so a small-target arm can be paid for geometry rather
-than evidence; a sample of such hits is read by hand before the target is
-decided (the grilling session of 2026-10-16).
+very index its arms are scored on; `judgments@2` removes it. And a chunk wholly
+inside a graded passage meets it at the passage's grade even when the chunk
+omits the sentence that earned it, so a small-target arm can be paid for
+geometry rather than evidence; a sample of such hits is read by hand before the
+target is decided (the grilling session of 2026-10-16).
+
+### The metrics, `judgments@2`
+
+The current definition, and the one every run computes. Its one home is the
+docstring of `gideon/evaluation/rankmetrics2.py`. It is `judgments@1` with the
+generation's manifest as a second input, the manifest mapping each source id to
+the one canonical-text SHA-256 the generation holds for it. Meets, crediting,
+the three figures, and their depths and thresholds are `@1`'s, so with nothing
+dropped every figure equals `@1`'s. A run recorded under one definition is
+never compared with a run under the other.
+
+**Held and dropped.** A judged passage is held when the manifest maps its
+`source_id` to its own `sha256`, and dropped otherwise: *absent* when the
+manifest has no row for the id, *changed* when it holds the id under another
+hash. Both kinds drop, and each is reported. The unit is the passage, so two
+spans of one changed document are two drops, and a document judged under two
+hashes keeps the passages whose hash the manifest carries. The `gold-drop`
+slice counts such a document dropped once, because it asks whether the
+generation holds the set's gold documents, while this slice asks what each
+query can still be scored on.
+
+**The figures over held passages.** A query's three figures are computed over
+its held passages alone, so the ideal ranking and recall's denominator count
+held passages and a passage no retriever over that generation could return
+does not count against it. A judged query with no held passage is a
+**dropped query**: null on all three figures, in no mean, and listed. The floor
+of twenty-five counts judged queries with at least one held passage.
+
+**The report.** After the means, one line gives the dropped-passage count, its
+absent and changed split, and the number of queries touched; one line per
+touched query gives its id and each dropped passage as
+`<source id>@<sha256>:<start>-<end>`; one line lists the dropped queries. Each
+result row carries `dropped_passages`, the `dropped` list of those strings, and
+`foreign_ranked`, and its `relevant_passages` counts held passages. Drops are
+reported and never gated.
+
+**A foreign entry.** A ranked entry whose `source_id` and `sha256` the manifest
+does not carry, at any rank, proves the file was not drawn from that
+generation. Its query is not scored, its row fails, and so does the run, as an
+input error and never a metric; the report lists the query ids with the count.
+
+**The limit that remains** is `@1`'s first and third: a chunk that swallows two
+graded passages, and a chunk inside a passage paid at its grade.
 
 The figures are reported and compared paired, and **never gated**. The slice's
-own verdict is coverage alone: it passes when every judged query was scored,
-and fails when one has no ranked list.
+own verdict is coverage and input validity: it passes when every judged query
+has a ranked list and every ranked entry is held by the generation, a dropped
+query passing with its null figures, and fails when a judged query has no
+ranked list or a list holds a foreign entry.
 
 ## The intake, for a CSA
 

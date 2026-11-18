@@ -78,7 +78,7 @@ def slice_gate(zero_tolerance_dropped: int, dropped: int, total: int) -> GateVer
     return GateVerdict(not reasons, tuple(reasons))
 
 
-def _read_manifest(
+def read_manifest(
     name: str, source_ids: tuple[str, ...], context: RunContext,
 ) -> Mapping[str, str] | Problem:
     """Read requested gold hashes in one metrics-role statement on the selected stack."""
@@ -179,7 +179,7 @@ def run_gold_drop(loaded: LoadedSet, slice_name: str, context: RunContext) -> Sl
         ))
     context.checkpoint()
     gold = sample.gold_hashes(loaded)
-    manifest = _read_manifest(generation.name, tuple(gold), context)
+    manifest = read_manifest(generation.name, tuple(gold), context)
     if isinstance(manifest, Problem):
         return _failed(selection.counted, len(selection.unsigned), "record-unreachable", manifest)
 

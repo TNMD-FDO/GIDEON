@@ -98,14 +98,12 @@ class CandidatePin:
 
 
 @dataclass(frozen=True, slots=True)
-class GpuRequirements:
-    """Minimum GPU facts required by a hardware profile."""
+class AdmittedCard:
+    """One card family admitted by a hardware profile."""
 
+    model: str
     architecture: str
     compute_capability: str
-    model: str
-    count: int
-    vram_gb: int
 
     def matches(self, reported: str) -> bool:
         """Match the card's name alone or with its edition after one space.
@@ -118,6 +116,20 @@ class GpuRequirements:
             reported.startswith(f"{self.model} ")
             and not reported.startswith(f"{self.model}  ")
         )
+
+
+@dataclass(frozen=True, slots=True)
+class GpuRequirements:
+    """Admitted cards and the minimum GPU count and per-card VRAM."""
+
+    cards: tuple[AdmittedCard, ...]
+    count: int
+    vram_gb: int
+
+    def card(self, reported: str) -> AdmittedCard | None:
+        """Return the entry matching the reported name, or ``None``."""
+
+        return next((card for card in self.cards if card.matches(reported)), None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,13 +274,8 @@ _PROFILE_KEYS: Final = (
     "client_reserve_seqs", "chunk_guards", "corpus_line",
 )
 _REQUIRES_KEYS: Final = ("platform", "gpu", "dram_gb", "data_volume_gb")
-_GPU_KEYS: Final = (
-    "architecture",
-    "compute_capability",
-    "model",
-    "count",
-    "vram_gb",
-)
+_GPU_KEYS: Final = ("cards", "count", "vram_gb")
+_CARD_KEYS: Final = ("model", "architecture", "compute_capability")
 _MODEL_KEYS: Final = ("repo", "revision", "gpu", "serve", "files")
 _CANDIDATE_KEYS: Final = ("role", "repo", "revision", "serve", "files")
 _SERVE_KEYS: Final = ("served_name", "env", "flags")
@@ -820,6 +827,55 @@ def _validate_client_reserve(
         )
 
 
+def _validate_cards(
+    gpu: Mapping[str, object], gpu_path: str, errors: list[ModelsLockError]
+) -> None:
+    path = f"{gpu_path}.cards"
+    present, value = _lookup(gpu, "cards")
+    if not present:
+        errors.append(_error(path, "missing required key"))
+        return
+    if not isinstance(value, list) or not value:
+        errors.append(_error(path, "expected a non-empty list"))
+        return
+
+    first_positions: dict[str, int] = {}
+    models: dict[int, str] = {}
+    for index, item in enumerate(value):
+        entry_path = _path(path, index)
+        if not isinstance(item, Mapping):
+            errors.append(_mapping_error(entry_path, item))
+            continue
+        entry = cast(Mapping[str, object], item)
+        _walk_unknown(entry, _CARD_KEYS, entry_path, errors)
+        _string(entry, "architecture", errors, error_path=f"{entry_path}.architecture")
+        capability_path = f"{entry_path}.compute_capability"
+        capability = _string(entry, "compute_capability", errors, error_path=capability_path)
+        if capability is not None and COMPUTE_CAPABILITY.fullmatch(capability) is None:
+            errors.append(_error(capability_path, "expected a quoted major.minor string"))
+        model_path = f"{entry_path}.model"
+        model = _string(entry, "model", errors, error_path=model_path)
+        if model is None:
+            continue
+        if model != model.strip():
+            errors.append(_error(model_path, "the card's name must not begin or end with whitespace"))
+            continue
+        models[index] = model
+        first_positions.setdefault(model, index)
+
+    for index, model in models.items():
+        model_path = f"{_path(path, index)}.model"
+        first = first_positions[model]
+        if index != first:
+            errors.append(_error(model_path, f"duplicate model {model!r} already named at index {first}"))
+        for shorter, other_index in first_positions.items():
+            if model.startswith(f"{shorter} "):
+                errors.append(_error(
+                    model_path,
+                    f"the edition rule already selects this name under {shorter!r} at index {other_index}",
+                ))
+
+
 def validate_models_lock(document: Mapping[str, object]) -> list[ModelsLockError]:
     """Return all shape, grammar, pin, and unknown-key errors in a lock."""
 
@@ -866,20 +922,15 @@ def validate_models_lock(document: Mapping[str, object]) -> list[ModelsLockError
                 platform = _string(requires, "platform", errors, error_path=f"{requires_path}.platform")
                 if platform is not None and PLATFORM.fullmatch(platform) is None:
                     errors.append(_error(f"{requires_path}.platform", "expected a machine name as uname -m prints it"))
-                gpu = _check_mapping(requires, "gpu", errors, error_path=f"{requires_path}.gpu")
+                gpu_path = f"{requires_path}.gpu"
+                gpu = _check_mapping(requires, "gpu", errors, error_path=gpu_path)
                 _int(requires, "dram_gb", errors, error_path=f"{requires_path}.dram_gb")
                 _int(requires, "data_volume_gb", errors, error_path=f"{requires_path}.data_volume_gb")
                 if gpu is not None:
-                    _walk_unknown(gpu, _GPU_KEYS, f"{requires_path}.gpu", errors)
-                    _string(gpu, "architecture", errors, error_path=f"{requires_path}.gpu.architecture")
-                    capability = _string(gpu, "compute_capability", errors, error_path=f"{requires_path}.gpu.compute_capability")
-                    model = _string(gpu, "model", errors, error_path=f"{requires_path}.gpu.model")
-                    if model is not None and model != model.strip():
-                        errors.append(_error(f"{requires_path}.gpu.model", "the card's name must not begin or end with whitespace"))
-                    gpu_count = _int(gpu, "count", errors, error_path=f"{requires_path}.gpu.count")
-                    _int(gpu, "vram_gb", errors, error_path=f"{requires_path}.gpu.vram_gb")
-                    if capability is not None and COMPUTE_CAPABILITY.fullmatch(capability) is None:
-                        errors.append(_error(f"{requires_path}.gpu.compute_capability", "expected a quoted major.minor string"))
+                    _walk_unknown(gpu, _GPU_KEYS, gpu_path, errors)
+                    _validate_cards(gpu, gpu_path, errors)
+                    gpu_count = _int(gpu, "count", errors, error_path=f"{gpu_path}.count")
+                    _int(gpu, "vram_gb", errors, error_path=f"{gpu_path}.vram_gb")
 
             models = _check_mapping(profile, "models", errors, error_path=f"{profile_path}.models")
             if models is not None:
@@ -952,9 +1003,14 @@ def _construct(document: Mapping[str, object]) -> ModelsLock:
         requirements = ProfileRequirements(
             platform=cast(str, requires_value["platform"]),
             gpu=GpuRequirements(
-                architecture=cast(str, gpu_value["architecture"]),
-                compute_capability=cast(str, gpu_value["compute_capability"]),
-                model=cast(str, gpu_value["model"]),
+                cards=tuple(
+                    AdmittedCard(
+                        model=cast(str, card["model"]),
+                        architecture=cast(str, card["architecture"]),
+                        compute_capability=cast(str, card["compute_capability"]),
+                    )
+                    for card in cast(list[Mapping[str, object]], gpu_value["cards"])
+                ),
                 count=cast(int, gpu_value["count"]),
                 vram_gb=cast(int, gpu_value["vram_gb"]),
             ),

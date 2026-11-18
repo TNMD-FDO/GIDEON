@@ -11,7 +11,7 @@ ERROR, so the one application warning carrying a query URL is dropped before a
 handler sees it, and sets each allowed engine's own logger to CRITICAL, so an
 engine's crash line, whose text can carry the response, is dropped too. The
 rendered settings follow the pinned SearXNG image's defaults and the
-frontend's search requests.
+frontend's search requests. They register no plugin.
 """
 
 import json
@@ -90,6 +90,12 @@ def searxng_settings_document(inputs: RenderInputs) -> Mapping[str, object]:
             {"name": engine, "disabled": False, "inactive": False}
             for engine in engines
         ],
+        # A rendered plugins mapping replaces the shipped mapping whole, so
+        # an empty mapping registers no plugin. The frontend reads results
+        # alone, and the tracker remover fetched the ClearURLs rule list from
+        # a public host at every container creation. Result links reach the
+        # frontend as their engines returned them. exempt: policy.
+        "plugins": {},
         # Every value below is the pinned image's default made a rendered fact,
         # except the formats and contact: the frontend asks for JSON, which
         # SearXNG refuses with 403 unless listed. Wikipedia refuses to set up
@@ -99,10 +105,9 @@ def searxng_settings_document(inputs: RenderInputs) -> Mapping[str, object]:
         # exempt: policy. Debug off leaves the process at WARNING;
         # autocomplete and favicon resolvers are pinned off because their
         # user-triggered calls come from an HTML page nobody reaches. The
-        # shipped tracker_url_remover plugin still fetches the ClearURLs rule
-        # lists at container creation, carrying no user text. The limiter and
-        # public_instance off need no valkey; no image proxy. No secret_key
-        # here: the env supplies SEARXNG_SECRET, which the loader lets win.
+        # limiter and public_instance off need no valkey; no image proxy. No
+        # secret_key here: the env supplies SEARXNG_SECRET, which the loader
+        # lets win.
         "general": {"debug": False, "contact_url": SEARXNG_CONTACT_URL},
         "search": {
             "formats": ["html", "json"],

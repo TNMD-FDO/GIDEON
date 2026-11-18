@@ -18,6 +18,7 @@ from gideon.evaluation import (
     generation,
     ranked,
     rankmetrics,
+    rankmetrics2,
     record,
     reference,
     stacks,
@@ -151,24 +152,30 @@ class _Request:
     paired_problem: Problem | None
     generation_name: object = None
 
-    def retry_command(self, *, ranked_flag: str = "", flags: str | None = None) -> str:
+    def retry_command(
+        self, *, slice_spec: SliceSpec | None = None, flags: str | None = None,
+    ) -> str:
         command_flags = self.command_flags if flags is None else flags
         if self.mode.challenger:
             return _challenger_retry(command_flags)
-        return f"eval run --slice {self.slice_name}{ranked_flag}{command_flags}"
+        ranked_flag = (
+            " --ranked <file>"
+            if slice_spec is not None and CallSurface.RANKED_FILE in slice_spec.surfaces
+            else ""
+        )
+        # A supplied set is reprinted as a placeholder, never its path, so a
+        # retry neither scores the release's set nor records in its place.
+        set_flag = " --set <dir>" if self.supplied_set else ""
+        return f"eval run --slice {self.slice_name}{set_flag}{ranked_flag}{command_flags}"
 
-    def engine_root_fix(self) -> str:
-        return f"Run {report.command(self.retry_command())}, then retry."
+    def engine_root_fix(self, slice_spec: SliceSpec | None = None) -> str:
+        return f"Run {report.command(self.retry_command(slice_spec=slice_spec))}, then retry."
 
     def record_root_fix(self, slice_spec: SliceSpec) -> str:
-        ranked_flag = " --ranked <file>" if CallSurface.RANKED_FILE in slice_spec.surfaces else ""
         return (
-            f"Run {report.command(self.retry_command(ranked_flag=ranked_flag))} "
+            f"Run {report.command(self.retry_command(slice_spec=slice_spec))} "
             "as root with the stack up, then retry."
         )
-
-    def ranked_required_fix(self) -> str:
-        return f"Run {report.command(self.retry_command(ranked_flag=' --ranked <file>'))}, then retry."
 
     def engine_lock_label(self) -> str:
         flags = self.command_flags if self.mode.challenger else f" --stack {self.paths.name}"
@@ -905,11 +912,14 @@ def _prepare_image(seams: _Seams, registry: str) -> ImageAccess | Problem:
     return ImageAccess(reference, seams.checkout)
 
 
-def _sibling_index_job_problem(request: _Request, seams: _Seams) -> Problem | None:
+def _sibling_index_job_problem(
+    request: _Request, seams: _Seams, slice_spec: SliceSpec,
+) -> Problem | None:
     """Refuse a sibling index job before an engine or stores run starts."""
 
     job = live_index_job(
-        seams.host, request.paths.turns_dir, report.command(request.retry_command()),
+        seams.host, request.paths.turns_dir,
+        report.command(request.retry_command(slice_spec=slice_spec)),
     )
     if isinstance(job, Problem):
         return job
@@ -937,10 +947,11 @@ def _prepare_generation(
         if name is None
         else request.command_flags.removesuffix(f" --generation {name}")
     )
+    retry = request.retry_command(slice_spec=slice_spec, flags=flags)
     if request.paths.name == CI_STACK and name is None:
         selected = generation.sibling_default(
             seams.host, seams.checkout, seams.site_path,
-            command_path=request.retry_command(flags=flags),
+            command_path=retry,
         )
         if isinstance(selected, Problem):
             return StageResult("preconditions", False, selected.problem, selected.fix)
@@ -948,7 +959,7 @@ def _prepare_generation(
     resolved = generation.resolve_generation(
         seams.host, request.paths.turns_dir, name,
         stack_name=request.paths.name,
-        retry_command=report.command(request.retry_command(flags=flags)),
+        retry_command=report.command(retry),
     )
     if isinstance(resolved, Problem):
         return StageResult("preconditions", False, resolved.problem, resolved.fix)
@@ -1009,7 +1020,7 @@ def _prepare_on_box(
                 "preconditions",
                 False,
                 "root privileges are required",
-                request.engine_root_fix(),
+                request.engine_root_fix(slice_spec),
             )
         )
         return None
@@ -1041,7 +1052,7 @@ def _prepare_on_box(
         image = resolved_image
     if CallSurface.ENGINE not in slice_spec.surfaces:
         if request.paths.name == CI_STACK and CallSurface.STORES in slice_spec.surfaces:
-            job_problem = _sibling_index_job_problem(request, seams)
+            job_problem = _sibling_index_job_problem(request, seams, slice_spec)
             if job_problem is not None:
                 print_stage(StageResult(
                     "preconditions", False, job_problem.problem, job_problem.fix
@@ -1196,7 +1207,7 @@ def _prepare_on_box(
         lock_detail = "engine lock held by this process"
 
     if request.paths.name == CI_STACK:
-        job_problem = _sibling_index_job_problem(request, seams)
+        job_problem = _sibling_index_job_problem(request, seams, slice_spec)
         if job_problem is not None:
             print_stage(StageResult(
                 "preconditions", False, job_problem.problem, job_problem.fix
@@ -1356,12 +1367,13 @@ def _prepare_ranked(
     ranked_path = request.ranked_path
     if CallSurface.RANKED_FILE in slice_spec.surfaces:
         if not isinstance(ranked_path, str) or not ranked_path:
+            retry = report.command(request.retry_command(slice_spec=slice_spec))
             print_stage(
                 StageResult(
                     "ranked",
                     False,
                     f"slice {slice_name} requires --ranked",
-                    request.ranked_required_fix(),
+                    f"Run {retry}, then retry.",
                 )
             )
             return None
@@ -1386,7 +1398,7 @@ def _prepare_ranked(
         )
         return ranked_result.ranked, {
             "judgments": {
-                "definition": rankmetrics.DEFINITION_ID,
+                "definition": rankmetrics2.DEFINITION_ID,
                 "ranked_sha256": ranked_result.sha256,
             }
         }

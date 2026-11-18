@@ -3,7 +3,7 @@ release: "fixture"
 inputs:
   site_sha256: "aa8930e46d859b552b00e9993216ea687dece40481daea7fdcd030835329a742"
   host_lock_sha256: "56b34abc306f9fbaf92b8b48f9beaa6a942c481573f06c6edc8d9b890b69d1bd"
-  models_lock_sha256: "d7f4c5b8f9db51c6403fd6a0f57e24c473ff3ea28be13748473ebd8b03ebf83a"
+  models_lock_sha256: "12b2c39433ce43a74a3cad2dc1c74964821d6dab9b42e4c3de58bbb328b955f6"
   egress_sha256: "e22abee0f29547aedd38bb2ca9ca9f0d2cd3dc4b28c9d6df72ae4fad53d0d3af"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
@@ -15,7 +15,7 @@ inputs:
   build_box: true
 files:
   compose.yaml:
-    sha256: "2b0a02ac518038375deafe980c84f965cb2ba2708b160b8b0c9d2a572d7e817f"
+    sha256: "845322f01ec94cb3bc3958aa78474202539bc54792074c31f8f9086eec0cb9aa"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -109,7 +109,7 @@ files:
     owners:
       - "open-webui"
   "open-webui/manifest.yaml":
-    sha256: "a4dc3e3633e9761b797d6f7d0b51685b084e24919ace6cd983e8553bd2c6c0da"
+    sha256: "e98e66a8126ddc22ef67f5b6ca06d4b356d7b9656116e740f494e3f36c9a7075"
     mode: "0644"
     owners: []
   "gideon-api/instruction.txt":
@@ -124,7 +124,7 @@ files:
       - "gideon-generator"
       - "gideon-embed"
   "searxng/settings.yml":
-    sha256: "46f5ce133145bab808eaf094e951b4651181a521ccac76ac85b682dcc0285457"
+    sha256: "c59d840171bac2208c37697e6a104ebf879aee92d7bf4e74feb73236a94ebbd6"
     mode: "0644"
     owners:
       - "searxng"
@@ -258,7 +258,7 @@ services:
   postgres: "22a8e8b30a6d9eaabbee5c36f326b8860b0a06ee3d5ee1d6c95d9aca13fb059f"
   qdrant: "30030653744c6091cd90a6481d358924b2c1eb8e76f86d54f1f6c1d633b61b83"
   opensearch: "5e566c66fd1232f7aa18d184184fd5680bc9be63896810da914b763f9c387742"
-  open-webui: "c77cd90569cc978835d67284a3d9eac17dc5e2e65303fffa50b27798f512452a"
+  open-webui: "6b85e47e793a70e900ce6bf6680ecf230e1e70fb0868833e34fdbdfb8144be0c"
   gideon-generator: "5568bee6e672194e56c419842484b9039c037e7902e04191e944c23e7d55fd1e"
   gideon-embed: "e47c661e7f14b1e0f85c047b292f954b567274c72c6eab013c9afa2d7c899f0c"
   gideon-api: "e0df6d9b49ad47f718ab5b41bfa7d95265798e400425745556002d9ce0ea98a5"

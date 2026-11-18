@@ -183,6 +183,21 @@ class Environment(unittest.TestCase):
         self.assertEqual(len(ALLOWED_ENDPOINTS), 9)
         self.assertEqual(ALLOWED_ENDPOINTS[8], FEEDBACK_LIST_ROUTE)
 
+    def test_feature_switches_apply_to_every_frontend_environment(self) -> None:
+        rendered_inputs = inputs()
+        environments = {
+            "gpu": owui_environment(rendered_inputs),
+            "no-gpu": owui_environment(inputs(no_gpu=True)),
+            "disconnected": owui_environment(rendered_inputs, engine=False),
+            "drill": owui_environment(rendered_inputs, engine=False, store=False),
+            "sibling": owui_environment(rendered_inputs, search=False, directory=False),
+        }
+        for frontend, environment in environments.items():
+            with self.subTest(frontend=frontend):
+                for name in ("ENABLE_NOTES", "ENABLE_CALENDAR", "ENABLE_CHANNELS"):
+                    self.assertEqual(environment[name], "false", name)
+                self.assertNotIn("ENABLE_FOLDERS", environment)
+
     def test_the_identity_and_policy_env_is_the_spec_verbatim(self) -> None:
         env = owui_environment(inputs())
         self.assertEqual(env["WEBUI_NAME"], "GIDEON")
@@ -418,6 +433,10 @@ class Environment(unittest.TestCase):
         self.assertEqual(env["USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS"], "false")
         self.assertEqual(env["USER_PERMISSIONS_WORKSPACE_MODELS_IMPORT"], "false")
         self.assertEqual(env["USER_PERMISSIONS_FEATURES_API_KEYS"], "false")
+        self.assertEqual(env["USER_PERMISSIONS_FEATURES_NOTES"], "false")
+        self.assertEqual(env["USER_PERMISSIONS_FEATURES_CALENDAR"], "false")
+        self.assertEqual(env["USER_PERMISSIONS_FEATURES_CHANNELS"], "false")
+        self.assertEqual(env["USER_PERMISSIONS_FEATURES_FOLDERS"], "true")
         self.assertEqual(env["USER_PERMISSIONS_FEATURES_WEB_SEARCH"], "true")
         self.assertEqual(env["USER_PERMISSIONS_CHAT_CONTROLS"], "false")
         self.assertEqual(env["USER_PERMISSIONS_CHAT_WEB_UPLOAD"], "false")
@@ -584,8 +603,14 @@ class Manifest(unittest.TestCase):
             self.assertEqual(groups[name]["membership"], "ldap")
             self.assertNotIn("members", groups[name])
             self.assertFalse(groups[name]["permissions"]["features"]["api_keys"])
-        for group in groups.values():
-            self.assertFalse(group["permissions"]["chat"]["web_upload"])
+        for name, group in groups.items():
+            with self.subTest(group=name):
+                self.assertFalse(group["permissions"]["chat"]["web_upload"])
+                features = group["permissions"]["features"]
+                self.assertIs(features["notes"], False)
+                self.assertIs(features["calendar"], False)
+                self.assertIs(features["channels"], False)
+                self.assertIs(features["folders"], True)
         service = groups[SERVICE_GROUP]
         self.assertEqual(service["membership"], "manifest")
         self.assertEqual(service["members"], [EVAL_IDENTITY.username])

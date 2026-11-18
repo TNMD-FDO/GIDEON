@@ -57,6 +57,7 @@ EXCLUDED_PREFIXES = (
     "tests/test_wait_for.py",  # bin/wait-for's tests
     "eval/seed/prototype-qa",  # harvested QA data pending a CSA ruling
     "eval/sets/eval-v1/judgments/queries.jsonl",  # harvest-derived judgment queries pending a CSA ruling
+    "eval/sets/eval-v1/judgments/judgments.jsonl",  # grades leave with the queries they name
     "eval/sets/eval-v1/research-qa/harvest.jsonl",  # harvest-derived research questions pending the same ruling
     "tools/judgments",  # judgment intake tooling that loads the excluded flagger
     "tools/signoffs",  # the sign-off kit tooling

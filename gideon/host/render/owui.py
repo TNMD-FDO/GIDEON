@@ -522,6 +522,15 @@ def owui_environment(
             # feature list, off for every role on every host (exempt: policy
             # toggles).  The Admin → Evaluations page stays.
             "ENABLE_EVALUATION_ARENA_MODELS": "false",
+            # Notes and Calendar default on in the pinned frontend. Turning
+            # both off hides their controls for admins too, removes the
+            # composer's attach-a-note item, and closes the calendar routes
+            # for every role. Channels defaults off and is set explicitly so a
+            # pin bump cannot enable it. Folders stays on with its shipped
+            # ENABLE_FOLDERS default. exempt: policy toggles.
+            "ENABLE_NOTES": "false",
+            "ENABLE_CALENDAR": "false",
+            "ENABLE_CHANNELS": "false",
             # No egress off the allowlist and no self-update nudge: releases are
             # digest-pinned, so the frontend never phones home for versions or models.
             "ENABLE_VERSION_UPDATE_CHECK": "false",

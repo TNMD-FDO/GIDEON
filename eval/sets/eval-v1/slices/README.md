@@ -59,8 +59,8 @@ invented suite stays on the kept side of the export boundary.
 
 The `judgments` slice selects the judgment set's queries in
 `../judgments/queries.jsonl`, one result per active query, scored against the
-judgments file by the `judgments@1` definition that `../judgments/README.md`
-states. Its one id list, `judgments/queries.ids`, leaves at the export boundary
+judgments file by the current definition, `judgments@2`, against the manifest
+of the generation the run names, as `../judgments/README.md` states. Its one id list, `judgments/queries.ids`, leaves at the export boundary
 with the queries file it names: an id list resolving to no case is a loader
 finding, so it cannot stay where its cases go. In an exported tree the registry
 holds a `judgments` slice the set does not, and `eval run` answers that as it

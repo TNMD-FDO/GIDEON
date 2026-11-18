@@ -234,7 +234,7 @@ Eval run scores an evaluation set, compares per-case verdicts with the committed
 
 The quiet window covers weeknights 19:00 to 06:00 and Friday 19:00 to Monday 06:00 in the site's timezone. The account used for evaluation turns through the frontend is called the eval identity.
 
-`extraction` scores the set's labelled exact objects, and `judgments --ranked <file>` scores ranked gold-evidence coordinates against attorneys' grades, reporting nDCG@10, recall@50, and Hole@10 without gating those measures.
+`extraction` scores the set's labelled exact objects, and `judgments --ranked <file> --generation <name>` scores ranked gold-evidence coordinates against attorneys' grades, reporting nDCG@10, recall@50, and Hole@10 without gating those measures. It reads the generation's manifest first, because a graded passage the generation does not hold under its graded text could not have been retrieved from it: such a passage is left out of that query's figures and listed by query id. A ranked entry the generation does not hold shows the file was drawn from another index, so its query and the run fail. The run records the generation and its corpus lockfile, and the generation is chosen as it is for `gold-drop` below.
 
 `guardrails` runs three guardrail families through General's service, with six cases also through the frontend, in the quiet window. It gates each family and the harness's false-refusal counts at their ceilings, while the judge's readings are reported without gating.
 

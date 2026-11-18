@@ -1,6 +1,7 @@
 """Independent invariants that keep judge scores out of the evaluation gate."""
 
 import ast
+import tempfile
 import unittest
 from collections.abc import Mapping
 from dataclasses import replace
@@ -11,6 +12,7 @@ from typing import cast
 import test_golddrop_slice
 from test_guardrails_slice import _DECLINE, SAMPLE_IDS, JudgingDoorHost, _fixture_turns
 from test_judge import false_refusal_content, valid_content
+from test_judgments_slice import FIGURE_KEYS, _coordinate, _fixture, _judgments_host
 
 from gideon import guardrail
 from gideon.evaluation import command, judge
@@ -199,14 +201,22 @@ def _run_registered(
             turns=turns,
             checkout=checkout,
         )
-        if slice_name == "gold-drop":
+        if slice_name in {"gold-drop", "judgments"}:
             gold_host = test_golddrop_slice.GoldDropHost()
-            gold_host.manifest = test_golddrop_slice._manifest(loaded)
             context = replace(
                 context,
                 host=cast(Host, gold_host),
                 generation=test_golddrop_slice._context(gold_host).generation,
             )
+            if slice_name == "gold-drop":
+                gold_host.manifest = test_golddrop_slice._manifest(loaded)
+            else:
+                ranked = dict.fromkeys(select_cases(loaded, slice_name).counted, ())
+                gold_host.manifest = {
+                    row.source_id: row.sha256 for row in loaded.judgments
+                    if row.assessment == "primary" and row.query_id in ranked
+                }
+                context = replace(context, ranked=ranked)
         result = spec.runner(loaded, slice_name, context)
         if CallSurface.TURNS in spec.surfaces and spec.judge_prompt is not None:
             assert all(
@@ -236,6 +246,29 @@ def _metric_offenders(value: object) -> tuple[str, ...]:
 
 class Invariance(unittest.TestCase):
     """Every registered runner keeps judge-derived variation inside judge."""
+
+    def test_judgments_verdict_holds_when_each_ranking_figure_changes(self) -> None:
+        """Both lists are covered and held, so their verdicts are equal whatever the figures."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, (case_id,) = _fixture(directory, {1: 3})
+            loaded = load_set(checkout / SET_ROOT).loaded
+            assert loaded is not None
+        source_id, sha256, start, end = _coordinate(1)
+        host = _judgments_host((1,))
+        context = test_golddrop_slice._context(host)
+        for entry, figures in (
+            ((source_id, sha256, start, end), (1.0, 1.0, 0.0)),
+            ((source_id, sha256, end, end + (end - start)), (0.0, 0.0, 1.0)),
+        ):
+            with self.subTest(figures=figures):
+                result = SLICE_RUNNERS["judgments"].runner(
+                    loaded, "judgments", replace(context, ranked={case_id: (entry,)}),
+                )
+                self.assertTrue(result.verdict, result.report)
+                row, = result.results
+                self.assertEqual((row.case_id, row.verdict), (case_id, "pass"))
+                self.assertEqual(tuple(row.metrics[key] for key in FIGURE_KEYS), figures)
 
     def test_every_registered_slice_is_driven_and_never_gates_on_verdict_fields(self) -> None:
         first_loaded, first = _run_registered(

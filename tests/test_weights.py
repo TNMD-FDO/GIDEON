@@ -605,11 +605,12 @@ profiles:
     requires:
       platform: x86_64
       gpu:
-        architecture: Fictitious
-        compute_capability: "1.0"
-        model: Fictitious GPU
         count: 1
         vram_gb: 1
+        cards:
+          - model: Fictitious GPU
+            architecture: Fictitious
+            compute_capability: "1.0"
       dram_gb: 1
       data_volume_gb: 1
     memory:

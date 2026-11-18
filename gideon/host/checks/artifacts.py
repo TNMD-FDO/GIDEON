@@ -15,7 +15,7 @@ from gideon.host.checks import (
     nvidia_failure,
 )
 from gideon.host.courts import CourtMap
-from gideon.host.models import GIGABYTE, select_profile
+from gideon.host.models import GIGABYTE, AdmittedCard, select_profile
 from gideon.host.report import Problem
 from gideon.host.steps.nvidia import loaded_driver_version
 
@@ -204,6 +204,7 @@ class HardwareProfileCheck(PreflightCheck):
     `count` positions, where render binds the profile's servers, so a driver
     that enumerates the cards differently moves no judgment; the cards beyond
     them are unused by the profile and named so.
+    Each judged card must match one entry in the profile's admitted list.
     """
 
     name = "hardware-profile"
@@ -291,22 +292,19 @@ class HardwareProfileCheck(PreflightCheck):
             shortfalls.append(f"platform is {platform}, profile requires {required.platform}")
         if len(facts) < required.gpu.count:
             shortfalls.append(f"GPU count is {len(facts)}, profile requires {required.gpu.count}")
+        matched: list[tuple[_GpuFacts, AdmittedCard]] = []
         for position, fact in enumerate(facts[:required.gpu.count]):
-            if not required.gpu.matches(fact.model):
+            card = required.gpu.card(fact.model)
+            mismatch = _card_mismatch(fact, card)
+            if mismatch is not None:
                 shortfalls.append(
                     f"GPU index {position} model is {fact.model}, "
-                    f"profile requires {required.gpu.model} (any edition)"
+                    f"architecture is {fact.architecture} (per nvidia-smi -q), "
+                    f"and compute capability is {fact.compute_capability}. {mismatch}. "
+                    f"{_admitted_detail(required.gpu.cards)}"
                 )
-            if fact.compute_capability != required.gpu.compute_capability:
-                shortfalls.append(
-                    f"GPU index {position} compute capability is {fact.compute_capability}, "
-                    f"profile requires {required.gpu.compute_capability}"
-                )
-            if fact.architecture != required.gpu.architecture:
-                shortfalls.append(
-                    f"GPU index {position} architecture is {fact.architecture} (per nvidia-smi -q), "
-                    f"profile requires {required.gpu.architecture}"
-                )
+            elif card is not None:
+                matched.append((fact, card))
             if fact.vram_bytes < required.gpu.vram_gb * GIGABYTE:
                 vram_mib = fact.vram_bytes // MEBIBYTE
                 shortfalls.append(
@@ -323,7 +321,7 @@ class HardwareProfileCheck(PreflightCheck):
             prefix = f"profile {profile.name!r}: " if non_reference else ""
             return CheckReport(Severity.REFUSE, prefix + "; ".join(shortfalls), _PROFILE_FIX)
 
-        detail = _matched_detail(platform, facts, dram_bytes, required.gpu.count)
+        detail = _matched_detail(platform, matched, dram_bytes, len(facts), required.gpu.count)
         prefix = gpus.UNRECORDED_DETAIL if recorded is None else ""
         if non_reference:
             return CheckReport(
@@ -342,21 +340,48 @@ def _unreadable_detail(command: str, stderr: str) -> str:
     return f"{command} could not determine the host fact" + (f": {detail}" if detail else "")
 
 
-def _matched_detail(platform: str, facts: list[_GpuFacts], dram_bytes: int, count: int) -> str:
-    """Render matched facts; every judged card matched, so the first speaks for that set."""
+def _card_mismatch(fact: _GpuFacts, card: AdmittedCard | None) -> str | None:
+    if card is None:
+        return "No admitted card has that name"
+    differences: list[str] = []
+    if fact.compute_capability != card.compute_capability:
+        differences.append(f"compute capability {card.compute_capability}")
+    if fact.architecture != card.architecture:
+        differences.append(f"architecture {card.architecture}")
+    if differences:
+        return f"The name matches {card.model}, which requires " + " and ".join(differences)
+    return None
 
-    first = facts[0]
-    count_detail = f"GPU count {len(facts)}"
-    if len(facts) > count:
-        unused = ", ".join(str(position) for position in range(count, len(facts)))
-        count_detail += f", profile requires {count}, unused GPU index {unused}"
-    return (
-        f"{count_detail}, model {first.model}; "
-        f"architecture {first.architecture} (per nvidia-smi -q); "
-        f"compute capability {first.compute_capability}; "
-        f"per-GPU VRAM {format_gb(first.vram_bytes)}; "
-        f"DRAM {format_gb(dram_bytes)}; platform {platform}"
+
+def _admitted_detail(cards: tuple[AdmittedCard, ...]) -> str:
+    entries = ", ".join(
+        f"{card.model} (architecture {card.architecture}, "
+        f"compute capability {card.compute_capability})"
+        for card in cards
     )
+    return f"Admitted cards are {entries} (any edition)"
+
+
+def _matched_detail(
+    platform: str,
+    matched: list[tuple[_GpuFacts, AdmittedCard]],
+    dram_bytes: int,
+    total: int,
+    count: int,
+) -> str:
+    """Render each judged GPU and the entry it matched."""
+
+    count_detail = f"GPU count {total}"
+    if total > count:
+        unused = ", ".join(str(position) for position in range(count, total))
+        count_detail += f", profile requires {count}, unused GPU index {unused}"
+    card_details = [
+        f"GPU index {position} model {fact.model} matches admitted card {card.model}, "
+        f"architecture {fact.architecture} (per nvidia-smi -q), "
+        f"compute capability {fact.compute_capability}, per-GPU VRAM {format_gb(fact.vram_bytes)}"
+        for position, (fact, card) in enumerate(matched)
+    ]
+    return "; ".join([count_detail, *card_details, f"DRAM {format_gb(dram_bytes)}", f"platform {platform}"])
 
 
 def _version_key(value: str) -> tuple[int, ...]:

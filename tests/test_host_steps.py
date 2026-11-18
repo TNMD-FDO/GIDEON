@@ -34,6 +34,8 @@ from gideon.host.lock import load_host_lock
 from gideon.host.models import GIGABYTE, ModelsLock, load_models_lock, select_profile
 from gideon.host.provision import run_provision
 from gideon.host.render import worker
+from gideon.host.render.ci import CI_ROOT
+from gideon.host.render.drill import DRILL_ROOT
 from gideon.host.render.opensearch import (
     OPENSEARCH_DATA_ROOT,
     OPENSEARCH_GID,
@@ -67,11 +69,13 @@ from gideon.host.steps.command import (
 )
 from gideon.host.steps.disk import (
     _DATA_DIRS,
+    DATA_MOUNT,
     GRAFANA_GID,
     GRAFANA_UID,
     PROMETHEUS_GID,
     PROMETHEUS_UID,
     DiskLayoutStep,
+    _owner_ids,
     data_directories,
 )
 from gideon.host.steps.docker import (
@@ -886,6 +890,7 @@ def add_data_directory(host: FakeHost, names: Sequence[str] = ()) -> None:
 _GIDEON_UID = 998
 _GIDEON_GID = 998
 _DIRECTORY_OWNERS = {
+    "root": (0, 0),
     "gideon": (_GIDEON_UID, _GIDEON_GID),
     "opensearch": (OPENSEARCH_UID, OPENSEARCH_GID),
     "prometheus": (PROMETHEUS_UID, PROMETHEUS_GID),
@@ -940,6 +945,16 @@ def populate_data_directories(host: FakeHost) -> None:
 
 
 class DiskLayoutStepTests(unittest.TestCase):
+    def test_sibling_project_directories_are_root_owned(self) -> None:
+        layout = {
+            str(DATA_MOUNT / directory.relative_path): (directory.owner, directory.mode)
+            for directory in _DATA_DIRS
+        }
+        for path in (DRILL_ROOT, CI_ROOT):
+            with self.subTest(path=path):
+                self.assertEqual(layout[path], ("root", 0o755))
+        self.assertEqual(_owner_ids(_GIDEON_UID, _GIDEON_GID)["root"], (0, 0))
+
     def test_data_directories_are_top_level_in_layout_order(self) -> None:
         names = data_directories()
         self.assertEqual(
@@ -1162,7 +1177,7 @@ class DiskLayoutStepTests(unittest.TestCase):
     def test_foreign_mount_apply_makes_only_data_directories(self) -> None:
         host = mounted_disk_host("/dev/office-data", "xfs", data_volume_floor_bytes())
         step = DiskLayoutStep()
-        step.apply(context(host))
+        self.assertIsNone(step.apply(context(host)))
 
         expected: list[tuple[str, object]] = []
         for directory in _DATA_DIRS:
@@ -1184,6 +1199,58 @@ class DiskLayoutStepTests(unittest.TestCase):
         self.assertTrue({run[0][0] for run in host.runs} <= {"lsblk", "findmnt", "getent"})
         self.assertNotIn(("read_text", "/etc/fstab"), host.calls)
         self.assertFalse(any(call[0] == "write_text" for call in host.calls))
+
+    def test_foreign_mount_apply_reowns_and_announces_existing_sibling_directories(self) -> None:
+        host = mounted_disk_host("/dev/office-data", "xfs", data_volume_floor_bytes())
+        populate_data_directories(host)
+        for path in (DRILL_ROOT, CI_ROOT):
+            host.stats[path] = directory_stat(0o755, _GIDEON_UID, _GIDEON_GID)
+        step = DiskLayoutStep()
+        ctx = context(host)
+
+        drift = step.check(ctx)
+        self.assertEqual(drift.disposition, Disposition.DRIFT)
+        self.assertEqual(drift.detail, f"directory {DRILL_ROOT} is not owned by root")
+        self.assertIn("Re-run provision", drift.fix)
+        self.assertNotIn("gideon", drift.fix)
+
+        announcement = step.apply(ctx)
+
+        self.assertIn(("chown", (DRILL_ROOT, 0, 0)), host.calls)
+        self.assertIn(("chown", (CI_ROOT, 0, 0)), host.calls)
+        previous_ids = f"{_GIDEON_UID}:{_GIDEON_GID}"
+        self.assertEqual(
+            announcement,
+            f"Re-owned {DRILL_ROOT} to root (previously {previous_ids}), "
+            f"{CI_ROOT} to root (previously {previous_ids})",
+        )
+
+    def test_foreign_mount_apply_does_not_announce_current_owners(self) -> None:
+        host = mounted_disk_host("/dev/office-data", "xfs", data_volume_floor_bytes())
+        populate_data_directories(host)
+        self.assertIsNone(DiskLayoutStep().apply(context(host)))
+
+    def test_foreign_mount_apply_refuses_unreadable_directory_before_mutation(self) -> None:
+        host = mounted_disk_host("/dev/office-data", "xfs", data_volume_floor_bytes())
+        populate_data_directories(host)
+        del host.stats[CI_ROOT]
+        self.assertFalse(host.exists(CI_ROOT))
+        read_stat = host.stat
+
+        def unreadable_ci_stat(path: PathLike) -> os.stat_result:
+            if os.fspath(path) == CI_ROOT:
+                raise PermissionError("access denied")
+            return read_stat(path)
+
+        with (
+            patch.object(host, "stat", side_effect=unreadable_ci_stat),
+            self.assertRaises(StepFailure) as raised,
+        ):
+            DiskLayoutStep().apply(context(host))
+
+        self.assertEqual(raised.exception.detail, f"cannot inspect {CI_ROOT}: access denied")
+        self.assertEqual(raised.exception.fix, f"Restore access to {CI_ROOT}, then re-run provision.")
+        self.assertFalse(any(call[0] in {"mkdir", "chmod", "chown"} for call in host.calls))
 
     def test_foreign_mount_size_and_type_shortfalls_refuse_without_mutation(self) -> None:
         floor_bytes = data_volume_floor_bytes()
@@ -1527,13 +1594,13 @@ class DiskLayoutStepTests(unittest.TestCase):
                 "work",
                 "models",
                 "registry",
-                "drill",
-                "ci",
                 "backup-staging",
                 "acceptance",
                 "observability",
             )
         }
+        stats[DRILL_ROOT] = directory_stat(0o755)
+        stats[CI_ROOT] = directory_stat(0o755)
         stats["/data/bulk/cas"] = os.stat_result(
             (0o42770, 0, 0, 0, 998, 998, 0, 0, 0, 0, 0)
         )
@@ -1566,7 +1633,7 @@ class DiskLayoutStepTests(unittest.TestCase):
         )
         step = DiskLayoutStep()
         self.assertEqual(step.check(context(host)).disposition, Disposition.DRIFT)
-        step.apply(context(host))
+        self.assertIsNone(step.apply(context(host)))
         self.assertEqual(
             host.files["/etc/fstab"],
             "# foreign line\n"
@@ -1720,6 +1787,12 @@ class DiskLayoutStepTests(unittest.TestCase):
             ("chown", ("/data/observability/grafana", 472, 472)),
             host.calls,
         )
+
+        with patch.dict(host.stats, {DRILL_ROOT: directory_stat(0o755, 0, _GIDEON_GID)}):
+            self.assertEqual(
+                step.apply(context(host)),
+                f"Re-owned {DRILL_ROOT} to root (previously 0:{_GIDEON_GID})",
+            )
 
         host.files["/etc/fstab"] += "/dev/vg_data/data /data xfs defaults 0 0\n"
         stray = step.check(context(host))
@@ -6923,13 +6996,13 @@ class BaselineCheckPass(unittest.TestCase):
                     "work",
                     "models",
                     "registry",
-                    "drill",
-                    "ci",
                     "backup-staging",
                     "acceptance",
                 )
             }
         )
+        host.stats[DRILL_ROOT] = directory_stat(0o755)
+        host.stats[CI_ROOT] = directory_stat(0o755)
         host.stats["/data/bulk/cas"] = directory_stat(0o2770, 998, 998)
         host.stats[str(worker.SNAPSHOTS_ROOT)] = directory_stat(worker.DIR_MODE, 998, 998)
         host.stats[str(worker.WORK_ROOT)] = directory_stat(worker.DIR_MODE, 998, 998)

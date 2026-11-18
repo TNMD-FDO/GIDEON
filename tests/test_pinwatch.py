@@ -192,11 +192,12 @@ def _fictitious_models_lock_text(
             "    requires:\n"
             "      platform: x86_64\n"
             "      gpu:\n"
-            "        architecture: fictitious\n"
-            "        compute_capability: \"1.0\"\n"
-            "        model: fictitious\n"
             "        count: 1\n"
             "        vram_gb: 2\n"
+            "        cards:\n"
+            "          - model: fictitious\n"
+            "            architecture: fictitious\n"
+            "            compute_capability: \"1.0\"\n"
             "      dram_gb: 2\n"
             "      data_volume_gb: 2\n"
             + FICTITIOUS_GUARDED_MEMORY
@@ -225,11 +226,15 @@ def _fictitious_models_lock_text(
         "    requires:\n"
         "      platform: x86_64\n"
         "      gpu:\n"
-        "        architecture: fictitious\n"
-        "        compute_capability: \"1.0\"\n"
-        "        model: fictitious\n"
         "        count: 1\n"
         "        vram_gb: 1\n"
+        "        cards:\n"
+        "          - model: fictitious\n"
+        "            architecture: fictitious\n"
+        "            compute_capability: \"1.0\"\n"
+        "          - model: alternate fictitious GPU\n"
+        "            architecture: alternate\n"
+        "            compute_capability: \"2.0\"\n"
         "      dram_gb: 1\n"
         "      data_volume_gb: 1\n"
         + FICTITIOUS_GUARDED_MEMORY
@@ -1884,6 +1889,10 @@ class PatchContracts(unittest.TestCase):
         self.assertIn("        # retain this comment\n        files:\n", patched)
         patched_result = load_models_lock_text(patched)
         assert patched_result.lock is not None
+        self.assertEqual(
+            patched_result.lock.profiles[0].requires.gpu.cards,
+            result.lock.profiles[0].requires.gpu.cards,
+        )
         self.assertEqual(
             patched_result.lock.profiles[0].models[0].files[0].path, "config.json"
         )

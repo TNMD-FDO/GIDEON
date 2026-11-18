@@ -14,6 +14,15 @@
 # membership (a profile's `corpus_line` names a line of lockfiles, the default
 # line when absent), product behaviour constants, host facts read at install
 # (GPU UUIDs); OS and driver pins are host.lock's, image digests images.lock's.
+#
+# Each requires.gpu block has a non-empty cards list, with exactly model,
+# architecture, and a quoted compute_capability per entry. The count and
+# vram_gb minimums apply to the whole block. Each model is listed once and
+# no entry is an edition of another. A card passes the list check when its
+# reported name equals an entry's model or begins with it and exactly one
+# space, and it reads that entry's architecture and compute capability.
+# The list admits NVIDIA cards alone. A card from another vendor needs its
+# own readings, container device access, and image.
 version: 1
 # The reference build: the one profile TNMD runs and evaluates against.
 reference: 2x96v-256d
@@ -25,22 +34,22 @@ profiles:
   2x96v-256d:
     # Minimums preflight checks against the host.  The memory figures are
     # decimal gigabytes (10^9 bytes), compared with the kernel's
-    # MemTotal and nvidia-smi's memory.total converted to bytes; the GPU model
-    # is the card's name as the driver leads with it. A reported name selects
-    # the profile when it equals the name or begins with it and one space,
-    # so every edition of the card selects the profile; the suffix names its
-    # cooler and power limit. The Max-Q's lower clocks are accepted, since
-    # nothing the profile fixes depends on clocks. The data-volume floor is
+    # MemTotal and nvidia-smi's memory.total converted to bytes. An entry's
+    # model is the card's name as the driver leads with it and admits every
+    # edition of that card. The suffix names its cooler and power limit.
+    # The Max-Q's lower clocks are accepted, since nothing the profile
+    # fixes depends on clocks. The data-volume floor is
     # a capacity starting value under the corpus footprint rule, corrected
     # by the measured footprint once the corpus lands.
     requires:
       platform: x86_64
       gpu:
-        architecture: Blackwell
-        compute_capability: "12.0"
-        model: NVIDIA RTX PRO 6000 Blackwell
         count: 2
         vram_gb: 96
+        cards:
+          - model: NVIDIA RTX PRO 6000 Blackwell
+            architecture: Blackwell
+            compute_capability: "12.0"
       dram_gb: 256
       data_volume_gb: 4000
     # The memory table gives Compose mem_limit starting values in decimal
@@ -562,22 +571,28 @@ profiles:
           vocab.json:
             sha256: sha256:ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910
             size: 2776833
-  # The trial profile: one RTX PRO 4500 Blackwell shared by the generator
-  # and embedder. Its figures are derived starting values, evaluated on the
-  # owned card's capped split. Host-memory and footprint proofs and acceptance
-  # on the named card are owed before an install is offered.
+  # The trial profile admits one NVIDIA RTX PRO 4500 Blackwell or NVIDIA
+  # GeForce RTX 5090 shared by the generator and embedder. The GeForce RTX
+  # 5090's driver and CDI behaviour are unread. The figures are derived
+  # starting values, evaluated on the owned card's capped split. Host-memory
+  # and footprint proofs and acceptance on an admitted card are owed before
+  # an install is offered.
   1x32v-120d:
     # Minimums in decimal gigabytes. The host-memory and data-volume floors
     # are proxies derived from recorded SCOTUS counts and tranche footprints.
-    # The GPU family name admits its Workstation and Server editions.
+    # The first entry's family name admits its Workstation and Server editions.
     requires:
       platform: x86_64
       gpu:
-        architecture: Blackwell
-        compute_capability: "12.0"
-        model: NVIDIA RTX PRO 4500 Blackwell
         count: 1
         vram_gb: 32
+        cards:
+          - model: NVIDIA RTX PRO 4500 Blackwell
+            architecture: Blackwell
+            compute_capability: "12.0"
+          - model: NVIDIA GeForce RTX 5090
+            architecture: Blackwell
+            compute_capability: "12.0"
       dram_gb: 120
       data_volume_gb: 600
     # E9 starting values in decimal gigabytes, corrected from measured RSS.

@@ -79,15 +79,23 @@ chat:
 
 features:
   api_keys: false # product value
-  notes: true # upstream default
-  channels: true # upstream default
-  folders: true # upstream default
+  # Notes and Calendar are off for every user, Channels is off to match its
+  # switch, and Folders stays on. The note screen opens chats with the
+  # frontend's notes tools regardless of General's settings. Notes and Calendar
+  # store user text outside the retention rule, which names chats and their
+  # uploads alone. The pinned frontend checks the Notes permission on its
+  # routes and both the Calendar switch and permission on calendar routes.
+  # Admins bypass permissions by design. The rendered switches also apply to
+  # admins. exempt: policy toggles.
+  notes: false # product decision; upstream default: true
+  channels: false # product decision; upstream default: true
+  folders: true # product decision; upstream default: true
   direct_tool_servers: false # product value
   web_search: true # product value
   image_generation: false # product value
   code_interpreter: false # product value
   memories: false # plan rule: Memory off
-  calendar: true # upstream default
+  calendar: false # product decision; upstream default: true
   automations: false # upstream default
   webhooks: false # upstream default
 

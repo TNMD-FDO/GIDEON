@@ -130,9 +130,12 @@ def resolve_generation(
         )
     if name is not None and re.fullmatch(GENERATION_PATTERN, name) is None:
         return Problem("not a generation name", selection_fix)
+    # A named generation is reprinted after a read failure, so the retry scores
+    # the same generation rather than falling back to the stack's default.
+    again = retry_command if name is None else f"{retry_command} --generation {name}"
     logs_fix = (
         f"Run {stack.logs_fix(stack_dir, record.POSTGRES_SERVICE)}, "
-        f"then run {retry_command} again."
+        f"then run {again} again."
     )
     try:
         result = host.run(record.reader_argv(stack_dir), input=_select_sql(name))

@@ -99,8 +99,10 @@ _DATA_DIRS: Final[tuple[_DataDirectory, ...]] = (
     ),
     _DataDirectory("models", "gideon", 0o755),
     _DataDirectory("registry", "gideon", 0o755),
-    _DataDirectory("drill", "gideon", 0o755),
-    _DataDirectory("ci", "gideon", 0o755),
+    # Only root may write these directories because it runs Compose from a
+    # document in each.
+    _DataDirectory("drill", "root", 0o755),
+    _DataDirectory("ci", "root", 0o755),
     _DataDirectory("backup-staging", "gideon", 0o755),
     _DataDirectory("acceptance", "gideon", 0o755),
     _DataDirectory("observability", "gideon", 0o755),
@@ -121,6 +123,7 @@ def _owner_ids(uid: int, gid: int) -> Mapping[str, tuple[int, int]]:
     """The uid/gid pair behind each ``_DataDirectory.owner`` name."""
 
     return {
+        "root": (0, 0),
         "gideon": (uid, gid),
         "prometheus": (PROMETHEUS_UID, PROMETHEUS_GID),
         "grafana": (GRAFANA_UID, GRAFANA_GID),
@@ -697,12 +700,12 @@ def _directory_result(
         return CheckResult(
             Disposition.DRIFT,
             missing_directory,
-            "Create the /data directory tree owned by gideon, then re-run provision.",
+            "Re-run provision to set the required owners and modes under /data.",
         )
     return CheckResult(Disposition.CONVERGED, detail, "")
 
 
-def _apply_directories(context: ProvisionContext) -> None:
+def _apply_directories(context: ProvisionContext) -> str | None:
     entry = passwd_entry(context, "gideon")
     if entry is None:
         raise StepFailure(
@@ -710,12 +713,31 @@ def _apply_directories(context: ProvisionContext) -> None:
             "Converge the service-user step, then re-run provision.",
         )
     owners = _owner_ids(entry.uid, entry.gid)
+    host = context.host
+    reowned: list[str] = []
+    for directory in _DATA_DIRS:
+        path = DATA_MOUNT / directory.relative_path
+        try:
+            details = host.stat(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise StepFailure(
+                f"cannot inspect {path}: {exc}",
+                f"Restore access to {path}, then re-run provision.",
+            ) from exc
+        if (details.st_uid, details.st_gid) != owners[directory.owner]:
+            reowned.append(
+                f"{path} to {directory.owner} (previously {details.st_uid}:{details.st_gid})"
+            )
+
     for directory in _DATA_DIRS:
         path = DATA_MOUNT / directory.relative_path
         owner_uid, owner_gid = owners[directory.owner]
-        context.host.mkdir(path, mode=directory.mode, exist_ok=True)
-        context.host.chmod(path, directory.mode)
-        context.host.chown(path, owner_uid, owner_gid)
+        host.mkdir(path, mode=directory.mode, exist_ok=True)
+        host.chmod(path, directory.mode)
+        host.chown(path, owner_uid, owner_gid)
+    return "Re-owned " + ", ".join(reowned) if reowned else None
 
 
 class DiskLayoutStep(Step):
@@ -833,7 +855,7 @@ class DiskLayoutStep(Step):
             )
         return _directory_result(context, inspection, detail="data layout is current")
 
-    def apply(self, context: ProvisionContext) -> None:
+    def apply(self, context: ProvisionContext) -> str | None:
         inspection = _inspect(context)
         if inspection.error is not None:
             raise StepFailure(inspection.error, inspection.error_fix)
@@ -850,8 +872,7 @@ class DiskLayoutStep(Step):
             refusal = _foreign_mount_refusal(context, inspection.mount)
             if refusal is not None:
                 raise StepFailure(refusal.detail, refusal.fix)
-            _apply_directories(context)
-            return
+            return _apply_directories(context)
         if inspection.data_disk is None or inspection.data_kind == "foreign":
             raise RuntimeError("refusing to mutate a foreign or unidentified data disk")
         if inspection.vg_exists and not inspection.pv_exists:
@@ -911,4 +932,4 @@ class DiskLayoutStep(Step):
             )
         if current_mount is None:
             context.host.run(["mount", str(DATA_MOUNT)], check=True)
-        _apply_directories(context)
+        return _apply_directories(context)

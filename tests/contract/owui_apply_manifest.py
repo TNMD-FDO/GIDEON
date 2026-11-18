@@ -507,6 +507,10 @@ class ApplyManifestContract(unittest.TestCase):
         self.assertIsInstance(restored_features, dict)
         assert isinstance(restored_features, dict)
         self.assertIs(restored_features["enable_message_rating"], True)
+        self.assertIs(restored_features["enable_notes"], False)
+        self.assertIs(restored_features["enable_calendar"], False)
+        self.assertIs(restored_features["enable_channels"], False)
+        self.assertIs(restored_features["enable_folders"], True)
         self._assert_live_model_listing(admin)
         restored_arena = admin.request("GET", "/api/v1/evaluations/config")
         self.assertEqual(restored_arena.status, 200, restored_arena.body)
@@ -590,6 +594,29 @@ class ApplyManifestContract(unittest.TestCase):
         select = self.stack.compose("exec", "-T", "postgres", "psql", "-U", "gideon_audit", "-d", "gideon", "-tAc", "SELECT count(*) FROM audit_log")
         self.assertNotEqual(select.returncode, 0)
         self.assertIn("permission denied", select.stderr)
+
+    def test_user_feature_routes_follow_rendered_policy(self) -> None:
+        # Bootstrap the eval identity so this test can run on its own.
+        converged = owui.bootstrap(
+            ContractHost(), client_factory, self.manifest(), rendered_dir=self.stack.directory
+        )
+        self.assertTrue(converged.ok, converged)
+        token = client_factory().signin(
+            EVAL_IDENTITY.email,
+            self.stack.passwords["gideon_eval_password"],
+        )
+        user = client_factory(token=token)
+        for path, expected_status in (
+            ("/api/v1/notes/", 401),
+            ("/api/v1/calendars/", 403),
+            (
+                "/api/v1/calendars/events?start=2030-01-01T00:00:00Z&end=2030-01-02T00:00:00Z",
+                403,
+            ),
+            ("/api/v1/folders/", 200),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(user.request("GET", path).status, expected_status)
 
 
 if __name__ == "__main__":

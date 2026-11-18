@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
+import yaml  # type: ignore[import-untyped]
 from test_render import render_templates
 
 from gideon.host.egress import load_egress_allowlist
@@ -156,6 +157,15 @@ class Settings(unittest.TestCase):
                 self.assertEqual([entry["name"] for entry in entries], engines)
                 for entry in entries:
                     self.assertIs(entry["inactive"], False)
+
+    def test_plugins_mapping_is_present_and_empty(self) -> None:
+        base = inputs()
+        artifact = SearxngSettingsArtifact()
+        for engines in (list(base.site.web.engines), list(WEB_ENGINE_VALUES)):
+            with self.subTest(engines=engines):
+                rendered_inputs = with_search(base, "on", engines=engines)
+                self.assertEqual(searxng_settings_document(rendered_inputs)["plugins"], {})
+                self.assertEqual(yaml.safe_load(artifact.emit(rendered_inputs))["plugins"], {})
 
     def test_pinned_defaults_the_two_formats_and_no_secret_key(self) -> None:
         document = searxng_settings_document(inputs())

@@ -25,6 +25,7 @@ from gideon.host.models import (
     REVISION,
     ROLE_NAME,
     SERVICE_NAME,
+    AdmittedCard,
     CandidatePin,
     ChunkGuards,
     CotenantReserve,
@@ -59,6 +60,13 @@ GUARDS = """    chunk_guards:
       resident_bytes_per_chunk: 1300
 """
 
+GPU_CARD = """          - model: Example GPU
+            architecture: Example
+            compute_capability: "1.0"
+"""
+GPU_CARDS = f"        cards:\n{GPU_CARD}"
+GPU_PATH = "profiles.2x96v-256d.requires.gpu"
+
 VALID = f"""version: 1
 reference: 2x96v-256d
 profiles:
@@ -66,12 +74,9 @@ profiles:
     requires:
       platform: x86_64
       gpu:
-        architecture: Blackwell
-        compute_capability: "12.0"
-        model: NVIDIA RTX PRO 6000 Blackwell
         count: 2
         vram_gb: 96
-      dram_gb: 256
+{GPU_CARDS}      dram_gb: 256
       data_volume_gb: 4000
     memory:
       caddy:
@@ -390,9 +395,7 @@ class CommittedLock(unittest.TestCase):
             ProfileRequirements(
                 platform="x86_64",
                 gpu=GpuRequirements(
-                    architecture="Blackwell",
-                    compute_capability="12.0",
-                    model="NVIDIA RTX PRO 6000 Blackwell",
+                    cards=(AdmittedCard("NVIDIA RTX PRO 6000 Blackwell", "Blackwell", "12.0"),),
                     count=2,
                     vram_gb=96,
                 ),
@@ -460,9 +463,10 @@ class CommittedLock(unittest.TestCase):
             ProfileRequirements(
                 platform="x86_64",
                 gpu=GpuRequirements(
-                    architecture="Blackwell",
-                    compute_capability="12.0",
-                    model="NVIDIA RTX PRO 4500 Blackwell",
+                    cards=(
+                        AdmittedCard("NVIDIA RTX PRO 4500 Blackwell", "Blackwell", "12.0"),
+                        AdmittedCard("NVIDIA GeForce RTX 5090", "Blackwell", "12.0"),
+                    ),
                     count=1,
                     vram_gb=32,
                 ),
@@ -589,18 +593,22 @@ class CommittedLock(unittest.TestCase):
             self.assertIn(value, problems[0])
 
     def test_models_dataclasses_are_frozen_and_slotted(self) -> None:
+        card = AdmittedCard("Example GPU", "Example", "1.0")
+        gpu = GpuRequirements((card,), 1, 1)
+        requirements = ProfileRequirements("x86_64", gpu, 1, 1)
         for value in (
             PinnedFile("config.json", FAKE_DIGEST, 1),
             ServeBaseline("example", {}, {}),
             ModelPin("generator", "example/fixture", FAKE_REVISION, 0, ServeBaseline("example", {}, {}), ()),
             CandidatePin("alternate-embed", "embed", "example/candidate", FAKE_REVISION, ServeBaseline("example", {}, {}), ()),
-            GpuRequirements("Example", "1.0", "Example GPU", 1, 1),
-            ProfileRequirements("x86_64", GpuRequirements("Example", "1.0", "Example GPU", 1, 1), 1, 1),
+            card,
+            gpu,
+            requirements,
             MemoryRow("example-service", 1, None),
             ChunkGuards(5, 3, 1300),
             CotenantReserve(0, 3),
             EmbeddingSpace("example-space", "generator", 17, FAKE_REVISION),
-            HardwareProfile("2x1v-1d", ProfileRequirements("x86_64", GpuRequirements("Example", "1.0", "Example GPU", 1, 1), 1, 1), (MemoryRow("example-service", 1, None),), (), ChunkGuards(5, 3, 1300)),
+            HardwareProfile("2x1v-1d", requirements, (MemoryRow("example-service", 1, None),), (), ChunkGuards(5, 3, 1300)),
             ModelsLock(1, "2x1v-1d", ()),
         ):
             self.assertTrue(is_dataclass(value))
@@ -612,12 +620,10 @@ class CommittedLock(unittest.TestCase):
     def test_gpu_model_matches_card_name_and_one_space_edition(self) -> None:
         """Editions of one card match, while different names refuse."""
 
-        requirements = GpuRequirements(
+        card = AdmittedCard(
             architecture="Example",
             compute_capability="1.0",
             model="Example Card 1000",
-            count=1,
-            vram_gb=1,
         )
         cases = (
             ("Example Card 1000", True),
@@ -629,7 +635,7 @@ class CommittedLock(unittest.TestCase):
         )
         for reported, expected in cases:
             with self.subTest(reported=reported):
-                self.assertEqual(requirements.matches(reported), expected)
+                self.assertEqual(card.matches(reported), expected)
 
     def test_parse_then_load_split(self) -> None:
         parsed = parse_models_lock(VALID)
@@ -888,19 +894,89 @@ class Refusals(unittest.TestCase):
     def test_missing_key(self) -> None:
         self.assert_refused(VALID.replace("      data_volume_gb: 4000\n", ""), "missing required key", key_path="profiles.2x96v-256d.requires.data_volume_gb")
 
+    def assert_gpu_refusals(self, text: str, *expected: tuple[str, str]) -> None:
+        result = load_text(text)
+        self.assertIsNone(result.lock)
+        self.assertCountEqual(
+            [error.key_path for error in result.errors],
+            [path for path, _ in expected],
+        )
+        for path, fragment in expected:
+            error = next(error for error in result.errors if error.key_path == path)
+            self.assertIn(fragment, error.problem)
+            self.assertEqual(error.fix, "Edit models.lock; consult docs/runbooks/release-files.md §4.")
+
+    def test_gpu_cards_shape_refusals(self) -> None:
+        """Profile card requirements use a non-empty list of mappings."""
+
+        path = f"{GPU_PATH}.cards"
+        cases = (
+            ("", path, "missing required key"),
+            ("        cards: {}\n", path, "expected a non-empty list"),
+            ("        cards: []\n", path, "expected a non-empty list"),
+            ("        cards:\n          - Example GPU\n", f"{path}.0", "expected a mapping"),
+            (
+                GPU_CARDS.replace("            architecture: Example\n", ""),
+                f"{path}.0.architecture",
+                "missing required key",
+            ),
+            (GPU_CARDS + "            future: true\n", f"{path}.0.future", "Unknown key"),
+        )
+        for cards, key_path, fragment in cases:
+            with self.subTest(cards=cards):
+                self.assert_gpu_refusals(VALID.replace(GPU_CARDS, cards), (key_path, fragment))
+
+    def test_gpu_cards_reject_duplicate_model_at_later_entry(self) -> None:
+        self.assert_gpu_refusals(
+            VALID.replace(GPU_CARDS, GPU_CARDS + GPU_CARD),
+            (f"{GPU_PATH}.cards.1.model", "duplicate model 'Example GPU' already named at index 0"),
+        )
+
+    def test_gpu_cards_reject_edition_overlap_in_both_orders(self) -> None:
+        edition = GPU_CARD.replace("model: Example GPU", "model: Example GPU Server Edition")
+        for longer_index, entries in ((0, edition + GPU_CARD), (1, GPU_CARD + edition)):
+            with self.subTest(longer_index=longer_index):
+                self.assert_gpu_refusals(
+                    VALID.replace(GPU_CARD, entries),
+                    (
+                        f"{GPU_PATH}.cards.{longer_index}.model",
+                        f"the edition rule already selects this name under 'Example GPU' at index {1 - longer_index}",
+                    ),
+                )
+
+    def test_gpu_cards_skip_cross_entry_checks_for_malformed_model(self) -> None:
+        malformed = GPU_CARD.replace("model: Example GPU", 'model: "Example GPU Server Edition "')
+        self.assert_gpu_refusals(
+            VALID.replace(GPU_CARDS, GPU_CARDS + malformed),
+            (f"{GPU_PATH}.cards.1.model", "the card's name must not begin or end with whitespace"),
+        )
+
+    def test_gpu_block_rejects_scalar_card_keys_with_or_without_cards(self) -> None:
+        for key, value in (("model", "Example GPU"), ("architecture", "Example"), ("compute_capability", '"1.0"')):
+            scalar = f"        {key}: {value}\n"
+            refusal = (f"{GPU_PATH}.{key}", f"Unknown key '{GPU_PATH}.{key}'")
+            with self.subTest(key=key, has_cards=True):
+                self.assert_gpu_refusals(VALID.replace(GPU_CARDS, scalar + GPU_CARDS), refusal)
+            with self.subTest(key=key, has_cards=False):
+                self.assert_gpu_refusals(
+                    VALID.replace(GPU_CARDS, scalar),
+                    refusal,
+                    (f"{GPU_PATH}.cards", "missing required key"),
+                )
+
     def test_gpu_model_surrounding_whitespace_refuses(self) -> None:
         """Surrounding whitespace cannot be part of the card's name."""
 
         valid = load_text(VALID)
         assert valid.lock is not None
-        model = valid.lock.profiles[0].requires.gpu.model
+        model = valid.lock.profiles[0].requires.gpu.cards[0].model
         for value in (f" {model}", f"{model} "):
             with self.subTest(model=value):
                 text = VALID.replace(f"model: {model}", f'model: "{value}"', 1)
                 self.assert_refused(
                     text,
                     "the card's name must not begin or end with whitespace",
-                    key_path="profiles.2x96v-256d.requires.gpu.model",
+                    key_path="profiles.2x96v-256d.requires.gpu.cards.0.model",
                 )
                 result = load_text(text)
                 self.assertTrue(all(
@@ -1007,8 +1083,17 @@ class Refusals(unittest.TestCase):
         self.assert_refused(VALID.replace("            reasoning-parser: qwen3", "            reasoning-parser: [qwen3]"), "scalar flag value")
         self.assert_refused(VALID.replace("          config.json:\n", "          .config.json:\n"), "relative POSIX file path")
         self.assert_refused(VALID.replace("            size: 1\n", "            size: 1\n            future: true\n"), "nearest valid key is 'sha256'")
-        self.assert_refused(VALID.replace('        compute_capability: "12.0"', "        compute_capability: 12.0"), "non-empty string")
-        self.assert_refused(VALID.replace('        compute_capability: "12.0"', '        compute_capability: "sm120"'), "major.minor")
+        capability_path = "profiles.2x96v-256d.requires.gpu.cards.0.compute_capability"
+        self.assert_refused(
+            VALID.replace('compute_capability: "1.0"', "compute_capability: 1.0"),
+            "non-empty string",
+            key_path=capability_path,
+        )
+        self.assert_refused(
+            VALID.replace('compute_capability: "1.0"', 'compute_capability: "sm100"'),
+            "major.minor",
+            key_path=capability_path,
+        )
         self.assert_refused(VALID.replace("      platform: x86_64", "      platform: X86-64"), "uname -m")
 
     def test_size_and_gpu_bounds(self) -> None:

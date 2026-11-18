@@ -11,6 +11,7 @@ engines:
   - name: "wikipedia"
     disabled: false
     inactive: false
+plugins: {}
 general:
   debug: false
   contact_url: "https://github.com/TNMD-FDO/GIDEON"

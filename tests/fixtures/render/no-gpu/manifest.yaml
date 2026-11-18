@@ -3,7 +3,7 @@ release: "fixture"
 inputs:
   site_sha256: "aa8930e46d859b552b00e9993216ea687dece40481daea7fdcd030835329a742"
   host_lock_sha256: "56b34abc306f9fbaf92b8b48f9beaa6a942c481573f06c6edc8d9b890b69d1bd"
-  models_lock_sha256: "d7f4c5b8f9db51c6403fd6a0f57e24c473ff3ea28be13748473ebd8b03ebf83a"
+  models_lock_sha256: "12b2c39433ce43a74a3cad2dc1c74964821d6dab9b42e4c3de58bbb328b955f6"
   egress_sha256: "e22abee0f29547aedd38bb2ca9ca9f0d2cd3dc4b28c9d6df72ae4fad53d0d3af"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
@@ -15,7 +15,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "1827469a7d3a82474bc5ea7fc13cd03ec5a42f35c16c8dc09bba6586e7749a1a"
+    sha256: "fa89518ba0382107bdc6ce15517991dc4706684815922ab13f2fcd7a00b28cad"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -99,11 +99,11 @@ files:
     owners:
       - "open-webui"
   "open-webui/manifest.yaml":
-    sha256: "81909c1893028d0840f33d32b1c83e77ea22cce85591bfe30697c3f973e7128e"
+    sha256: "5e69f660c41fbba5bfe7f162cba81059c360528831aa4b39af30dc622d72c4bc"
     mode: "0644"
     owners: []
   "searxng/settings.yml":
-    sha256: "46f5ce133145bab808eaf094e951b4651181a521ccac76ac85b682dcc0285457"
+    sha256: "c59d840171bac2208c37697e6a104ebf879aee92d7bf4e74feb73236a94ebbd6"
     mode: "0644"
     owners:
       - "searxng"
@@ -216,7 +216,7 @@ services:
   postgres: "22a8e8b30a6d9eaabbee5c36f326b8860b0a06ee3d5ee1d6c95d9aca13fb059f"
   qdrant: "30030653744c6091cd90a6481d358924b2c1eb8e76f86d54f1f6c1d633b61b83"
   opensearch: "27498b570276390bbfcbe9a50dcce211b44b364fec9c7dbf145cab517f4e41a6"
-  open-webui: "d9d3e04a06aa6f753b02b0668d95612baad66ae91fa8d206be61d3904e3f0437"
+  open-webui: "e2ad648ce19c84c9fd2b5ad20fe02fb6c07da3cfff24a0e6daa7cf73d3c7721e"
   gideon-worker: "c60049f653e72e0f6f659510473561e4ffeb44fc5e1b131a4c0229a7cd9bda9e"
   gideon-egress: "d961fa13530a157ee903e72d7e505dc032d5fa0e658054b6e698cbf11d35bae8"
   searxng: "a4f26a7f67d7b3093a5544861716df0768127e22091bf4c84c7b2bccb99644bf"

@@ -1,4 +1,4 @@
-"""Hosted tests for the search sentinel's engine comparison, residual classifier, and marker."""
+"""Hosted tests for the search sentinel's config, log, and marker helpers."""
 
 import importlib.util
 import re
@@ -134,6 +134,65 @@ class EngineConfigTests(unittest.TestCase):
                 "rendered engine 'example-second' is omitted from /config",
             ],
         )
+
+
+class PluginConfigTests(unittest.TestCase):
+    def test_an_empty_plugin_list_has_no_findings(self) -> None:
+        self.assertEqual(CONTRACT.plugin_config_findings({"plugins": []}), [])
+
+    def test_each_listed_plugin_is_named_regardless_of_enabled_state(self) -> None:
+        self.assertEqual(
+            CONTRACT.plugin_config_findings({"plugins": [
+                {"name": "example-first", "enabled": True},
+                {"name": "example-second", "enabled": False},
+            ]}),
+            ["/config lists plugin 'example-first'", "/config lists plugin 'example-second'"],
+        )
+
+    def test_a_missing_or_unreadable_plugin_list_is_a_finding(self) -> None:
+        bodies: tuple[object, ...] = (
+            None, [], "unreadable", {},
+            {"plugins": None}, {"plugins": {}}, {"plugins": "unreadable"},
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                self.assertEqual(
+                    CONTRACT.plugin_config_findings(body),
+                    ["SearXNG /config has no readable plugin list"],
+                )
+
+    def test_an_unreadable_plugin_entry_is_a_finding(self) -> None:
+        entries: tuple[object, ...] = (
+            None, "unreadable", {}, {"name": []}, {"name": ""}, {"name": 42},
+        )
+        for entry in entries:
+            with self.subTest(entry=entry):
+                self.assertEqual(
+                    CONTRACT.plugin_config_findings({"plugins": [entry]}),
+                    ["SearXNG /config has an unreadable plugin entry"],
+                )
+
+
+class RuleListLinesTests(unittest.TestCase):
+    def test_only_rule_list_warnings_and_errors_are_returned_in_order(self) -> None:
+        prefix = "searxng-rendered-1  | 2026-11-17 10:15:02,123 "
+        exception_warning = (
+            f"{prefix}WARNING:searx.data: TRACKER_PATTERNS: RequestException while fetching "
+            "https://rules.example/data.min.json: connection refused"
+        )
+        status_warning = (
+            f"{prefix}WARNING:searx.data: TRACKER_PATTERNS: ClearURL ignore HTTP 503 "
+            "https://rules.example/data.min.json"
+        )
+        error = f"{prefix}ERROR:searx.data: TRACKER_PATTERNS: failed fetching ClearURL rule lists"
+        unrelated = f"{prefix}WARNING:searx.data: wikidata: request timed out"
+        self.assertEqual(
+            CONTRACT.rule_list_lines("\n".join([exception_warning, unrelated, status_warning, error])),
+            (exception_warning, status_warning, error),
+        )
+
+    def test_empty_text_has_no_rule_list_lines(self) -> None:
+        self.assertEqual(CONTRACT.rule_list_lines(""), ())
 
 
 if __name__ == "__main__":

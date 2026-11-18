@@ -60,15 +60,15 @@ groups:
         temporary_enforced: false
       features:
         api_keys: false
-        notes: true
-        channels: true
+        notes: false
+        channels: false
         folders: true
         direct_tool_servers: false
         web_search: true
         image_generation: false
         code_interpreter: false
         memories: false
-        calendar: true
+        calendar: false
         automations: false
         webhooks: false
       settings:
@@ -133,15 +133,15 @@ groups:
         temporary_enforced: false
       features:
         api_keys: false
-        notes: true
-        channels: true
+        notes: false
+        channels: false
         folders: true
         direct_tool_servers: false
         web_search: true
         image_generation: false
         code_interpreter: false
         memories: false
-        calendar: true
+        calendar: false
         automations: false
         webhooks: false
       settings:
@@ -206,15 +206,15 @@ groups:
         temporary_enforced: false
       features:
         api_keys: false
-        notes: true
-        channels: true
+        notes: false
+        channels: false
         folders: true
         direct_tool_servers: false
         web_search: true
         image_generation: false
         code_interpreter: false
         memories: false
-        calendar: true
+        calendar: false
         automations: false
         webhooks: false
       settings:
@@ -279,15 +279,15 @@ groups:
         temporary_enforced: false
       features:
         api_keys: false
-        notes: true
-        channels: true
+        notes: false
+        channels: false
         folders: true
         direct_tool_servers: false
         web_search: true
         image_generation: false
         code_interpreter: false
         memories: false
-        calendar: true
+        calendar: false
         automations: false
         webhooks: false
       settings:
@@ -354,15 +354,15 @@ groups:
         temporary_enforced: false
       features:
         api_keys: true
-        notes: true
-        channels: true
+        notes: false
+        channels: false
         folders: true
         direct_tool_servers: false
         web_search: true
         image_generation: false
         code_interpreter: false
         memories: false
-        calendar: true
+        calendar: false
         automations: false
         webhooks: false
       settings:

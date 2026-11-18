@@ -54,6 +54,7 @@ class SliceSpec:
     readings.
     A part naming the stores surface runs in every ``smoke`` or ``build-gates``
     run, even when no counted case routes to it.
+    ``judgments`` names the stores surface for the manifest its definition reads.
     ``engine_calls`` estimates the engine requests one counted run makes; None
     leaves its size bound to the quiet window. ``smoke``'s is the sum of its
     parts' ``turn_calls``; ``guardrails`` run alone keeps None, since the
@@ -136,14 +137,23 @@ _JUDGE_TRIPLES: Final[SliceSpec] = SliceSpec(
 )
 _JUDGMENTS: Final[SliceSpec] = SliceSpec(
     runner=judgments_slice.run_judgments,
-    surfaces=frozenset({CallSurface.RANKED_FILE}),
+    surfaces=frozenset({CallSurface.RANKED_FILE, CallSurface.STORES}),
     repeats=1,
     judge_prompt=None,
     compares_reference=False,
     engine_calls=None,
-    gate_pass="every judged query was scored, the metrics reported and never gated",
-    gate_fail="one or more judged queries have no ranked list",
-    gate_fix="add a ranked list for each query id the report names, then retry.",
+    gate_pass=(
+        "every judged query had a ranked list and every ranked entry is held by the generation, "
+        "the metrics reported and never gated"
+    ),
+    gate_fail=(
+        "one or more judged queries have no ranked list or the file has ranked entries "
+        "the generation does not hold"
+    ),
+    gate_fix=(
+        "Add a ranked list for each missing query id in the report, or use --generation <name> "
+        "to score the file against the generation it was drawn from."
+    ),
     categories=frozenset({("judgments", "judgments")}),
     turn_calls=None,
 )

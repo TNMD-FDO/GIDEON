@@ -76,11 +76,12 @@ profiles:
     requires:
       platform: x86_64
       gpu:
-        architecture: Fixture
-        compute_capability: "1.0"
-        model: Fixture GPU
         count: 1
         vram_gb: 1
+        cards:
+          - model: Fixture GPU
+            architecture: Fixture
+            compute_capability: "1.0"
       dram_gb: 1
       data_volume_gb: 1
     memory:

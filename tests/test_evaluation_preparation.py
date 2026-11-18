@@ -28,13 +28,13 @@ from test_evaluation_run import (
     _run_kwargs,
     _sibling_row,
 )
-from test_judgments_slice import _fixture, _ranked_file
+from test_judgments_slice import _fixture, _judgments_host, _ranked_file
 
 from gideon.evaluation import command
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet
 from gideon.evaluation.results import RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS, CallSurface
-from gideon.host import report
+from gideon.host import report, secrets
 from gideon.host.corpus.lockfile import (
     read_lockfile_directory,
     render_errors,
@@ -265,6 +265,8 @@ class PreparationRoutes(unittest.TestCase):
                     ]
                     self.assertEqual(len(generation_reads), int(CallSurface.STORES in surfaces))
                     if CallSurface.STORES in surfaces:
+                        if CallSurface.RANKED_FILE in surfaces:
+                            self.assertLess(stdout.index("ranked: ok"), stdout.index("preconditions: ok"))
                         row = _generation_row()
                         assert context.generation is not None
                         self.assertEqual(
@@ -815,6 +817,34 @@ class StoresPreparation(unittest.TestCase):
 
 class SiblingSurfaceRule(unittest.TestCase):
     """The CI sibling admits slices that name a surface on the box."""
+
+    def test_judgments_prepares_ranked_file_before_resolving_the_sibling_default(self) -> None:
+        self.addCleanup(secrets.select_directory, secrets.current_directory())
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, _ = _fixture(directory, {1: 2})
+            ranked_path, _ = _ranked_file(directory, {1: (1,)})
+            _copy_sibling_artifacts(checkout)
+            generation = _sibling_row(checkout)
+            host = _judgments_host((1,))
+            host.generation_output = json.dumps(generation) + "\n"
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", "judgments", "--stack", CI_STACK, "--ranked", str(ranked_path)],
+                **_run_kwargs(host, checkout=checkout, court_path=checkout / "courts.yaml"),
+            )
+
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        self.assertLess(stdout.index("ranked: ok"), stdout.index("preconditions: ok"))
+        self.assertIn(
+            f"generation {generation['gen_id']} ({generation['corpus_lockfile']}, {generation['state']})",
+            stdout,
+        )
+        (argv, sql), = [
+            (argv, sql) for argv, sql in host.calls if "FROM public.index_generations" in (sql or "")
+        ]
+        self.assertEqual(argv, tuple(command.record.reader_argv(command.stacks.CI_ROOT)))
+        assert sql is not None
+        bind = next(line for line in sql.splitlines() if line.startswith("\\set v_name "))
+        self.assertEqual(read_psql_set(bind, "v_name"), generation["gen_id"])
 
     def test_load_refuses_no_box_surface_even_with_a_judge_prompt(self) -> None:
         replacement = dict(SLICE_RUNNERS)

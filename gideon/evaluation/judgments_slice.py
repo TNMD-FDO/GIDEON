@@ -1,22 +1,34 @@
-"""Run the ``judgments@1`` metrics over a ranked-list file."""
+"""Run the ``judgments@2`` metrics against a generation's manifest."""
 
+from collections import Counter
 from collections.abc import Mapping
 from typing import Final, cast
 
 from gideon.evaluation.evalset import LoadedSet, select_cases
+from gideon.evaluation.generation import GenerationAccess
+from gideon.evaluation.golddrop_slice import read_manifest
 from gideon.evaluation.judgments import coordinates
 from gideon.evaluation.rankmetrics import (
-    DEFINITION_ID,
     RANKING_FLOOR,
     RELEVANT_GRADE,
     Coordinates,
     GradedPassage,
+)
+from gideon.evaluation.rankmetrics2 import (
+    DEFINITION_ID,
+    DROP_KINDS,
+    DropKind,
+    foreign_entries,
+    held_passages,
     hole_at_10,
     ndcg_at_10,
     recall_at_50,
 )
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
+from gideon.host import report
+from gideon.host.report import Problem
 
+PROBLEMS: Final[frozenset[str]] = frozenset({"generation-unresolved", "record-unreachable"})
 _FIGURE_KEYS: Final[tuple[str, ...]] = ("ndcg_at_10", "recall_at_50", "hole_at_10")
 
 
@@ -35,38 +47,37 @@ def _render_figure(value: float | None) -> str:
 
 
 def _report(
-    case_ids: tuple[str, ...],
     results: tuple[CaseResult, ...],
-    graded: Mapping[str, tuple[GradedPassage, ...]],
-    ranked: Mapping[str, tuple[Coordinates, ...]] | None,
+    held: Mapping[str, tuple[GradedPassage, ...]],
+    ranked: Mapping[str, tuple[Coordinates, ...]],
+    generation: GenerationAccess,
+    drop_counts: Counter[DropKind],
 ) -> str:
     """Render the summary from ids and computed values, never case content."""
 
-    judged_ids = tuple(case_id for case_id in case_ids if graded.get(case_id))
+    judged_ids = tuple(result.case_id for result in results if result.metrics["graded_passages"])
     no_relevant = tuple(
-        case_id
-        for case_id in judged_ids
-        if not any(grade >= RELEVANT_GRADE for _coordinate, grade in graded[case_id])
+        result.case_id
+        for result in results
+        if result.case_id in held and not result.metrics["relevant_passages"]
     )
     no_positive = tuple(
         case_id
-        for case_id in judged_ids
-        if not any(grade > 0 for _coordinate, grade in graded[case_id])
+        for case_id, passages in held.items()
+        if not any(grade > 0 for _coordinate, grade in passages)
     )
-    no_grades = tuple(case_id for case_id in case_ids if not graded.get(case_id))
     # An ungraded query is left out of Hole@10 for want of grades, not for want
     # of a list, and the no-grades-yet count already reports it.
     empty_ranked = tuple(
         case_id
         for case_id in judged_ids
-        if ranked is not None and case_id in ranked and not ranked[case_id]
+        if case_id in ranked and not ranked[case_id]
     )
-    not_ranked = tuple(
-        case_id for case_id in judged_ids if ranked is None or case_id not in ranked
-    )
+    not_ranked = tuple(case_id for case_id in judged_ids if case_id not in ranked)
 
     lines = [
-        f"judged queries {len(judged_ids)} of {len(case_ids)}; definition {DEFINITION_ID}"
+        f"judged queries {len(judged_ids)} of {len(results)}, definition {DEFINITION_ID}, "
+        f"generation {generation.name} ({generation.corpus_lockfile})"
     ]
     for key in _FIGURE_KEYS:
         values = tuple(
@@ -75,6 +86,18 @@ def _report(
             if isinstance(result.metrics[key], float)
         )
         lines.append(f"{key} mean {_render_figure(_mean(values))} count {len(values)}")
+    touched = tuple(result for result in results if result.metrics["dropped_passages"])
+    kinds = ", ".join(f"{kind} {drop_counts[kind]}" for kind in DROP_KINDS)
+    lines.append(f"dropped passages {drop_counts.total()} ({kinds}) across {len(touched)} queries")
+    for result in touched:
+        dropped = " ".join(cast(list[str], result.metrics["dropped"]))
+        lines.append(f"{result.case_id}: {dropped}")
+    dropped_queries = " ".join(case_id for case_id in judged_ids if case_id not in held)
+    lines.append(f"dropped queries: {dropped_queries or 'none'}")
+    foreign = tuple(result for result in results if result.metrics["foreign_ranked"])
+    if foreign:
+        count = sum(cast(int, result.metrics["foreign_ranked"]) for result in foreign)
+        lines.append(f"foreign ranked entries {count}: " + " ".join(result.case_id for result in foreign))
     if no_relevant:
         lines.append(f"no relevant passage: {' '.join(no_relevant)}")
     if no_positive:
@@ -83,45 +106,79 @@ def _report(
         lines.append(f"empty ranked list: {' '.join(empty_ranked)}")
     if not_ranked:
         lines.append(f"judged and not ranked: {' '.join(not_ranked)}")
-    lines.append(f"no grades yet: {len(no_grades)}")
-    if len(judged_ids) < RANKING_FLOOR:
+    lines.append(f"no grades yet: {len(results) - len(judged_ids)}")
+    if len(held) < RANKING_FLOOR:
         lines.append(
-            f"small set: {len(judged_ids)} judged queries below {RANKING_FLOOR}; "
+            f"small set: {len(held)} judged queries with held passages below {RANKING_FLOOR}; "
             "the set detects regressions and ranks nothing"
         )
     return "\n".join(lines) + "\n"
 
 
+def _failed(
+    case_ids: tuple[str, ...], unsigned: int, code: str, problem: Problem,
+) -> SliceResult:
+    """Fail every counted query and report the problem with its fix."""
+
+    results = tuple(CaseResult(case_id, 1, "fail", {"problem": code}) for case_id in case_ids)
+    lines = (
+        f"{len(case_ids)} counted, {unsigned} unsigned excluded",
+        *report.failure_lines(problem.fix, f"{code}: {problem.problem}"),
+        "judgments: fail",
+    )
+    return SliceResult(False, "\n".join(lines) + "\n", results)
+
+
 def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> SliceResult:
-    """Score active judgment queries in id order from primary grades only."""
+    """Score active queries in id order over the primary grades the generation holds."""
 
     selected = select_cases(eval_set, slice_name)
     case_ids = tuple(sorted(selected.counted))
+    generation = context.generation
+    if generation is None:
+        retry = report.command(f"eval run --slice {slice_name} --ranked <file> --generation <name>")
+        return _failed(case_ids, len(selected.unsigned), "generation-unresolved", Problem(
+            "the stores generation was not resolved",
+            f"Run {retry} through the command's stores preconditions, then retry.",
+        ))
+
+    ranked_lists = context.ranked or {}
+    source_ids = {entry[0] for ranked in ranked_lists.values() for entry in ranked}
+    active = set(case_ids)
     grouped: dict[str, list[GradedPassage]] = {}
     for judgment in eval_set.judgments:
-        if judgment.assessment == "primary":
+        if judgment.assessment == "primary" and judgment.query_id in active:
             grouped.setdefault(judgment.query_id, []).append(
                 (coordinates(judgment), judgment.grade)
             )
-    graded = {query_id: tuple(values) for query_id, values in grouped.items()}
+            source_ids.add(judgment.source_id)
+    context.checkpoint()
+    manifest = read_manifest(generation.name, tuple(sorted(source_ids)), context)
+    if isinstance(manifest, Problem):
+        return _failed(case_ids, len(selected.unsigned), "record-unreachable", manifest)
 
     case_results: list[CaseResult] = []
-    ranked_lists = context.ranked
+    held_by_query: dict[str, tuple[GradedPassage, ...]] = {}
+    drop_counts: Counter[DropKind] = Counter()
     for case_id in case_ids:
-        passages = graded.get(case_id, ())
-        ranked: tuple[Coordinates, ...]
-        if ranked_lists is None or case_id not in ranked_lists:
-            covered = False
-            ranked = ()
-        else:
-            covered = True
-            ranked = ranked_lists[case_id]
-        judged = bool(passages)
-        if judged and covered:
+        context.checkpoint()
+        passages = grouped.get(case_id, [])
+        held, dropped = held_passages(passages, manifest)
+        if held:
+            held_by_query[case_id] = held
+        dropped_coordinates: list[str] = []
+        for drop in dropped:
+            source_id, sha256, start, end = drop.passage[0]
+            dropped_coordinates.append(f"{source_id}@{sha256}:{start}-{end}")
+            drop_counts[drop.kind] += 1
+        ranked = ranked_lists.get(case_id, ())
+        covered = case_id in ranked_lists
+        foreign = foreign_entries(ranked, manifest)
+        if held and covered and not foreign:
             figures: tuple[float | None, float | None, float | None] = (
-                _rounded(ndcg_at_10(ranked, passages)),
-                _rounded(recall_at_50(ranked, passages)),
-                _rounded(hole_at_10(ranked, passages)),
+                _rounded(ndcg_at_10(ranked, held)),
+                _rounded(recall_at_50(ranked, held)),
+                _rounded(hole_at_10(ranked, held)),
             )
         else:
             figures = (None, None, None)
@@ -131,15 +188,18 @@ def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
             "hole_at_10": figures[2],
             "graded_passages": len(passages),
             "relevant_passages": sum(
-                grade >= RELEVANT_GRADE for _coordinate, grade in passages
+                grade >= RELEVANT_GRADE for _coordinate, grade in held
             ),
             "ranked_passages": len(ranked),
+            "dropped_passages": len(dropped),
+            "dropped": list[JSONValue](sorted(dropped_coordinates)),
+            "foreign_ranked": len(foreign),
         }
         case_results.append(
             CaseResult(
                 case_id,
                 1,
-                "pass" if not judged or covered else "fail",
+                "fail" if foreign or (passages and not covered) else "pass",
                 metrics,
                 judge=None,
                 latency_ms=None,
@@ -147,10 +207,11 @@ def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
         )
 
     results = tuple(case_results)
-    # The verdict is coverage and never a metric: a row fails exactly when a
-    # judged query had no ranked list, so the verdict is based on its rows.
+    # The verdict is coverage and input validity, never a metric: a row fails
+    # exactly when a judged query had no ranked list or its list holds an entry
+    # the generation does not hold, so the verdict is based on its rows.
     return SliceResult(
         all(result.verdict == "pass" for result in results),
-        _report(case_ids, results, graded, ranked_lists),
+        _report(results, held_by_query, ranked_lists, generation, drop_counts),
         results,
     )

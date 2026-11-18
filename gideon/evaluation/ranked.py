@@ -1,4 +1,4 @@
-"""Read the content-free ranked-list JSONL file used by ``judgments@1``."""
+"""Read the content-free ranked-list JSONL file the ``judgments`` slice scores."""
 
 import hashlib
 import json

@@ -41,7 +41,7 @@ class Expected:
     os_lts: str
     platform: str
     profile: str
-    model: str
+    models: tuple[str, ...]
     count: int
     vram_gb: int
     dram_gb: int
@@ -226,13 +226,14 @@ def rule_prerequisites(path: Path, source: str, expected: Expected) -> list[Find
             "Hardware",
             "models.lock reference",
         )
-    if expected.model not in hardware.text:
-        add(
-            hardware.number,
-            "GPU model differs from the reference profile",
-            "Hardware",
-            "models.lock requires.gpu.model",
-        )
+    for model in expected.models:
+        if model not in hardware.text:
+            add(
+                hardware.number,
+                f"GPU model {model!r} from the reference profile is missing",
+                "Hardware",
+                "models.lock requires.gpu.cards",
+            )
     if not re.search(rf"(?<!\d){expected.count}\s*×", hardware.text):
         add(
             hardware.number,
@@ -373,7 +374,7 @@ class CommittedTree(unittest.TestCase):
             host_result.lock.os_lts,
             requires.platform,
             profile.name,
-            requires.gpu.model,
+            tuple(card.model for card in requires.gpu.cards),
             requires.gpu.count,
             requires.gpu.vram_gb,
             requires.dram_gb,
@@ -400,13 +401,14 @@ class CommittedTree(unittest.TestCase):
 
 class SeededText(unittest.TestCase):
     expected = Expected(
-        "987.65", "example_64", "3x111v-777d", "Example Accelerator", 3, 111, 777, 9999
+        "987.65", "example_64", "3x111v-777d",
+        ("Example Accelerator", "Fictitious GPU"), 3, 111, 777, 9999
     )
     source = (
         "# Example\n\n## Install\n\n### Before you begin\n\n"
         "- **Operating system** — Ubuntu Server 987.65 on example_64.\n"
-        "- **Hardware** — `3x111v-777d`: 3 × Example Accelerator, 111 GB VRAM per GPU,\n"
-        "  777 GB RAM, 9999 GB data volume.\n\n"
+        "- **Hardware** — `3x111v-777d`: 3 × Example Accelerator or Fictitious GPU,\n"
+        "  111 GB VRAM per GPU, 777 GB RAM, 9999 GB data volume.\n\n"
         "1. First step:\n\n   ```bash\n   example command\n   ```\n\n## Later\n"
     )
 
@@ -510,9 +512,12 @@ class SeededText(unittest.TestCase):
         )
 
     def test_wrong_model(self) -> None:
-        self.check(
-            self.source.replace("Example Accelerator", "Other Accelerator"), "GPU model"
-        )
+        for model in self.expected.models:
+            with self.subTest(model=model):
+                self.check(
+                    self.source.replace(model, "Other Accelerator"),
+                    f"GPU model {model!r} from the reference profile is missing",
+                )
 
     def test_wrong_count(self) -> None:
         self.check(self.source.replace("3 ×", "4 ×"), "GPU count")
