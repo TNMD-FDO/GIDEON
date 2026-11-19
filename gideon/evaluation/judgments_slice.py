@@ -1,18 +1,22 @@
 """Run the ``judgments@2`` metrics against a generation's manifest."""
 
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Final, cast
 
+from gideon.evaluation.assessments import Assessments, agreement
 from gideon.evaluation.evalset import LoadedSet, select_cases
 from gideon.evaluation.generation import GenerationAccess
 from gideon.evaluation.golddrop_slice import read_manifest
-from gideon.evaluation.judgments import coordinates
+from gideon.evaluation.judgments import KappaValue, coordinates
 from gideon.evaluation.rankmetrics import (
+    HOLE_DEPTH,
     RANKING_FLOOR,
     RELEVANT_GRADE,
     Coordinates,
     GradedPassage,
+    crediting,
 )
 from gideon.evaluation.rankmetrics2 import (
     DEFINITION_ID,
@@ -30,6 +34,67 @@ from gideon.host.report import Problem
 
 PROBLEMS: Final[frozenset[str]] = frozenset({"generation-unresolved", "record-unreachable"})
 _FIGURE_KEYS: Final[tuple[str, ...]] = ("ndcg_at_10", "recall_at_50", "hole_at_10")
+_GRADES: Final = range(4)
+
+
+@dataclass(frozen=True, slots=True)
+class _QueryAssessment:
+    """Assessor counts and matched human grades for one active query."""
+
+    hole_count: int | None
+    hole_grades: Counter[int]
+    pairs: tuple[tuple[int, int], ...]
+
+    def judge(self, assessments: Assessments) -> Mapping[str, JSONValue]:
+        comparison = agreement(self.pairs)
+        return {
+            "prompt": assessments.prompt,
+            "model": assessments.model,
+            "hole_count": self.hole_count,
+            "assessed_hole_count": None if self.hole_count is None else self.hole_grades.total(),
+            **{
+                f"grade_{grade}": None if self.hole_count is None else self.hole_grades[grade]
+                for grade in _GRADES
+            },
+            "pair_count": comparison.pair_count,
+            "four_grade_differing": comparison.four_grade_differing,
+            "relevant_differing": comparison.relevant_differing,
+        }
+
+
+def _assess_query(
+    assessments: Assessments,
+    case_id: str,
+    passages: Iterable[GradedPassage],
+    *,
+    ranked: tuple[Coordinates, ...] | None,
+    held: tuple[GradedPassage, ...],
+) -> _QueryAssessment:
+    """Pair every primary grade and count the top ten's holes against held passages.
+
+    ``ranked`` is None for a query whose figures are not computed: it keeps its
+    pairs, since the agreement is about the grader and not the generation, and
+    has no holes to count.
+    """
+
+    grades = assessments.grades.get(case_id, {})
+    pairs = tuple(
+        (grade, grades[coordinate]) for coordinate, grade in passages if coordinate in grades
+    )
+    if ranked is None:
+        return _QueryAssessment(None, Counter(), pairs)
+
+    top = ranked[:HOLE_DEPTH]
+    holes = tuple(
+        coordinate
+        for coordinate, credit in zip(top, crediting(top, held), strict=True)
+        if not credit.judged
+    )
+    return _QueryAssessment(
+        len(holes),
+        Counter(grades[coordinate] for coordinate in holes if coordinate in grades),
+        pairs,
+    )
 
 
 def _rounded(value: float | None) -> float | None:
@@ -46,12 +111,50 @@ def _render_figure(value: float | None) -> str:
     return "null" if value is None else f"{value:.6f}"
 
 
+def _render_kappa(value: KappaValue) -> str:
+    return _render_figure(value) if isinstance(value, float) else value
+
+
+def _assessment_lines(
+    assessments: Assessments, queries: Iterable[_QueryAssessment],
+) -> tuple[str, str]:
+    hole_count = hole_queries = pair_queries = 0
+    grades: Counter[int] = Counter()
+    pairs: list[tuple[int, int]] = []
+    for query in queries:
+        hole_count += query.hole_count or 0
+        hole_queries += bool(query.hole_count)
+        pair_queries += bool(query.pairs)
+        grades.update(query.hole_grades)
+        pairs.extend(query.pairs)
+
+    assessed_holes = grades.total()
+    grade_counts = ", ".join(f"grade {grade} {grades[grade]}" for grade in _GRADES)
+    relevant_holes = sum(count for grade, count in grades.items() if grade >= RELEVANT_GRADE)
+    comparison = agreement(pairs)
+    pair_count = comparison.pair_count
+    four_grade_rate = comparison.four_grade_differing / pair_count if pair_count else None
+    relevant_rate = comparison.relevant_differing / pair_count if pair_count else None
+    return (
+        f"assessor {assessments.prompt}, model {assessments.model}, "
+        f"holes at ranks 1-{HOLE_DEPTH} {hole_count} across {hole_queries} queries, "
+        f"assessed {assessed_holes}, unassessed {hole_count - assessed_holes}, "
+        f"{grade_counts}, relevant {relevant_holes}",
+        f"assessor disagreement {pair_count} pairs across {pair_queries} queries, "
+        f"four-grade differing {comparison.four_grade_differing} "
+        f"rate {_render_figure(four_grade_rate)} kappa {_render_kappa(comparison.four_grade_kappa)}, "
+        f"relevant differing {comparison.relevant_differing} "
+        f"rate {_render_figure(relevant_rate)} kappa {_render_kappa(comparison.relevant_kappa)}",
+    )
+
+
 def _report(
     results: tuple[CaseResult, ...],
     held: Mapping[str, tuple[GradedPassage, ...]],
     ranked: Mapping[str, tuple[Coordinates, ...]],
     generation: GenerationAccess,
     drop_counts: Counter[DropKind],
+    assessment_lines: tuple[str, ...],
 ) -> str:
     """Render the summary from ids and computed values, never case content."""
 
@@ -86,6 +189,7 @@ def _report(
             if isinstance(result.metrics[key], float)
         )
         lines.append(f"{key} mean {_render_figure(_mean(values))} count {len(values)}")
+    lines.extend(assessment_lines)
     touched = tuple(result for result in results if result.metrics["dropped_passages"])
     kinds = ", ".join(f"{kind} {drop_counts[kind]}" for kind in DROP_KINDS)
     lines.append(f"dropped passages {drop_counts.total()} ({kinds}) across {len(touched)} queries")
@@ -134,9 +238,13 @@ def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
 
     selected = select_cases(eval_set, slice_name)
     case_ids = tuple(sorted(selected.counted))
+    assessments = context.assessments
     generation = context.generation
     if generation is None:
-        retry = report.command(f"eval run --slice {slice_name} --ranked <file> --generation <name>")
+        assessed_flag = " --assessed <file>" if assessments is not None else ""
+        retry = report.command(
+            f"eval run --slice {slice_name} --ranked <file>{assessed_flag} --generation <name>"
+        )
         return _failed(case_ids, len(selected.unsigned), "generation-unresolved", Problem(
             "the stores generation was not resolved",
             f"Run {retry} through the command's stores preconditions, then retry.",
@@ -158,6 +266,7 @@ def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
         return _failed(case_ids, len(selected.unsigned), "record-unreachable", manifest)
 
     case_results: list[CaseResult] = []
+    query_assessments: list[_QueryAssessment] = []
     held_by_query: dict[str, tuple[GradedPassage, ...]] = {}
     drop_counts: Counter[DropKind] = Counter()
     for case_id in case_ids:
@@ -174,7 +283,8 @@ def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
         ranked = ranked_lists.get(case_id, ())
         covered = case_id in ranked_lists
         foreign = foreign_entries(ranked, manifest)
-        if held and covered and not foreign:
+        can_score = bool(held and covered and not foreign)
+        if can_score:
             figures: tuple[float | None, float | None, float | None] = (
                 _rounded(ndcg_at_10(ranked, held)),
                 _rounded(recall_at_50(ranked, held)),
@@ -195,23 +305,33 @@ def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
             "dropped": list[JSONValue](sorted(dropped_coordinates)),
             "foreign_ranked": len(foreign),
         }
+        judge = None
+        if assessments is not None:
+            query_assessment = _assess_query(
+                assessments, case_id, passages, ranked=ranked if can_score else None, held=held,
+            )
+            query_assessments.append(query_assessment)
+            judge = query_assessment.judge(assessments)
         case_results.append(
             CaseResult(
                 case_id,
                 1,
                 "fail" if foreign or (passages and not covered) else "pass",
                 metrics,
-                judge=None,
+                judge=judge,
                 latency_ms=None,
             )
         )
 
     results = tuple(case_results)
+    assessment_lines = (
+        () if assessments is None else _assessment_lines(assessments, query_assessments)
+    )
     # The verdict is coverage and input validity, never a metric: a row fails
     # exactly when a judged query had no ranked list or its list holds an entry
     # the generation does not hold, so the verdict is based on its rows.
     return SliceResult(
         all(result.verdict == "pass" for result in results),
-        _report(results, held_by_query, ranked_lists, generation, drop_counts),
+        _report(results, held_by_query, ranked_lists, generation, drop_counts, assessment_lines),
         results,
     )

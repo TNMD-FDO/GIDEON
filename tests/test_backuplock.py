@@ -188,15 +188,16 @@ class HoldingContracts(unittest.TestCase):
                 self.assertIs(raised.exception, error)
 
     def test_requested_lock_supplies_the_file_identity_and_record(self) -> None:
-        self.io.stats = {backuplock.ENGINE_LOCK.path: self.info}
-        self.io.files = {
-            backuplock.LOCK_TABLE: self.line,
-            backuplock.ENGINE_LOCK.path: self.record.to_json(),
-        }
-        self.assertEqual(
-            backuplock.held_by(self.host, lock=backuplock.ENGINE_LOCK),
-            backuplock.Holding(True, self.record),
-        )
+        for lock, filename in (
+            (backuplock.ENGINE_LOCK, "engine.lock"),
+            (backuplock.UNAVAILABLE_LOCK, "unavailable.lock"),
+            (backuplock.UNAVAILABLE_NESTED_LOCK, "unavailable-nested.lock"),
+        ):
+            with self.subTest(lock=lock):
+                self.assertEqual(lock.path, f"{backuplock.LOCK_DIR}/{filename}")
+                self.io.stats = {lock.path: self.info}
+                self.io.files = {backuplock.LOCK_TABLE: self.line, lock.path: self.record.to_json()}
+                self.assertEqual(backuplock.held_by(self.host, lock=lock), backuplock.Holding(True, self.record))
 
 
 class LockContracts(unittest.TestCase):

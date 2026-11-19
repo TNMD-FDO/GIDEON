@@ -12,15 +12,21 @@ import unittest
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 from urllib.parse import unquote
+from zoneinfo import ZoneInfo
 
 import yaml  # type: ignore[import-untyped]
+from test_announcements import window_query_argv
 from test_imagestore import image_listing
 from test_render import artifact_source_files, declared_source_files, inputs
 from test_secrets import answer_pair_command
+from test_windowrecord import END, EVENT, KEY, START, reply
 
 from gideon.host import (
+    announcements,
+    announcesync,
     backuplock,
     grafana,
     imagestore,
@@ -28,8 +34,10 @@ from gideon.host import (
     owui,
     pgbackrest,
     report,
+    stack,
     weights,
 )
+from gideon.host import apply as apply_module
 from gideon.host.apply import (
     _VERIFY_ATTEMPTS,
     _VERIFY_SLEEP_SECONDS,
@@ -54,6 +62,7 @@ from gideon.host.render import ARTIFACTS, RenderInputs
 from gideon.host.render.command import run_render
 from gideon.host.render.compose import (
     NETWORK_NAME,
+    TURN_PATH_SERVICES,
     network_name,
     service_blocks,
     service_names,
@@ -64,7 +73,7 @@ from gideon.host.render.engine import (
     INTEGRATION_NETWORK_NAME,
 )
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
-from gideon.host.render.owui import GENERAL_MODEL_ID
+from gideon.host.render.owui import BANNER_TIMESTAMP, BANNERS_ROUTE, GENERAL_MODEL_ID
 from gideon.host.render.services import all_service_names, store_services
 from gideon.host.site import SiteConfig, load_site
 from gideon.host.stack import compose_argv, exec_argv
@@ -117,6 +126,7 @@ PSQL_POSTGRES_STATEMENT = tuple(exec_argv(RENDERED, "postgres", "psql", "-U", "p
 PSQL_GIDEON_QUERY = tuple(exec_argv(RENDERED, "postgres", "psql", "-U", "gideon", "-d", "gideon", "-tA", "-f", "-"))
 PSQL_GIDEON_STATEMENT = tuple(exec_argv(RENDERED, "postgres", "psql", "-U", "gideon", "-d", "gideon", "-v", "ON_ERROR_STOP=1", "-f", "-"))
 PSQL_MIGRATION = tuple(exec_argv(RENDERED, "postgres", "psql", "-U", "gideon", "-d", "gideon", "-v", "ON_ERROR_STOP=1", "--single-transaction", "-f", "-"))
+PSQL_WINDOW_QUERY = window_query_argv(RENDERED)
 PG_UID = tuple(exec_argv(RENDERED, "postgres", "id", "-u", "postgres"))
 PG_GID = tuple(exec_argv(RENDERED, "postgres", "id", "-g", "postgres"))
 PG_STANZA_CREATE = tuple(pgbackrest.exec_argv(RENDERED, "stanza-create"))
@@ -146,6 +156,9 @@ SYSTEMCTL_ACTIVE_UPSTREAM_WATCH = ("systemctl", "is-active", "gideon-upstream-wa
 SYSTEMCTL_LINK_RETENTION_SWEEP = ("systemctl", "link", f"{RENDERED}/systemd/gideon-retention-sweep.service")
 SYSTEMCTL_ENABLE_RETENTION_SWEEP = ("systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-retention-sweep.timer")
 SYSTEMCTL_ACTIVE_RETENTION_SWEEP = ("systemctl", "is-active", "gideon-retention-sweep.timer")
+SYSTEMCTL_LINK_ANNOUNCEMENTS_SYNC = ("systemctl", "link", f"{RENDERED}/systemd/gideon-announcements-sync.service")
+SYSTEMCTL_ENABLE_ANNOUNCEMENTS_SYNC = ("systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-announcements-sync.timer")
+SYSTEMCTL_ACTIVE_ANNOUNCEMENTS_SYNC = ("systemctl", "is-active", "gideon-announcements-sync.timer")
 TIMER_STARTS = (
     (SYSTEMCTL_ENABLE, SYSTEMCTL_ACTIVE),
     (SYSTEMCTL_ENABLE_BACKUP, SYSTEMCTL_ACTIVE_BACKUP),
@@ -155,6 +168,7 @@ TIMER_STARTS = (
     (SYSTEMCTL_ENABLE_PROPOSALS, SYSTEMCTL_ACTIVE_PROPOSALS),
     (SYSTEMCTL_ENABLE_UPSTREAM_WATCH, SYSTEMCTL_ACTIVE_UPSTREAM_WATCH),
     (SYSTEMCTL_ENABLE_RETENTION_SWEEP, SYSTEMCTL_ACTIVE_RETENTION_SWEEP),
+    (SYSTEMCTL_ENABLE_ANNOUNCEMENTS_SYNC, SYSTEMCTL_ACTIVE_ANNOUNCEMENTS_SYNC),
 )
 
 
@@ -224,6 +238,7 @@ class FakeFrontend:
         self.next_user = 1
         self.functions: list[dict[str, object]] = []
         self.models: list[dict[str, object]] = []
+        self.banners: list[dict[str, object]] = []
 
     def _group(self, value: Mapping[str, object]) -> dict[str, object]:
         return {
@@ -325,6 +340,13 @@ class FakeFrontend:
             assert isinstance(value, list)
             self.models = [dict(item) for item in value if isinstance(item, Mapping)]
             return Response(200, [])
+        if route == BANNERS_ROUTE and method == "GET":
+            return Response(200, self.banners)
+        if route == BANNERS_ROUTE and method == "POST":
+            value = payload["banners"]
+            assert isinstance(value, list)
+            self.banners = list(value)
+            return Response(200, self.banners)
         if route == "/api/models":
             # The live listing bootstrap reads after the models sync: the
             # record under `info` without its params.
@@ -373,6 +395,19 @@ class FakeGrafanaClient(grafana.Client):
         return grafana.Response(self.status, {"database": "ok"})
 
 
+def lock_stat(locks: Mapping[str, str], path: str) -> os.stat_result:
+    """Supply the same lock inode as the fake kernel lock table."""
+
+    inode = tuple(locks).index(path) + 1
+    return os.stat_result((stat_module.S_IFREG | 0o600, inode, 0, 1, 0, 0, 0, 0, 0, 0))
+
+
+def lock_table(locks: Mapping[str, str]) -> str:
+    """List the flocks the fake host currently holds."""
+
+    return "\n".join(f"{inode}: FLOCK ADVISORY WRITE 1 00:00:{inode} 0 EOF" for inode, _ in enumerate(locks, 1))
+
+
 class ApplyHost:
     """Commands map argv → outcome (or a queue); files is the rendered filesystem plus inputs."""
 
@@ -391,6 +426,7 @@ class ApplyHost:
         self.calls: list[tuple[tuple[str, ...], Mapping[str, str] | None]] = []
         self.run_errors: set[tuple[str, ...]] = set()
         self.inputs: list[tuple[tuple[str, ...], str | None]] = []
+        self.timeouts: list[tuple[tuple[str, ...], float | None]] = []
         self.writes: list[str] = []
         self.write_modes: dict[str, int] = {}
         self.mkdir_calls: list[tuple[str, int, bool, bool]] = []
@@ -407,10 +443,11 @@ class ApplyHost:
         self.grafana = FakeGrafanaClient()
 
     def run(self, argv: Command, *, check: bool = False, input: str | None = None, cwd: PathLike | None = None, env: Mapping[str, str] | None = None, timeout: float | None = None, passthrough: bool = False) -> subprocess.CompletedProcess[str]:
-        del check, cwd, timeout
+        del check, cwd
         command = tuple(argv)
         self.calls.append((command, env))
         self.inputs.append((command, input))
+        self.timeouts.append((command, timeout))
         if command in self.run_errors:
             raise OSError("fixture Docker read failure")
         if command and command[0] in {"openssl", "mv"}:
@@ -429,6 +466,10 @@ class ApplyHost:
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
         key = os.fspath(path)
+        if key == backuplock.LOCK_TABLE:
+            return lock_table(self.locks)
+        if key in self.locks:
+            return self.locks[key]
         if key not in self.files:
             raise FileNotFoundError(key)
         return self.files[key]
@@ -454,6 +495,8 @@ class ApplyHost:
 
     def stat(self, path: PathLike) -> os.stat_result:
         key = os.fspath(path)
+        if key in self.locks:
+            return lock_stat(self.locks, key)
         if key in self.files:
             mode = stat_module.S_IFREG | 0o644
         elif self._is_dir(key):
@@ -544,6 +587,7 @@ def healthy_commands(
         PSQL_GIDEON_QUERY: done(PSQL_GIDEON_QUERY, stdout=""),
         PSQL_GIDEON_STATEMENT: done(PSQL_GIDEON_STATEMENT),
         PSQL_MIGRATION: done(PSQL_MIGRATION),
+        PSQL_WINDOW_QUERY: done(PSQL_WINDOW_QUERY),
         SYSTEMCTL_RELOAD: done(SYSTEMCTL_RELOAD),
         SYSTEMCTL_LINK_SERVICE: done(SYSTEMCTL_LINK_SERVICE),
         SYSTEMCTL_ENABLE: done(SYSTEMCTL_ENABLE),
@@ -573,6 +617,9 @@ def healthy_commands(
         SYSTEMCTL_LINK_RETENTION_SWEEP: done(SYSTEMCTL_LINK_RETENTION_SWEEP),
         SYSTEMCTL_ENABLE_RETENTION_SWEEP: done(SYSTEMCTL_ENABLE_RETENTION_SWEEP),
         SYSTEMCTL_ACTIVE_RETENTION_SWEEP: done(SYSTEMCTL_ACTIVE_RETENTION_SWEEP, stdout="active\n"),
+        SYSTEMCTL_LINK_ANNOUNCEMENTS_SYNC: done(SYSTEMCTL_LINK_ANNOUNCEMENTS_SYNC),
+        SYSTEMCTL_ENABLE_ANNOUNCEMENTS_SYNC: done(SYSTEMCTL_ENABLE_ANNOUNCEMENTS_SYNC),
+        SYSTEMCTL_ACTIVE_ANNOUNCEMENTS_SYNC: done(SYSTEMCTL_ACTIVE_ANNOUNCEMENTS_SYNC, stdout="active\n"),
         PS: done(PS, stdout=running_rows(render_inputs=render_inputs)),
         INTEGRATION_READ: done(INTEGRATION_READ),
         PROJECT_READ: done(PROJECT_READ),
@@ -707,7 +754,12 @@ class HappyPath(unittest.TestCase):
         )
         self.assertEqual(
             host.lock_log,
-            [("take", backuplock.ENGINE_LOCK.path), ("release", backuplock.ENGINE_LOCK.path)],
+            [
+                ("take", backuplock.ENGINE_LOCK.path),
+                ("take", backuplock.UNAVAILABLE_LOCK.path),
+                ("release", backuplock.UNAVAILABLE_LOCK.path),
+                ("release", backuplock.ENGINE_LOCK.path),
+            ],
         )
         self.assertEqual(host.locks, {})
 
@@ -741,7 +793,11 @@ class HappyPath(unittest.TestCase):
 
         self.assertEqual((code, err), (0, ""), out)
         self.assertIn("preconditions: ok — Docker Compose is available; engine lock held by this process", out)
-        self.assertEqual(host.lock_log, [("take", backuplock.ENGINE_LOCK.path)])
+        self.assertEqual(host.lock_log, [
+            ("take", backuplock.ENGINE_LOCK.path),
+            ("take", backuplock.UNAVAILABLE_LOCK.path),
+            ("release", backuplock.UNAVAILABLE_LOCK.path),
+        ])
         self.assertIn(backuplock.ENGINE_LOCK.path, host.locks)
 
     def test_apply_releases_after_a_later_stage_refusal(self) -> None:
@@ -763,7 +819,10 @@ class HappyPath(unittest.TestCase):
 
         self.assertEqual((code, err), (1, ""))
         self.assertIn("models: refuse — fixture pull failure", out)
-        self.assertEqual(host.lock_log[-1], ("release", backuplock.ENGINE_LOCK.path))
+        self.assertEqual(stages(out)[-2:], ["models", "clear"])
+        self.assertEqual(host.lock_log[-2:], [
+            ("release", backuplock.UNAVAILABLE_LOCK.path), ("release", backuplock.ENGINE_LOCK.path),
+        ])
         self.assertEqual(host.locks, {})
 
     def test_first_apply_runs_every_stage_and_records_the_applied_manifest(self) -> None:
@@ -776,6 +835,7 @@ class HappyPath(unittest.TestCase):
                 "preconditions",
                 "secrets",
                 "render",
+                "announce",
                 "network",
                 "registry",
                 "pull",
@@ -788,6 +848,7 @@ class HappyPath(unittest.TestCase):
                 "timers",
                 "record",
                 "prune",
+                "clear",
             ],
         )
         self.assertIn("network: ok — no network definition moved", out)
@@ -1163,16 +1224,156 @@ class PruneStage(unittest.TestCase):
         self.assertNotIn(imagestore.containers_argv(), argv_calls(host))
         self.assertFalse(any(call[:3] == ("docker", "image", "rm") for call in argv_calls(host)))
 
-    def test_prune_is_the_last_row_after_record(self) -> None:
+    def test_prune_follows_record_before_clear(self) -> None:
         host = ApplyHost(healthy_commands(), base_files())
 
         code, out, err = apply(host)
 
         self.assertEqual((code, err), (0, ""), out)
         rows = stages(out)
-        self.assertEqual(rows[-2:], ["record", "prune"])
+        self.assertEqual(rows[-3:], ["record", "prune", "clear"])
         self.assertEqual(rows.count("prune"), 1)
         self.assertIn("prune: ok — nothing to remove", out)
+
+
+class CommandAnnouncements(unittest.TestCase):
+    def test_disruption_counts_only_rendered_turn_path_services_recreated_or_down(self) -> None:
+        applied = ApplyHost(healthy_commands(), base_files())
+        self.assertEqual(apply(applied)[0], 0)
+        unreadable = (
+            done(PS, 1, stdout=running_rows()),
+            done(PS, stdout="fictitious non-JSON output"),
+        )
+        for recreated, stopped, initial_read, expected in (
+            (("caddy",), {}, done(PS, stdout=running_rows()), ("caddy",)),
+            ((), {"open-webui": "exited"}, None, ("open-webui",)),
+            (("caddy", "grafana"), {"caddy": "exited", "open-webui": "exited"}, None, ("caddy", "open-webui")),
+            (("grafana",), {"grafana": "exited"}, None, ()),
+            ((), {}, unreadable[0], TURN_PATH_SERVICES),
+            ((), {}, unreadable[1], TURN_PATH_SERVICES),
+        ):
+            with self.subTest(recreated=recreated, stopped=stopped, initial_read=initial_read):
+                host = ApplyHost(healthy_commands(), applied.files)
+                manifest = yaml.safe_load(host.files[f"{RENDERED}/applied.yaml"])
+                for service in recreated:
+                    manifest["services"][service] = "0" * 64
+                host.files[f"{RENDERED}/applied.yaml"] = yaml.safe_dump(manifest, sort_keys=False)
+                host.commands[PS] = [
+                    initial_read if initial_read is not None else done(PS, stdout=running_rows(states=stopped)),
+                    done(PS, stdout=running_rows()),
+                ]
+
+                with patch.object(stack, "running_services", wraps=stack.running_services) as running:
+                    code, out, err = apply(host, now=START)
+
+                self.assertEqual((code, err), (0, ""), out)
+                running.assert_called_once_with(host, RENDERED, timeout=apply_module.ANNOUNCE_PS_TIMEOUT_SECONDS)
+                self.assertLess(argv_calls(host).index(PS), argv_calls(host).index(PULL))
+                self.assertEqual(stages(out)[2:5], ["render", "announce", "network"])
+                if expected:
+                    record = backuplock.parse(host.lock_records[1])
+                    assert record is not None
+                    identifier = announcements.command_announcement(record, None, START, UTC).id
+                    self.assertIn(f"announce: ok — raised {identifier} (disrupted services: {', '.join(expected)})", out)
+                    self.assertTrue(out.endswith(f"clear: ok — cleared {identifier}\n"), out)
+                else:
+                    self.assertIn(
+                        "announce: ok — nothing raised (no service a turn passes through is recreated or down)", out,
+                    )
+                    self.assertNotIn("clear", stages(out))
+                    self.assertEqual(host.lock_log, [
+                        ("take", backuplock.ENGINE_LOCK.path), ("release", backuplock.ENGINE_LOCK.path),
+                    ])
+                self.assertEqual(host.frontend.banners, [])
+
+    def test_a_stalled_compose_read_expires_and_counts_every_turn_path_service_down(self) -> None:
+        host = ApplyHost(healthy_commands(), base_files())
+        self.assertEqual(apply(host)[0], 0)
+        host.timeouts.clear()
+        run = host.run
+        stalled = False
+
+        def stall_first_read(argv: Command, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            nonlocal stalled
+            if tuple(argv) == PS and not stalled:
+                stalled = True
+                host.timeouts.append((PS, kwargs.get("timeout")))
+                raise subprocess.TimeoutExpired(list(argv), kwargs.get("timeout") or 0)
+            return run(argv, **kwargs)
+
+        with patch.object(host, "run", side_effect=stall_first_read):
+            code, out, err = apply(host, now=START)
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(next(entry for entry in host.timeouts if entry[0] == PS), (PS, apply_module.ANNOUNCE_PS_TIMEOUT_SECONDS))
+        self.assertIn(f"(disrupted services: {', '.join(TURN_PATH_SERVICES)})", out)
+
+    def test_nested_apply_leaves_parents_announcement_standing(self) -> None:
+        host = ApplyHost(healthy_commands(), base_files())
+        self.assertEqual(apply(host)[0], 0)
+        host.lock_log.clear()
+        parent = backuplock.Record("fixture upgrade", os.getpid() + 1, EVENT.at)
+        host.locks[backuplock.UNAVAILABLE_LOCK.path] = parent.to_json()
+        host.commands[PS] = [
+            done(PS, stdout=running_rows(states={"caddy": "exited"})), done(PS, stdout=running_rows()),
+        ]
+
+        code, out, err = apply(host, now=START)
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn(f"announce: ok — announcement stands under {parent.command} (disrupted services: caddy)", out)
+        self.assertTrue(out.endswith(f"clear: ok — announcement still stands under {parent.command}\n"), out)
+        self.assertEqual(host.lock_log, [
+            ("take", backuplock.ENGINE_LOCK.path),
+            ("take", backuplock.UNAVAILABLE_LOCK.path),
+            ("take", backuplock.UNAVAILABLE_NESTED_LOCK.path),
+            ("release", backuplock.UNAVAILABLE_NESTED_LOCK.path),
+            ("release", backuplock.ENGINE_LOCK.path),
+        ])
+        identifier = announcements.command_announcement(parent, None, START, UTC).id
+        self.assertEqual([item["id"] for item in host.frontend.banners], [identifier])
+
+    def test_interrupt_after_announce_clears_before_releasing_engine(self) -> None:
+        host = ApplyHost(healthy_commands(), base_files())
+        self.assertEqual(apply(host)[0], 0)
+        host.lock_log.clear()
+        host.commands[PS] = done(PS, stdout=running_rows(states={"caddy": "exited"}))
+
+        def interrupt(_io: Host, _context: object) -> None:
+            self.assertEqual(len(host.frontend.banners), 1)
+            raise KeyboardInterrupt
+
+        with (
+            patch.object(apply_module, "_network_stage", side_effect=interrupt),
+            patch.object(apply_module, "print_stage", wraps=apply_module.print_stage) as printed,
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            apply(host, now=START)
+
+        self.assertEqual([call.args[0].name for call in printed.call_args_list][-2:], ["announce", "clear"])
+        self.assertEqual(host.lock_log[-2:], [
+            ("release", backuplock.UNAVAILABLE_LOCK.path), ("release", backuplock.ENGINE_LOCK.path),
+        ])
+        self.assertEqual(host.locks, {})
+        self.assertEqual(host.frontend.banners, [])
+
+    def test_clear_failure_does_not_change_a_successful_apply_exit(self) -> None:
+        host = ApplyHost(healthy_commands(), base_files())
+        request = host.frontend.request
+
+        def refuse_clear(method: str, path: str, body: object | None = None) -> Response:
+            if path == BANNERS_ROUTE and backuplock.UNAVAILABLE_LOCK.path not in host.locks:
+                return Response(503, {})
+            return request(method, path, body)
+
+        with patch.object(host.frontend, "request", side_effect=refuse_clear):
+            code, out, err = apply(host)
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("clear: ok — lock released, banner left to the next announcements sync firing", out)
+        self.assertEqual(host.lock_log[-2:], [
+            ("release", backuplock.UNAVAILABLE_LOCK.path), ("release", backuplock.ENGINE_LOCK.path),
+        ])
 
 
 class NetworkChanges(unittest.TestCase):
@@ -1196,12 +1397,12 @@ class NetworkChanges(unittest.TestCase):
         code, out, err = apply(host)
 
         self.assertEqual((code, err), (1, ""))
-        self.assertEqual(stages(out), ["preconditions", "secrets", "render", "network"])
+        self.assertEqual(stages(out), ["preconditions", "secrets", "render", "announce", "network", "clear"])
         self.assertIn("no Compose project (outside-client)", out)
         self.assertIn("Announce the change", out)
         self.assertIn("wait until they have left gideon_integration", out)
         self.assertIn(f"re-run {report.command('apply')}", out)
-        self.assertEqual(argv_calls(host)[-1], INTEGRATION_READ)
+        self.assertEqual(argv_calls(host)[-2:], [INTEGRATION_READ, PSQL_WINDOW_QUERY])
         self.assertFalse(any(call[:2] == ("docker", "manifest") for call in argv_calls(host)))
         self.assertNotIn(PULL, argv_calls(host))
         self.assertNotIn(INTEGRATION_STOP, argv_calls(host))
@@ -1217,7 +1418,7 @@ class NetworkChanges(unittest.TestCase):
         code, out, err = apply(host)
 
         self.assertEqual((code, err), (1, ""))
-        self.assertEqual(stages(out)[-1], "network")
+        self.assertEqual(stages(out)[-2:], ["network", "clear"])
         self.assertIn("project gideon-ci (relay)", out)
         self.assertIn("sudo python3 -m tools.cistack down", out)
         self.assertNotIn(PULL, argv_calls(host))
@@ -1232,7 +1433,7 @@ class NetworkChanges(unittest.TestCase):
         code, out, err = apply(host)
 
         self.assertEqual((code, err), (1, ""))
-        self.assertEqual(stages(out)[-1], "network")
+        self.assertEqual(stages(out)[-2:], ["network", "clear"])
         self.assertIn(
             "project gideon-ci (relay-one, relay-two); no Compose project (gideon-registry)",
             out,
@@ -1252,7 +1453,7 @@ class NetworkChanges(unittest.TestCase):
                 code, out, err = apply(host)
 
                 self.assertEqual((code, err), (1, ""))
-                self.assertEqual(stages(out)[-1], "network")
+                self.assertEqual(stages(out)[-2:], ["network", "clear"])
                 self.assertIn("cannot read what is attached to gideon_integration", out)
                 self.assertIn("docker-engine", out)
                 self.assertNotIn(PULL, argv_calls(host))
@@ -1324,7 +1525,7 @@ class NetworkChanges(unittest.TestCase):
                 code, out, err = apply(host, egress_path=egress_path)
 
                 self.assertEqual((code, err), (1, ""))
-                self.assertEqual(stages(out)[-1], failure)
+                self.assertEqual(stages(out)[-2:], [failure, "clear"])
                 self.assertIn(INTEGRATION_READ, argv_calls(host))
                 self.assertNotIn(INTEGRATION_STOP, argv_calls(host))
                 self.assertFalse(any("--force-recreate" in call for call in argv_calls(host)))
@@ -1371,7 +1572,7 @@ class NetworkChanges(unittest.TestCase):
                 code, out, err = apply(host)
 
                 self.assertEqual((code, err), (1, ""))
-                self.assertEqual(stages(out)[-1], "recreate")
+                self.assertEqual(stages(out)[-2:], ["recreate", "clear"])
                 self.assertIn("Compose stop failed", out)
                 self.assertIn("logs caddy", out)
                 self.assertNotIn(RECREATE_POSTGRES, argv_calls(host))
@@ -1537,6 +1738,7 @@ class Refusals(unittest.TestCase):
         starting = running_rows(states={ENGINE_SERVICE_NAME: "starting"})
         commands[PS] = [
             done(PS, stdout=running_rows()),
+            done(PS, stdout=running_rows()),
             *(done(PS, stdout=starting) for _ in range(32)),
             done(PS, stdout=running_rows()),
         ]
@@ -1552,6 +1754,7 @@ class Refusals(unittest.TestCase):
         commands[PS] = [
             done(PS, stdout=running_rows()),
             done(PS, stdout=running_rows()),
+            done(PS, stdout=running_rows()),
             done(PS, stdout=running_rows(states={ENGINE_SERVICE_NAME: "starting"})),
         ]
         host = ApplyHost(commands, base_files())
@@ -1562,7 +1765,7 @@ class Refusals(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("verify: refuse", out)
         self.assertIn(f"logs {ENGINE_SERVICE_NAME}", out)
-        self.assertEqual(argv_calls(host).count(PS), 3)
+        self.assertEqual(argv_calls(host).count(PS), 4)
 
     def test_engine_attempts_shrink_after_time_since_start(self) -> None:
         commands = healthy_commands()
@@ -1573,6 +1776,7 @@ class Refusals(unittest.TestCase):
             ),
         )
         commands[PS] = [
+            done(PS, stdout=running_rows()),
             done(PS, stdout=running_rows()),
             done(PS, stdout=running_rows()),
             *(
@@ -1587,12 +1791,13 @@ class Refusals(unittest.TestCase):
             clock=iter((100.0, 950.0, 962.0)).__next__,
         )
         self.assertEqual(code, 0, out)
-        self.assertEqual(argv_calls(host).count(PS), expected_attempts + 3)
+        self.assertEqual(argv_calls(host).count(PS), expected_attempts + 4)
         self.assertIn("model servers healthy 862 s after start", out)
 
     def test_non_engine_failure_is_reported_before_engine_wait(self) -> None:
         commands = healthy_commands()
         commands[PS] = [
+            done(PS, stdout=running_rows()),
             done(PS, stdout=running_rows()),
             done(
                 PS,
@@ -1607,13 +1812,14 @@ class Refusals(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("missing service(s): caddy", out)
         self.assertIn("logs caddy", out)
-        self.assertEqual(argv_calls(host).count(PS), _VERIFY_ATTEMPTS + 1)
+        self.assertEqual(argv_calls(host).count(PS), _VERIFY_ATTEMPTS + 2)
 
     def test_unexpected_service_fails_the_final_exact_read(self) -> None:
         rows = [json.loads(line) for line in running_rows().splitlines()]
         rows.append({"Service": "unexpected", "State": "running", "Health": ""})
         commands = healthy_commands()
         commands[PS] = [
+            done(PS, stdout=running_rows()),
             done(PS, stdout=running_rows()),
             done(PS, stdout=running_rows()),
             done(PS, stdout=running_rows()),
@@ -1628,6 +1834,7 @@ class Refusals(unittest.TestCase):
     def test_slow_start_is_polled_then_passes(self) -> None:
         commands = healthy_commands()
         commands[PS] = [
+            done(PS, stdout=running_rows()),
             done(PS, stdout=""),
             done(PS, stdout=running_rows()),
         ]
@@ -1645,9 +1852,15 @@ class Refusals(unittest.TestCase):
     def test_corrupt_applied_manifest_refuses(self) -> None:
         files = base_files()
         files[f"{RENDERED}/applied.yaml"] = "files: [nope]\n"
-        code, out, _ = apply(ApplyHost(healthy_commands(), files))
+        host = ApplyHost(healthy_commands(), files)
+        code, out, _ = apply(host)
         self.assertEqual(code, 1)
         self.assertIn("render: refuse", out)
+        self.assertEqual(stages(out), ["preconditions", "secrets", "render"])
+        self.assertNotIn(PS, argv_calls(host))
+        self.assertEqual(host.lock_log, [
+            ("take", backuplock.ENGINE_LOCK.path), ("release", backuplock.ENGINE_LOCK.path),
+        ])
 
     def test_foreign_file_refuses_before_any_docker_call(self) -> None:
         files = base_files()
@@ -1828,14 +2041,17 @@ class NoGpuModeSwitch(unittest.TestCase):
     def test_no_gpu_verify_keeps_the_single_default_wait(self) -> None:
         host = ApplyHost(healthy_commands(), base_files())
         host.files[os.fspath(nogpu.NO_GPU_PATH)] = "declared\n"
+        rendered = inputs(EXAMPLE, no_gpu=True)
         host.commands[PS] = done(
             PS,
-            stdout=running_rows(render_inputs=inputs(EXAMPLE, no_gpu=True)),
+            stdout=running_rows(render_inputs=rendered),
         )
         sleeps: list[float] = []
         code, out, _ = apply(host, sleep_calls=sleeps)
         self.assertEqual(code, 0, out)
-        self.assertEqual(argv_calls(host).count(PS), 2)
+        self.assertEqual(argv_calls(host).count(PS), 3)
+        disrupted = ", ".join(name for name in service_names(rendered) if name in TURN_PATH_SERVICES)
+        self.assertIn(f"(disrupted services: {disrupted})", out)
         self.assertNotIn("model servers healthy", out)
         self.assertLessEqual(len(sleeps), _VERIFY_ATTEMPTS - 1)
 
@@ -1974,7 +2190,7 @@ class NewStages(unittest.TestCase):
         host.frontend.request = failing  # type: ignore[method-assign]
         code, out, _ = apply(host)
         self.assertEqual(code, 1)
-        self.assertIn("apply-manifest: refuse", out)
+        self.assertRegex(out, r"apply-manifest: refuse — group [^\n]+HTTP 500")
         self.assertIn("HTTP 500", out)
         self.assertIn("logs open-webui", out)
         self.assertNotIn(HANDSHAKE, argv_calls(host))
@@ -1994,19 +2210,113 @@ class NewStages(unittest.TestCase):
         assert generator is not None
         served_name = generator.serve.served_name
         host.frontend.models.append({"id": served_name, "base_model_id": None})
-        code, out, _ = apply(host)
+        banner_id = "moon-library"
+        banner_text = "The moon library has moved to a new crater."
+        host.frontend.banners.append({
+            "id": banner_id,
+            "type": "info",
+            "content": banner_text,
+            "dismissible": True,
+            "timestamp": BANNER_TIMESTAMP,
+        })
+        code, out, err = apply(host)
         self.assertEqual(code, 0, out)
         self.assertIn("removed functions: hand_added, gideon-branch-gate", out)
-        self.assertIn(f"removed models: {served_name}", out)
+        manifest_row = next(line for line in out.splitlines() if line.startswith("apply-manifest: ok"))
+        self.assertIn(f"removed models: {served_name}", manifest_row)
+        self.assertIn(f"removed banners: {banner_id}", manifest_row)
         self.assertIn("minted secrets: gideon_admin_api_key, gideon_eval_api_key", out)
+        self.assertNotIn(banner_text, out + err)
         self.assertEqual(host.write_modes["/etc/gideon/secrets/gideon_admin_api_key"], 0o440)
         self.assertEqual(
             [item["id"] for item in host.frontend.functions],
             [],
         )
         self.assertEqual([item["id"] for item in host.frontend.models], [GENERAL_MODEL_ID])
+        self.assertEqual(host.frontend.banners, [])
         code, out, _ = apply(host)
+        self.assertEqual(code, 0, out)
         self.assertIn("apply-manifest: ok — frontend state matches the manifest", out)
+
+    def test_manifest_stage_applies_the_standing_window_in_the_site_timezone(self) -> None:
+        commands = healthy_commands()
+        commands[PSQL_WINDOW_QUERY] = done(PSQL_WINDOW_QUERY, stdout=reply())
+        host = ApplyHost(commands, base_files())
+        code, out, err = apply(host, now=EVENT.at)
+        banner_id = f"window-{KEY}-ahead"
+        self.assertEqual((code, err), (0, ""), out)
+        manifest_row = next(line for line in out.splitlines() if line.startswith("apply-manifest: ok"))
+        zone = ZoneInfo(_EXAMPLE_INPUTS.site.office.timezone)
+        holder = backuplock.parse(host.lock_records[1])
+        assert holder is not None
+        command_id = announcements.command_announcement(holder, None, EVENT.at, zone).id
+        self.assertIn(f"added banners: {command_id}, {banner_id}", manifest_row)
+        start, end = announcements.office_time(START, zone), announcements.office_time(END, zone)
+        text = f"GIDEON will be unavailable for maintenance from {start} until {end}."
+        self.assertEqual(host.frontend.banners, [{
+            "id": banner_id, "type": "info", "content": text, "dismissible": True, "timestamp": BANNER_TIMESTAMP,
+        }])
+        self.assertNotIn(text, out + err)
+        calls = argv_calls(host)
+        announce_read, manifest_read, clear_read = [
+            index for index, call in enumerate(calls) if call == PSQL_WINDOW_QUERY
+        ]
+        self.assertLess(announce_read, calls.index(PSQL_MIGRATION))
+        self.assertLess(calls.index(PSQL_MIGRATION), manifest_read)
+        self.assertLess(manifest_read, clear_read)
+        self.assertEqual(
+            [timeout for command, timeout in host.timeouts if command == PSQL_WINDOW_QUERY],
+            [announcesync._HOOK_TIMEOUT, None, announcesync._HOOK_TIMEOUT],
+        )
+
+    def test_manifest_retries_a_timer_post_between_its_post_and_read_back(self) -> None:
+        host = ApplyHost(healthy_commands(), base_files())
+        self.assertEqual(apply(host)[0], 0)
+        host.calls.clear()
+        host.timeouts.clear()
+        host.commands[PSQL_WINDOW_QUERY] = done(PSQL_WINDOW_QUERY, stdout=reply())
+        request = host.frontend.request
+        posts = 0
+
+        def timer_post(method: str, path: str, body: object | None = None) -> Response:
+            nonlocal posts
+            response = request(method, path, body)
+            if method == "POST" and path == BANNERS_ROUTE:
+                posts += 1
+                if posts == 1:
+                    host.frontend.banners = []
+            return response
+
+        with (
+            patch.object(host.frontend, "request", side_effect=timer_post),
+            patch.object(owui, "bootstrap", wraps=owui.bootstrap) as bootstrap,
+        ):
+            code, out, err = apply(host, now=EVENT.at)
+
+        self.assertEqual((code, err), (0, ""), out)
+        bootstrap.assert_called_once()
+        self.assertIsNone(bootstrap.call_args.kwargs.get("announcements"))
+        self.assertEqual(posts, 2)
+        identifier = f"window-{KEY}-ahead"
+        self.assertIn(f"apply-manifest: ok — added banners: {identifier}", out)
+        self.assertEqual([item["id"] for item in host.frontend.banners], [identifier])
+        self.assertEqual([t for command, t in host.timeouts if command == PSQL_WINDOW_QUERY], [None, None])
+
+    def test_manifest_stage_refuses_an_unreadable_record_without_touching_banners(self) -> None:
+        commands = healthy_commands()
+        commands[PSQL_WINDOW_QUERY] = done(PSQL_WINDOW_QUERY, stdout="fictitious unreadable reply")
+        host = ApplyHost(commands, base_files())
+        banner: dict[str, object] = {"id": "moon-library", "content": "The moon library has moved to a new crater."}
+        host.frontend.banners.append(banner)
+        code, out, err = apply(host)
+        self.assertEqual((code, err), (1, ""))
+        self.assertIn(
+            "apply-manifest: refuse — maintenance window reader returned an unreadable event. "
+            f"Fix: Run {report.command('apply')}, then retry.", out,
+        )
+        self.assertNotIn("verify:", out)
+        self.assertNotIn("fictitious unreadable reply", out)
+        self.assertEqual(host.frontend.banners, [banner])
 
     def _restored_onto_a_no_gpu_host(self, disable_stderr: str, load_state: str) -> ApplyHost:
         # A set restored from a GPU host carries an applied record naming the
@@ -2160,6 +2470,7 @@ class NewStages(unittest.TestCase):
     def test_stores_stage_waits_for_a_healthy_store_tier_only(self) -> None:
         commands = healthy_commands()
         commands[PS] = [
+            done(PS, stdout=running_rows()),
             done(PS, stdout=ps_rows({"Service": "postgres", "State": "running", "Health": "starting"})),
             done(PS, stdout=ps_rows({"Service": "postgres", "State": "running", "Health": "healthy"})),
             done(PS, stdout=running_rows()),

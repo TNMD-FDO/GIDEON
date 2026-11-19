@@ -82,9 +82,9 @@ def searxng_settings_document(inputs: RenderInputs) -> Mapping[str, object]:
         # The mapping form is what exposes keep_only; a bare `true` does not.
         # keep_only governs list membership, disabled whether a kept engine
         # is on, and inactive whether it loads at all. Upstream disables bing
-        # and google and ships startpage inactive, so every kept engine is
-        # re-enabled and activated by name. Google is off for every office
-        # unless the site file names it.
+        # and google and ships startpage and mojeek inactive, so every kept
+        # engine is re-enabled and activated by name. Google stays off unless
+        # the site file names it.
         "use_default_settings": {"engines": {"keep_only": engines}},
         "engines": [
             {"name": engine, "disabled": False, "inactive": False}

@@ -37,6 +37,7 @@ from gideon.host.render.owui import (
     ALLOWED_ENDPOINTS,
     AUDIT_EXCLUDED_PATHS,
     AUDIT_LOG_FILE,
+    BANNERS_ROUTE,
     BREAK_GLASS,
     EVAL_IDENTITY,
     FEEDBACK_LIST_ROUTE,
@@ -180,8 +181,12 @@ class Environment(unittest.TestCase):
             with self.subTest(site_path=site_path, no_gpu=no_gpu):
                 env = owui_environment(inputs(site_path, no_gpu=no_gpu))
                 self.assertEqual(env["ENABLE_MESSAGE_RATING"], "true")
-        self.assertEqual(len(ALLOWED_ENDPOINTS), 9)
-        self.assertEqual(ALLOWED_ENDPOINTS[8], FEEDBACK_LIST_ROUTE)
+
+    def test_allowlist_ends_with_the_exact_feedback_and_banner_routes(self) -> None:
+        self.assertEqual(len(ALLOWED_ENDPOINTS), 10)
+        self.assertEqual(ALLOWED_ENDPOINTS[-2:], (FEEDBACK_LIST_ROUTE, BANNERS_ROUTE))
+        self.assertEqual(BANNERS_ROUTE, "/api/v1/configs/banners")
+        self.assertNotIn("/api/v1/configs", ALLOWED_ENDPOINTS)
 
     def test_feature_switches_apply_to_every_frontend_environment(self) -> None:
         rendered_inputs = inputs()

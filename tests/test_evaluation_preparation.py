@@ -17,6 +17,7 @@ from typing import cast
 from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
+from test_evaluation_assessments import FIXTURE_MODEL, FIXTURE_PROMPT
 from test_evaluation_record import read_psql_set
 from test_evaluation_run import (
     NOW,
@@ -28,10 +29,22 @@ from test_evaluation_run import (
     _run_kwargs,
     _sibling_row,
 )
-from test_judgments_slice import _fixture, _judgments_host, _ranked_file
+from test_judgments_slice import (
+    _assessed_file,
+    _coordinate,
+    _fixture,
+    _judgments_host,
+    _ranked_file,
+)
 
 from gideon.evaluation import command
+from gideon.evaluation.assessments import (
+    ASSESSMENTS_FIX,
+    ASSESSMENTS_LABEL,
+    Assessments,
+)
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet
+from gideon.evaluation.rankmetrics import RELEVANT_GRADE
 from gideon.evaluation.results import RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS, CallSurface
 from gideon.host import report, secrets
@@ -162,6 +175,56 @@ def _invoke_planted(
 
 class PreparationRoutes(unittest.TestCase):
     """Each named surface supplies its runner context and record facts."""
+
+    def test_assessments_reach_the_runner_on_both_preparation_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, (case_id,) = _fixture(directory, {1: RELEVANT_GRADE})
+            ranked_path, _ = _ranked_file(directory, {1: (1,)})
+            coordinate = _coordinate(1)
+            assessed_path, _ = _assessed_file(directory, ((case_id, coordinate, 0),))
+            for surfaces in (frozenset({CallSurface.RANKED_FILE}), SLICE_RUNNERS["judgments"].surfaces):
+                with self.subTest(surfaces=surfaces):
+                    (code, stdout, stderr), contexts, _ = _invoke_planted(
+                        EvalHost(), checkout, ranked_path, surfaces,
+                        flags=("--assessed", str(assessed_path)),
+                    )
+                    self.assertEqual((code, stderr), (0, ""), stdout)
+                    context, = contexts
+                    self.assertEqual(context.ranked, {case_id: (coordinate,)})
+                    self.assertEqual(context.assessments, Assessments(
+                        {case_id: {coordinate: 0}}, FIXTURE_PROMPT, FIXTURE_MODEL,
+                    ))
+                    stages = [line.split(":", 1)[0] for line in stdout.splitlines() if ": ok" in line]
+                    expected = ["load", "ranked", "assessed"]
+                    if CallSurface.STORES in surfaces:
+                        expected.append("preconditions")
+                    self.assertEqual(stages, [*expected, "run", "record", "gate"])
+
+    def test_refused_assessments_stop_before_any_box_preconditions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, _ = _fixture(directory, {1: RELEVANT_GRADE})
+            ranked_path, _ = _ranked_file(directory, {1: (1,)})
+            assessed_path = Path(directory) / "fictional-matter-assessments.jsonl"
+            sentinel = "Fictitious passage from an unreadable assessment"
+            assessed_path.write_text(sentinel + "\n", encoding="utf-8")
+            host = EvalHost()
+            with patch.object(host, "geteuid", wraps=host.geteuid) as root_lookup:
+                (code, stdout, stderr), contexts, _ = _invoke_planted(
+                    host, checkout, ranked_path, SLICE_RUNNERS["judgments"].surfaces,
+                    flags=("--assessed", str(assessed_path)),
+                )
+                root_lookup.assert_not_called()
+        self.assertEqual(code, 1)
+        self.assertEqual(contexts, [])
+        self.assertEqual(host.calls, [])
+        self.assertEqual(host.lock_records, [])
+        self.assertEqual([line.split(":", 1)[0] for line in stdout.splitlines()], [
+            "load", "ranked", "assessed",
+        ])
+        self.assertIn(f"assessed: refuse — assessments file refused Fix: {ASSESSMENTS_FIX}", stdout)
+        self.assertIn(f"{ASSESSMENTS_LABEL}:line 1: line is not one JSON object", stderr)
+        self.assertNotIn(sentinel, stdout + stderr)
+        self.assertNotIn(str(assessed_path), stdout + stderr)
 
     def test_record_only_requires_root_and_site_without_a_surface_probe(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

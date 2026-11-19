@@ -34,7 +34,9 @@ class AuditRow:
     detail: Mapping[str, object]
 
 
-def _argv(rendered_dir: PathLike) -> list[str]:
+def audit_argv(rendered_dir: PathLike) -> list[str]:
+    """Build the audit role's stdin-fed, single-transaction psql command."""
+
     return stack.exec_argv(
         rendered_dir,
         _POSTGRES_SERVICE,
@@ -67,7 +69,9 @@ def _escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "''")
 
 
-def _set_variable(name: str, value: str) -> str:
+def set_variable(name: str, value: str) -> str:
+    """Emit a psql binding for a value already checked for CR, LF, and NUL."""
+
     return f"\\set {name} '{_escape(value)}'"
 
 
@@ -86,7 +90,7 @@ def _array_literal(values: tuple[str, ...]) -> str:
 def _sql_value(variable: str, value: str | None, lines: list[str]) -> str:
     if value is None:
         return "NULL"
-    lines.append(_set_variable(variable, value))
+    lines.append(set_variable(variable, value))
     return f":'{variable}'"
 
 
@@ -107,20 +111,20 @@ def _row_sql(row: AuditRow) -> str:
     if _has_forbidden_text(row.detail):
         raise ValueError("detail contains CR, LF, or NUL")
 
-    lines.append(_set_variable("v_run_id", row.run_id))
-    lines.append(_set_variable("v_kind", row.kind))
+    lines.append(set_variable("v_run_id", row.run_id))
+    lines.append(set_variable("v_kind", row.kind))
     actor = _sql_value("v_actor", row.actor_user_id, lines)
     user = _sql_value("v_user", row.user_id, lines)
     chat = _sql_value("v_chat", row.chat_id, lines)
-    lines.append(_set_variable("v_kb", _array_literal(row.kb_ids)))
-    lines.append(_set_variable("v_release", gideon.__version__))
+    lines.append(set_variable("v_kb", _array_literal(row.kb_ids)))
+    lines.append(set_variable("v_release", gideon.__version__))
     try:
         detail = json.dumps(dict(row.detail), sort_keys=True)
     except (TypeError, ValueError) as exc:
         raise ValueError("detail is not JSON-serializable") from exc
     if _has_forbidden_text(detail):
         raise ValueError("detail contains CR, LF, or NUL")
-    lines.append(_set_variable("v_detail", detail))
+    lines.append(set_variable("v_detail", detail))
     lines.append(
         "INSERT INTO audit_log "
         "(run_id, kind, actor_user_id, user_id, chat_id, kb_ids, release, detail) "
@@ -132,7 +136,7 @@ def _row_sql(row: AuditRow) -> str:
 
 def _run(io: Host, rendered_dir: PathLike, sql: str) -> str | None:
     try:
-        result = io.run(_argv(rendered_dir), input=sql)
+        result = io.run(audit_argv(rendered_dir), input=sql)
     except OSError as exc:
         return f"audit writer failed: {exc}"
     if result.returncode != 0:

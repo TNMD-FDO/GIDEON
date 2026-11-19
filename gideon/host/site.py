@@ -84,17 +84,20 @@ _RETENTION_VALUES: Final = ("1d", "7d", "30d", "60d", "90d", "180d", "1y")
 _DRILL_INTERVAL_VALUES: Final = ("1w", "2w", "1m", "3m", "6m", "1y")
 _PROMPT_LOGGING_VALUES: Final = ("metadata_only", "full")
 _WEB_SEARCH_VALUES: Final = ("on", "off")
-# The engines an office may name (the defaults: bing and wikipedia): each is
-# the ``name:`` of a default engine in the pinned SearXNG image; ``brave`` is
-# the keyless engine, never ``braveapi``. A release extends the list.
-# DuckDuckGo, Google, Brave, and Startpage are allowed but off by default.
+# The default engines are bing, wikipedia, and mojeek.
+# Each allowed name is the ``name:`` of a default engine in the pinned SearXNG
+# image. ``brave`` is the keyless engine, distinct from ``braveapi``.
 # DuckDuckGo's bot detection answers a SearXNG instance's request shape with a
-# CAPTCHA at every search; Google is off in upstream's defaults. On the box
-# with the pinned image, Brave answered none of fifteen fixed searches, each
-# refused as too many requests as on the earlier image. Startpage answered
-# none of fifteen fixed searches, its first request answered with a CAPTCHA
-# and every later one suspended for it. Bing answered all fifteen and
-# Wikipedia all six title searches.
+# CAPTCHA at every search. On the box with the pinned image, Brave answered
+# none of fifteen fixed searches, each refused as too many requests as on the
+# earlier image. Startpage answered none of fifteen fixed searches, its first
+# request answered with a CAPTCHA and every later one suspended for it.
+# Bing answered all fifteen and Wikipedia all six title searches.
+# Mojeek answered all fifteen. Its in-module proof-of-work solve took 0.22
+# seconds, well within the search budget. Google stays allowed and off by
+# default after answering none of fifteen, with access denied in each round.
+# Qwant is not allowed: it answered none of fifteen, each refused as access
+# denied or suspended for that refusal.
 WEB_ENGINE_VALUES: Final[tuple[str, ...]] = (
     "duckduckgo",
     "brave",
@@ -102,6 +105,7 @@ WEB_ENGINE_VALUES: Final[tuple[str, ...]] = (
     "startpage",
     "wikipedia",
     "google",
+    "mojeek",
 )
 # Bare lowercase domain names only: the frontend reads a leading ``!`` as a
 # block rule and an address as a network, while this key is an allow-list; a
@@ -353,7 +357,7 @@ FIELD_REGISTRY: Final[tuple[FieldSpec, ...]] = (
         "web.engines",
         kind="string list",
         allowed_values=WEB_ENGINE_VALUES,
-        default=["bing", "wikipedia"],
+        default=["bing", "wikipedia", "mojeek"],
         description="Search engines made available to SearXNG.",
     ),
     _field(

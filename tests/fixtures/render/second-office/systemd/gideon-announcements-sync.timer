@@ -1,0 +1,10 @@
+[Unit]
+Description=Synchronize GIDEON frontend announcements every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00 America/Denver
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

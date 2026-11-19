@@ -24,6 +24,8 @@ _ARCHIVE_PUSH_SERVICE_TEMPLATE = "systemd/gideon-archive-push.service.tmpl"
 _ARCHIVE_PUSH_TIMER_TEMPLATE = "systemd/gideon-archive-push.timer.tmpl"
 _RETENTION_SWEEP_SERVICE_TEMPLATE = "systemd/gideon-retention-sweep.service.tmpl"
 _RETENTION_SWEEP_TIMER_TEMPLATE = "systemd/gideon-retention-sweep.timer.tmpl"
+_ANNOUNCEMENTS_SYNC_SERVICE_TEMPLATE = "systemd/gideon-announcements-sync.service.tmpl"
+_ANNOUNCEMENTS_SYNC_TIMER_TEMPLATE = "systemd/gideon-announcements-sync.timer.tmpl"
 
 RECONCILE_CALENDAR: Final = "*-*-* 03:00:00"
 BACKUP_CALENDAR: Final = "*-*-* 01:00:00"
@@ -50,6 +52,12 @@ RETENTION_SWEEP_CALENDAR: Final = "*-*-* 02:00:00"
 # Exempt operational starting value: four calls per chat for 300 chats at the
 # client's 15-second bound, with an hour for listings, feedback, and audit writes.
 RETENTION_SWEEP_TIMEOUT_START_SECONDS: Final = 21600
+# Exempt operational starting value: check every minute so window changes and
+# stale banners are picked up at the next firing.
+ANNOUNCEMENTS_SYNC_CALENDAR: Final = "*-*-* *:*:00"
+# Exempt operational starting value: allow the frontend read, write, and
+# read-back at their request bounds, and stop a stalled run before the next minute.
+ANNOUNCEMENTS_SYNC_TIMEOUT_START_SECONDS: Final = 50
 # One undashed command runs the suites in order, so a stop's SIGTERM ends the unit.
 NIGHTLY_SUITES: Final = ("general-smoke", "guardrails")
 # The build box's challenger is last: `-` keeps a failed pair off the unit's verdict.
@@ -340,4 +348,30 @@ class RetentionSweepTimerArtifact(_SystemdArtifact):
     def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
         substitutions = dict(super()._substitutions(inputs))
         substitutions["calendar"] = _calendar_with_zone(RETENTION_SWEEP_CALENDAR, inputs)
+        return substitutions
+
+
+class AnnouncementsSyncServiceArtifact(_SystemdArtifact):
+    """Render the announcement reconciliation service on every host."""
+
+    name = "gideon-announcements-sync-service"
+    relative_path = "systemd/gideon-announcements-sync.service"
+    template_paths = (_ANNOUNCEMENTS_SYNC_SERVICE_TEMPLATE,)
+
+    def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
+        substitutions = dict(super()._substitutions(inputs))
+        substitutions["timeout_start_seconds"] = str(ANNOUNCEMENTS_SYNC_TIMEOUT_START_SECONDS)
+        return substitutions
+
+
+class AnnouncementsSyncTimerArtifact(_SystemdArtifact):
+    """Render the office-zoned timer that syncs announcements every minute."""
+
+    name = "gideon-announcements-sync-timer"
+    relative_path = "systemd/gideon-announcements-sync.timer"
+    template_paths = (_ANNOUNCEMENTS_SYNC_TIMER_TEMPLATE,)
+
+    def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
+        substitutions = dict(super()._substitutions(inputs))
+        substitutions["calendar"] = _calendar_with_zone(ANNOUNCEMENTS_SYNC_CALENDAR, inputs)
         return substitutions

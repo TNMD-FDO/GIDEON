@@ -48,6 +48,7 @@ eval/sets/eval-v1/judgments/judgments.jsonl export-ignore
 eval/sets/eval-v1/research-qa/harvest.jsonl export-ignore
 tools/judgments/ export-ignore
 tools/signoffs/ export-ignore
+tests/test_judgments_assess.py export-ignore
 tests/test_judgments_intake.py export-ignore
 tests/test_judgments_kit.py export-ignore
 tests/test_judgments_pool.py export-ignore

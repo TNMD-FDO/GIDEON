@@ -61,6 +61,7 @@ EXCLUDED_PREFIXES = (
     "eval/sets/eval-v1/research-qa/harvest.jsonl",  # harvest-derived research questions pending the same ruling
     "tools/judgments",  # judgment intake tooling that loads the excluded flagger
     "tools/signoffs",  # the sign-off kit tooling
+    "tests/test_judgments_assess.py",  # model assessor kit tests
     "tests/test_judgments_intake.py",  # judgment intake's excluded tests
     "tests/test_judgments_kit.py",  # judgment packet and grades intake tests
     "tests/test_judgments_pool.py",  # judgment pool builder tests

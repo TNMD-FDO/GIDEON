@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import gideon
 from gideon.evaluation import (
+    assessments,
     challenger,
     generation,
     ranked,
@@ -25,6 +26,7 @@ from gideon.evaluation import (
     window,
 )
 from gideon.evaluation import decision as decision_stats
+from gideon.evaluation.assessments import Assessments
 from gideon.evaluation.bound import bound_text
 from gideon.evaluation.conditions import (
     ConditionsReader,
@@ -151,6 +153,7 @@ class _Request:
     command_flags: str
     paired_problem: Problem | None
     generation_name: object = None
+    assessed_path: str | None = None
 
     def retry_command(
         self, *, slice_spec: SliceSpec | None = None, flags: str | None = None,
@@ -163,10 +166,19 @@ class _Request:
             if slice_spec is not None and CallSurface.RANKED_FILE in slice_spec.surfaces
             else ""
         )
+        assessed_flag = (
+            " --assessed <file>"
+            if (
+                self.assessed_path is not None
+                and slice_spec is not None
+                and slice_spec.accepts_assessments
+            )
+            else ""
+        )
         # A supplied set is reprinted as a placeholder, never its path, so a
         # retry neither scores the release's set nor records in its place.
         set_flag = " --set <dir>" if self.supplied_set else ""
-        return f"eval run --slice {self.slice_name}{set_flag}{ranked_flag}{command_flags}"
+        return f"eval run --slice {self.slice_name}{set_flag}{ranked_flag}{assessed_flag}{command_flags}"
 
     def engine_root_fix(self, slice_spec: SliceSpec | None = None) -> str:
         return f"Run {report.command(self.retry_command(slice_spec=slice_spec))}, then retry."
@@ -253,6 +265,7 @@ class _Prepared:
     record: _RecordFacts | StageResult
     image: ImageAccess | None = None
     generation: GenerationAccess | None = None
+    assessments: Assessments | None = None
 
 
 @dataclass(slots=True)
@@ -1006,6 +1019,7 @@ def _prepare_on_box(
     *,
     started: datetime,
     ranked_lists: Mapping[str, tuple[rankmetrics.Coordinates, ...]] | None,
+    supplied_assessments: Assessments | None,
     overrides: Mapping[str, object],
 ) -> _Prepared | None:
     """Run the ``preconditions`` stage for a slice naming a surface on the box.
@@ -1081,6 +1095,7 @@ def _prepare_on_box(
             served_model_name=None,
             turns=None,
             ranked=ranked_lists,
+            assessments=supplied_assessments,
             checkpoint=no_checkpoint,
             started=started,
             forced=False,
@@ -1303,6 +1318,7 @@ def _prepare_on_box(
         served_model_name=target.served_model_name,
         turns=turns,
         ranked=ranked_lists,
+        assessments=supplied_assessments,
         checkpoint=window.deadline_checkpoint(seams.clock, judgement.end),
         started=effective_start,
         forced=request.force,
@@ -1351,6 +1367,13 @@ def _held_record(
     return _RecordFacts(site_result.config.hardware_profile, *resolved_provenance)
 
 
+def _active_slice_ids(loaded: LoadedSet, slice_name: str) -> tuple[str, ...]:
+    """Return the active slice ids accepted by the file readers."""
+
+    active_ids = set(loaded.active_ids)
+    return tuple(case_id for case_id in loaded.slices[slice_name] if case_id in active_ids)
+
+
 def _prepare_ranked(
     request: _Request,
     slice_spec: SliceSpec,
@@ -1377,9 +1400,7 @@ def _prepare_ranked(
                 )
             )
             return None
-        active_ids = set(loaded.active_ids)
-        allowed_ids = tuple(case_id for case_id in loaded.slices[slice_name] if case_id in active_ids)
-        ranked_result = ranked.read(ranked_path, allowed_ids)
+        ranked_result = ranked.read(ranked_path, _active_slice_ids(loaded, slice_name))
         if not ranked_result.ok:
             print_findings(ranked_result.findings)
             print_stage(
@@ -1415,6 +1436,53 @@ def _prepare_ranked(
     return None, overrides
 
 
+def _prepare_assessed(
+    request: _Request,
+    slice_spec: SliceSpec,
+    loaded: LoadedSet,
+    overrides: Mapping[str, object],
+) -> tuple[Assessments | None, Mapping[str, object]] | None:
+    """Read an optional assessments file and add its provenance to the run."""
+
+    if request.assessed_path is None:
+        return None, overrides
+    slice_name = cast(str, request.slice_name)
+    if not slice_spec.accepts_assessments:
+        print_stage(StageResult(
+            "assessed", False, f"slice {slice_name} does not take --assessed",
+            f"Remove --assessed when running --slice {slice_name}, then retry.",
+        ))
+        return None
+
+    result = assessments.read(request.assessed_path, _active_slice_ids(loaded, slice_name))
+    if not result.ok:
+        print_findings(result.findings)
+        print_stage(StageResult(
+            "assessed", False, "assessments file refused", assessments.ASSESSMENTS_FIX,
+        ))
+        return None
+    supplied_assessments = result.assessments
+    assert supplied_assessments is not None and result.sha256 is not None
+    line_count = sum(len(grades) for grades in supplied_assessments.grades.values())
+    print_stage(StageResult(
+        "assessed", True,
+        f"{len(supplied_assessments.grades)} queries, {line_count} lines, "
+        f"prompt {supplied_assessments.prompt}, model {supplied_assessments.model}, SHA-256 {result.sha256}",
+        "",
+    ))
+    judgments_overrides = overrides.get("judgments", {})
+    assert isinstance(judgments_overrides, Mapping)
+    return supplied_assessments, {
+        **overrides,
+        "judgments": {
+            **judgments_overrides,
+            "assessed_sha256": result.sha256,
+            "assessed_prompt": supplied_assessments.prompt,
+            "assessed_model": supplied_assessments.model,
+        },
+    }
+
+
 def _prepare(
     request: _Request,
     seams: _Seams,
@@ -1424,7 +1492,7 @@ def _prepare(
     *,
     started: datetime,
 ) -> _Prepared | None:
-    """Resolve each surface the slice names and the facts its record needs.
+    """Resolve the slice's surfaces, optional assessments, and record facts.
 
     Returns None after exactly one refusing row. A run that reaches the box is
     recordable before it starts, so its lookups refuse under ``preconditions``;
@@ -1441,6 +1509,10 @@ def _prepare(
     if ranked_step is None:
         return None
     ranked_lists, overrides = ranked_step
+    assessed_step = _prepare_assessed(request, slice_spec, loaded, overrides)
+    if assessed_step is None:
+        return None
+    supplied_assessments, overrides = assessed_step
     if slice_spec.reaches_box:
         return _prepare_on_box(
             request,
@@ -1450,12 +1522,14 @@ def _prepare(
             loaded,
             started=started,
             ranked_lists=ranked_lists,
+            supplied_assessments=supplied_assessments,
             overrides=overrides,
         )
     return _Prepared(
         served_model_name=None,
         turns=None,
         ranked=ranked_lists,
+        assessments=supplied_assessments,
         checkpoint=no_checkpoint,
         started=started,
         forced=False,
@@ -1692,6 +1766,7 @@ def _run_body(
         repeats=slice_spec.repeats,
         progress=print,
         ranked=prepared.ranked,
+        assessments=prepared.assessments,
         turns=prepared.turns,
         checkout=seams.checkout,
         image=prepared.image,
@@ -1872,7 +1947,7 @@ def _challenger_flag_problem(args: argparse.Namespace) -> Problem | None:
         " --force" if getattr(args, "force", False) else ""
     )
     fix = f"Run {report.command(_challenger_retry(flags))}, then retry."
-    for name in ("slice", "set", "ranked", "decision", "against"):
+    for name in ("slice", "set", "ranked", "assessed", "decision", "against"):
         value = getattr(args, name, None)
         if value is not None and value is not False:
             return Problem(f"--challenger cannot be combined with --{name}", fix)
@@ -1999,6 +2074,7 @@ def run_eval(
         force=bool(getattr(args, "force", False)),
         against=against,
         ranked_path=getattr(args, "ranked", None),
+        assessed_path=getattr(args, "assessed", None),
         generation_name=generation_name,
         set_root=set_root,
         supplied_set=supplied_root is not None,

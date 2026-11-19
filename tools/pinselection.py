@@ -68,6 +68,7 @@ SELECTED = (
     "test_upgrade",
     "test_venv_build",
     "test_weights",
+    "test_window",
     "test_worker_pipeline",
 )
 

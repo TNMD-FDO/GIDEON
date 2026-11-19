@@ -60,12 +60,12 @@ alerts:
 
 # web:                             General branch search policy
 #   search: on                     off = no web search anywhere; SearXNG not started
-#   engines: [bing, wikipedia]
+#   engines: [bing, wikipedia, mojeek]
 #                                  allowed: duckduckgo, brave, bing, startpage,
-#                                  wikipedia, google; available but off by default:
+#                                  wikipedia, google, mojeek; available but off by default:
 #                                  DuckDuckGo (bot-detection CAPTCHA at every search),
-#                                  Google (off upstream), Brave (too many requests),
-#                                  Startpage (CAPTCHA, then suspension)
+#                                  Brave (too many requests), Startpage (CAPTCHA, then suspension),
+#                                  Google (access denied, then suspension)
 #   domain_filter: []              allow-list of result domains, e.g. [law.cornell.edu, uscourts.gov]; empty = any;
 #                                  bare lowercase names only, each covering itself and its subdomains
 

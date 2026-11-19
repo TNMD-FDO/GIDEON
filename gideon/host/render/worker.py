@@ -118,7 +118,10 @@ CASELAW_FAILURE_REASONS: Final = frozenset({
     "citations", "treatment", "tokenizer", "chunker", "pipeline",
 })
 PIPELINE_VERSION: Final[str] = "1.1.0"
-PIPELINE_CHUNK_SIZES: Final = {"1.0.0": (512, 1024, 64), "1.1.0": (512, 1024, 64)}
+PIPELINE_CHUNK_SIZES: Final = {
+    "1.0.0": (512, 1024, 64), "1.1.0": (512, 1024, 64),
+    "1.2.0": (256, 1024, 64), "1.3.0": (768, 1024, 64),
+}
 DOCUMENT_FAILURE_REASONS: Final = frozenset({
     "no-text", "unparseable", "empty", "illegible", "interrupted",
 })

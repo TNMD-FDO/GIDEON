@@ -976,9 +976,13 @@ def _observation_detail(observation: browser.Observation) -> str:
         )
     else:
         integrations = "none"
+    banners = "none"
+    if observation.banners:
+        banner_types = ", ".join(label for label, _ in observation.banners)
+        banners = f"{len(observation.banners)} ({banner_types})"
     return (
         f"selector: {observation.selector_label} ({len(observation.models)} listed: {models}); "
-        f"+ menu: {plus_items}; integrations: {integrations}"
+        f"+ menu: {plus_items}; integrations: {integrations}; banners: {banners}"
     )
 
 
@@ -1190,6 +1194,7 @@ def _browser_run_data(
             "models": list(observation.models),
             "plus_items": list(observation.plus_items),
             "integrations": [list(value) for value in observation.integrations],
+            "banners": [list(value) for value in observation.banners],
         }
     data: dict[str, object] = {
         "detail": setup.detail,

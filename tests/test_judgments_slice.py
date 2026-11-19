@@ -10,6 +10,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 
+from test_evaluation_assessments import FIXTURE_MODEL, FIXTURE_PROMPT
 from test_evaluation_record import read_psql_set
 from test_evaluation_run import (
     EVALUATION,
@@ -21,10 +22,16 @@ from test_evaluation_run import (
 )
 from test_golddrop_slice import GoldDropHost, _context
 
+from gideon.evaluation.assessments import Assessments
 from gideon.evaluation.evalset import SET_ROOT, load_set
 from gideon.evaluation.judgments import Judgment, path_for, serialize
 from gideon.evaluation.judgments_slice import run_judgments
-from gideon.evaluation.rankmetrics import RANKING_FLOOR
+from gideon.evaluation.rankmetrics import (
+    HOLE_DEPTH,
+    RANKING_FLOOR,
+    RELEVANT_GRADE,
+    Coordinates,
+)
 from gideon.evaluation.record import POSTGRES_SERVICE
 from gideon.evaluation.results import CaseResult, JSONValue
 from gideon.host import report, secrets, stack
@@ -138,6 +145,23 @@ def _write_ranked_bytes(directory: str, data: bytes) -> Path:
     return path
 
 
+def _assessed_file(
+    directory: str, entries: Iterable[tuple[str, Coordinates, int]],
+) -> tuple[Path, bytes]:
+    """Write the file format independently of the assessments serializer."""
+
+    path = Path(directory) / "assessments.jsonl"
+    data = _write_jsonl(path, [
+        {
+            "query_id": case_id, "source_id": source_id, "sha256": sha256,
+            "start": start, "end": end, "grade": grade,
+            "prompt": FIXTURE_PROMPT, "model": FIXTURE_MODEL,
+        }
+        for case_id, (source_id, sha256, start, end), grade in entries
+    ])
+    return path, data
+
+
 def _judgments_host(indices: Iterable[int]) -> GoldDropHost:
     host = GoldDropHost()
     host.generation_output = json.dumps(_generation_row()) + "\n"
@@ -170,6 +194,12 @@ def _binding(sql: str, variable: str) -> str:
 
 def _result_metrics(sql: str, index: int) -> dict[str, JSONValue]:
     return json.loads(_binding(sql, f"result_{index}_metrics"))
+
+
+def _report_bytes(stdout: str) -> bytes:
+    start = stdout.index("judged queries ")
+    end = stdout.index("verdict ", start)
+    return stdout[start:end].encode("utf-8")
 
 
 class Command(unittest.TestCase):
@@ -261,6 +291,119 @@ class Command(unittest.TestCase):
             },
         )
         self.assertNotIn(SENTINEL, stdout + stderr + sql)
+
+    def test_hand_written_assessments_add_only_judge_facts_and_two_report_lines(self) -> None:
+        relevant = RELEVANT_GRADE
+        source_id, sha256, start, end = _coordinate(1)
+        overlap = (source_id, sha256, start + 1, end - 1)
+        ranked = (
+            overlap, _coordinate(1), _coordinate(7), _coordinate(8),
+            *((source_id, sha256, start, end + step) for step in range(1, HOLE_DEPTH - 3)),
+            _coordinate(9),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, (held, dropped) = _fixture(
+                directory, {1: relevant, 2: relevant + 1}, second_grades={1: 0},
+            )
+            court_path = checkout / "courts.yaml"
+            ranked_path = Path(directory) / "ranked.jsonl"
+            ranked_bytes = _write_jsonl(ranked_path, [
+                {
+                    "query_id": case_id,
+                    "ranked": [
+                        {"source_id": source, "sha256": digest, "start": lo, "end": hi}
+                        for source, digest, lo, hi in entries
+                    ],
+                }
+                for case_id, entries in ((held, ranked), (dropped, (_coordinate(7),)))
+            ])
+            assessed_path, assessed_bytes = _assessed_file(directory, (
+                (held, _coordinate(1), relevant),
+                (held, overlap, 0),
+                (held, _coordinate(7), relevant),
+                (held, _coordinate(9), relevant + 1),  # Below Hole@10.
+                (dropped, _coordinate(2), relevant - 1),
+            ))
+            argv = ["eval", "run", "--slice", "judgments", "--ranked", str(ranked_path)]
+            baseline_host = _judgments_host((1, 7, 8, 9))
+            base_code, base_stdout, base_stderr = _invoke(
+                argv, **_run_kwargs(baseline_host, checkout=checkout, court_path=court_path),
+            )
+            host = _judgments_host((1, 7, 8, 9))
+            code, stdout, stderr = _invoke(
+                [*argv, "--assessed", str(assessed_path)],
+                **_run_kwargs(host, checkout=checkout, court_path=court_path),
+            )
+            base_sql = _write_sql(baseline_host)
+            sql = _write_sql(host)
+
+        self.assertEqual((base_code, base_stderr), (0, ""), base_stdout)
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        generation = _generation_row()
+        hole_line = f"hole_at_10 mean {2 / HOLE_DEPTH:.6f} count 1\n"
+        drop_source, drop_sha, drop_start, drop_end = _coordinate(2)
+        legacy_report = (
+            "judged queries 2 of 2, definition judgments@2, "
+            f"generation {generation['gen_id']} ({generation['corpus_lockfile']})\n"
+            "ndcg_at_10 mean 1.000000 count 1\n"
+            "recall_at_50 mean 1.000000 count 1\n"
+            f"{hole_line}"
+            "dropped passages 1 (absent 1, changed 0) across 1 queries\n"
+            f"{dropped}: {drop_source}@{drop_sha}:{drop_start}-{drop_end}\n"
+            f"dropped queries: {dropped}\n"
+            "no grades yet: 0\n"
+            f"small set: 1 judged queries with held passages below {RANKING_FLOOR}; "
+            "the set detects regressions and ranks nothing\n"
+        )
+        self.assertEqual(_report_bytes(base_stdout), legacy_report.encode())
+        # One exact pair agrees. The absent passage crosses the relevance line.
+        # Exact chance agreement is 1/4, and collapsed chance agreement is 1/2.
+        assessor_lines = (
+            f"assessor {FIXTURE_PROMPT}, model {FIXTURE_MODEL}, "
+            f"holes at ranks 1-{HOLE_DEPTH} 2 across 1 queries, assessed 1, unassessed 1, "
+            "grade 0 0, grade 1 0, grade 2 1, grade 3 0, relevant 1\n"
+            "assessor disagreement 2 pairs across 2 queries, four-grade differing 1 "
+            "rate 0.500000 kappa 0.333333, relevant differing 1 rate 0.500000 kappa 0.000000\n"
+        )
+        assessed_report = legacy_report.replace(hole_line, hole_line + assessor_lines)
+        self.assertEqual(_report_bytes(stdout), assessed_report.encode())
+        self.assertNotIn("assessed:", base_stdout)
+        self.assertNotIn("_judge ", base_sql)
+        digest = hashlib.sha256(assessed_bytes).hexdigest()
+        self.assertEqual(_summary_line(stdout, "assessed: ok"), (
+            f"assessed: ok — 2 queries, 5 lines, prompt {FIXTURE_PROMPT}, "
+            f"model {FIXTURE_MODEL}, SHA-256 {digest}"
+        ))
+        self.assertEqual(json.loads(_binding(sql, "overrides")), {"judgments": {
+            "definition": "judgments@2",
+            "ranked_sha256": hashlib.sha256(ranked_bytes).hexdigest(),
+            "assessed_sha256": digest,
+            "assessed_prompt": FIXTURE_PROMPT,
+            "assessed_model": FIXTURE_MODEL,
+        }})
+        figures = (1.0, 1.0, round(2 / HOLE_DEPTH, 6))
+        for index, case_id, expected_figures, hole_fields, differing in (
+            (0, held, figures, (2, 1, 0, 0, 1, 0), 0),
+            (1, dropped, (None, None, None), (None,) * 6, 1),
+        ):
+            self.assertEqual(_binding(sql, f"result_{index}_case_id"), case_id)
+            self.assertEqual(_binding(sql, f"result_{index}_verdict"), "pass")
+            metrics = _result_metrics(sql, index)
+            self.assertEqual(metrics, _result_metrics(base_sql, index))
+            self.assertEqual(tuple(metrics[key] for key in FIGURE_KEYS), expected_figures)
+            judge = json.loads(_binding(sql, f"result_{index}_judge"))
+            expected = {
+                "prompt": FIXTURE_PROMPT, "model": FIXTURE_MODEL, "pair_count": 1,
+                "four_grade_differing": differing, "relevant_differing": differing,
+                **dict(zip(
+                    ("hole_count", "assessed_hole_count", "grade_0", "grade_1", "grade_2", "grade_3"),
+                    hole_fields, strict=True,
+                )),
+            }
+            self.assertEqual(judge, expected)
+            for key, value in expected.items():
+                self.assertIs(type(judge[key]), type(value))
+        self.assertNotIn(SENTINEL, base_stdout + base_stderr + base_sql + stdout + stderr + sql)
 
     def test_small_set_line_drops_at_the_ranking_floor(self) -> None:
         grades = dict.fromkeys(range(1, RANKING_FLOOR + 1), 2)
@@ -527,6 +670,25 @@ class Command(unittest.TestCase):
             self.assertIn("Remove --ranked", stdout)
             self.assertEqual([call for call in host.calls if call[0][0] == "docker"], [])
 
+    def test_root_retry_keeps_assessed_placeholder_without_the_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, (case_id,) = _fixture(directory, {1: RELEVANT_GRADE})
+            ranked_path, _ = _ranked_file(directory, {1: (1,)})
+            assessed_path, _ = _assessed_file(directory, ((case_id, _coordinate(1), RELEVANT_GRADE),))
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", "judgments", "--ranked", str(ranked_path),
+                 "--assessed", str(assessed_path)],
+                **_run_kwargs(
+                    EvalHost(effective_uid=1), checkout=checkout, court_path=checkout / "courts.yaml",
+                ),
+            )
+        self.assertEqual((code, stderr), (1, ""), stdout)
+        retry = report.command("eval run --slice judgments --ranked <file> --assessed <file>")
+        self.assertEqual(_summary_line(stdout, "preconditions: refuse"), (
+            f"preconditions: refuse — root privileges are required Fix: Run {retry}, then retry."
+        ))
+        self.assertNotIn(str(assessed_path), stdout + stderr)
+
     def test_set_argument_skips_recording(self) -> None:
         self.addCleanup(secrets.select_directory, secrets.current_directory())
         with tempfile.TemporaryDirectory() as directory:
@@ -575,6 +737,12 @@ class RunnerRefusals(unittest.TestCase):
         context = replace(_context(host), ranked={ids[0]: (_coordinate(1),), ids[1]: ()})
         host.manifest_code = 23
         retry = report.command("eval run --slice judgments --ranked <file> --generation <name>")
+        assessed_retry = report.command(
+            "eval run --slice judgments --ranked <file> --assessed <file> --generation <name>"
+        )
+        assessments = Assessments({ids[0]: {_coordinate(1): 0}}, FIXTURE_PROMPT, FIXTURE_MODEL)
+        manifest_failure = "generation manifest read failed (exit 23)"
+        manifest_fix = f"Run {stack.logs_fix(context.turns_dir, POSTGRES_SERVICE)}, then retry."
         cases = (
             (
                 replace(context, generation=None), "generation-unresolved",
@@ -582,8 +750,14 @@ class RunnerRefusals(unittest.TestCase):
                 f"Run {retry} through the command's stores preconditions, then retry.", 0,
             ),
             (
-                context, "record-unreachable", "generation manifest read failed (exit 23)",
-                f"Run {stack.logs_fix(context.turns_dir, POSTGRES_SERVICE)}, then retry.", 1,
+                replace(context, generation=None, assessments=assessments), "generation-unresolved",
+                "the stores generation was not resolved",
+                f"Run {assessed_retry} through the command's stores preconditions, then retry.", 0,
+            ),
+            (context, "record-unreachable", manifest_failure, manifest_fix, 1),
+            (
+                replace(context, assessments=assessments), "record-unreachable",
+                manifest_failure, manifest_fix, 1,
             ),
         )
         for run_context, problem, detail, fix, reads in cases:
@@ -608,7 +782,9 @@ class NoText(unittest.TestCase):
 
     def test_new_modules_do_not_subscript_or_get_content_fields(self) -> None:
         forbidden = {"question", "notes", "labels", "text", "caption", "quote"}
-        for name in ("judgments_slice.py", "ranked.py", "rankmetrics.py", "rankmetrics2.py"):
+        for name in (
+            "assessments.py", "judgments_slice.py", "ranked.py", "rankmetrics.py", "rankmetrics2.py",
+        ):
             path = EVALUATION / name
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):

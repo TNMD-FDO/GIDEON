@@ -138,6 +138,16 @@ class Settings(unittest.TestCase):
             {"name": "google", "disabled": False, "inactive": False}, document["engines"]  # type: ignore[arg-type]
         )
 
+    def test_each_probed_engine_still_allowed_renders_with_a_critical_logger(self) -> None:
+        base = inputs()
+        loggers = searxng_logging_document()["loggers"]
+        assert isinstance(loggers, Mapping)
+        for engine in (name for name in ("qwant", "mojeek") if name in WEB_ENGINE_VALUES):
+            with self.subTest(engine=engine):
+                document = searxng_settings_document(with_search(base, "on", engines=[engine]))
+                self.assertEqual(document["engines"], [{"name": engine, "disabled": False, "inactive": False}])
+                self.assertEqual(loggers[f"{SEARXNG_ENGINE_LOGGER_PREFIX}{engine}"], {"level": "CRITICAL"})
+
     def test_a_site_naming_duckduckgo_still_renders_it(self) -> None:
         engines = [*inputs().site.web.engines, "duckduckgo"]
         document = searxng_settings_document(with_search(inputs(), "on", engines=engines))

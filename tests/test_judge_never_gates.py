@@ -10,12 +10,14 @@ from types import ModuleType
 from typing import cast
 
 import test_golddrop_slice
+from test_evaluation_assessments import FIXTURE_MODEL, FIXTURE_PROMPT
 from test_guardrails_slice import _DECLINE, SAMPLE_IDS, JudgingDoorHost, _fixture_turns
-from test_judge import false_refusal_content, valid_content
+from test_judge import false_refusal_content, passage_relevance_content, valid_content
 from test_judgments_slice import FIGURE_KEYS, _coordinate, _fixture, _judgments_host
 
 from gideon import guardrail
 from gideon.evaluation import command, judge
+from gideon.evaluation.assessments import Assessments
 from gideon.evaluation.evalset import (
     SET_ROOT,
     SHAPE_REGISTRY,
@@ -24,6 +26,7 @@ from gideon.evaluation.evalset import (
     load_set,
     select_cases,
 )
+from gideon.evaluation.rankmetrics import RELEVANT_GRADE
 from gideon.evaluation.results import RunContext, SliceResult
 from gideon.evaluation.slices import (
     BUILD_GATES_PARTS,
@@ -124,6 +127,20 @@ VERDICT_PAIRS: Mapping[str, tuple[tuple[str, int, int, float], tuple[str, int, i
             37,
             29,
             6.5,
+        ),
+    ),
+    "passage_relevance_verdict": (
+        (
+            passage_relevance_content(grade=3, reason="A fictitious passage directly answers the question."),
+            17,
+            9,
+            2.5,
+        ),
+        (
+            passage_relevance_content(grade=0, reason="A fictitious passage addresses a different subject."),
+            17,
+            9,
+            2.5,
         ),
     ),
 }
@@ -269,6 +286,36 @@ class Invariance(unittest.TestCase):
                 row, = result.results
                 self.assertEqual((row.case_id, row.verdict), (case_id, "pass"))
                 self.assertEqual(tuple(row.metrics[key] for key in FIGURE_KEYS), figures)
+
+    def test_judgments_assessor_variation_stays_inside_judge(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, (case_id,) = _fixture(directory, {1: RELEVANT_GRADE})
+            loaded = load_set(checkout / SET_ROOT).loaded
+            assert loaded is not None
+        primary, hole = _coordinate(1), _coordinate(2)
+        host = _judgments_host((1, 2))
+        context = replace(test_golddrop_slice._context(host), ranked={case_id: (primary, hole)})
+        runner = SLICE_RUNNERS["judgments"].runner
+        baseline = runner(loaded, "judgments", context)
+        self.assertTrue(baseline.verdict, baseline.report)
+        baseline_row, = baseline.results
+        self.assertIsNone(baseline_row.judge)
+        judges = []
+        for grade in (RELEVANT_GRADE - 1, RELEVANT_GRADE):
+            assessments = Assessments(
+                {case_id: {primary: grade, hole: grade}}, FIXTURE_PROMPT, FIXTURE_MODEL,
+            )
+            result = runner(loaded, "judgments", replace(context, assessments=assessments))
+            self.assertEqual(result.verdict, baseline.verdict)
+            self.assertEqual(result.gated_cases, baseline.gated_cases)
+            row, = result.results
+            self.assertEqual(
+                (row.case_id, row.verdict, row.metrics),
+                (baseline_row.case_id, baseline_row.verdict, baseline_row.metrics),
+            )
+            self.assertIsNotNone(row.judge)
+            judges.append(row.judge)
+        self.assertNotEqual(*judges)
 
     def test_every_registered_slice_is_driven_and_never_gates_on_verdict_fields(self) -> None:
         first_loaded, first = _run_registered(

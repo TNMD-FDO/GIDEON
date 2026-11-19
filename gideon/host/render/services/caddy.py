@@ -11,6 +11,7 @@ class CaddyService(ServiceDefinition):
     """The caddy service in the Compose project."""
 
     name = "caddy"
+    turn_path = True
 
     def block(
         self, inputs: RenderInputs, target: RegistryTarget

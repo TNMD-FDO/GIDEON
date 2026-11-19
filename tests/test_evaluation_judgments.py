@@ -18,6 +18,7 @@ from gideon.evaluation.judgments import (
     JudgmentReadResult,
     LocatedJudgment,
     agreement,
+    cohen_kappa,
     coordinate_findings,
     parse_bytes,
     path_for,
@@ -331,6 +332,12 @@ class AgreementTests(TestCase):
         assert isinstance(result.relevant_kappa, float)
         self.assertAlmostEqual(result.four_grade_kappa, four_grade)
         self.assertAlmostEqual(result.relevant_kappa, relevant)
+        exact_kappa = cohen_kappa(pairs, collapsed=False)
+        collapsed_kappa = cohen_kappa(pairs, collapsed=True)
+        assert isinstance(exact_kappa, float)
+        assert isinstance(collapsed_kappa, float)
+        self.assertAlmostEqual(exact_kappa, four_grade)
+        self.assertAlmostEqual(collapsed_kappa, relevant)
 
     def test_table_a_one_step_misses_stay_on_the_same_relevance_side(self) -> None:
         # A: observed = 6/10, expected = (4²+2²+2²+2²)/10² = 7/25;

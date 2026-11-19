@@ -52,10 +52,6 @@ class PipelineRegistry(unittest.TestCase):
 
     def test_versions_and_sizes(self) -> None:
         self.assertIn(PIPELINE_VERSION, PIPELINES)
-        self.assertEqual(
-            PIPELINE_VERSION,
-            max(PIPELINES, key=lambda version: tuple(map(int, version.split(".")))),
-        )
         for version, entry in PIPELINES.items():
             with self.subTest(version=version):
                 self.assertIsNotNone(VERSION_PATTERN.fullmatch(version))
@@ -69,6 +65,17 @@ class PipelineRegistry(unittest.TestCase):
         previous = PIPELINES["1.0.0"]
         bumped = PIPELINES["1.1.0"]
         self.assertEqual(bumped, replace(previous, version=bumped.version))
+
+    def test_chunk_target_arms_differ_from_the_segmenter_bump_by_target_alone(self) -> None:
+        baseline = PIPELINES["1.1.0"]
+        for version, target in (("1.2.0", 256), ("1.3.0", 768)):
+            with self.subTest(version=version):
+                arm = PIPELINES[version]
+                self.assertEqual(arm, replace(baseline, version=version, chunk_target=target))
+        self.assertEqual(
+            sorted(PIPELINES[version].chunk_target for version in ("1.1.0", "1.2.0", "1.3.0")),
+            [256, 512, 768],
+        )
 
     def test_tokenizer_paths_match_the_weights_layout(self) -> None:
         root = Path("/fictitious/weights")

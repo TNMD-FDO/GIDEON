@@ -57,7 +57,7 @@ DEFAULTS = {
     "egress_proxy": "",
     "docker_address_pool": "",
     "web.search": "on",
-    "web.engines": ["bing", "wikipedia"],
+    "web.engines": ["bing", "wikipedia", "mojeek"],
     "web.domain_filter": [],
     "retention.chats": "90d",
     "prompt_logging": "metadata_only",
@@ -237,9 +237,9 @@ class SiteValidation(unittest.TestCase):
                 self.assertEqual(result.config.docker_address_pool, pool)
 
     def test_web_engines_and_domain_filter_refusals(self) -> None:
-        """The three web keys accept six engine names and bare domains."""
+        """The three web keys accept seven engine names and bare domains."""
 
-        allowed = "duckduckgo, brave, bing, startpage, wikipedia, google"
+        allowed = "duckduckgo, brave, bing, startpage, wikipedia, google, mojeek"
         self.assertEqual(
             self._render_fixture("bad-engines.yaml"),
             f"Invalid value for 'web.engines': expected each entry to be one of: {allowed} "

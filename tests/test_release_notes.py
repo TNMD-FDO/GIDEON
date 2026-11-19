@@ -5,16 +5,21 @@ from __future__ import annotations
 import re
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import gideon
+from gideon.host import announcements, report
 from gideon.host.upgrade import Version
+from gideon.host.windowrecord import Window
 from tools.exportboundary import absent_from_export
 from tools.pinwatch import bumped
 
 ROOT = Path(__file__).resolve().parent.parent
 RELEASE_NOTES = ROOT / "docs" / "release-notes"
 TEMPLATE = RELEASE_NOTES / "TEMPLATE.md"
+_WINDOW_HEADING = "## Next maintenance window"
+_TEMPLATE_4_HEADINGS = ("## What is new", "## What was bumped", "## Coverage", _WINDOW_HEADING)
 # One entry per template version; a later version freezes the earlier list here so
 # a note written under it stays judged by its own template.
 KNOWN_TEMPLATE_HEADINGS: dict[int, tuple[str, ...]] = {
@@ -31,12 +36,8 @@ KNOWN_TEMPLATE_HEADINGS: dict[int, tuple[str, ...]] = {
         "## Coverage",
         "## Next maintenance window",
     ),
-    4: (
-        "## What is new",
-        "## What was bumped",
-        "## Coverage",
-        "## Next maintenance window",
-    ),
+    4: _TEMPLATE_4_HEADINGS,
+    5: _TEMPLATE_4_HEADINGS,
 }
 # The practice rule is the sentence every pre-launch note carries verbatim.
 PRACTICE_RULE = (
@@ -49,6 +50,16 @@ _H2_RE = re.compile(r"^##\s+.+$", re.MULTILINE)
 _TEMPLATE_RE = re.compile(r"^Template:\s*(\d+)\s*$", re.MULTILINE)
 _PLACEHOLDER_RE = re.compile(r"<[^>\n]+>")
 _MINIMUM_NOTE_VERSION = Version.parse("0.2.0")
+_OFFICE_TIME_PATTERN = (
+    rf"(?:{'|'.join(map(re.escape, announcements.WEEKDAYS))}), "
+    rf"(?:{'|'.join(map(re.escape, announcements.MONTHS))}) "
+    r"(?:[1-9]|[12][0-9]|3[01]) at (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM)"
+)
+_WINDOW_NOTE_RE = re.compile(
+    re.escape(announcements.WINDOW_NOTE)
+    .replace(re.escape("{start}"), _OFFICE_TIME_PATTERN)
+    .replace(re.escape("{end}"), _OFFICE_TIME_PATTERN)
+)
 
 
 def _without_comments(text: str) -> str:
@@ -271,6 +282,17 @@ def note_findings(
                     )
                 )
 
+        if note_template_version >= 5:
+            window_line = _section_text(text, _WINDOW_HEADING)
+            if window_line != announcements.NO_WINDOW_NOTE and not _WINDOW_NOTE_RE.fullmatch(window_line):
+                findings.append(
+                    _finding(
+                        path,
+                        f"section {_WINDOW_HEADING} does not match the maintenance window note format",
+                        f"paste the complete output of {report.command('window show --note')} beneath {_WINDOW_HEADING} in {path}",
+                    )
+                )
+
     if "<!--" in text or "-->" in text:
         findings.append(
             _finding(
@@ -368,11 +390,11 @@ class ReleaseNoteTests(unittest.TestCase):
     """Test the release-note artifact and its durable contract."""
 
     def test_template_contract(self) -> None:
-        """The committed template declares version 4 and exactly its required sections."""
+        """The committed template declares version 5 and exactly its required sections."""
 
         if absent_from_export(TEMPLATE.relative_to(ROOT), ROOT):
             self.skipTest("the release-note template is excluded from the public export")
-        self.assertEqual(_template_version(TEMPLATE.read_text(encoding="utf-8")), 4)
+        self.assertEqual(_template_version(TEMPLATE.read_text(encoding="utf-8")), 5)
         self.assertEqual(template_findings(), [])
 
     def test_each_committed_note_conforms(self) -> None:
@@ -516,6 +538,29 @@ class ReleaseNoteTests(unittest.TestCase):
                     self.assertTrue(any(problem in finding for finding in findings), findings)
                     for finding in findings:
                         self.assertIn(". Fix: ", finding)
+
+    def test_template_five_requires_the_generated_maintenance_window_sentence(self) -> None:
+        start = datetime(2099, 9, 7, 0, 5, tzinfo=UTC)
+        window = Window("example-window", start, start + timedelta(hours=12), start, "example-operator")
+        window_line = announcements.note_line(window, UTC)
+        note = _good_note_v4().replace("Template: 4", "Template: 5")
+        old_line = _section_text(note, _WINDOW_HEADING)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "v0.2.0.md"
+            for line in (announcements.note_line(None, UTC), window_line):
+                with self.subTest(line=line):
+                    path.write_text(note.replace(old_line, line), encoding="utf-8")
+                    self.assertEqual(note_findings(path), [])
+            for line in (
+                "The moon cafe has booked an hour for repairs.",
+                f"{window_line}\nAsk the moon cafe for details.",
+                window_line.replace(announcements.office_time(window.ends_at, UTC), "September 7 at noon"),
+            ):
+                with self.subTest(line=line):
+                    path.write_text(note.replace(old_line, line), encoding="utf-8")
+                    [finding] = note_findings(path)
+                    self.assertIn(f"section {_WINDOW_HEADING} does not match", finding)
+                    self.assertIn(f"Fix: paste the complete output of {report.command('window show --note')}", finding)
 
     def test_existence_rule_starts_at_0_2_0(self) -> None:
         """A note is required for the current version from 0.2.0 on, never before."""

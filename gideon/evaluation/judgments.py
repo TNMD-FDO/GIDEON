@@ -300,7 +300,9 @@ def read(path: str | Path) -> JudgmentReadResult:
     )
 
 
-def _kappa(pairs: Iterable[tuple[int, int]], *, collapsed: bool) -> KappaValue:
+def cohen_kappa(pairs: Iterable[tuple[int, int]], *, collapsed: bool) -> KappaValue:
+    """Compute Cohen kappa on the grade scale or collapsed to relevance."""
+
     values = tuple((primary >= 2, second >= 2) if collapsed else (primary, second) for primary, second in pairs)
     if not values:
         return KAPPA_NO_PAIRS
@@ -335,6 +337,6 @@ def agreement(records: Iterable[Judgment]) -> Agreement:
     return Agreement(
         pair_count=len(pairs),
         query_count=len(query_ids),
-        four_grade_kappa=_kappa(pairs, collapsed=False),
-        relevant_kappa=_kappa(pairs, collapsed=True),
+        four_grade_kappa=cohen_kappa(pairs, collapsed=False),
+        relevant_kappa=cohen_kappa(pairs, collapsed=True),
     )

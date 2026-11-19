@@ -43,6 +43,7 @@ from gideon.host.render.command import (
 from gideon.host.render.compose import (
     PROJECT_NAME,
     STORE_SERVICES,
+    TURN_PATH_SERVICES,
     ComposeArtifact,
     compose_top_level,
     container_name,
@@ -64,6 +65,7 @@ from gideon.host.render.opensearch import (
     OPENSEARCH_PASSWORD_SECRET_NAME,
     OPENSEARCH_SERVICE_NAME,
 )
+from gideon.host.render.searxng import SEARXNG_SERVICE_NAME
 from gideon.host.render.services import (
     SERVICES,
     ServiceDefinition,
@@ -73,6 +75,7 @@ from gideon.host.render.services import (
     slow_start_services,
     source_digest,
     store_services,
+    turn_path_services,
 )
 from gideon.host.render.services.api import ApiService
 from gideon.host.render.services.dcgm_exporter import DcgmExporterService
@@ -515,6 +518,13 @@ class Registry(unittest.TestCase):
                 }
                 self.assertTrue(set(stores) <= applying)
 
+    def test_turn_path_services_are_projected_in_registry_order(self) -> None:
+        expected = ("caddy", "postgres", "open-webui", ENGINE_SERVICE_NAME, API_SERVICE_NAME, SEARXNG_SERVICE_NAME)
+        self.assertEqual(turn_path_services(), expected)
+        self.assertEqual(TURN_PATH_SERVICES, expected)
+        self.assertFalse(ServiceDefinition.turn_path)
+        self.assertFalse(EmbedService.turn_path)
+
     def test_slow_starters_have_positive_allowances_and_matching_healthchecks(
         self,
     ) -> None:
@@ -661,6 +671,7 @@ class Verify(unittest.TestCase):
         commands = healthy_commands()
         commands[PS] = [
             done(PS, stdout=running_rows()),
+            done(PS, stdout=running_rows()),
             done(PS, stdout=rows_with_unhealthy(EMBED_SERVICE_NAME)),
             *(
                 done(PS, stdout=rows_with_unhealthy(EMBED_SERVICE_NAME))
@@ -683,6 +694,7 @@ class Verify(unittest.TestCase):
             refused_commands = healthy_commands()
             refused_commands[PS] = [
                 done(PS, stdout=running_rows()),
+                done(PS, stdout=running_rows()),
                 *(
                     done(PS, stdout=rows_with_unhealthy(EMBED_SERVICE_NAME))
                     for _ in range(attempts + 1)
@@ -693,7 +705,7 @@ class Verify(unittest.TestCase):
 
         self.assertEqual(code, 0, out)
         self.assertIn("model servers healthy", out)
-        self.assertEqual(argv_calls(host).count(PS), attempts + 3)
+        self.assertEqual(argv_calls(host).count(PS), attempts + 4)
         self.assertEqual(refused_code, 1)
         self.assertIn(f"logs {EMBED_SERVICE_NAME}", refused_out)
-        self.assertEqual(argv_calls(refused_host).count(PS), attempts + 2)
+        self.assertEqual(argv_calls(refused_host).count(PS), attempts + 3)

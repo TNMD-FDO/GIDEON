@@ -60,11 +60,14 @@ GENERAL_FILTER_IDS: Final[tuple[str, ...]] = ()
 # no bypass. This exact entry admits the one GET and leaves the export twin,
 # deletes, and arena configuration under the evaluations router out.
 FEEDBACK_LIST_ROUTE: Final[str] = "/api/v1/evaluations/feedbacks/list"
+# This exact path admits the banner list's read and set alone. Its parent
+# prefix would admit config import and export.
+BANNERS_ROUTE: Final[str] = "/api/v1/configs/banners"
 ALLOWED_ENDPOINTS: Final[tuple[str, ...]] = (
     # Prefixes, not just the sync paths: the admin key lists Functions and
     # models before each desired-state sync so removals are reported by id;
     # role gating still refuses the eval identity every admin-only listing.
-    # The feedback list route alone is an exact path, not a prefix.
+    # The feedback list and banner routes are exact paths.
     "/api/v1/functions",
     "/api/v1/models",
     "/api/v1/groups",
@@ -74,6 +77,7 @@ ALLOWED_ENDPOINTS: Final[tuple[str, ...]] = (
     "/api/chat/completions",
     "/api/models",
     FEEDBACK_LIST_ROUTE,
+    BANNERS_ROUTE,
 )
 SERVICE_GROUP: Final = "gideon-service"
 OWUI_COLLECTION_PREFIX: Final[str] = "owui"
@@ -206,6 +210,10 @@ GENERAL_FUNCTION_CALLING: Final[str] = "legacy"
 SYNC_ROW_USER_ID: Final[str] = BREAK_GLASS.username
 SYNC_ROW_CREATED_AT: Final[int] = 0
 SYNC_ROW_UPDATED_AT: Final[int] = 0
+
+# The banner route requires a timestamp. The page ignores it, so a fixed
+# value keeps comparisons exact.
+BANNER_TIMESTAMP: Final[int] = 0
 
 # A grant entry in the sync payload must carry an id, a resource type, a
 # resource id, and a creation time the server discards, keeping only the

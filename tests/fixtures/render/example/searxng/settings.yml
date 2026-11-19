@@ -4,11 +4,15 @@ use_default_settings:
     keep_only:
       - "bing"
       - "wikipedia"
+      - "mojeek"
 engines:
   - name: "bing"
     disabled: false
     inactive: false
   - name: "wikipedia"
+    disabled: false
+    inactive: false
+  - name: "mojeek"
     disabled: false
     inactive: false
 plugins: {}

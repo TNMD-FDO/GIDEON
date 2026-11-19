@@ -10,6 +10,7 @@ from urllib.parse import unquote, urlsplit
 
 from gideon.api import progress
 from gideon.evaluation.turns.session import LOGS_FIX
+from gideon.host.announcements import LEVELS
 from gideon.host.report import Problem
 
 type Frame = Mapping[str, object]
@@ -89,13 +90,14 @@ class BrowserTurn:
 
 @dataclass(frozen=True, slots=True)
 class Observation:
-    """Facts visible in the new-chat composer and its menus."""
+    """Facts visible on the new-chat screen and in the composer's menus."""
 
     selector_label: str
     models: tuple[str, ...]
     plus_items: tuple[str, ...]
     integrations: tuple[tuple[str, bool], ...]
     screenshots: tuple[Path, ...]
+    banners: tuple[tuple[str, str], ...] = ()
 
 
 class PageError(Exception):
@@ -164,6 +166,22 @@ INTEGRATION_TOGGLE_SELECTOR = '[role="menu"] button[aria-pressed]'
 # A menu renders a moment after its button is clicked; the pause is the
 # page's own, so the render is serviced — a starting value.
 MENU_SETTLE_SECONDS = 0.5
+
+# A banner carries no id, test id, or role, so it is reached from its close
+# button, one per banner, by the English locale's accessible name (another
+# locale translates it); the button's grandparent is the banner's box, holding
+# the uppercase type label and the content.
+BANNER_CLOSE_SELECTOR = 'role=button[name="Close Banner"s] >> visible=true'
+BANNER_BOX_SELECTOR = "xpath=../.."
+BANNER_TYPE_SELECTOR = "div.uppercase"
+BANNER_CONTENT_SELECTOR = "div.max-h-60"
+# The list arrives after page load and banners fade in after mount. Give the
+# page this starting bound to show the first close button.
+BANNER_SETTLE_SECONDS = 2
+# A painted banner fades in after a 100 ms delay over 300 ms, and the
+# visibility the read waits on ignores opacity, so the banner screenshot waits
+# this much longer through the page's own pause — a starting value.
+BANNER_FADE_SECONDS = 0.5
 
 # A message container's id is message-<uuid>;
 # the user's own carries the user-message class and the composer's id starts
@@ -248,14 +266,51 @@ def signin(page: Page, account: str, password: str, *, timeout: float) -> str | 
         return Problem("the sign-in page could not be read", LOGS_FIX)
 
 
+_BANNER_SELECTOR_FIX = (
+    "Compare the banner's markup on the pinned frontend with the banner selectors in "
+    "gideon/evaluation/turns/browser.py and correct them."
+)
+
+
+def _read_banners(page: Page) -> tuple[tuple[str, str], ...] | Problem:
+    """Each painted banner's type word and content; a missing part fails the read.
+
+    A close button found with no label or content beside it means the markup
+    moved, and counting it as read would pass a seat that never saw the text.
+    """
+
+    if not page.wait_until(lambda: page.count(BANNER_CLOSE_SELECTOR) > 0, BANNER_SETTLE_SECONDS):
+        return ()
+    banners: list[tuple[str, str]] = []
+    for index in range(page.count(BANNER_CLOSE_SELECTOR)):
+        box = f"{BANNER_CLOSE_SELECTOR} >> nth={index} >> {BANNER_BOX_SELECTOR}"
+        label = page.text(f"{box} >> {BANNER_TYPE_SELECTOR}")
+        content = page.text(f"{box} >> {BANNER_CONTENT_SELECTOR}")
+        if label is None or content is None:
+            return Problem(
+                f"banner {index + 1}'s type label or content was not found", _BANNER_SELECTOR_FIX
+            )
+        word = label.strip().casefold()
+        banners.append((word.title() if word in LEVELS else "other", content))
+    return tuple(banners)
+
+
 def observe(page: Page, out: Path, *, timeout: float) -> Observation | Problem:
-    """The new chat page's selector and two menus, with a screenshot of each open."""
+    """Read the new-chat banners, selector and two menus, with screenshots."""
 
     screenshots: list[Path] = []
     try:
         page.goto("/")
         if not page.wait_until(lambda: page.count(CHAT_INPUT_SELECTOR) > 0, timeout):
             return Problem("the chat composer did not appear", LOGS_FIX)
+        banners = _read_banners(page)
+        if isinstance(banners, Problem):
+            return banners
+        if banners:
+            page.sleep(BANNER_FADE_SECONDS)
+            banner_screenshot = out / "observe-banners.png"
+            page.screenshot(banner_screenshot)
+            screenshots.append(banner_screenshot)
         if page.count(MODEL_SELECTOR) == 0:
             return Problem("the model selector button was not found", LOGS_FIX)
         label = page.text(MODEL_SELECTOR)
@@ -298,6 +353,7 @@ def observe(page: Page, out: Path, *, timeout: float) -> Observation | Problem:
             plus_items=plus_items,
             integrations=tuple(integrations),
             screenshots=tuple(screenshots),
+            banners=banners,
         )
     except PageError:
         return Problem("the browser observations could not be read", LOGS_FIX)

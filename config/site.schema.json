@@ -311,7 +311,8 @@
         "engines": {
           "default": [
             "bing",
-            "wikipedia"
+            "wikipedia",
+            "mojeek"
           ],
           "description": "Search engines made available to SearXNG.",
           "items": {
@@ -321,7 +322,8 @@
               "bing",
               "startpage",
               "wikipedia",
-              "google"
+              "google",
+              "mojeek"
             ],
             "type": "string"
           },

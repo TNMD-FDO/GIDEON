@@ -26,8 +26,15 @@ from urllib.parse import quote, urlsplit
 import yaml  # type: ignore[import-untyped]
 
 from gideon.host import stack
+from gideon.host.announcements import ID_PATTERN, Announcement
 from gideon.host.ingress import SniHTTPSConnection
-from gideon.host.render.owui import BREAK_GLASS, EVAL_IDENTITY, EVAL_PASSWORD_SECRET
+from gideon.host.render.owui import (
+    BANNER_TIMESTAMP,
+    BANNERS_ROUTE,
+    BREAK_GLASS,
+    EVAL_IDENTITY,
+    EVAL_PASSWORD_SECRET,
+)
 from gideon.host.secrets import SecretReadResult, read_secret, secret_path, write_secret
 from gideon.host.sysio import Host, PathLike
 
@@ -63,6 +70,10 @@ class OwuiError(Exception):
 
 class OwuiTimeout(OwuiError):
     """The client's request or stream bound expired."""
+
+
+class BannerReadbackMismatch(OwuiError):
+    """The stored banner list differs from the list just posted."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -522,6 +533,18 @@ class Client:
         path = "/api/v1/models/sync"
         self._checked("POST", path, {"models": list(models)})
 
+    def banners(self) -> list[Mapping[str, object]]:
+        """Read the frontend's banner list in display order."""
+
+        return _banner_rows(self._checked("GET", BANNERS_ROUTE))
+
+    def set_banners(self, banners: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+        """Replace the whole banner list and return the server's response."""
+
+        return _banner_rows(
+            self._checked("POST", BANNERS_ROUTE, {"banners": [dict(row) for row in banners]})
+        )
+
     def paged_items(self, path: str) -> tuple[Mapping[str, object], ...]:
         """Every item of a ``{items, total}`` listing, walking pages until one is empty."""
 
@@ -638,6 +661,9 @@ class BootstrapReport:
     minted: tuple[str, ...] = ()
     problem: str | None = None
     fix: str = ""
+    added_banners: tuple[str, ...] = ()
+    removed_banners: tuple[str, ...] = ()
+    replaced_banners: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -684,6 +710,10 @@ def _as_list(value: object | None, path: str) -> list[object]:
     if not isinstance(value, list):
         raise _invalid_response(path)
     return value
+
+
+def _banner_rows(value: object | None) -> list[Mapping[str, object]]:
+    return [_as_mapping(row, BANNERS_ROUTE) for row in _as_list(value, BANNERS_ROUTE)]
 
 
 def _required_text(value: Mapping[str, object], key: str, path: str) -> str:
@@ -1036,6 +1066,95 @@ def _function_difference(
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class BannerSync:
+    """The ids changed by reconciling the banner list."""
+
+    added: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+    replaced: tuple[str, ...] = ()
+
+
+def _compare_banners(
+    desired: Mapping[str, Mapping[str, object]], observed: Sequence[Mapping[str, object]]
+) -> tuple[BannerSync, dict[str, tuple[str, ...]]]:
+    """Compare the ordered list and name each differing field by id."""
+
+    # The frontend accepts any string as an id, so a hand-added banner's id may
+    # be a person's text; one outside the announcement grammar is reported by a
+    # placeholder. No desired id can take that shape, so the grouping is safe.
+    observed_by_id: dict[str, list[Mapping[str, object]]] = {}
+    for row in observed:
+        identifier = row.get("id")
+        if not isinstance(identifier, str):
+            label = "(no id)"
+        elif ID_PATTERN.fullmatch(identifier):
+            label = identifier
+        else:
+            label = "(malformed id)"
+        observed_by_id.setdefault(label, []).append(row)
+
+    # Position is judged among the ids both lists hold, so an addition or a
+    # removal does not report every later banner as replaced.
+    desired_order = [identifier for identifier in desired if identifier in observed_by_id]
+    observed_order = [identifier for identifier in observed_by_id if identifier in desired]
+    added: list[str] = []
+    replaced: list[str] = []
+    differences: dict[str, tuple[str, ...]] = {}
+    for identifier, row in desired.items():
+        observed_rows = observed_by_id.get(identifier)
+        if observed_rows is None:
+            added.append(identifier)
+            differences[identifier] = ("id",)
+            continue
+        actual = observed_rows[0]
+        fields = tuple(
+            key
+            for key, wanted in row.items()
+            if type(actual.get(key)) is not type(wanted) or actual.get(key) != wanted
+        )
+        if len(observed_rows) > 1:
+            fields = ("id", *fields)
+        if desired_order.index(identifier) != observed_order.index(identifier):
+            fields += ("position",)
+        if fields:
+            replaced.append(identifier)
+            differences[identifier] = fields
+
+    removed = tuple(identifier for identifier in observed_by_id if identifier not in desired)
+    differences.update(dict.fromkeys(removed, ("id",)))
+    return BannerSync(tuple(added), removed, tuple(replaced)), differences
+
+
+def sync_banners(client: Client, announcements: Sequence[Announcement]) -> BannerSync:
+    """Set the banner list when it differs and report the verified changes by id."""
+
+    desired: dict[str, Mapping[str, object]] = {}
+    for announcement in announcements:
+        if announcement.id in desired:
+            raise ValueError(f"Announcement id {announcement.id!r} must be unique in the set.")
+        desired[announcement.id] = {
+            "id": announcement.id,
+            "type": announcement.level,
+            "content": announcement.text,
+            "dismissible": announcement.dismissible,
+            "timestamp": BANNER_TIMESTAMP,
+        }
+
+    changes, differences = _compare_banners(desired, client.banners())
+    if not differences:
+        return changes
+    client.set_banners(list(desired.values()))
+    # Read the list again to verify the stored state after an acknowledged write.
+    _, differences = _compare_banners(desired, client.banners())
+    if differences:
+        detail = ", ".join(
+            f"{identifier!r} ({', '.join(fields)})" for identifier, fields in differences.items()
+        )
+        raise BannerReadbackMismatch(f"Open WebUI banners sync read-back differs for {detail}.")
+    return changes
+
+
 def _failure(
     report: BootstrapReport, step: str, error: OwuiError, rendered_dir: PathLike
 ) -> BootstrapReport:
@@ -1113,6 +1232,7 @@ def bootstrap(
     manifest: Mapping[str, object],
     *,
     rendered_dir: PathLike,
+    announcements: Sequence[Announcement] | None = None,
 ) -> BootstrapReport:
     """Push the rendered manifest and machine identities into Open WebUI.
 
@@ -1122,8 +1242,10 @@ def bootstrap(
     desired-state syncs.  Function rows are read back by id and valves after
     the Functions sync, model rows are read back by listing and fields, and
     the live model listing is then read so the frontend's per-worker cache
-    holds the pushed records for the next turn on any path; a second run
-    reports nothing changed.
+    holds the pushed records for the next turn on any path. Banner sync runs
+    last when the caller supplies an announcement set. ``None`` skips banner
+    requests for callers outside the user-facing stack. A second run reports
+    nothing changed.
     """
 
     report = BootstrapReport()
@@ -1291,4 +1413,15 @@ def bootstrap(
         _refresh_live_models(client, desired_by_id)
     except OwuiError as exc:
         return _failure(report, "models refresh", exc, rendered_dir)
+    if announcements is not None:
+        try:
+            banners = sync_banners(client, announcements)
+        except (OwuiError, ValueError) as exc:
+            return _failure(report, "banners sync", OwuiError(str(exc)), rendered_dir)
+        report = replace(
+            report,
+            added_banners=banners.added,
+            removed_banners=banners.removed,
+            replaced_banners=banners.replaced,
+        )
     return report

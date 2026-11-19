@@ -12,6 +12,7 @@ from gideon.host.render.services import (
     all_service_names,
     applying_services,
     store_services,
+    turn_path_services,
 )
 from gideon.host.render.yamlout import dump
 
@@ -30,6 +31,8 @@ SWAP_CEILING_BYTES: Final = 4096
 # any other service is recreated: the registry's store projection, bound once
 # at import.
 STORE_SERVICES: tuple[str, ...] = store_services()
+TURN_PATH_SERVICES: tuple[str, ...] = turn_path_services()
+
 
 class ComposeArtifact(Artifact):
     """Render the ordered Compose project containing the GIDEON services."""

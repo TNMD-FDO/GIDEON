@@ -1,4 +1,4 @@
-"""The reference-guided judge over a stub engine."""
+"""Registered judge prompts over a stub engine."""
 
 import ast
 import inspect
@@ -26,6 +26,7 @@ from gideon.host.sysio import Command, PathLike
 RENDERED = "/rendered"
 PROMPT = judge.PROMPT_REGISTRY["synthesis@1"]
 FALSE_REFUSAL_PROMPT = judge.PROMPT_REGISTRY["false-refusal@1"]
+PASSAGE_RELEVANCE_PROMPT = judge.PROMPT_REGISTRY["passage-relevance@1"]
 SLOTS = {
     "question": "What is the answer?",
     "reference": "The reference answer.",
@@ -34,6 +35,11 @@ SLOTS = {
 FALSE_REFUSAL_SLOTS = {
     "question": "What rule controls the calculation?",
     "candidate": "I cannot state the rule.",
+}
+PASSAGE_RELEVANCE_SLOTS = {
+    "question": "What rule applies in this fictitious dispute?",
+    "caption": "Invented Person v. Imaginary County",
+    "passage": "The fictional court applied a rule to the fictional facts.",
 }
 
 
@@ -116,6 +122,14 @@ def false_refusal_content(
     """One on-schema false-refusal verdict document."""
 
     return json.dumps({"withheld": withheld, "reason": reason})
+
+
+def passage_relevance_content(
+    *, grade: int, reason: str = "The fictitious passage answers the question."
+) -> str:
+    """One passage relevance verdict document."""
+
+    return json.dumps({"grade": grade, "reason": reason})
 
 
 def run_grade(
@@ -220,20 +234,18 @@ class Request(unittest.TestCase):
         self.assertIn(f"<candidate-answer>\n{SLOTS['candidate']}", user)
 
     def test_grade_refuses_missing_or_extra_slots_before_engine_call(self) -> None:
-        for slots in (
-            {"question": "question", "reference": "reference"},
-            {**SLOTS, "other": "extra"},
+        for prompt, slots in (
+            (PROMPT, {"question": "question", "reference": "reference"}),
+            (PROMPT, {**SLOTS, "other": "extra"}),
+            (PASSAGE_RELEVANCE_PROMPT, {
+                key: value for key, value in PASSAGE_RELEVANCE_SLOTS.items() if key != "caption"
+            }),
+            (PASSAGE_RELEVANCE_PROMPT, {**PASSAGE_RELEVANCE_SLOTS, "rank": "1"}),
         ):
-            with self.subTest(slots=tuple(slots)):
+            with self.subTest(prompt=prompt.id, slots=tuple(slots)):
                 host = StubHost(engine_output(valid_content()))
                 with self.assertRaises(ValueError):
-                    judge.grade(
-                        cast(Any, host),
-                        RENDERED,
-                        served_model_name="fixture-model",
-                        prompt=PROMPT,
-                        slots=slots,
-                    )
+                    run_grade(host, prompt=prompt, slots=slots)
                 self.assertIsNone(host.input)
 
     def test_false_refusal_request_uses_its_two_slots_and_schema(self) -> None:
@@ -284,6 +296,47 @@ class Request(unittest.TestCase):
             )
         )
         self.assertEqual(host.argv, expected_argv)
+
+    def test_passage_relevance_request_uses_its_three_slots_and_closed_schema(self) -> None:
+        content = passage_relevance_content(grade=3)
+        host = StubHost(engine_output(content))
+        prompt = PASSAGE_RELEVANCE_PROMPT
+        grading = run_grade(host, prompt=prompt, slots=PASSAGE_RELEVANCE_SLOTS)
+        self.assertEqual(grading.prompt, "passage-relevance@1")
+        self.assertEqual(grading.verdict, judge.Verdict(json.loads(content)))
+        self.assertEqual(prompt.slots, tuple(PASSAGE_RELEVANCE_SLOTS))
+        user = prompt.user_template.format(**PASSAGE_RELEVANCE_SLOTS)
+        for slot, value in PASSAGE_RELEVANCE_SLOTS.items():
+            self.assertIn(f"<{slot}>\n{value}\n</{slot}>", user)
+        assert host.input is not None
+        self.assertEqual(json.loads(host.input), {
+            "model": "fixture-model",
+            "messages": [
+                {"role": "system", "content": prompt.system},
+                {"role": "user", "content": user},
+            ],
+            "max_tokens": judge.JUDGE_MAX_TOKENS,
+            "temperature": 0,
+            "stream": False,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "passage_relevance_verdict",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "grade": {"type": "integer", "enum": [0, 1, 2, 3]},
+                            "reason": {
+                                "type": "string", "minLength": 1, "maxLength": judge.REASON_MAX_LENGTH,
+                            },
+                        },
+                        "required": ["grade", "reason"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "chat_template_kwargs": {"enable_thinking": True},
+        })
 
     def test_exec_argv_names_the_secret_path_and_nothing_more(self) -> None:
         host = StubHost(engine_output(valid_content()))
@@ -397,6 +450,21 @@ class Failures(unittest.TestCase):
                 assert grading.failure is not None
                 self.assertEqual(grading.failure.code, "schema-violation")
                 self.assertNotIn("withheld", judge.render_judge(grading))
+
+    def test_passage_relevance_rejects_grades_outside_the_enum(self) -> None:
+        reason = "Fictitious passage assessment that must stay out of the failure."
+        for grade_value in (-1, 4):
+            with self.subTest(grade=grade_value):
+                content = passage_relevance_content(grade=grade_value, reason=reason)
+                grading = run_grade(
+                    StubHost(engine_output(content)),
+                    prompt=PASSAGE_RELEVANCE_PROMPT, slots=PASSAGE_RELEVANCE_SLOTS,
+                )
+                self.assertIsNone(grading.verdict)
+                self.assertEqual(grading.failure, judge.Failure("schema-violation", "schema violation at /grade"))
+                field = judge.render_judge(grading)
+                self.assertNotIn("grade", field)
+                self.assertNotIn(reason, repr(field))
 
 
 class Normalisation(unittest.TestCase):
@@ -552,6 +620,7 @@ class Registry(unittest.TestCase):
     def test_ids_are_unique_versioned_and_digest_pinned(self) -> None:
         ids = tuple(judge.PROMPT_REGISTRY)
         self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(set(ids), set(judge.PROMPT_DIGESTS))
         for prompt_id in ids:
             with self.subTest(prompt_id=prompt_id):
                 name, separator, version = prompt_id.rpartition("@")

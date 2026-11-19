@@ -105,6 +105,7 @@ class ApiService(ServiceDefinition):
     """
 
     name = API_SERVICE_NAME
+    turn_path = True
     sources = ("gideon/api", "gideon/guardrail")
 
     def applies(self, inputs: RenderInputs) -> bool:

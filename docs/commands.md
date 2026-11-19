@@ -31,7 +31,7 @@ Render produces the release's configuration, with `--diff` showing the changes b
 
 ### gideon apply
 
-Apply brings the running stack into agreement with the site file and the release: it converges the stack, generates absent secrets, fetches the profile's models, and verifies the services. A CSA runs it after editing `/etc/gideon/site.yaml`. It needs root, and it refuses while an evaluation holds the engine lock.
+Apply brings the running stack into agreement with the site file and the release: it converges the stack, generates absent secrets, fetches the profile's models, and verifies the services. A CSA runs it after editing `/etc/gideon/site.yaml`. It needs root, and it refuses while an evaluation holds the engine lock. An apply that recreates or finds down a service a user's turn passes through tells users that GIDEON is unavailable before it changes anything, and takes the announcement down when it exits.
 
 **Command.** `gideon apply`.\
 **Steps.** [docs/runbooks/install-upgrade.md §4](runbooks/install-upgrade.md).
@@ -43,16 +43,44 @@ Install runs preflight, apply, user reconciliation, engine verification, backup,
 **Command.** `gideon install`.\
 **Steps.** [docs/runbooks/install-upgrade.md §1](runbooks/install-upgrade.md).
 
+### gideon window set
+
+Record a maintenance window with a start and an end in the office time zone. Use the command again with new times to move the current window. The frontend banner follows the recorded times within a minute. The command warns when the notice is shorter than one working day.
+
+**Command.** `gideon window set --start "<YYYY-MM-DD HH:MM>" --end "<YYYY-MM-DD HH:MM>"`.\
+**Steps.** [docs/runbooks/install-upgrade.md §2](runbooks/install-upgrade.md).
+
+### gideon window withdraw
+
+Withdraw the recorded maintenance window when the work is canceled or finishes early. The frontend clears its banner within a minute. The command refuses when there is no current window to withdraw.
+
+**Command.** `gideon window withdraw`.\
+**Steps.** [docs/runbooks/install-upgrade.md §2](runbooks/install-upgrade.md).
+
+### gideon window show
+
+Check the current maintenance window, including its times, whether it has started, and who recorded it. Use `--note` to print the one sentence to paste into the release note.
+
+**Command.** `gideon window show [--note]`.\
+**Steps.** [docs/runbooks/install-upgrade.md §2](runbooks/install-upgrade.md).
+
+### gideon announcements sync
+
+Bring the frontend's banner list into agreement with the current maintenance window and any running command's unavailability announcement. A timer runs the command every minute. Run it by hand to refresh the list immediately after a change or restart.
+
+**Command.** `gideon announcements sync`.\
+**Steps.** [docs/runbooks/observability.md §1](runbooks/observability.md).
+
 ### gideon upgrade <tag>
 
-Upgrade takes a mandatory full backup before checking out the release and running the new tree's commands. A CSA runs it against a clean install checkout; git runs as the checkout's owner.
+Upgrade takes a mandatory full backup before checking out the release and running the new tree's commands. A CSA runs it against a clean install checkout; git runs as the checkout's owner. It tells users that GIDEON is unavailable before the checkout and takes the announcement down when it exits.
 
 **Command.** `gideon upgrade <tag>`.\
 **Steps.** [docs/runbooks/install-upgrade.md §2](runbooks/install-upgrade.md).
 
 ### gideon upgrade --rollback
 
-Rollback restores the pre-upgrade backup and applies the previous release. A CSA runs it to return the data and product to their saved state.
+Rollback restores the pre-upgrade backup and applies the previous release. A CSA runs it to return the data and product to their saved state. It tells users that GIDEON is unavailable before it stops the stack and takes the announcement down when it exits.
 
 **Command.** `gideon upgrade --rollback [<tag>]`.\
 **Steps.** [docs/runbooks/install-upgrade.md §3](runbooks/install-upgrade.md).
@@ -234,7 +262,7 @@ Eval run scores an evaluation set, compares per-case verdicts with the committed
 
 The quiet window covers weeknights 19:00 to 06:00 and Friday 19:00 to Monday 06:00 in the site's timezone. The account used for evaluation turns through the frontend is called the eval identity.
 
-`extraction` scores the set's labelled exact objects, and `judgments --ranked <file> --generation <name>` scores ranked gold-evidence coordinates against attorneys' grades, reporting nDCG@10, recall@50, and Hole@10 without gating those measures. It reads the generation's manifest first, because a graded passage the generation does not hold under its graded text could not have been retrieved from it: such a passage is left out of that query's figures and listed by query id. A ranked entry the generation does not hold shows the file was drawn from another index, so its query and the run fail. The run records the generation and its corpus lockfile, and the generation is chosen as it is for `gold-drop` below.
+`extraction` scores the set's labelled exact objects, and `judgments --ranked <file> --generation <name>` scores ranked gold-evidence coordinates against attorneys' grades, reporting nDCG@10, recall@50, and Hole@10 without gating those measures. It reads the generation's manifest first, because a graded passage the generation does not hold under its graded text could not have been retrieved from it: such a passage is left out of that query's figures and listed by query id. A ranked entry the generation does not hold shows the file was drawn from another index, so its query and the run fail. The run records the generation and its corpus lockfile, and the generation is chosen as it is for `gold-drop` below. With `--assessed <file>`, a model assessor's grades file written on the box outside the checkout, the report adds two lines: the passages in each top ten that no attorney graded, with the model's grade counts over them, and the model's disagreement with the attorneys' grades as a rate and Cohen's κ. No measure or verdict changes, and the run records the file's SHA-256, prompt, and model.
 
 `guardrails` runs three guardrail families through General's service, with six cases also through the frontend, in the quiet window. It gates each family and the harness's false-refusal counts at their ceilings, while the judge's readings are reported without gating.
 

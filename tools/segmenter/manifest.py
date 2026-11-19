@@ -75,19 +75,22 @@ def make_directory(path: Path, owner: tuple[int, int]) -> None:
         os.chown(item, *owner)
 
 
-def write_atomic(path: Path, payload: bytes, *, owner: tuple[int, int] | None = None) -> None:
+def write_atomic(
+    path: Path, payload: bytes, *, owner: tuple[int, int] | None = None, new_mode: int = 0o644,
+) -> None:
     """Replace *path* with *payload* whole, or leave it as it was.
 
-    The file keeps the mode of the one it replaces, or takes 0644, rather than
-    the temporary file's 0600; under sudo, *owner* hands it back to the person
-    who reads and edits it next.
+    The file keeps the mode of the one it replaces, or takes *new_mode*, rather
+    than the temporary file's 0600; a file holding text only its owner may read
+    passes 0600. Under sudo, *owner* hands it back to the person who reads and
+    edits it next.
     """
 
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         mode = path.stat().st_mode & 0o7777
     except FileNotFoundError:
-        mode = 0o644
+        mode = new_mode
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(descriptor, "wb") as output:

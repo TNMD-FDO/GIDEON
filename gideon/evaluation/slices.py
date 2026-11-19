@@ -55,6 +55,11 @@ class SliceSpec:
     A part naming the stores surface runs in every ``smoke`` or ``build-gates``
     run, even when no counted case routes to it.
     ``judgments`` names the stores surface for the manifest its definition reads.
+    ``accepts_assessments`` is whether ``eval run`` admits ``--assessed``, the
+    model assessor's grades file, for the slice. It is a field and not a
+    surface: every surface a slice names is required of each of its runs and
+    decides ``reaches_box``, while the assessments file is optional and read
+    off the box.
     ``engine_calls`` estimates the engine requests one counted run makes; None
     leaves its size bound to the quiet window. ``smoke``'s is the sum of its
     parts' ``turn_calls``; ``guardrails`` run alone keeps None, since the
@@ -76,6 +81,7 @@ class SliceSpec:
     turn_calls: Callable[[LoadedSet, str], int] | None
     ceiling_cases: Callable[[LoadedSet, str], frozenset[str]] | None = None
     decision: DecisionMetric | None = None
+    accepts_assessments: bool = False
 
     def __post_init__(self) -> None:
         if CallSurface.TURNS in self.surfaces and CallSurface.ENGINE not in self.surfaces:
@@ -156,6 +162,7 @@ _JUDGMENTS: Final[SliceSpec] = SliceSpec(
     ),
     categories=frozenset({("judgments", "judgments")}),
     turn_calls=None,
+    accepts_assessments=True,
 )
 _GOLD_DROP: Final[SliceSpec] = SliceSpec(
     runner=golddrop_slice.run_gold_drop,

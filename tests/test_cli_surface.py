@@ -26,7 +26,7 @@ from gideon.host.steps import STEPS
 TOP_LEVEL = [
     "host", "render", "apply", "preflight", "install", "upgrade", "uninstall", "tls",
     "users", "secrets", "engine", "worker", "models", "corpus", "index", "registry", "eval", "proposals", "status",
-    "backup", "archive", "restore", "audit", "retention", "alerts",
+    "backup", "archive", "restore", "audit", "retention", "window", "announcements", "alerts",
 ]
 
 # Each stub with the phrase its help and refusal must carry: the slice it
@@ -98,6 +98,34 @@ class Start(unittest.TestCase):
 
 
 class Help(unittest.TestCase):
+    def test_announcements_group_lists_sync(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["announcements", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertEqual(help_entries(out.getvalue()), {
+            "sync": "synchronize frontend banners with the standing announcements",
+        })
+
+    def test_window_group_and_help(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["window", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertEqual(set(help_entries(out.getvalue())), {"set", "withdraw", "show"})
+        for subcommand, expected in (
+            ("set", ("--start", "--end", "office timezone")),
+            ("withdraw", ("window withdraw",)),
+            ("show", ("--note", "release note sentence")),
+        ):
+            with self.subTest(subcommand=subcommand):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+                    main(["window", subcommand, "--help"])
+                self.assertEqual(ctx.exception.code, 0)
+                for phrase in expected:
+                    self.assertIn(phrase, collapsed(out.getvalue()))
+
     def test_archive_group_is_plain_and_push_help_is_reachable(self) -> None:
         top = io.StringIO()
         with contextlib.redirect_stdout(top), self.assertRaises(SystemExit) as ctx:
@@ -310,6 +338,57 @@ class Help(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("root", out.getvalue())
         self.assertIn("default: last month", collapsed(out.getvalue()))
+
+
+class AnnouncementsCommands(unittest.TestCase):
+    def test_sync_dispatches_through_the_guard(self) -> None:
+        with patch("gideon.host.announcesync.run_announcements_sync", return_value=0) as run:
+            self.assertEqual(main(["announcements", "sync"]), 0)
+            run.assert_called_once()
+            self.assertEqual(run.call_args.args[0].command_path, "announcements sync")
+        error = io.StringIO()
+        with patch("gideon.host.announcesync.run_announcements_sync", side_effect=RuntimeError("fictitious failure")), contextlib.redirect_stderr(error):
+            self.assertEqual(main(["announcements", "sync"]), 1)
+        self.assertIn("gideon announcements sync: internal error", error.getvalue())
+        self.assertIn("Fix:", error.getvalue())
+        self.assertNotIn("Traceback", error.getvalue())
+
+
+class WindowCommands(unittest.TestCase):
+    def test_set_requires_both_times(self) -> None:
+        for flag in ("--start", "--end"):
+            with self.subTest(flag=flag):
+                error = io.StringIO()
+                with contextlib.redirect_stderr(error), self.assertRaises(SystemExit) as ctx:
+                    main(["window", "set", flag, "2099-01-01 12:00"])
+                self.assertEqual(ctx.exception.code, 2)
+                other = "--end" if flag == "--start" else "--start"
+                self.assertIn(f"required: {other}", error.getvalue())
+
+    def test_each_subcommand_dispatches_to_its_guarded_handler(self) -> None:
+        cases: tuple[tuple[str, list[str], dict[str, object]], ...] = (
+            ("set", ["--start", "2099-01-01 12:00", "--end", "2099-01-01 13:00"],
+             {"start": "2099-01-01 12:00", "end": "2099-01-01 13:00"}),
+            ("withdraw", [], {}),
+            ("show", ["--note"], {"note": True}),
+        )
+        for subcommand, flags, expected in cases:
+            with self.subTest(subcommand=subcommand), patch(f"gideon.host.window.run_window_{subcommand}") as run:
+                run.return_value = 0
+                self.assertEqual(main(["window", subcommand, *flags]), 0)
+                run.assert_called_once()
+                args = run.call_args.args[0]
+                self.assertEqual(args.command_path, f"window {subcommand}")
+                for key, value in expected.items():
+                    self.assertEqual(getattr(args, key), value)
+
+    def test_window_handler_guards_unexpected_errors(self) -> None:
+        error = io.StringIO()
+        with patch("gideon.host.window.run_window_show", side_effect=RuntimeError("fictitious failure")), contextlib.redirect_stderr(error):
+            self.assertEqual(main(["window", "show"]), 1)
+        self.assertIn("gideon window show: internal error", error.getvalue())
+        self.assertIn("Fix:", error.getvalue())
+        self.assertNotIn("Traceback", error.getvalue())
 
 
 class Stubs(unittest.TestCase):

@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 from gideon.host import (
     alerts,
+    announcesync,
     apply,
     archive,
     backup,
@@ -23,6 +24,7 @@ from gideon.host import (
     upgrade,
     users,
     weights,
+    window,
     worker,
 )
 from gideon.host.corpus import cut, watch
@@ -82,6 +84,22 @@ def run_users_reconcile(args: argparse.Namespace) -> int:
 
 def run_retention_sweep(args: argparse.Namespace) -> int:
     return _guarded("retention sweep", retention.run_retention_sweep, args)
+
+
+def run_window_set(args: argparse.Namespace) -> int:
+    return _guarded("window set", window.run_window_set, args)
+
+
+def run_window_withdraw(args: argparse.Namespace) -> int:
+    return _guarded("window withdraw", window.run_window_withdraw, args)
+
+
+def run_window_show(args: argparse.Namespace) -> int:
+    return _guarded("window show", window.run_window_show, args)
+
+
+def run_announcements_sync(args: argparse.Namespace) -> int:
+    return _guarded("announcements sync", announcesync.run_announcements_sync, args)
 
 
 def _guarded(command: str, run: Callable[[argparse.Namespace], int], args: argparse.Namespace) -> int:

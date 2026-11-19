@@ -48,6 +48,7 @@ class OpenWebuiService(ServiceDefinition):
     """The open-webui service in the Compose project."""
 
     name = "open-webui"
+    turn_path = True
 
     def block(
         self, inputs: RenderInputs, target: RegistryTarget

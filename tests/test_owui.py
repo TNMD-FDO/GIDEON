@@ -1,4 +1,4 @@
-"""The Open WebUI client, readiness wait, and the idempotent bootstrap."""
+"""The Open WebUI client, readiness wait, and desired-state syncs."""
 
 import contextlib
 import http.server
@@ -16,7 +16,10 @@ from urllib.parse import unquote
 
 import yaml  # type: ignore[import-untyped]
 
+from gideon.host.announcements import Announcement
 from gideon.host.owui import (
+    BannerReadbackMismatch,
+    BannerSync,
     Client,
     OwuiError,
     OwuiTimeout,
@@ -24,9 +27,12 @@ from gideon.host.owui import (
     bootstrap,
     ingress_client_factory,
     load_manifest,
+    sync_banners,
     wait_ready,
 )
 from gideon.host.render.owui import (
+    BANNER_TIMESTAMP,
+    BANNERS_ROUTE,
     BREAK_GLASS,
     EVAL_IDENTITY,
     GENERAL_MODEL_ID,
@@ -43,6 +49,10 @@ EVAL_PASSWORD = "eval-pw"
 ADMIN_KEY = "sk-admin-secret"
 EVAL_KEY = "sk-eval-secret"
 FUNCTION_ID = "fixture-function"
+_CAFE = Announcement("moon-cafe", "info", "The moon cafe will close at dusk.", True)
+_BAKERY = Announcement("moon-bakery", "warning", "The moon bakery is out of craters.", False)
+_STRAY = Announcement("moon-arcade", "success", "The moon arcade has reopened.", True)
+_EDITED_TEXT = "The moon cafe will close at dawn."
 
 
 def fixture_function() -> dict[str, object]:
@@ -57,6 +67,16 @@ def fixture_function() -> dict[str, object]:
         "valves": {},
         "is_active": True,
         "is_global": True,
+    }
+
+
+def banner_row(announcement: Announcement) -> dict[str, object]:
+    return {
+        "id": announcement.id,
+        "type": announcement.level,
+        "content": announcement.text,
+        "dismissible": announcement.dismissible,
+        "timestamp": BANNER_TIMESTAMP,
     }
 
 
@@ -108,7 +128,7 @@ class FakeHost:
 
 
 class Frontend:
-    """An in-memory Open WebUI: the observed v0.11.0 shapes for the routes bootstrap uses."""
+    """An in-memory Open WebUI over the routes bootstrap uses."""
 
     def __init__(self) -> None:
         self.users: dict[str, dict[str, Any]] = {
@@ -120,9 +140,11 @@ class Frontend:
         self.members: dict[str, set[str]] = {}
         self.functions: list[dict[str, Any]] = []
         self.models: list[dict[str, Any]] = []
+        self.banners: list[dict[str, object]] = []
         self.calls: list[tuple[str, str]] = []
         self.next_id = 0
         self.swallow_sync = False
+        self.swallow_banner_set = False
         # The live listing built from a stale cache: General carries a stray attachment.
         self.stale_live_models = False
 
@@ -164,8 +186,17 @@ class Frontend:
             key = f"sk-{user['id']}-{self.fresh_id('k')}"
             self.keys[user["id"]] = key
             return Response(200, {"api_key": key})
+        if (method, route) == ("GET", BANNERS_ROUTE) and user["role"] in {"admin", "user"}:
+            return Response(200, list(self.banners))
         if user["role"] != "admin":
             return Response(401, {"detail": "admin required"})
+        if (method, route) == ("POST", BANNERS_ROUTE):
+            assert isinstance(body, Mapping)
+            assert isinstance(body["banners"], list)
+            banners = [{"title": None, **row} for row in body["banners"]]
+            if not self.swallow_banner_set:
+                self.banners = banners
+            return Response(200, banners)
         if route == "/api/v1/users/all":
             return Response(200, {"users": list(self.users.values()), "total": len(self.users)})
         if route == "/api/v1/auths/add":
@@ -557,6 +588,127 @@ class WaitReady(unittest.TestCase):
         self.assertIn("/ready", result.problem or "")
 
 
+class Banners(unittest.TestCase):
+    def setUp(self) -> None:
+        self.frontend = Frontend()
+        self.frontend.keys["u-admin"] = ADMIN_KEY
+        self.client = FakeClient(self.frontend, api_key=ADMIN_KEY)
+
+    def test_banner_requests_round_trip_the_list(self) -> None:
+        row = banner_row(_CAFE)
+        stored = [{"title": None, **row}]
+        self.assertEqual(self.client.set_banners((row,)), stored)
+        self.assertEqual(self.client.banners(), stored)
+        self.assertEqual(self.frontend.calls, [("POST", BANNERS_ROUTE), ("GET", BANNERS_ROUTE)])
+
+    def test_malformed_banner_responses_refuse_without_echoing_the_body(self) -> None:
+        for operation in (self.client.banners, lambda: self.client.set_banners(())):
+            for payload in ({"detail": _EDITED_TEXT}, [_EDITED_TEXT]):
+                with self.subTest(operation=operation, payload=payload):
+                    with (
+                        patch.object(self.client, "request", return_value=Response(200, payload)),
+                        self.assertRaisesRegex(OwuiError, "invalid response") as raised,
+                    ):
+                        operation()
+                    self.assertIn(BANNERS_ROUTE, raised.exception.problem)
+                    self.assertNotIn(_EDITED_TEXT, raised.exception.problem)
+
+    def test_matching_list_only_reads(self) -> None:
+        self.frontend.banners = [{**banner_row(_CAFE), "title": "Moon cafe notice"}]
+        self.assertEqual(sync_banners(self.client, (_CAFE,)), BannerSync())
+        self.assertEqual(self.frontend.calls, [("GET", BANNERS_ROUTE)])
+
+    def test_adds_a_missing_banner_and_posts_only_the_five_fields(self) -> None:
+        row = banner_row(_CAFE)
+        with patch.object(self.client, "request", wraps=self.client.request) as request:
+            self.assertEqual(sync_banners(self.client, (_CAFE,)), BannerSync(added=(_CAFE.id,)))
+        request.assert_any_call("POST", BANNERS_ROUTE, {"banners": [row]})
+        self.assertEqual(self.frontend.banners, [{"title": None, **row}])
+        self.assertEqual(
+            self.frontend.calls,
+            [("GET", BANNERS_ROUTE), ("POST", BANNERS_ROUTE), ("GET", BANNERS_ROUTE)],
+        )
+
+    def test_removes_stray_and_unidentified_banners(self) -> None:
+        private_id = "Call the moon clinic\nabout the crater"
+        for bad_id, label in (
+            ({}, "(no id)"),
+            ({"id": 3}, "(no id)"),
+            ({"id": private_id}, "(malformed id)"),
+            ({"id": "Moon-Arcade"}, "(malformed id)"),
+        ):
+            with self.subTest(bad_id=bad_id):
+                self.frontend.banners = [banner_row(_STRAY), {"content": _EDITED_TEXT, **bad_id}]
+                changes = sync_banners(self.client, ())
+                self.assertEqual(changes, BannerSync(removed=(_STRAY.id, label)))
+                self.assertNotIn(private_id, repr(changes))
+                self.assertEqual(self.frontend.banners, [])
+
+    def test_a_malformed_id_reaches_no_read_back_refusal(self) -> None:
+        private_id = "Call the moon clinic\nabout the crater"
+        self.frontend.banners = [{**banner_row(_CAFE), "id": private_id}]
+        self.frontend.swallow_banner_set = True
+        with self.assertRaisesRegex(OwuiError, "'\\(malformed id\\)' \\(id\\)") as raised:
+            sync_banners(self.client, ())
+        self.assertNotIn("moon clinic", str(raised.exception))
+
+    def test_replaces_an_edited_banner(self) -> None:
+        self.frontend.banners = [{**banner_row(_CAFE), "content": _EDITED_TEXT}]
+        self.assertEqual(sync_banners(self.client, (_CAFE,)), BannerSync(replaced=(_CAFE.id,)))
+        self.assertEqual(self.frontend.banners[0]["content"], _CAFE.text)
+
+    def test_an_addition_in_front_leaves_later_banners_unreplaced(self) -> None:
+        self.frontend.banners = [banner_row(_CAFE)]
+        self.assertEqual(
+            sync_banners(self.client, (_BAKERY, _CAFE)), BannerSync(added=(_BAKERY.id,))
+        )
+        self.assertEqual([row["id"] for row in self.frontend.banners], [_BAKERY.id, _CAFE.id])
+
+    def test_reordering_reports_the_moved_ids_as_replaced(self) -> None:
+        self.frontend.banners = [banner_row(_BAKERY), banner_row(_CAFE)]
+        self.assertEqual(
+            sync_banners(self.client, (_CAFE, _BAKERY)), BannerSync(replaced=(_CAFE.id, _BAKERY.id))
+        )
+        self.assertEqual([row["id"] for row in self.frontend.banners], [_CAFE.id, _BAKERY.id])
+
+    def test_swallowed_set_read_back_names_the_ids_and_fields_without_values(self) -> None:
+        self.frontend.banners = [
+            banner_row(_STRAY),
+            {
+                **banner_row(_CAFE),
+                "type": _BAKERY.level,
+                "content": _EDITED_TEXT,
+                "dismissible": _BAKERY.dismissible,
+                "timestamp": BANNER_TIMESTAMP + 1,
+            },
+            {"content": _EDITED_TEXT},
+        ]
+        self.frontend.swallow_banner_set = True
+        with self.assertRaisesRegex(OwuiError, "read-back differs") as raised:
+            sync_banners(self.client, (_CAFE, _BAKERY))
+        self.assertIsInstance(raised.exception, BannerReadbackMismatch)
+        self.assertEqual(
+            self.frontend.calls,
+            [("GET", BANNERS_ROUTE), ("POST", BANNERS_ROUTE), ("GET", BANNERS_ROUTE)],
+        )
+        problem = raised.exception.problem
+        self.assertIn(f"{_CAFE.id!r} (type, content, dismissible, timestamp)", problem)
+        for identifier in (_BAKERY.id, _STRAY.id, "(no id)"):
+            self.assertIn(f"{identifier!r} (id)", problem)
+        for text in (_CAFE.text, _BAKERY.text, _STRAY.text, _EDITED_TEXT):
+            self.assertNotIn(text, str(raised.exception))
+            self.assertNotIn(text, raised.exception.fix)
+
+    def test_duplicate_ids_refuse_before_any_request(self) -> None:
+        duplicate = Announcement(_CAFE.id, _CAFE.level, _EDITED_TEXT, _CAFE.dismissible)
+        with self.assertRaisesRegex(ValueError, "must be unique") as raised:
+            sync_banners(self.client, (_CAFE, duplicate))
+        self.assertEqual(self.frontend.calls, [])
+        self.assertIn(_CAFE.id, str(raised.exception))
+        self.assertNotIn(_CAFE.text, str(raised.exception))
+        self.assertNotIn(duplicate.text, str(raised.exception))
+
+
 class Bootstrap(unittest.TestCase):
     def run_bootstrap(self, frontend: Frontend, host: FakeHost):
         return bootstrap(host, factory_for(frontend), manifest(), rendered_dir=RENDERED)
@@ -592,6 +744,59 @@ class Bootstrap(unittest.TestCase):
         report = self.run_bootstrap(frontend, host)
         self.assertTrue(report.ok, report.problem)
         self.assertEqual(report, type(report)())
+
+    def test_bootstrap_without_a_set_leaves_banners_unread_and_untouched(self) -> None:
+        frontend = Frontend()
+        row = banner_row(_STRAY)
+        frontend.banners = [row]
+        report = self.run_bootstrap(frontend, FakeHost(secrets()))
+        self.assertTrue(report.ok, report.problem)
+        self.assertNotIn(BANNERS_ROUTE, [path for _, path in frontend.calls])
+        self.assertEqual(frontend.banners, [row])
+        self.assertEqual(
+            (report.added_banners, report.removed_banners, report.replaced_banners), ((), (), ())
+        )
+
+    def test_bootstrap_syncs_banners_after_refresh_and_reports_all_changes(self) -> None:
+        frontend = Frontend()
+        frontend.banners = [{**banner_row(_CAFE), "content": _EDITED_TEXT}, banner_row(_STRAY)]
+        host = FakeHost(secrets())
+        report = bootstrap(
+            host, factory_for(frontend), manifest(), rendered_dir=RENDERED, announcements=(_CAFE, _BAKERY)
+        )
+        self.assertTrue(report.ok, report.problem)
+        self.assertEqual(report.added_banners, (_BAKERY.id,))
+        self.assertEqual(report.removed_banners, (_STRAY.id,))
+        self.assertEqual(report.replaced_banners, (_CAFE.id,))
+        self.assertEqual(
+            frontend.calls[-4:],
+            [("GET", "/api/models"), ("GET", BANNERS_ROUTE), ("POST", BANNERS_ROUTE), ("GET", BANNERS_ROUTE)],
+        )
+
+        cleared = bootstrap(host, factory_for(frontend), manifest(), rendered_dir=RENDERED, announcements=())
+        self.assertTrue(cleared.ok, cleared.problem)
+        self.assertEqual(cleared.removed_banners, (_CAFE.id, _BAKERY.id))
+        self.assertEqual(frontend.banners, [])
+
+    def test_bootstrap_reports_banner_sync_refusal_with_its_logs_fix(self) -> None:
+        frontend = Frontend()
+        frontend.banners = [{**banner_row(_CAFE), "content": _EDITED_TEXT}]
+        frontend.swallow_banner_set = True
+        report = bootstrap(
+            FakeHost(secrets()),
+            factory_for(frontend),
+            manifest(),
+            rendered_dir=RENDERED,
+            announcements=(_CAFE,),
+        )
+        self.assertFalse(report.ok)
+        problem = report.problem or ""
+        self.assertTrue(problem.startswith("banners sync:"), problem)
+        self.assertIn(_CAFE.id, problem)
+        self.assertIn("content", problem)
+        self.assertIn("logs open-webui", report.fix)
+        for text in (_CAFE.text, _EDITED_TEXT):
+            self.assertNotIn(text, repr(report))
 
     def test_hand_added_function_and_stray_group_are_removed_by_id(self) -> None:
         frontend = Frontend()

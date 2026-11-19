@@ -10,15 +10,32 @@ import os
 import shutil
 import subprocess
 import unittest
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
+
+from test_announcements import window_query_argv
+from test_apply import lock_stat, lock_table
+from test_owui import ADMIN_KEY, Frontend, factory_for
 
 import gideon
-from gideon.host import audit, backupset, nogpu, report, sysio, upgrade
+from gideon.host import (
+    announcements,
+    announcesync,
+    audit,
+    backuplock,
+    backupset,
+    nogpu,
+    owui,
+    report,
+    secrets,
+    sysio,
+    upgrade,
+)
 from gideon.host.checks import CheckReport, PreflightCheck, PreflightContext, Severity
 from gideon.host.cotenants import ACKNOWLEDGE_DISRUPTION_FLAG
 from gideon.host.site import load_site
@@ -46,17 +63,21 @@ NEXT_MAJOR_PATCH = f"v{CURRENT.major + 1}.0.1"
 SECOND_MAJOR_PATCH = f"v{CURRENT.major + 2}.0.1"
 FORWARD_ROWS = [
     "preconditions", "fetch", "signature", "version", "preflight", "backup", "audit-intent",
-    "checkout", "provision", "preflight", "apply", "verify", "engine-verify", "audit-applied",
+    "announce", "checkout", "provision", "preflight", "apply", "verify", "engine-verify", "audit-applied", "clear",
 ]
 ROLLBACK_ROWS = [
-    "preconditions", "select", "plan", "safety", "audit-intent", "stop", "identity", "checkout",
-    "restore", "apply", "verify", "engine-verify", "audit-applied",
+    "preconditions", "select", "plan", "safety", "audit-intent", "announce", "stop", "identity", "checkout",
+    "restore", "units", "apply", "verify", "engine-verify", "audit-applied", "clear",
 ]
 # The release a rollback returns to: the current version's own pre-release, so the
 # fictitious set names a release other than the running one.
 PREVIOUS = LOWER_PRE.removeprefix("v")
 UNPARSABLE = "release: [\n"
 MARKER = f"{backupset.STAGING}/rollback.json"
+APPLIED_RECORD = f"{RENDERED}/applied.yaml"
+SYSTEMD_DIR = "/etc/systemd/system"
+FIND_UNIT_LINKS = ("find", SYSTEMD_DIR, "-type", "l", "-printf", r"%P\t%l\n")
+DAEMON_RELOAD = ("systemctl", "daemon-reload")
 
 
 def marker_json(label: str, *, restore_needed: bool = True, restored: bool = False) -> str:
@@ -67,10 +88,18 @@ def marker_json(label: str, *, restore_needed: bool = True, restored: bool = Fal
 _site = load_site(EXAMPLE).config
 assert _site is not None
 HOSTNAME = _site.hostname
+ZONE = ZoneInfo(_site.office.timezone)
 
 
-def completed(argv: Sequence[str], *, returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(list(argv), returncode, stdout, "")
+def completed(
+    argv: Sequence[str], *, returncode: int = 0, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(list(argv), returncode, stdout, stderr)
+
+
+def applied_record(release: str, *units: str) -> str:
+    files: dict[str, dict[str, object]] = {f"systemd/{unit}": {} for unit in units}
+    return f"release: {release}\nfiles: {json.dumps(files)}\n"
 
 
 def manifest_json(
@@ -167,6 +196,8 @@ class FakeHost:
         apply_records: bool = True,
         identity_present: bool = False,
         identity_unlink_error: bool = False,
+        unit_links: Mapping[str, str] | None = None,
+        restored_applied_record: str | None = None,
     ) -> None:
         self.owner_uid = owner_uid
         self.dirty = dirty
@@ -190,9 +221,22 @@ class FakeHost:
         self.identity_unlink_error = identity_unlink_error
         self.points_at = list(points_at)
         self.tag = ""
+        self.unit_links = dict(unit_links or {})
+        self.restored_applied_record = restored_applied_record
+        self.disable_returncodes: dict[str, int] = {}
+        self.unit_load_states: dict[str, str] = {}
+        self.disable_removes_links: dict[str, bool] = {}
+        self.reset_failed_returncodes: dict[str, int] = {}
+        self.active_states: dict[str, str] = {}
+        self.find_overrides: dict[int, OSError | subprocess.CompletedProcess[str]] = {}
+        self.find_reads = 0
+        self.reload_returncode = 0
+        self.read_errors: dict[str, OSError] = {}
         self.calls: list[tuple[tuple[str, ...], str | None, bool]] = []
         self.child_environments: list[Mapping[str, str] | None] = []
         self.files: dict[str, str] = {str(EXAMPLE): EXAMPLE.read_text()}
+        self.held_files: dict[str, str] = {}
+        self.lock_log: list[tuple[str, str]] = []
         self.files[f"{CHECKOUT}/config/release-signers"] = "# Fictitious release signers.\n"
         for path in (
             ROOT / "host.lock",
@@ -207,7 +251,7 @@ class FakeHost:
         for label, text in self.sets.items():
             self.files[os.path.join(backupset.set_dir(label), backupset.MANIFEST_NAME)] = text
         if applied_release is not None:
-            self.files[f"{RENDERED}/applied.yaml"] = f"release: {applied_release}\nfiles: {{}}\n"
+            self.files[APPLIED_RECORD] = applied_record(applied_release)
         self.set_commit = head  # what backup run records for a set taken now
         self.writes: list[tuple[str, str]] = []
         self.unlinked: list[str] = []
@@ -236,9 +280,12 @@ class FakeHost:
         timeout: float | None = None,
         passthrough: bool = False,
     ) -> subprocess.CompletedProcess[str]:
-        del check, input, timeout
+        del check, timeout
         command = tuple(argv)
         self.calls.append((command, None if cwd is None else os.fspath(cwd), passthrough))
+        if command == window_query_argv(RENDERED):
+            assert input is not None and "FROM public.maintenance_window_events" in input
+            return completed(command)
         if command[:2] == ("getent", "passwd"):
             return completed(command, stdout=f"{OWNER}:x:{self.owner_uid}:{self.owner_uid}::/home/{OWNER}:/bin/bash\n")
         if command[:3] == ("docker", "compose", "version"):
@@ -247,6 +294,29 @@ class FakeHost:
             return completed(command, stdout=json.dumps(self.ps_rows))
         if command[:2] == ("docker", "compose") and command[-2:] == ("config", "--services"):
             return completed(command, stdout="".join(f"{name}\n" for name in self.declared))
+        if command == FIND_UNIT_LINKS:
+            self.find_reads += 1
+            override = self.find_overrides.get(self.find_reads)
+            if isinstance(override, OSError):
+                raise override
+            if override is not None:
+                return override
+            return completed(command, stdout="".join(f"{path}\t{target}\n" for path, target in self.unit_links.items()))
+        if command == DAEMON_RELOAD:
+            return completed(command, returncode=self.reload_returncode)
+        if command[:3] == ("systemctl", "disable", "--now"):
+            unit = command[3]
+            code = self.disable_returncodes.get(unit, 0)
+            if self.disable_removes_links.get(unit, code == 0):
+                self.unit_links = {path: target for path, target in self.unit_links.items() if Path(path).name != unit}
+            return completed(command, returncode=code, stderr="example disable failed\n" if code else "")
+        if command[:2] == ("systemctl", "reset-failed"):
+            code = self.reset_failed_returncodes.get(command[2], 0)
+            return completed(command, returncode=code, stderr="example reset failed\n" if code else "")
+        if command[:4] == ("systemctl", "show", "--property=ActiveState", "--value"):
+            return completed(command, stdout=f"{self.active_states.get(command[4], 'inactive')}\n")
+        if command[:4] == ("systemctl", "show", "--property=LoadState", "--value"):
+            return completed(command, stdout=f"{self.unit_load_states.get(command[4], 'loaded')}\n")
         git = command[3:] if command[:2] == ("sudo", "-u") else command
         if git and git[0] == "git":
             return self._git(command, git[1:])
@@ -260,11 +330,13 @@ class FakeHost:
                     answer = f"gideon {self.tree_version or self.tag.removeprefix('v')}\n"
                 return completed(command, stdout=answer)
             failed = " ".join(arguments) == self.failing_child
+            if arguments[:1] == ("restore",) and not failed and self.restored_applied_record is not None:
+                self.files[APPLIED_RECORD] = self.restored_applied_record
             if arguments == ("apply",) and not failed:
                 self.ps_rows = list(self.stack_after_apply)  # apply brings the stack up
                 if self.apply_records:  # and records the tree's release after verify
                     release = self.tree_version or self.tag.removeprefix("v")
-                    self.files[f"{RENDERED}/applied.yaml"] = f"release: {release}\nfiles: {{}}\n"
+                    self.files[APPLIED_RECORD] = applied_record(release)
             return completed(command, returncode=int(failed))
         return completed(command)
 
@@ -307,10 +379,17 @@ class FakeHost:
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
         del encoding
+        key = os.fspath(path)
+        if key in self.read_errors:
+            raise self.read_errors[key]
+        if key == backuplock.LOCK_TABLE:
+            return lock_table(self.held_files)
+        if key in self.held_files:
+            return self.held_files[key]
         try:
-            return self.files[os.fspath(path)]
+            return self.files[key]
         except KeyError as exc:
-            raise FileNotFoundError(os.fspath(path)) from exc
+            raise FileNotFoundError(key) from exc
 
     def read_bytes(self, path: PathLike) -> bytes:
         return self.read_text(path).encode("utf-8")
@@ -337,11 +416,30 @@ class FakeHost:
         raise FileNotFoundError(os.fspath(path))
 
     def stat(self, path: PathLike) -> os.stat_result:
-        if os.fspath(path) == CHECKOUT:
+        key = os.fspath(path)
+        if key in self.held_files:
+            return lock_stat(self.held_files, key)
+        if key == CHECKOUT:
             return os.stat_result((0o40755, 1, 0, 1, self.owner_uid, self.owner_uid, 0, 0, 0, 0))
-        if os.fspath(path) == os.fspath(AGE_IDENTITY_PATH) and os.fspath(path) in self.files:
+        if key == os.fspath(AGE_IDENTITY_PATH) and key in self.files:
             return os.stat_result((0o100400, 1, 0, 1, 0, 0, 9, 0, 0, 0))
-        raise FileNotFoundError(os.fspath(path))
+        raise FileNotFoundError(key)
+
+    def mkdir(self, path: PathLike, *, mode: int = 0o755, parents: bool = False, exist_ok: bool = False) -> None:
+        assert os.fspath(path) == backuplock.LOCK_DIR
+
+    def take_lock(self, path: PathLike, record: str) -> str | None:
+        key = os.fspath(path)
+        self.lock_log.append(("take", key))
+        if key in self.held_files:
+            return self.held_files[key]
+        self.held_files[key] = record
+        return None
+
+    def release_lock(self, path: PathLike) -> None:
+        key = os.fspath(path)
+        self.lock_log.append(("release", key))
+        self.held_files.pop(key, None)
 
     def geteuid(self) -> int:
         return self.euid
@@ -426,6 +524,7 @@ class CommandRunner(unittest.TestCase):
         runners: FakeRunners | None = None,
         audit_backend: FakeAudit | None = None,
         preflight_runner: upgrade.Runner | None = None,
+        client_factory: Callable[..., owui.Client] | None = None,
     ) -> tuple[int, str, str, FakeRunners, FakeAudit]:
         nested = runners or FakeRunners()
         if isinstance(host, FakeHost):
@@ -452,8 +551,13 @@ class CommandRunner(unittest.TestCase):
                 python=PYTHON,
                 now=NOW,
                 audit=backend,
+                client_factory=client_factory,
             )
         return code, out.getvalue(), err.getvalue(), nested, backend
+
+    def run_rollback(self, host: Any, **kwargs: Any) -> tuple[int, str, str, FakeRunners, FakeAudit]:
+        kwargs.setdefault("tag", None)
+        return self.run_upgrade(host, rollback=True, **kwargs)
 
 
 def current_preflight_runner(
@@ -798,6 +902,8 @@ class UpgradeTests(CommandRunner):
         self.assertIn("new-tree-preflight", durations)
         self.assertIn("apply", durations)
         self.assertIn("signature", durations)
+        self.assertNotIn("announce", durations)
+        self.assertNotIn("clear", durations)
 
     def test_no_gpu_marker_does_not_add_flags_to_child_argv(self) -> None:
         host = FakeHost(applied_release=HIGHER.removeprefix("v"))
@@ -1033,6 +1139,11 @@ class UpgradeTests(CommandRunner):
                 self.assertEqual([r.detail["phase"] for r in backend.rows], phases)
                 if phases:
                     self.assertIn(backend.rows[-1].detail["failed_phase"], ("provision", "new-tree-preflight", "apply", "verify", "engine-verify"))
+                    self.assertEqual(rows_of(out)[-2:], ["audit-applied", "clear"])
+                    self.assertEqual(host.lock_log[-1], ("release", backuplock.UNAVAILABLE_LOCK.path))
+                    self.assertEqual(host.held_files, {})
+                else:
+                    self.assertEqual(host.lock_log, [])
                 self.assertNotIn("audit-applied: ok — upgrade applied", out)
 
     def test_the_fresh_set_must_record_the_checkout_commit(self) -> None:
@@ -1359,12 +1470,96 @@ def rollback_host(**kwargs: Any) -> FakeHost:
     return FakeHost(**defaults)
 
 
+class AnnouncementLifecycle(CommandRunner):
+    def frontend_for(self, host: FakeHost) -> Frontend:
+        frontend = Frontend()
+        frontend.keys["u-admin"] = ADMIN_KEY
+        host.files[os.fspath(secrets.secret_path("gideon_admin_api_key"))] = ADMIN_KEY
+        return frontend
+
+    def assert_announcement_spans_disruption(self, *, rollback: bool) -> None:
+        host = rollback_host() if rollback else FakeHost()
+        frontend = self.frontend_for(host)
+        command = report.command_name("upgrade --rollback" if rollback else "upgrade")
+        record = backuplock.Record(command, os.getpid(), NOW)
+        banner = announcements.command_announcement(record, None, NOW, ZONE)
+        first = "_rollback_stop_stage" if rollback else "_checkout_stage"
+        stage = getattr(upgrade, first)
+
+        def at_disruption(*args: Any) -> report.StageResult:
+            self.assertEqual(host.held_files, {backuplock.UNAVAILABLE_LOCK.path: record.to_json()})
+            self.assertEqual([row["id"] for row in frontend.banners], [banner.id])
+            return stage(*args)
+
+        with patch.object(upgrade, first, side_effect=at_disruption) as disruptive_stage:
+            code, out, err, _, _ = self.run_upgrade(
+                host, tag=None if rollback else HIGHER, rollback=rollback, client_factory=factory_for(frontend),
+            )
+
+        self.assertEqual((code, err), (0, ""), out)
+        disruptive_stage.assert_called_once()
+        self.assertEqual(rows_of(out), ROLLBACK_ROWS if rollback else FORWARD_ROWS)
+        self.assertIn(f"announce: ok — raised {banner.id}\n", out)
+        self.assertTrue(out.endswith(f"clear: ok — cleared {banner.id}\n"), out)
+        self.assertEqual(host.lock_log, [
+            ("take", backuplock.UNAVAILABLE_LOCK.path), ("release", backuplock.UNAVAILABLE_LOCK.path),
+        ])
+        self.assertEqual(host.held_files, {})
+        self.assertEqual(frontend.banners, [])
+
+    def test_announcement_stands_before_checkout_or_stop_and_clears_after_the_last_row(self) -> None:
+        for rollback in (False, True):
+            with self.subTest(rollback=rollback):
+                self.assert_announcement_spans_disruption(rollback=rollback)
+
+    def test_exception_after_checkout_clears_the_announcement(self) -> None:
+        for rollback in (False, True):
+            with self.subTest(rollback=rollback):
+                host = rollback_host() if rollback else FakeHost()
+                frontend = self.frontend_for(host)
+                backend = FakeAudit()
+                with (
+                    patch.object(upgrade, "_verify_stage", side_effect=KeyboardInterrupt),
+                    patch.object(upgrade, "print_stage", wraps=upgrade.print_stage) as printed,
+                    self.assertRaises(KeyboardInterrupt),
+                ):
+                    self.run_upgrade(
+                        host, tag=None if rollback else HIGHER, rollback=rollback,
+                        client_factory=factory_for(frontend), audit_backend=backend,
+                    )
+
+                rows = [call.args[0] for call in printed.call_args_list]
+                self.assertEqual([row.name for row in rows][-2:], ["apply", "clear"])
+                announced = next(row for row in rows if row.name == "announce")
+                identifier = announced.detail.removeprefix("raised ")
+                self.assertEqual(rows[-1], report.StageResult("clear", True, f"cleared {identifier}", ""))
+                self.assertEqual(host.held_files, {})
+                self.assertEqual(frontend.banners, [])
+                self.assertEqual([row.detail["phase"] for row in backend.rows], ["intent"])
+
+    def test_early_refusal_neither_raises_nor_clears(self) -> None:
+        for rollback, expected_last in ((False, "audit-intent"), (True, "safety")):
+            with self.subTest(rollback=rollback):
+                host = rollback_host() if rollback else FakeHost()
+                with (
+                    patch.object(announcesync, "raise_announcement") as raise_notice,
+                    patch.object(announcesync, "clear_announcement") as clear_notice,
+                ):
+                    code, out, err, _, backend = self.run_upgrade(
+                        host, tag=None if rollback else HIGHER, rollback=rollback,
+                        audit_backend=FakeAudit(fail_first=True),
+                        runners=FakeRunners(backup=1 if rollback else 0),
+                    )
+                self.assertEqual((code, err), (1, ""), out)
+                self.assertEqual(rows_of(out)[-1], expected_last)
+                raise_notice.assert_not_called()
+                clear_notice.assert_not_called()
+                self.assertEqual(host.lock_log, [])
+                self.assertEqual(backend.rows, [])
+
+
 class RollbackTests(CommandRunner):
     """``upgrade --rollback [<tag>]``: the pre-upgrade set restored, the previous release applied."""
-
-    def run_rollback(self, host: Any, **kwargs: Any) -> tuple[int, str, str, FakeRunners, FakeAudit]:
-        kwargs.setdefault("tag", None)
-        return self.run_upgrade(host, rollback=True, **kwargs)
 
     def test_disruption_acknowledgment_does_not_change_rollback_children_or_rows(self) -> None:
         plain_host = rollback_host()
@@ -1454,6 +1649,10 @@ class RollbackTests(CommandRunner):
         self.assertEqual(applied.detail["phase"], "applied")
         self.assertTrue(applied.detail["intent_recorded"])
         self.assertEqual(applied.run_id, intent.run_id)
+        durations = applied.detail["durations"]
+        assert isinstance(durations, Mapping)
+        self.assertNotIn("announce", durations)
+        self.assertNotIn("clear", durations)
 
     def test_identity_stage_removes_identity_for_one_recipient_set(self) -> None:
         host = rollback_host(identity_present=True)
@@ -1589,6 +1788,7 @@ class RollbackTests(CommandRunner):
             self.assertEqual(code, 0, out)
             self.assertIn(f"plan: ok — resuming the rollback of {label} begun {NOW.isoformat()}; the restore is still pending", out)
             self.assertIn("safety: ok — partial or stopped stack", out)
+            self.assertIn("units: ok — no stale unit is linked\n", out)
             self.assertEqual(runners.calls, [])
             children = [call[0][3:] for call in host.calls if call[0][:3] == (PYTHON, "-m", "gideon")]
             self.assertEqual(children[0], ("restore", "--from", "staging", "--set", label))
@@ -1601,6 +1801,7 @@ class RollbackTests(CommandRunner):
             self.assertEqual(code, 0, out)
             self.assertIn("; the restore is done", out)
             self.assertIn("restore: ok — skipped (already restored by the earlier run)", out)
+            self.assertIn("units: ok — no stale unit is linked\n", out)
             children = [call[0][3:] for call in host.calls if call[0][:3] == (PYTHON, "-m", "gideon")]
             self.assertEqual(children, [("apply",), ("--version",), ("engine", "verify")])
             self.assertFalse(any(command[-1] == "down" for command, _, _ in host.calls))
@@ -1666,6 +1867,7 @@ class RollbackTests(CommandRunner):
             self.assertIn("safety: ok — skipped (the new release never applied)", out)
             self.assertIn("stop: ok — skipped (the new release never applied)", out)
             self.assertIn("restore: ok — skipped (the new release never applied)", out)
+            self.assertIn("units: ok — skipped (the new release never applied)\n", out)
             self.assertEqual(runners.calls, [])
             self.assertFalse(any(command[-1] == "down" for command, _, _ in host.calls))
             children = [call[0][3:] for call in host.calls if call[0][:3] == (PYTHON, "-m", "gideon")]
@@ -1708,6 +1910,7 @@ class RollbackTests(CommandRunner):
         code, out, _, _, backend = self.run_rollback(host, audit_backend=FakeAudit(fail_first=True))
         self.assertEqual(code, 0, out)
         self.assertIn("audit-intent: ok — rollback intent deferred: rollback intent recorded: audit writer failed: exit 1", out)
+        self.assertEqual(rows_of(out), ROLLBACK_ROWS)
         self.assertEqual([row.detail["phase"] for row in backend.rows], ["applied"])
         self.assertFalse(backend.rows[0].detail["intent_recorded"])
 
@@ -1732,6 +1935,9 @@ class RollbackTests(CommandRunner):
                 self.assertEqual([r.detail["phase"] for r in backend.rows], ["intent", "failed"])
                 self.assertEqual(backend.rows[-1].detail["failed_phase"], row)
                 self.assertTrue(backend.rows[-1].detail["intent_recorded"])
+                self.assertEqual(rows_of(out)[-2:], ["audit-applied", "clear"])
+                self.assertEqual(host.lock_log[-1], ("release", backuplock.UNAVAILABLE_LOCK.path))
+                self.assertEqual(host.held_files, {})
 
     def test_checkout_uses_the_commit_without_a_tag_and_skips_when_already_there(self) -> None:
         untagged = rollback_host(points_at=("not-a-release", ""))
@@ -1752,3 +1958,363 @@ class RollbackTests(CommandRunner):
         code, _, err, _, _ = self.run_rollback(FakeHost(), tag="1.2.3")
         self.assertEqual(code, 1)
         self.assertIn("gideon upgrade: target tag is invalid: 1.2.3. Fix: Use a tag matching v<major>.<minor>.<patch>", err)
+
+
+LATER_TIMER = "example-later.timer"
+LATER_SERVICE = "example-later.service"
+KEPT_TIMER = "example-kept.timer"
+KEPT_SERVICE = "example-kept.service"
+WANTS_LINK = f"timers.target.wants/{LATER_TIMER}"
+TIMER_LINKS = f"{SYSTEMD_DIR}/{LATER_TIMER}, {SYSTEMD_DIR}/{WANTS_LINK}"
+SERVICE_LINK = f"{SYSTEMD_DIR}/{LATER_SERVICE}"
+PAIR_FIX = (
+    f"Still linked: {LATER_TIMER} ({TIMER_LINKS}); {LATER_SERVICE} ({SERVICE_LINK}). "
+    f"Run sudo systemctl disable --now {LATER_TIMER}, sudo systemctl disable --now {LATER_SERVICE}."
+)
+TIMER_FIX = f"Still linked: {LATER_TIMER} ({TIMER_LINKS}). Run sudo systemctl disable --now {LATER_TIMER}."
+SERVICE_FIX = f"Still linked: {LATER_SERVICE} ({SERVICE_LINK}). Run sudo systemctl disable --now {LATER_SERVICE}."
+LISTING_FIX = (
+    f"List the leftover unit links with sudo find {SYSTEMD_DIR} -xtype l "
+    f"'(' -name '*.timer' -o -name '*.service' ')' "
+    f"-lname '{RENDERED}/systemd/*' '!' -lname '{RENDERED}/systemd/*/*' -printf '%p -> %l\\n', "
+    "then run sudo systemctl disable --now <unit> for each unit listed."
+)
+
+
+def rendered_unit_links(*paths: str) -> dict[str, str]:
+    return {path: f"{RENDERED}/systemd/{Path(path).name}" for path in paths}
+
+
+def disable(unit: str) -> tuple[str, ...]:
+    return ("systemctl", "disable", "--now", unit)
+
+
+def reset_failed(unit: str) -> tuple[str, ...]:
+    return ("systemctl", "reset-failed", unit)
+
+
+def active_state(unit: str) -> tuple[str, ...]:
+    return ("systemctl", "show", "--property=ActiveState", "--value", unit)
+
+
+def load_state(unit: str) -> tuple[str, ...]:
+    return ("systemctl", "show", "--property=LoadState", "--value", unit)
+
+
+def systemd_calls(host: FakeHost) -> list[tuple[str, ...]]:
+    return [command for command, _, _ in host.calls if command[0] in {"find", "systemctl"}]
+
+
+class RollbackUnitsTests(CommandRunner):
+    """The units a newer release left linked are disabled before the older tree applies."""
+
+    def assert_units_refusal(
+        self,
+        make_host: Callable[[], FakeHost],
+        detail: str,
+        commands: Sequence[tuple[str, ...]],
+        *,
+        hand_fix: str = LISTING_FIX,
+        failed_disable: str | None = None,
+        reset_units: Sequence[str] = (),
+    ) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed, prefix in ((False, "sudo python3 -m gideon"), (True, "gideon")):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                host = make_host()
+                code, out, err, _, backend = self.run_rollback(host)
+
+                self.assertEqual(code, 1, out + err)
+                self.assertEqual(err, "")
+                self.assertEqual(
+                    rows_of(out), [*ROLLBACK_ROWS[:ROLLBACK_ROWS.index("apply")], "audit-applied", "clear"]
+                )
+                fix = f"{hand_fix} " if hand_fix else ""
+                fix += (
+                    "Remove a link that outlives its disable with sudo rm -- <link path>, "
+                    "then run sudo systemctl daemon-reload. "
+                )
+                fix += (
+                    f"Clear each of {', '.join(reset_units)} that sudo systemctl --failed lists "
+                    "with sudo systemctl reset-failed <unit>. "
+                    if reset_units
+                    else "Clear each disabled unit that sudo systemctl --failed lists with sudo systemctl reset-failed <unit>. "
+                )
+                if failed_disable is not None:
+                    fix += f"Read sudo journalctl -u {failed_disable} for the failed disable. "
+                fix += f"Then re-run {prefix} upgrade --rollback."
+                self.assertIn(f"units: refuse — {detail} Fix: {fix}\n", out)
+                self.assertEqual(systemd_calls(host), list(commands))
+                self.assertNotIn((PYTHON, "-m", "gideon", "apply"), [call[0] for call in host.calls])
+                self.assertEqual([row.detail["phase"] for row in backend.rows], ["intent", "failed"])
+                self.assertEqual(backend.rows[-1].detail["failed_phase"], "units")
+
+    def test_disables_the_retired_pair_between_restore_and_apply(self) -> None:
+        host = rollback_host(
+            applied_release=HIGHER.removeprefix("v"),
+            restored_applied_record=applied_record(PREVIOUS, KEPT_TIMER, KEPT_SERVICE),
+            unit_links=rendered_unit_links(LATER_SERVICE, WANTS_LINK, LATER_TIMER, KEPT_TIMER, KEPT_SERVICE),
+        )
+        host.files[APPLIED_RECORD] = applied_record(HIGHER.removeprefix("v"), LATER_TIMER, LATER_SERVICE, KEPT_TIMER, KEPT_SERVICE)
+
+        code, out, err, _, _ = self.run_rollback(host)
+
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(rows_of(out), ROLLBACK_ROWS)
+        self.assertIn(f"units: ok — disabled {LATER_TIMER}, {LATER_SERVICE}\n", out)
+        commands = [call[0] for call in host.calls]
+        restore = commands.index((PYTHON, "-m", "gideon", "restore", "--from", "staging", "--set", f"pre-{HIGHER}"))
+        apply = commands.index((PYTHON, "-m", "gideon", "apply"))
+        self.assertEqual(commands[restore + 1:apply], [
+            FIND_UNIT_LINKS, DAEMON_RELOAD, disable(LATER_TIMER), disable(LATER_SERVICE), FIND_UNIT_LINKS,
+            reset_failed(LATER_TIMER), reset_failed(LATER_SERVICE),
+        ])
+
+    def test_runs_when_rollback_resumes_after_restore(self) -> None:
+        host = rollback_host(
+            head=FROM_COMMIT,
+            render_release=PREVIOUS,
+            unit_links=rendered_unit_links(LATER_TIMER),
+            failing_child="apply",
+        )
+        host.files[MARKER] = marker_json(f"pre-{HIGHER}", restored=True)
+
+        with patch.object(gideon, "__version__", PREVIOUS):
+            code, out, err, _, backend = self.run_rollback(host)
+
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("restore: ok — skipped (already restored by the earlier run)\n", out)
+        self.assertIn(f"units: ok — disabled {LATER_TIMER}\n", out)
+        self.assertEqual(backend.rows[-1].detail["failed_phase"], "apply")
+        commands = [call[0] for call in host.calls]
+        self.assertFalse(any(command[:4] == (PYTHON, "-m", "gideon", "restore") for command in commands))
+        self.assertEqual(systemd_calls(host), [
+            FIND_UNIT_LINKS, DAEMON_RELOAD, disable(LATER_TIMER), FIND_UNIT_LINKS, reset_failed(LATER_TIMER),
+        ])
+        self.assertLess(commands.index(disable(LATER_TIMER)), commands.index((PYTHON, "-m", "gideon", "apply")))
+
+        host.failing_child = None
+        host.calls.clear()
+        with patch.object(gideon, "__version__", PREVIOUS):
+            code, out, err, _, _ = self.run_rollback(host)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("units: ok — no stale unit is linked\n", out)
+        self.assertEqual(systemd_calls(host), [FIND_UNIT_LINKS])
+
+    def test_checkout_only_skips_the_link_listing_and_systemctl(self) -> None:
+        host = rollback_host(render_release=PREVIOUS, unit_links=rendered_unit_links(LATER_TIMER))
+
+        code, out, err, _, _ = self.run_rollback(host)
+
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("units: ok — skipped (the new release never applied)\n", out)
+        self.assertEqual(systemd_calls(host), [])
+
+    def test_no_stale_unit_makes_no_systemctl_call(self) -> None:
+        host = rollback_host(
+            restored_applied_record=applied_record(PREVIOUS, KEPT_TIMER, KEPT_SERVICE),
+            unit_links=rendered_unit_links(KEPT_TIMER, KEPT_SERVICE),
+        )
+
+        code, out, err, _, _ = self.run_rollback(host)
+
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("units: ok — no stale unit is linked\n", out)
+        self.assertEqual(systemd_calls(host), [FIND_UNIT_LINKS])
+
+    def test_disable_failure_for_never_loaded_unit_passes_if_its_links_are_gone(self) -> None:
+        host = rollback_host(unit_links=rendered_unit_links(WANTS_LINK, LATER_TIMER))
+        host.disable_returncodes[LATER_TIMER] = 1
+        host.unit_load_states[LATER_TIMER] = "not-found"
+        host.disable_removes_links[LATER_TIMER] = True
+
+        code, out, err, _, _ = self.run_rollback(host)
+
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"units: ok — disabled {LATER_TIMER}\n", out)
+        self.assertEqual(systemd_calls(host), [
+            FIND_UNIT_LINKS, DAEMON_RELOAD, disable(LATER_TIMER), load_state(LATER_TIMER), FIND_UNIT_LINKS,
+            reset_failed(LATER_TIMER),
+        ])
+
+    def test_disable_failure_for_loaded_unit_audits_units_and_stops_before_apply(self) -> None:
+        def make_host() -> FakeHost:
+            host = rollback_host(unit_links=rendered_unit_links(LATER_SERVICE))
+            host.disable_returncodes[LATER_SERVICE] = 1
+            return host
+
+        self.assert_units_refusal(
+            make_host, f"systemctl disable failed for {LATER_SERVICE}: example disable failed",
+            [FIND_UNIT_LINKS, DAEMON_RELOAD, disable(LATER_SERVICE), load_state(LATER_SERVICE), FIND_UNIT_LINKS],
+            hand_fix=SERVICE_FIX, failed_disable=LATER_SERVICE, reset_units=(LATER_SERVICE,),
+        )
+
+    def test_first_disable_failure_names_the_timer_and_the_unattempted_service(self) -> None:
+        def make_host() -> FakeHost:
+            host = rollback_host(unit_links=rendered_unit_links(WANTS_LINK, LATER_SERVICE, LATER_TIMER))
+            host.disable_returncodes[LATER_TIMER] = 1
+            return host
+
+        self.assert_units_refusal(
+            make_host, f"systemctl disable failed for {LATER_TIMER}: example disable failed",
+            [FIND_UNIT_LINKS, DAEMON_RELOAD, disable(LATER_TIMER), load_state(LATER_TIMER), FIND_UNIT_LINKS],
+            hand_fix=PAIR_FIX, failed_disable=LATER_TIMER, reset_units=(LATER_TIMER, LATER_SERVICE),
+        )
+
+    def test_service_failure_names_the_earlier_never_loaded_timers_surviving_links(self) -> None:
+        def make_host() -> FakeHost:
+            host = rollback_host(unit_links=rendered_unit_links(WANTS_LINK, LATER_SERVICE, LATER_TIMER))
+            host.disable_returncodes.update({LATER_TIMER: 1, LATER_SERVICE: 1})
+            host.unit_load_states[LATER_TIMER] = "not-found"
+            return host
+
+        self.assert_units_refusal(
+            make_host, f"systemctl disable failed for {LATER_SERVICE}: example disable failed",
+            [FIND_UNIT_LINKS, DAEMON_RELOAD, disable(LATER_TIMER), load_state(LATER_TIMER),
+             disable(LATER_SERVICE), load_state(LATER_SERVICE), FIND_UNIT_LINKS],
+            hand_fix=PAIR_FIX, failed_disable=LATER_SERVICE, reset_units=(LATER_TIMER, LATER_SERVICE),
+        )
+
+    def test_disable_refusal_with_failed_link_reread_gives_the_scoped_listing(self) -> None:
+        def make_host() -> FakeHost:
+            host = rollback_host(unit_links=rendered_unit_links(WANTS_LINK, LATER_SERVICE, LATER_TIMER))
+            host.disable_returncodes[LATER_TIMER] = 1
+            host.find_overrides[2] = OSError("example link reread failed")
+            return host
+
+        self.assert_units_refusal(
+            make_host, f"systemctl disable failed for {LATER_TIMER}: example disable failed",
+            [FIND_UNIT_LINKS, DAEMON_RELOAD, disable(LATER_TIMER), load_state(LATER_TIMER), FIND_UNIT_LINKS],
+            failed_disable=LATER_TIMER, reset_units=(LATER_TIMER, LATER_SERVICE),
+        )
+
+    def test_readback_refuses_and_names_a_stale_unit_whose_links_survive_disable(self) -> None:
+        def make_host() -> FakeHost:
+            host = rollback_host(unit_links=rendered_unit_links(WANTS_LINK, LATER_SERVICE, LATER_TIMER))
+            host.disable_returncodes[LATER_TIMER] = 1
+            host.unit_load_states[LATER_TIMER] = "not-found"
+            return host
+
+        self.assert_units_refusal(
+            make_host, f"still linked after disable: {LATER_TIMER}",
+            [FIND_UNIT_LINKS, DAEMON_RELOAD, disable(LATER_TIMER), load_state(LATER_TIMER),
+             disable(LATER_SERVICE), FIND_UNIT_LINKS, FIND_UNIT_LINKS],
+            hand_fix=TIMER_FIX, reset_units=(LATER_TIMER, LATER_SERVICE),
+        )
+
+    def test_failed_readback_refuses_and_reads_links_again_for_the_fix(self) -> None:
+        def make_host() -> FakeHost:
+            host = rollback_host(unit_links=rendered_unit_links(WANTS_LINK, LATER_TIMER))
+            host.find_overrides[2] = OSError("example readback failed")
+            return host
+
+        self.assert_units_refusal(
+            make_host, "systemd unit links could not be read: example readback failed",
+            [FIND_UNIT_LINKS, DAEMON_RELOAD, disable(LATER_TIMER), FIND_UNIT_LINKS, FIND_UNIT_LINKS],
+            hand_fix="", reset_units=(LATER_TIMER,),
+        )
+
+    def test_reload_failure_rereads_and_names_the_whole_stale_set(self) -> None:
+        def make_host() -> FakeHost:
+            host = rollback_host(
+                restored_applied_record=applied_record(PREVIOUS, KEPT_TIMER),
+                unit_links=rendered_unit_links(WANTS_LINK, LATER_SERVICE, LATER_TIMER, KEPT_TIMER),
+            )
+            host.reload_returncode = 1
+            return host
+
+        self.assert_units_refusal(
+            make_host, "systemctl daemon-reload failed: command failed",
+            [FIND_UNIT_LINKS, DAEMON_RELOAD, FIND_UNIT_LINKS], hand_fix=PAIR_FIX, reset_units=(LATER_TIMER, LATER_SERVICE),
+        )
+
+    def test_unreadable_first_link_listing_refuses_with_the_scoped_listing(self) -> None:
+        for outcome, detail in (
+            (OSError("example find unavailable"), "systemd unit links could not be read: example find unavailable"),
+            (completed(FIND_UNIT_LINKS, returncode=1, stderr="example find denied\n"),
+             "systemd unit links could not be read: example find denied"),
+            (completed(FIND_UNIT_LINKS, stdout="example output without a tab\n"),
+             "systemd unit link listing is malformed"),
+        ):
+            with self.subTest(detail=detail):
+                def make_host(answer: OSError | subprocess.CompletedProcess[str] = outcome) -> FakeHost:
+                    host = rollback_host(unit_links=rendered_unit_links(LATER_TIMER))
+                    host.find_overrides[1] = answer
+                    return host
+
+                self.assert_units_refusal(make_host, detail, [FIND_UNIT_LINKS])
+
+    def test_unreadable_restored_record_refuses_with_the_scoped_listing(self) -> None:
+        def make_host() -> FakeHost:
+            host = rollback_host(unit_links=rendered_unit_links(LATER_TIMER))
+            host.read_errors[APPLIED_RECORD] = OSError("example applied record denied")
+            return host
+
+        self.assert_units_refusal(
+            make_host,
+            f"restored applied manifest is unreadable: render manifest is unreadable: {APPLIED_RECORD} (example applied record denied)",
+            [],
+        )
+
+    def test_absent_restored_record_disables_every_linked_unit_in_order(self) -> None:
+        last_timer, last_service = "example-z.timer", "example-z.service"
+        host = rollback_host(
+            applied_release=None,
+            unit_links=rendered_unit_links(last_service, LATER_SERVICE, last_timer, LATER_TIMER),
+        )
+
+        code, out, err, _, _ = self.run_rollback(host)
+
+        self.assertEqual(code, 0, out + err)
+        ordered = (LATER_TIMER, last_timer, LATER_SERVICE, last_service)
+        self.assertIn(f"units: ok — disabled {', '.join(ordered)}\n", out)
+        self.assertEqual(systemd_calls(host), [
+            FIND_UNIT_LINKS, DAEMON_RELOAD, *(disable(unit) for unit in ordered), FIND_UNIT_LINKS,
+            *(reset_failed(unit) for unit in ordered),
+        ])
+
+    def test_ignores_links_outside_the_unit_directory_or_with_another_suffix(self) -> None:
+        host = rollback_host(unit_links={
+            "example-outside.timer": "/opt/example/systemd/example-outside.timer",
+            "example-nested.service": f"{RENDERED}/systemd/nested/example-nested.service",
+            "example-other.socket": f"{RENDERED}/systemd/example-other.socket",
+            **rendered_unit_links(LATER_TIMER),
+        })
+
+        code, out, err, _, _ = self.run_rollback(host)
+
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"units: ok — disabled {LATER_TIMER}\n", out)
+        self.assertEqual(systemd_calls(host), [
+            FIND_UNIT_LINKS, DAEMON_RELOAD, disable(LATER_TIMER), FIND_UNIT_LINKS, reset_failed(LATER_TIMER),
+        ])
+
+    def test_reset_failed_on_a_unit_that_reads_inactive_passes_unnamed(self) -> None:
+        host = rollback_host(unit_links=rendered_unit_links(WANTS_LINK, LATER_SERVICE, LATER_TIMER))
+        host.reset_failed_returncodes[LATER_SERVICE] = 1
+
+        code, out, err, _, _ = self.run_rollback(host)
+
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"units: ok — disabled {LATER_TIMER}, {LATER_SERVICE}\n", out)
+        self.assertEqual(systemd_calls(host)[-3:], [
+            reset_failed(LATER_TIMER), reset_failed(LATER_SERVICE), active_state(LATER_SERVICE),
+        ])
+
+    def test_reset_failed_on_a_not_found_timer_still_failed_is_named_and_the_rollback_goes_on(self) -> None:
+        host = rollback_host(unit_links=rendered_unit_links(WANTS_LINK, LATER_TIMER))
+        host.reset_failed_returncodes[LATER_TIMER] = 1
+        host.unit_load_states[LATER_TIMER] = "not-found"
+        host.active_states[LATER_TIMER] = "failed"
+
+        code, out, err, _, backend = self.run_rollback(host)
+
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(rows_of(out), ROLLBACK_ROWS)
+        self.assertIn(
+            f"units: ok — disabled {LATER_TIMER}; failed state not reset: {LATER_TIMER} (example reset failed)\n",
+            out,
+        )
+        self.assertIn((PYTHON, "-m", "gideon", "apply"), [call[0] for call in host.calls])
+        self.assertEqual(backend.rows[-1].detail["phase"], "applied")

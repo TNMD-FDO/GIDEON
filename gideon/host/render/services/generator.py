@@ -60,5 +60,7 @@ def engine_service(
 class GeneratorService(ModelServerService):
     """The gideon-generator service in the Compose project."""
 
+    turn_path = True
+
     def __init__(self) -> None:
         super().__init__(GENERATOR)

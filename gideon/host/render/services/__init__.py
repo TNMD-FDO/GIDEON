@@ -16,6 +16,8 @@ class ServiceDefinition:
     apply converges before any other; ``slow_start_seconds`` is the seconds
     verify allows it to become healthy, so a service carrying one renders a
     healthcheck.
+    ``turn_path`` marks a service a user's turn passes through, whose recreate
+    or absence makes apply announce.
     ``swap`` is false for a container that may swap no more than one page, the
     document's swap ceiling one page above its memory limit.
     ``sources`` lists package directories or single module files the container
@@ -24,6 +26,7 @@ class ServiceDefinition:
 
     name: str = ""
     store: bool = False
+    turn_path: bool = False
     slow_start_seconds: int | None = None
     swap: bool = True
     sources: tuple[str, ...] = ()
@@ -162,6 +165,12 @@ def store_services() -> tuple[str, ...]:
     """Names of services in the store tier."""
 
     return tuple(service.name for service in SERVICES if service.store)
+
+
+def turn_path_services() -> tuple[str, ...]:
+    """Names of services a user's turn passes through, in registry order."""
+
+    return tuple(service.name for service in SERVICES if service.turn_path)
 
 
 def slow_start_services() -> dict[str, int]:

@@ -29,7 +29,7 @@ Read the proposed revision, regenerated `files` block, hosted checks, and each r
 ## 4. The window
 
 Who: The CSAs.\
-Command: Announce the weekend maintenance span and create the planned Grafana silences.\
+Command: Record the weekend maintenance span with `gideon window set --start "<start>" --end "<end>"` and create the planned Grafana silences.\
 Failure: If the announcement is late, move the swap to the next weekend.
 
 From go-live, announce the span at least one working day ahead and inform the supervisor. It begins with the branch swap and ends with the closing apply, whether that is the tagged upgrade or the return. Say explicitly that the box will serve a model under test during that span. Tell any other project sharing the GPU host. Choose a weekend because the decision run is allowed only in its weekend window. Before the first user is on the box, no announcement is owed, but the same order applies.

@@ -27,6 +27,9 @@
     "searx.engines.google": {
       "level": "CRITICAL"
     },
+    "searx.engines.mojeek": {
+      "level": "CRITICAL"
+    },
     "searx.engines.startpage": {
       "level": "CRITICAL"
     },

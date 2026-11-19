@@ -1,0 +1,15 @@
+[Unit]
+Description=Synchronize GIDEON frontend announcements
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$checkout
+# Bytecode writing off: a root run every minute would otherwise leave
+# root-owned __pycache__ directories in whichever checkout this unit names.
+ExecStart=/usr/bin/python3 -B -m gideon announcements sync
+TimeoutStartSec=$timeout_start_seconds
+StandardOutput=journal
+StandardError=journal

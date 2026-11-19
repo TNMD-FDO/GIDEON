@@ -75,6 +75,7 @@ class SearxngService(ServiceDefinition):
     """The searxng service in the Compose project."""
 
     name = SEARXNG_SERVICE_NAME
+    turn_path = True
 
     def applies(self, inputs: RenderInputs) -> bool:
         return search_enabled(inputs)

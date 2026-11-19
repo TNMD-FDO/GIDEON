@@ -14,7 +14,8 @@ and a changed group are restored by the next push; another push changes nothing.
 It also proves the signed-in environment facts: the rendered ``default_models``
 value and the disabled evaluation arena are visible through session-only config
 routes, survive their panel edits only until the frontend restarts, and return
-to the rendered values after restart.
+to the rendered values after restart. The banner list follows the supplied set
+and starts empty after a restart.
 
 Environment: ``GIDEON_CONTRACT_REGISTRY`` (default ``127.0.0.1:5000``),
 ``GIDEON_CONTRACT_PORT`` (default ``18081``).  The caller needs Docker access.
@@ -29,6 +30,7 @@ import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -38,10 +40,13 @@ sys.path.insert(0, str(ROOT))
 
 import gideon.host.secrets as secret_files
 from gideon.host import owui, stores
+from gideon.host.announcements import Announcement
 from gideon.host.images import load_image_lock, parse_registry, reference
 from gideon.host.models import HardwareProfile, load_models_lock, select_profile
 from gideon.host.render.owui import (
     ALLOWED_ENDPOINTS,
+    BANNER_TIMESTAMP,
+    BANNERS_ROUTE,
     BREAK_GLASS,
     EVAL_IDENTITY,
     GENERAL_CAPABILITIES,
@@ -70,6 +75,22 @@ HAND_ADDED_FUNCTION = {
     "content": "class Filter:\n    def __init__(self):\n        pass\n\n    def inlet(self, body, __user__=None):\n        return body\n",
     "meta": {"description": "contract probe"},
 }
+_BANNER = Announcement(
+    "moon-observatory", "info", "The moon observatory will close at dusk.", True
+)
+_STRAY_BANNER = Announcement(
+    "moon-arcade", "warning", "The moon arcade is out of tokens.", False
+)
+
+
+def _banner_row(announcement: Announcement) -> dict[str, object]:
+    return {
+        "id": announcement.id,
+        "type": announcement.level,
+        "content": announcement.text,
+        "dismissible": announcement.dismissible,
+        "timestamp": BANNER_TIMESTAMP,
+    }
 
 
 def stub_model_id() -> str:
@@ -319,6 +340,33 @@ class ApplyManifestContract(unittest.TestCase):
         self.assertEqual(listing.status, 200, listing.body)
         self.assertEqual(listing.body, [])
 
+    def _assert_banner_list(
+        self, response: owui.Response, announcements: tuple[Announcement, ...]
+    ) -> None:
+        self.assertEqual(response.status, 200, BANNERS_ROUTE)
+        if not isinstance(response.body, list):
+            self.fail("Banner response must be a list.")
+        self.assertEqual(len(response.body), len(announcements), "Banner count differs.")
+        for row, announcement in zip(response.body, announcements, strict=True):
+            if not isinstance(row, dict):
+                self.fail(f"Banner {announcement.id} response row must be a mapping.")
+            for field, value in {**_banner_row(announcement), "title": None}.items():
+                self.assertTrue(
+                    field in row and type(row[field]) is type(value) and row[field] == value,
+                    f"Banner {announcement.id} field {field} differs.",
+                )
+
+    def _bootstrap_banners(self, announcements: tuple[Announcement, ...]) -> owui.BootstrapReport:
+        report = owui.bootstrap(
+            ContractHost(),
+            client_factory,
+            self.manifest(),
+            rendered_dir=self.stack.directory,
+            announcements=announcements,
+        )
+        self.assertTrue(report.ok, report.problem)
+        return report
+
     def test_hand_added_function_and_model_are_removed_and_restorations_are_idempotent(self) -> None:
         session = self.admin_session()
         created = session.request("POST", "/api/v1/functions/create", HAND_ADDED_FUNCTION)
@@ -430,7 +478,7 @@ class ApplyManifestContract(unittest.TestCase):
         self._assert_manifest_model_state(admin, users[BREAK_GLASS.email].id)
 
     def test_rendered_environment_facts_return_after_frontend_restart(self) -> None:
-        """Panel edits are process-local; restart restores the rendered environment facts."""
+        """Restart restores the rendered environment and clears process-local banners."""
 
         admin = self.admin_session()
         config = admin.request("GET", "/api/config")
@@ -494,10 +542,16 @@ class ApplyManifestContract(unittest.TestCase):
         # the config read-back is what the restart reverts.
         self._assert_live_model_listing(admin, arena=True)
 
+        announcements = (_BANNER,)
+        raised = self._bootstrap_banners(announcements)
+        self.assertEqual(raised.added_banners, (_BANNER.id,))
+        self._assert_banner_list(admin.request("GET", BANNERS_ROUTE), announcements)
+
         restarted = self.stack.compose("restart", "open-webui")
         self.assertEqual(restarted.returncode, 0, restarted.stderr)
         ready = owui.wait_ready(client_factory(), attempts=READY_ATTEMPTS, sleep=time.sleep)
         self.assertTrue(ready.ok, ready.problem)
+        self._assert_banner_list(admin.request("GET", BANNERS_ROUTE), ())
 
         restored_config = admin.request("GET", "/api/config")
         self.assertEqual(restored_config.status, 200, restored_config.body)
@@ -516,6 +570,13 @@ class ApplyManifestContract(unittest.TestCase):
         self.assertEqual(restored_arena.status, 200, restored_arena.body)
         assert isinstance(restored_arena.body, dict)
         self.assertFalse(restored_arena.body["ENABLE_EVALUATION_ARENA_MODELS"])
+
+        restored = self._bootstrap_banners(announcements)
+        self.assertEqual(restored.added_banners, (_BANNER.id,))
+        self._assert_banner_list(admin.request("GET", BANNERS_ROUTE), announcements)
+        cleared = self._bootstrap_banners(())
+        self.assertEqual(cleared.removed_banners, (_BANNER.id,))
+        self._assert_banner_list(admin.request("GET", BANNERS_ROUTE), ())
 
     def test_rating_round_trip_reads_ids_alone_and_the_export_is_refused(self) -> None:
         """The adapter reads a user's rating as five fields; the key reaches no export."""
@@ -594,6 +655,47 @@ class ApplyManifestContract(unittest.TestCase):
         select = self.stack.compose("exec", "-T", "postgres", "psql", "-U", "gideon_audit", "-d", "gideon", "-tAc", "SELECT count(*) FROM audit_log")
         self.assertNotEqual(select.returncode, 0)
         self.assertIn("permission denied", select.stderr)
+
+    def test_the_banner_list_follows_the_given_set(self) -> None:
+        admin = self.admin_session()
+        self._assert_banner_list(admin.request("GET", BANNERS_ROUTE), ())
+
+        announcements = (_BANNER,)
+        raised = self._bootstrap_banners(announcements)
+        self.assertEqual(raised.added_banners, (_BANNER.id,))
+        token = client_factory().signin(
+            EVAL_IDENTITY.email,
+            self.stack.passwords["gideon_eval_password"],
+        )
+        user = client_factory(token=token)
+        self._assert_banner_list(user.request("GET", BANNERS_ROUTE), announcements)
+        refused = user.request("POST", BANNERS_ROUTE, {"banners": []})
+        self.assertEqual(refused.status, 401, BANNERS_ROUTE)
+
+        hand_added = admin.request(
+            "POST", BANNERS_ROUTE, {"banners": [_banner_row(_BANNER), _banner_row(_STRAY_BANNER)]}
+        )
+        self._assert_banner_list(hand_added, (_BANNER, _STRAY_BANNER))
+        removed = self._bootstrap_banners(announcements)
+        self.assertEqual(removed.removed_banners, (_STRAY_BANNER.id,))
+        self._assert_banner_list(admin.request("GET", BANNERS_ROUTE), announcements)
+
+        edited = replace(_BANNER, text="The moon observatory will close at dawn.")
+        posted = admin.request("POST", BANNERS_ROUTE, {"banners": [_banner_row(edited)]})
+        self._assert_banner_list(posted, (edited,))
+        repaired = self._bootstrap_banners(announcements)
+        self.assertEqual(repaired.replaced_banners, (_BANNER.id,))
+        self.assertEqual(self._bootstrap_banners(announcements), owui.BootstrapReport())
+
+        admin_key = (self.stack.secrets / "gideon_admin_api_key").read_text().strip()
+        admin_api = client_factory(api_key=admin_key)
+        self._assert_banner_list(admin_api.request("GET", BANNERS_ROUTE), announcements)
+        exported = admin_api.request("GET", "/api/v1/configs/export")
+        self.assertEqual(exported.status, 403)
+
+        cleared = self._bootstrap_banners(())
+        self.assertEqual(cleared.removed_banners, (_BANNER.id,))
+        self._assert_banner_list(admin.request("GET", BANNERS_ROUTE), ())
 
     def test_user_feature_routes_follow_rendered_policy(self) -> None:
         # Bootstrap the eval identity so this test can run on its own.

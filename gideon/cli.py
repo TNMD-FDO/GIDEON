@@ -497,6 +497,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="ranked-list JSONL file for the judgments metrics",
     )
     eval_run.add_argument(
+        "--assessed",
+        metavar="FILE",
+        help="model assessor's grades file for the judgments report",
+    )
+    eval_run.add_argument(
         "--generation",
         metavar="NAME",
         help="index generation a slice reading the stores runs over; default: the stack's live one",
@@ -644,6 +649,29 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sweep.set_defaults(handler=host_cli.run_retention_sweep, command_path="retention sweep")
+
+    window = commands.add_parser("window", help="record and show the office's maintenance window")
+    window_sub = window.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
+    window_set = window_sub.add_parser("set", help="record a maintenance window or move the standing window")
+    window_set.add_argument(
+        "--start", required=True, metavar="<YYYY-MM-DD HH:MM>", help="start in the office timezone",
+    )
+    window_set.add_argument(
+        "--end", required=True, metavar="<YYYY-MM-DD HH:MM>", help="end in the office timezone",
+    )
+    window_set.set_defaults(handler=host_cli.run_window_set, command_path="window set")
+    window_withdraw = window_sub.add_parser("withdraw", help="withdraw the standing maintenance window")
+    window_withdraw.set_defaults(handler=host_cli.run_window_withdraw, command_path="window withdraw")
+    window_show = window_sub.add_parser("show", help="show the standing maintenance window")
+    window_show.add_argument("--note", action="store_true", help="print only the release note sentence")
+    window_show.set_defaults(handler=host_cli.run_window_show, command_path="window show")
+
+    announcements = commands.add_parser("announcements", help="manage frontend announcements")
+    announcements_sub = announcements.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
+    announcements_sync = announcements_sub.add_parser(
+        "sync", help="synchronize frontend banners with the standing announcements",
+    )
+    announcements_sync.set_defaults(handler=host_cli.run_announcements_sync, command_path="announcements sync")
 
     alerts = commands.add_parser("alerts", help="alerting")
     alerts_sub = alerts.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)

@@ -1382,6 +1382,22 @@ class Command(unittest.TestCase):
         _assert_no_verdict_line(self, stdout)
         self.assertFalse(any(argv[0] == "docker" for argv, _input in host.calls))
 
+    def test_assessed_flag_refuses_for_extraction(self) -> None:
+        host = EvalHost()
+        supplied = "/tmp/fictitious-matter-assessments.jsonl"
+        code, stdout, stderr = _invoke(
+            ["eval", "run", "--slice", "extraction", "--assessed", supplied], **_run_kwargs(host),
+        )
+        self.assertEqual((code, stderr), (1, ""), stdout)
+        self.assertIn(
+            "assessed: refuse — slice extraction does not take --assessed "
+            "Fix: Remove --assessed when running --slice extraction, then retry.", stdout,
+        )
+        self.assertNotIn(supplied, stdout)
+        self.assertNotIn("preconditions:", stdout)
+        self.assertEqual(host.calls, [])
+        _assert_no_verdict_line(self, stdout)
+
     def test_signoff_slice_row_names_unsigned_count_and_zero(self) -> None:
         if absent_from_export(RESEARCH_QA_CASES_PATH, ROOT):
             self.skipTest("in an export the case this slice names is absent, so the set cannot load it")
@@ -3221,8 +3237,9 @@ class ChallengerPair(unittest.TestCase):
     def test_flag_refusals_are_early_and_retry_is_parseable(self) -> None:
         from gideon.cli import build_parser
 
+        assessed_flag = ("--assessed", "/tmp/fictitious-assessments")
         flags = (("--slice", "judge-triples"), ("--set", "/tmp/fictitious-set"),
-                 ("--ranked", "/tmp/fictitious-rank"), ("--decision",),
+                 ("--ranked", "/tmp/fictitious-rank"), assessed_flag, ("--decision",),
                  ("--against", RUN_ID), ("--kind", "smoke"))
         for extra in flags:
             with self.subTest(extra=extra):
@@ -3232,6 +3249,9 @@ class ChallengerPair(unittest.TestCase):
                 )
                 self.assertEqual((code, stdout), (1, ""))
                 self.assertIn("Fix:", stderr)
+                if extra == assessed_flag:
+                    self.assertIn("--challenger cannot be combined with --assessed", stderr)
+                    self.assertNotIn(assessed_flag[1], stderr)
                 _assert_no_verdict_line(self, stdout)
                 self.assertFalse(host.calls)
                 self.assertFalse(host.exists_calls)

@@ -28,7 +28,7 @@ This card is arranged by situation. Each item gives a command, when there is one
 
 ## 5. Upgrade day
 
-- Before the window, read the release note, announce the window, and inform the supervisor. [docs/runbooks/install-upgrade.md §2](install-upgrade.md)
+- Before the window, read the release note, record the window with `gideon window set --start "<start>" --end "<end>"`, and inform the supervisor. [docs/runbooks/install-upgrade.md §2](install-upgrade.md)
 - In the window, run `gideon upgrade <tag>`. [docs/runbooks/install-upgrade.md §2](install-upgrade.md)
 - If the new release is red or wrong, run `gideon upgrade --rollback`. [docs/runbooks/install-upgrade.md §3](install-upgrade.md)
 - If a command refuses, follow its printed fix and the re-run guidance. [docs/runbooks/install-upgrade.md §4](install-upgrade.md)

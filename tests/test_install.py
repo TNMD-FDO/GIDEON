@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
+from test_apply import SITE, ApplyHost, apply, base_files, healthy_commands
+
 from gideon.host import audit, backuplock, backupset, install, nogpu, report
 from gideon.host.report import StageResult
 from gideon.host.site import load_site
@@ -88,6 +90,9 @@ class FakeHost:
 
     def read_bytes(self, path: PathLike) -> bytes:
         return self.read_text(path).encode("utf-8")
+
+    def stat(self, path: PathLike) -> os.stat_result:
+        raise FileNotFoundError(os.fspath(path))
 
     def listdir(self, path: PathLike) -> list[str]:
         if os.fspath(path) == backupset.SETS_DIR and self.sets:
@@ -185,6 +190,30 @@ def row_names(text: str) -> list[str]:
 
 
 class InstallTests(unittest.TestCase):
+    def test_nested_apply_prints_its_announce_and_clear_rows(self) -> None:
+        host = ApplyHost(healthy_commands(), base_files())
+        output = io.StringIO()
+        runners = FakeRunners().mapping()
+
+        def nested_apply(_args: argparse.Namespace) -> int:
+            code, out, err = apply(host, now=NOW)
+            self.assertEqual(err, "")
+            print(out, end="")
+            return code
+
+        runners["apply"] = nested_apply
+        with contextlib.redirect_stdout(output):
+            code = install.run_install(
+                argparse.Namespace(), host=cast(install.InstallHost, host), site_path=SITE,
+                rendered_dir=RENDERED, runners=runners, audit=FakeAudit(),
+            )
+
+        out = output.getvalue()
+        self.assertEqual(code, 0, out)
+        self.assertLess(out.index("render: ok"), out.index("announce: ok — lock held, announcement not shown yet"))
+        self.assertLess(out.index("announce: ok"), out.index("network: ok"))
+        self.assertLess(out.index("clear: ok — cleared "), out.index("apply: ok — apply completed"))
+
     def test_fixes_follow_the_run_form(self) -> None:
         self.addCleanup(report.set_form_from_environment, os.environ.copy())
         observed = (StageResult("smoke", False, "smoke failed", "fixture fix"),)

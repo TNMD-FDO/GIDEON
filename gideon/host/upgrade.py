@@ -1,31 +1,45 @@
-"""The forward release upgrade command.
+"""Forward release upgrades and rollbacks.
 
 Forward upgrades and rollbacks run the engine verify child after structural
 verify and before their applied audit row; a failure records the failed phase.
+The parent holds the unavailability announcement across the disruptive stages.
 """
 
 import argparse
 import contextlib
 import json
 import re
+import shlex
 import subprocess
 import sys
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from functools import total_ordering
 from pathlib import Path
 from typing import Any, Final, Protocol
+from zoneinfo import ZoneInfo
 
 import yaml  # type: ignore[import-untyped]
 
 import gideon
+from gideon.host import (
+    announcesync,
+    backup,
+    backupset,
+    owui,
+    preflight,
+    report,
+    site,
+    stack,
+)
 from gideon.host import audit as audit_module
-from gideon.host import backup, backupset, preflight, report, site, stack
+from gideon.host.apply import applied_units, disable_unit
 from gideon.host.checks import PreflightCheck, Severity
 from gideon.host.cotenants import ACKNOWLEDGE_DISRUPTION_FLAG
+from gideon.host.render.command import read_applied_manifest
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.report import StageResult, command_detail, print_stage, refusal
 from gideon.host.stages import aware_now, site_problem
@@ -40,6 +54,7 @@ class UpgradeHost(ReadBytesHost, LockingHost, Protocol):
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
+_SYSTEMD_DIR: Final = Path("/etc/systemd/system")
 _RELEASE_SIGNERS: Final = Path("config/release-signers")
 
 
@@ -117,6 +132,62 @@ def _after_apply_fix() -> str:
 # Rollback's next step is always the same command; only the by-hand cases differ.
 def _rollback_fix() -> str:
     return f"Correct the refusal, then re-run {_rollback()}."
+
+
+def _leftover_links_listing(unit_dir: Path) -> str:
+    """The command listing GIDEON's unit links whose rendered file is gone, and no other application's."""
+
+    target = re.sub(r"([\\*?\[])", r"\\\1", str(unit_dir))
+    return shlex.join([
+        "sudo", "find", str(_SYSTEMD_DIR), "-xtype", "l",
+        "(", "-name", "*.timer", "-o", "-name", "*.service", ")",
+        "-lname", f"{target}/*", "!", "-lname", f"{target}/*/*",
+        "-printf", r"%p -> %l\n",
+    ])
+
+
+def _rollback_units_fix(
+    io: Host, unit_dir: Path, stale_units: tuple[str, ...] | None, failed_unit: str | None
+) -> str:
+    """The hand route for every stale unit still linked, then the re-run.
+
+    The re-run may be an older tree's that holds no such stage, so the fix
+    names the hand commands too; the links are read again so a refusal part
+    way through the disables covers each unit still owed, never the failed
+    one alone.
+    """
+
+    links = _read_unit_links(io, unit_dir) if stale_units is not None else None
+    steps: list[str] = []
+    if stale_units is None or not isinstance(links, dict):
+        steps.append(
+            f"List the leftover unit links with {_leftover_links_listing(unit_dir)}, "
+            "then run sudo systemctl disable --now <unit> for each unit listed."
+        )
+    else:
+        remaining = [unit for unit in stale_units if unit in links]
+        if remaining:
+            named = "; ".join(
+                f"{unit} ({', '.join(str(path) for path in sorted(links[unit]))})" for unit in remaining
+            )
+            commands = ", ".join(f"sudo systemctl disable --now {unit}" for unit in remaining)
+            steps.append(f"Still linked: {named}. Run {commands}.")
+    steps.append(
+        "Remove a link that outlives its disable with sudo rm -- <link path>, "
+        "then run sudo systemctl daemon-reload."
+    )
+    if stale_units is None:
+        steps.append("Clear each disabled unit that sudo systemctl --failed lists with sudo systemctl reset-failed <unit>.")
+    else:
+        # An already unlinked unit is in no listing, so the names come from the stale set.
+        steps.append(
+            f"Clear each of {', '.join(stale_units)} that sudo systemctl --failed lists "
+            "with sudo systemctl reset-failed <unit>."
+        )
+    if failed_unit is not None:
+        steps.append(f"Read sudo journalctl -u {failed_unit} for the failed disable.")
+    steps.append(f"Then re-run {_rollback()}.")
+    return " ".join(steps)
 
 
 def _rollback_fetch_fix() -> str:
@@ -1395,10 +1466,110 @@ def _rollback_checkout_stage(io: Host, plan: _RollbackPlan) -> StageResult:
     return StageResult("checkout", True, f"checked out {ref} for {plan.target_commit} as {plan.owner.name}", "")
 
 
+def _read_unit_links(io: Host, unit_dir: Path) -> dict[str, list[Path]] | str:
+    """Read links to rendered units, including links whose targets are gone."""
+
+    try:
+        result = io.run(["find", str(_SYSTEMD_DIR), "-type", "l", "-printf", r"%P\t%l\n"])
+    except (OSError, UnicodeError) as exc:
+        return f"systemd unit links could not be read: {exc}"
+    if result.returncode != 0:
+        return f"systemd unit links could not be read: {command_detail(result)}"
+    links: dict[str, list[Path]] = {}
+    for line in result.stdout.splitlines():
+        relative_path, tab, target = line.partition("\t")
+        if not tab or not relative_path or not target:
+            return "systemd unit link listing is malformed"
+        path = _SYSTEMD_DIR / relative_path
+        if path.name.endswith((".timer", ".service")) and Path(target).parent == unit_dir:
+            links.setdefault(path.name, []).append(path)
+    return links
+
+
+def _rollback_units_stage(io: Host, *, rendered_dir: PathLike) -> StageResult:
+    """Disable linked units the restored applied record does not name.
+
+    The restore removes the newer release's unit files and returns a record
+    that never named them, so the older tree's apply would leave their enable
+    links standing, and a later upgrade would read a returning timer's link as
+    a person's stop.  Timers go before services; a never-loaded unit counts as
+    disabled only once the links read back show it unlinked.
+    """
+
+    rendered_root = Path(rendered_dir)
+    unit_dir = rendered_root / "systemd"
+    stale_units: tuple[str, ...] | None = None
+
+    def refuse(detail: str, *, failed_unit: str | None = None) -> StageResult:
+        return StageResult("units", False, detail, _rollback_units_fix(io, unit_dir, stale_units, failed_unit))
+
+    try:
+        applied = read_applied_manifest(io, rendered_root / "applied.yaml")
+    except (OSError, TypeError, ValueError) as exc:
+        return refuse(f"restored applied manifest is unreadable: {exc}")
+    links = _read_unit_links(io, unit_dir)
+    if isinstance(links, str):
+        return refuse(links)
+    kept_units = applied_units(applied, ".timer") | applied_units(applied, ".service")
+    stale_units = tuple(sorted(links.keys() - kept_units, key=lambda unit: (unit.endswith(".service"), unit)))
+    if not stale_units:
+        return StageResult("units", True, "no stale unit is linked", "")
+
+    try:
+        reload = io.run(["systemctl", "daemon-reload"])
+    except OSError as exc:
+        return refuse(f"systemctl daemon-reload failed: {exc}")
+    if reload.returncode != 0:
+        return refuse(f"systemctl daemon-reload failed: {command_detail(reload)}")
+    for unit in stale_units:
+        problem = disable_unit(io, unit)
+        if problem is not None:
+            return refuse(problem, failed_unit=unit)
+
+    links = _read_unit_links(io, unit_dir)
+    if isinstance(links, str):
+        return refuse(links)
+    still_linked = [unit for unit in stale_units if unit in links]
+    if still_linked:
+        return refuse(f"still linked after disable: {', '.join(still_linked)}")
+    detail = f"disabled {', '.join(stale_units)}"
+    unreset = [problem for unit in stale_units if (problem := _reset_failed_problem(io, unit)) is not None]
+    if unreset:
+        detail += f"; failed state not reset: {'; '.join(unreset)}"
+    return StageResult("units", True, detail, "")
+
+
+def _reset_failed_problem(io: Host, unit: str) -> str | None:
+    """Clear a disabled unit's failed state, reporting a failure unless the unit reads inactive.
+
+    A timer active when its file went stays in systemd's memory as failed
+    after its disable, listed by ``systemctl --failed`` until a reboot, its
+    load state already ``not-found``; so a failed reset passes only on a read
+    of the unit's activity, which a unit systemd no longer holds answers
+    ``inactive``.  The links are already gone, so a failure is named, never
+    refused.
+    """
+
+    try:
+        result = io.run(["systemctl", "reset-failed", unit])
+    except OSError as exc:
+        problem = f"{unit} ({exc})"
+    else:
+        if result.returncode == 0:
+            return None
+        problem = f"{unit} ({command_detail(result)})"
+    try:
+        state = io.run(["systemctl", "show", "--property=ActiveState", "--value", unit])
+    except OSError:
+        return problem
+    return None if state.returncode == 0 and state.stdout.strip() == "inactive" else problem
+
+
 def _run_rollback(
     args: argparse.Namespace,
     *,
     io: UpgradeHost,
+    config: site.SiteConfig,
     site_path: PathLike,
     rendered_dir: PathLike,
     checkout: Path,
@@ -1406,6 +1577,7 @@ def _run_rollback(
     executable: str,
     now: datetime | None,
     audit_api: Any,
+    client_factory: Callable[..., owui.Client] | None,
 ) -> int:
     """Restore the pre-upgrade set and re-apply the release it describes."""
 
@@ -1526,122 +1698,146 @@ def _run_rollback(
         print_stage(applied_result)
         return 1
 
-    with timer.timed("stop"):
-        stop_result = (
-            _rollback_stop_stage(io, rendered_dir)
-            if plan.restore_needed
-            else StageResult("stop", True, "skipped (the new release never applied)", "")
-        )
-    print_stage(stop_result)
-    if not stop_result.ok:
-        return failed("stop")
+    timezone = ZoneInfo(config.office.timezone)
+    handle, announced = announcesync.raise_announcement(
+        io, rendered_dir, command=report.command_name("upgrade --rollback"), hostname=config.hostname,
+        timezone=timezone, now=effective_now if now is not None else datetime.now(UTC),
+        client_factory=client_factory,
+    )
+    try:
+        print_stage(announced)
+        with timer.timed("stop"):
+            stop_result = (
+                _rollback_stop_stage(io, rendered_dir)
+                if plan.restore_needed
+                else StageResult("stop", True, "skipped (the new release never applied)", "")
+            )
+        print_stage(stop_result)
+        if not stop_result.ok:
+            return failed("stop")
 
-    with timer.timed("identity"):
-        identity_result = _rollback_identity_stage(io, plan)
-    print_stage(identity_result)
-    if not identity_result.ok:
-        return failed("identity")
+        with timer.timed("identity"):
+            identity_result = _rollback_identity_stage(io, plan)
+        print_stage(identity_result)
+        if not identity_result.ok:
+            return failed("identity")
 
-    with timer.timed("checkout"):
-        checkout_result = _rollback_checkout_stage(io, plan)
-    print_stage(checkout_result)
-    if not checkout_result.ok:
-        return failed("checkout")
+        with timer.timed("checkout"):
+            checkout_result = _rollback_checkout_stage(io, plan)
+        print_stage(checkout_result)
+        if not checkout_result.ok:
+            return failed("checkout")
 
-    if plan.restore_needed:
-        with timer.timed("restore"):
-            restore_result = _child_stage(
+        if plan.restore_needed:
+            with timer.timed("restore"):
+                restore_result = _child_stage(
+                    io,
+                    executable=executable,
+                    checkout=plan.checkout,
+                    name="restore",
+                    arguments=("restore", "--from", "staging", "--set", plan.set_label),
+                    fix=_rollback_fix(),
+                )
+            if restore_result.ok:
+                problem = _write_marker(io, replace(marker, restored=True))
+                if problem is not None:
+                    restore_result = StageResult(
+                        "restore", False, f"restore completed, but the record of it failed: {problem}", _marker_fix()
+                    )
+        elif marker.restored:
+            restore_result = StageResult("restore", True, "skipped (already restored by the earlier run)", "")
+        else:
+            restore_result = StageResult("restore", True, "skipped (the new release never applied)", "")
+        print_stage(restore_result)
+        if not restore_result.ok:
+            return failed("restore")
+
+        if plan.restore_needed or marker.restored:
+            with timer.timed("units"):
+                units_result = _rollback_units_stage(io, rendered_dir=rendered_dir)
+        else:
+            units_result = StageResult("units", True, "skipped (the new release never applied)", "")
+        print_stage(units_result)
+        if not units_result.ok:
+            return failed("units")
+
+        with timer.timed("apply"):
+            apply_result = _child_stage(
                 io,
                 executable=executable,
                 checkout=plan.checkout,
-                name="restore",
-                arguments=("restore", "--from", "staging", "--set", plan.set_label),
+                name="apply",
+                arguments=("apply",),
                 fix=_rollback_fix(),
             )
-        if restore_result.ok:
-            problem = _write_marker(io, replace(marker, restored=True))
-            if problem is not None:
-                restore_result = StageResult(
-                    "restore", False, f"restore completed, but the record of it failed: {problem}", _marker_fix()
-                )
-    elif marker.restored:
-        restore_result = StageResult("restore", True, "skipped (already restored by the earlier run)", "")
-    else:
-        restore_result = StageResult("restore", True, "skipped (the new release never applied)", "")
-    print_stage(restore_result)
-    if not restore_result.ok:
-        return failed("restore")
+        print_stage(apply_result)
+        if not apply_result.ok:
+            return failed("apply")
 
-    with timer.timed("apply"):
-        apply_result = _child_stage(
-            io,
-            executable=executable,
-            checkout=plan.checkout,
-            name="apply",
-            arguments=("apply",),
-            fix=_rollback_fix(),
-        )
-    print_stage(apply_result)
-    if not apply_result.ok:
-        return failed("apply")
+        with timer.timed("verify"):
+            verify_result = _verify_stage(
+                io,
+                executable=executable,
+                checkout=plan.checkout,
+                rendered_dir=rendered_dir,
+                target=plan.target_version,
+            )
+        print_stage(verify_result)
+        if not verify_result.ok:
+            return failed("verify")
 
-    with timer.timed("verify"):
-        verify_result = _verify_stage(
-            io,
-            executable=executable,
-            checkout=plan.checkout,
-            rendered_dir=rendered_dir,
-            target=plan.target_version,
-        )
-    print_stage(verify_result)
-    if not verify_result.ok:
-        return failed("verify")
+        with timer.timed("engine-verify"):
+            engine_verify_result = _child_stage(
+                io,
+                executable=executable,
+                checkout=plan.checkout,
+                name="engine-verify",
+                arguments=("engine", "verify"),
+                fix=(
+                    "Do not go live on this engine. Run "
+                    f"{stack.logs_fix(rendered_dir, ENGINE_SERVICE_NAME)}, correct the engine or driver, "
+                    f"then run {report.command('engine verify')} by hand."
+                ),
+            )
+        print_stage(engine_verify_result)
+        if not engine_verify_result.ok:
+            return failed("engine-verify")
 
-    with timer.timed("engine-verify"):
-        engine_verify_result = _child_stage(
-            io,
-            executable=executable,
-            checkout=plan.checkout,
-            name="engine-verify",
-            arguments=("engine", "verify"),
-            fix=(
-                "Do not go live on this engine. Run "
-                f"{stack.logs_fix(rendered_dir, ENGINE_SERVICE_NAME)}, correct the engine or driver, "
-                f"then run {report.command('engine verify')} by hand."
-            ),
+        with timer.timed("audit-applied"):
+            applied_result = _write_audit(
+                audit_api,
+                io,
+                rendered_dir,
+                row(
+                    "applied",
+                    durations=dict(timer.durations),
+                    intent_recorded=intent_recorded,
+                ),
+                stage="audit-applied",
+                detail="rollback applied",
+                fix=_rollback_fix(),
+            )
+            # The record goes only once the row is written: a re-run after a failed
+            # row must still find it, or it would refuse with nothing left to do.
+            if applied_result.ok:
+                try:
+                    io.unlink(_MARKER_PATH, missing_ok=True)
+                except OSError as exc:
+                    applied_result = StageResult(
+                        "audit-applied",
+                        False,
+                        f"rollback applied, but the rollback record could not be removed: {exc}",
+                        _marker_fix(),
+                    )
+        print_stage(applied_result)
+        return int(not applied_result.ok)
+    finally:
+        cleared = announcesync.clear_announcement(
+            io, rendered_dir, handle, hostname=config.hostname, timezone=timezone,
+            now=effective_now if now is not None else datetime.now(UTC), client_factory=client_factory,
         )
-    print_stage(engine_verify_result)
-    if not engine_verify_result.ok:
-        return failed("engine-verify")
-
-    with timer.timed("audit-applied"):
-        applied_result = _write_audit(
-            audit_api,
-            io,
-            rendered_dir,
-            row(
-                "applied",
-                durations=dict(timer.durations),
-                intent_recorded=intent_recorded,
-            ),
-            stage="audit-applied",
-            detail="rollback applied",
-            fix=_rollback_fix(),
-        )
-        # The record goes only once the row is written: a re-run after a failed
-        # row must still find it, or it would refuse with nothing left to do.
-        if applied_result.ok:
-            try:
-                io.unlink(_MARKER_PATH, missing_ok=True)
-            except OSError as exc:
-                applied_result = StageResult(
-                    "audit-applied",
-                    False,
-                    f"rollback applied, but the rollback record could not be removed: {exc}",
-                    _marker_fix(),
-                )
-    print_stage(applied_result)
-    return int(not applied_result.ok)
+        if cleared is not None:
+            print_stage(cleared)
 
 
 def run_upgrade(
@@ -1655,6 +1851,7 @@ def run_upgrade(
     python: str | None = None,
     now: datetime | None = None,
     audit: Any | None = None,
+    client_factory: Callable[..., owui.Client] | None = None,
 ) -> int:
     """Run the forward upgrade or rollback path; exit 0 iff every stage is ok."""
 
@@ -1671,12 +1868,14 @@ def run_upgrade(
             site_problem(loaded) or "the site file is invalid.",
             f"Correct /etc/gideon/site.yaml, then re-run {retry}.",
         )
+    config = loaded.config
     root = Path(__file__).parents[2] if checkout is None else Path(checkout)
     executable = sys.executable if python is None else python
     if rollback:
         return _run_rollback(
             args,
             io=io,
+            config=config,
             site_path=site_path,
             rendered_dir=rendered_dir,
             checkout=root,
@@ -1684,6 +1883,7 @@ def run_upgrade(
             executable=executable,
             now=now,
             audit_api=audit_api,
+            client_factory=client_factory,
         )
     acknowledge_disruption = bool(getattr(args, "acknowledge_disruption", False))
     if not isinstance(tag, str) or not tag:
@@ -1824,69 +2024,84 @@ def run_upgrade(
         print_stage(result)
         return 1
 
-    with timer.timed("checkout"):
-        checkout_result = _checkout_stage(io, plan, owner)
-    print_stage(checkout_result)
-    if not checkout_result.ok:
-        return failed("checkout")
-
-    # From here on the tree under this process is the new release's; every step is
-    # the new tree's own CLI as a child, and nothing below imports anything.
-    provision_arguments = ("host", "provision") + (
-        (ACKNOWLEDGE_DISRUPTION_FLAG,) if acknowledge_disruption else ()
+    timezone = ZoneInfo(config.office.timezone)
+    handle, announced = announcesync.raise_announcement(
+        io, rendered_dir, command=report.command_name("upgrade"), hostname=config.hostname,
+        timezone=timezone, now=effective_now if now is not None else datetime.now(UTC),
+        client_factory=client_factory,
     )
-    for name, key, arguments, fix in (
-        ("provision", "provision", provision_arguments, provision_fix),
-        ("preflight", "new-tree-preflight", ("preflight",), after_checkout_fix),
-        ("apply", "apply", ("apply",), _after_apply_fix()),
-    ):
-        with timer.timed(key):
-            result = _child_stage(
+    try:
+        print_stage(announced)
+        with timer.timed("checkout"):
+            checkout_result = _checkout_stage(io, plan, owner)
+        print_stage(checkout_result)
+        if not checkout_result.ok:
+            return failed("checkout")
+
+        # The new release's CLI runs in children. The parent uses modules loaded
+        # before checkout for verification, audit, and announcement cleanup.
+        provision_arguments = ("host", "provision") + (
+            (ACKNOWLEDGE_DISRUPTION_FLAG,) if acknowledge_disruption else ()
+        )
+        for name, key, arguments, fix in (
+            ("provision", "provision", provision_arguments, provision_fix),
+            ("preflight", "new-tree-preflight", ("preflight",), after_checkout_fix),
+            ("apply", "apply", ("apply",), _after_apply_fix()),
+        ):
+            with timer.timed(key):
+                result = _child_stage(
+                    io,
+                    executable=executable,
+                    checkout=plan.checkout,
+                    name=name,
+                    arguments=arguments,
+                    fix=fix,
+                )
+            print_stage(result)
+            if not result.ok:
+                return failed(key)
+
+        with timer.timed("verify"):
+            verify_result = _verify_stage(
                 io,
                 executable=executable,
                 checkout=plan.checkout,
-                name=name,
-                arguments=arguments,
-                fix=fix,
+                rendered_dir=rendered_dir,
+                target=plan.target_version,
             )
-        print_stage(result)
-        if not result.ok:
-            return failed(key)
+        print_stage(verify_result)
+        if not verify_result.ok:
+            return failed("verify")
 
-    with timer.timed("verify"):
-        verify_result = _verify_stage(
-            io,
-            executable=executable,
-            checkout=plan.checkout,
-            rendered_dir=rendered_dir,
-            target=plan.target_version,
-        )
-    print_stage(verify_result)
-    if not verify_result.ok:
-        return failed("verify")
+        with timer.timed("engine-verify"):
+            engine_verify_result = _child_stage(
+                io,
+                executable=executable,
+                checkout=plan.checkout,
+                name="engine-verify",
+                arguments=("engine", "verify"),
+                fix=_after_apply_fix(),
+            )
+        print_stage(engine_verify_result)
+        if not engine_verify_result.ok:
+            return failed("engine-verify")
 
-    with timer.timed("engine-verify"):
-        engine_verify_result = _child_stage(
-            io,
-            executable=executable,
-            checkout=plan.checkout,
-            name="engine-verify",
-            arguments=("engine", "verify"),
-            fix=_after_apply_fix(),
+        with timer.timed("audit-applied"):
+            applied = _write_audit(
+                audit_api,
+                io,
+                rendered_dir,
+                row("applied", durations=dict(timer.durations)),
+                stage="audit-applied",
+                detail="upgrade applied",
+                fix=audit_fix,
+            )
+        print_stage(applied)
+        return int(not applied.ok)
+    finally:
+        cleared = announcesync.clear_announcement(
+            io, rendered_dir, handle, hostname=config.hostname, timezone=timezone,
+            now=effective_now if now is not None else datetime.now(UTC), client_factory=client_factory,
         )
-    print_stage(engine_verify_result)
-    if not engine_verify_result.ok:
-        return failed("engine-verify")
-
-    with timer.timed("audit-applied"):
-        applied = _write_audit(
-            audit_api,
-            io,
-            rendered_dir,
-            row("applied", durations=dict(timer.durations)),
-            stage="audit-applied",
-            detail="upgrade applied",
-            fix=audit_fix,
-        )
-    print_stage(applied)
-    return int(not applied.ok)
+        if cleared is not None:
+            print_stage(cleared)

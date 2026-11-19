@@ -480,6 +480,8 @@ class Registry(unittest.TestCase):
                 "systemd/gideon-archive-push.timer",
                 "systemd/gideon-retention-sweep.service",
                 "systemd/gideon-retention-sweep.timer",
+                "systemd/gideon-announcements-sync.service",
+                "systemd/gideon-announcements-sync.timer",
                 DCGM_COUNTERS_PATH,
             ],
         )
@@ -1545,6 +1547,45 @@ class Core(unittest.TestCase):
                     for value in rendered_inputs.secrets.values():
                         self.assertNotIn(value, unit.content)
 
+    def test_announcements_sync_units_are_zoned_bounded_and_nonpersistent_on_every_host_kind(self) -> None:
+        self.assertEqual(systemd.ANNOUNCEMENTS_SYNC_CALENDAR, "*-*-* *:*:00")
+        self.assertGreater(systemd.ANNOUNCEMENTS_SYNC_TIMEOUT_START_SECONDS, 0)
+        self.assertLess(systemd.ANNOUNCEMENTS_SYNC_TIMEOUT_START_SECONDS, 60)
+        for name, site_path, no_gpu, build_box in FIXTURE_CASES:
+            with self.subTest(host=name):
+                rendered_inputs = inputs(
+                    site_path, no_gpu=no_gpu, build_box=build_box, checkout="/srv/gideon",
+                )
+                rendered = render_all(rendered_inputs)
+                service_file = rendered.by_path["systemd/gideon-announcements-sync.service"]
+                timer_file = rendered.by_path["systemd/gideon-announcements-sync.timer"]
+                service = service_file.content.splitlines()
+                timer = timer_file.content.splitlines()
+                for line in (
+                    "Requires=docker.service", "After=docker.service network-online.target",
+                    "Wants=network-online.target", "Type=oneshot", "WorkingDirectory=/srv/gideon",
+                    f"TimeoutStartSec={systemd.ANNOUNCEMENTS_SYNC_TIMEOUT_START_SECONDS}",
+                    "StandardOutput=journal", "StandardError=journal",
+                ):
+                    self.assertIn(line, service)
+                self.assertEqual(
+                    [line for line in service if line.startswith("ExecStart=")],
+                    ["ExecStart=/usr/bin/python3 -B -m gideon announcements sync"],
+                )
+                self.assertTrue(any(line.startswith("#") and "root-owned __pycache__" in line for line in service))
+                self.assertEqual(
+                    [line for line in timer if line.startswith(("OnCalendar=", "AccuracySec=", "Persistent="))],
+                    [
+                        f"OnCalendar={systemd.ANNOUNCEMENTS_SYNC_CALENDAR} {rendered_inputs.site.office.timezone}",
+                        "AccuracySec=1s", "Persistent=false",
+                    ],
+                )
+                self.assertIn("WantedBy=timers.target", timer)
+                for unit in (service_file, timer_file):
+                    self.assertEqual(unit.owners, ())
+                    self.assertEqual(unit.mode, 0o644)
+                    self.assertFalse(unit.secret)
+
     def test_no_rendered_unit_starts_a_corpus_act(self) -> None:
         forbidden = ("corpus cut", "corpus install", "index build", "index promote")
         for name, site_path, no_gpu, build_box in FIXTURE_CASES:
@@ -1649,6 +1690,8 @@ class Core(unittest.TestCase):
                 "systemd/gideon-upstream-watch.timer",
                 "systemd/gideon-retention-sweep.service",
                 "systemd/gideon-retention-sweep.timer",
+                "systemd/gideon-announcements-sync.service",
+                "systemd/gideon-announcements-sync.timer",
                 DCGM_COUNTERS_PATH,
             },
         )

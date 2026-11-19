@@ -32,6 +32,7 @@ class PostgresService(ServiceDefinition):
 
     name = "postgres"
     store = True
+    turn_path = True
 
     def block(
         self, inputs: RenderInputs, target: RegistryTarget

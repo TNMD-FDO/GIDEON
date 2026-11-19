@@ -14,6 +14,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
+from test_announcements import window_query_argv
+from test_apply import lock_stat, lock_table
 from test_render import artifact_source_files, declared_source_files, inputs
 from test_secrets import (
     PAIR_CERT_TEXT,
@@ -49,6 +51,7 @@ from gideon.host.render.opensearch import (
     OPENSEARCH_METRICS_SECRET_NAME,
     OPENSEARCH_SERVICE_NAME,
 )
+from gideon.host.render.owui import BANNERS_ROUTE
 from gideon.host.render.services import all_service_names, store_services
 from gideon.host.render.services.prometheus import PrometheusService
 from gideon.host.secrets import SECRET_REGISTRY, SECRETS_DIR
@@ -66,6 +69,7 @@ TEMPLATE_PATHS = tuple(
 )
 SITE = "/etc/gideon/site.yaml"
 RENDERED = "/etc/gideon/rendered"
+PSQL_WINDOW_QUERY = window_query_argv(RENDERED)
 _COMMITTED_LOCK = load_image_lock(ROOT / "images.lock").lock
 assert _COMMITTED_LOCK is not None
 _DIGESTS = {pin.name: pin.digest for pin in _COMMITTED_LOCK.images}
@@ -216,6 +220,13 @@ SYSTEMCTL_ENABLE_RETENTION_SWEEP = (
     "systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-retention-sweep.timer",
 )
 SYSTEMCTL_ACTIVE_RETENTION_SWEEP = ("systemctl", "is-active", "gideon-retention-sweep.timer")
+SYSTEMCTL_LINK_ANNOUNCEMENTS_SYNC = (
+    "systemctl", "link", f"{RENDERED}/systemd/gideon-announcements-sync.service",
+)
+SYSTEMCTL_ENABLE_ANNOUNCEMENTS_SYNC = (
+    "systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-announcements-sync.timer",
+)
+SYSTEMCTL_ACTIVE_ANNOUNCEMENTS_SYNC = ("systemctl", "is-active", "gideon-announcements-sync.timer")
 CERT = CERT_PATH
 HANDSHAKE = (
     "openssl",
@@ -292,6 +303,7 @@ class FakeFrontend:
         self.next_user = 1
         self.functions: list[dict[str, object]] = []
         self.models: list[dict[str, object]] = []
+        self.banners: list[dict[str, object]] = []
 
     def _group(self, value: Mapping[str, object]) -> dict[str, object]:
         return {
@@ -389,6 +401,13 @@ class FakeFrontend:
             assert isinstance(value, list)
             self.models = [dict(item) for item in value if isinstance(item, Mapping)]
             return Response(200, [])
+        if route == BANNERS_ROUTE and method == "GET":
+            return Response(200, self.banners)
+        if route == BANNERS_ROUTE and method == "POST":
+            value = payload["banners"]
+            assert isinstance(value, list)
+            self.banners = list(value)
+            return Response(200, self.banners)
         if route == "/api/models":
             return Response(
                 200,
@@ -510,6 +529,10 @@ class ApplyHost:
         del encoding
         key = os.fspath(path)
         self.reads.append(key)
+        if key == backuplock.LOCK_TABLE:
+            return lock_table(self.locks)
+        if key in self.locks:
+            return self.locks[key]
         if key not in self.files:
             raise FileNotFoundError(key)
         return self.files[key]
@@ -546,6 +569,8 @@ class ApplyHost:
 
     def stat(self, path: PathLike) -> os.stat_result:
         key = os.fspath(path)
+        if key in self.locks:
+            return lock_stat(self.locks, key)
         if key in self.files:
             mode = stat_module.S_IFREG | 0o644
         elif self._is_dir(key):
@@ -643,6 +668,7 @@ def healthy_commands(
         PSQL_GIDEON_QUERY: done(PSQL_GIDEON_QUERY, stdout=""),
         PSQL_GIDEON_STATEMENT: done(PSQL_GIDEON_STATEMENT),
         PSQL_MIGRATION: done(PSQL_MIGRATION),
+        PSQL_WINDOW_QUERY: done(PSQL_WINDOW_QUERY),
         SYSTEMCTL_RELOAD: done(SYSTEMCTL_RELOAD),
         SYSTEMCTL_LINK_SERVICE: done(SYSTEMCTL_LINK_SERVICE),
         SYSTEMCTL_ENABLE: done(SYSTEMCTL_ENABLE),
@@ -672,6 +698,9 @@ def healthy_commands(
         SYSTEMCTL_LINK_RETENTION_SWEEP: done(SYSTEMCTL_LINK_RETENTION_SWEEP),
         SYSTEMCTL_ENABLE_RETENTION_SWEEP: done(SYSTEMCTL_ENABLE_RETENTION_SWEEP),
         SYSTEMCTL_ACTIVE_RETENTION_SWEEP: done(SYSTEMCTL_ACTIVE_RETENTION_SWEEP, stdout="active\n"),
+        SYSTEMCTL_LINK_ANNOUNCEMENTS_SYNC: done(SYSTEMCTL_LINK_ANNOUNCEMENTS_SYNC),
+        SYSTEMCTL_ENABLE_ANNOUNCEMENTS_SYNC: done(SYSTEMCTL_ENABLE_ANNOUNCEMENTS_SYNC),
+        SYSTEMCTL_ACTIVE_ANNOUNCEMENTS_SYNC: done(SYSTEMCTL_ACTIVE_ANNOUNCEMENTS_SYNC, stdout="active\n"),
         PS: done(PS, stdout=running_rows(render_inputs=render_inputs)),
         **healthy_ingress(),
     }
@@ -900,6 +929,7 @@ class EngineRotation(RealStack):
         self.assertEqual(host.write_modes[path], 0o440)
         self.assertIn((path, 0, 4242), host.chown_calls)
         calls = argv_calls(host)[baseline_calls:]
+        self.assertLess(calls.index(PULL), calls.index(PS))
         self.assertIn(SYSTEMCTL_LINK_UPSTREAM_WATCH, calls)
         self.assertIn(SYSTEMCTL_ENABLE_UPSTREAM_WATCH, calls)
         self.assertIn(SYSTEMCTL_ACTIVE_UPSTREAM_WATCH, calls)

@@ -11,6 +11,7 @@ from gideon.evaluation.rankmetrics import Coordinates
 from gideon.host.sysio import Host, PathLike
 
 if TYPE_CHECKING:
+    from gideon.evaluation.assessments import Assessments
     from gideon.evaluation.generation import GenerationAccess
     from gideon.evaluation.turns.access import TurnAccess
 
@@ -109,6 +110,9 @@ class RunContext:
     service or managed frontend drivers.
     ``image`` is present for a slice that runs code in the pinned service image.
     ``generation`` is present for a slice that names the stores surface.
+    ``assessments`` is the optional judge-derived input with grades by query
+    and coordinates, the prompt, and the model. Runners may put facts derived
+    from it under ``judge`` alone in case results.
     ``checkpoint`` is called by a runner between cases and before a case's
     further turns, and a runner never catches what it raises: past the run's
     deadline it raises ``window.WindowOverrun``, so no turn starts after the
@@ -124,6 +128,7 @@ class RunContext:
     repeats: int
     progress: Callable[[str], None]
     ranked: Mapping[str, tuple[Coordinates, ...]] | None = None
+    assessments: Assessments | None = field(default=None, kw_only=True)
     turns: TurnAccess | None = None
     checkpoint: Callable[[], None] = no_checkpoint
     checkout: PathLike | None = None

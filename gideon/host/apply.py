@@ -11,8 +11,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, Protocol
+from zoneinfo import ZoneInfo
 
 from gideon.host import (
+    announcesync,
     backuplock,
     cotenants,
     egress,
@@ -48,6 +50,7 @@ from gideon.host.render.command import (
 from gideon.host.render.compose import (
     PROJECT_NAME,
     STORE_SERVICES,
+    TURN_PATH_SERVICES,
     network_members,
     network_name,
     service_images,
@@ -77,6 +80,9 @@ _VERIFY_SLEEP_SECONDS: Final = 2.0
 _READY_ATTEMPTS: Final = 60
 # exempt: a bound, not a threshold; the proof's seconds correct it.
 STORE_TIER_WAIT_SECONDS: Final = 300
+# exempt: operational starting value. A stalled daemon cannot hold the engine
+# lock before the announce row; its expiry reads every turn-path service as down.
+ANNOUNCE_PS_TIMEOUT_SECONDS: Final = 30.0
 
 
 def _root_fix() -> str:
@@ -552,6 +558,20 @@ def _recreated(context: _ApplyContext) -> tuple[str, ...]:
     return tuple(service for service in service_names(context.inputs) if service in selected)
 
 
+def _disrupted_services(io: Host, rendered_dir: PathLike, context: _ApplyContext) -> tuple[str, ...]:
+    """The rendered turn-path services this apply recreates or finds down."""
+
+    try:
+        running = set(stack.running_services(io, rendered_dir, timeout=ANNOUNCE_PS_TIMEOUT_SECONDS) or ())
+    except UnicodeError:
+        running = set()
+    recreated = set(_recreated(context))
+    return tuple(
+        service for service in service_names(context.inputs)
+        if service in TURN_PATH_SERVICES and (service in recreated or service not in running)
+    )
+
+
 def _recreate_detail(
     services: tuple[str, ...], judgment: RecreateJudgment, none_text: str
 ) -> str:
@@ -851,7 +871,7 @@ def _stores_stage(
     )
 
 
-def _manifest_detail(result: owui.BootstrapReport) -> str:
+def _manifest_detail(result: owui.BootstrapReport, banners: owui.BannerSync) -> str:
     changes: list[str] = []
     if result.created_groups:
         changes.append(f"created groups: {', '.join(result.created_groups)}")
@@ -865,6 +885,12 @@ def _manifest_detail(result: owui.BootstrapReport) -> str:
         )
     if result.removed_models:
         changes.append(f"removed models: {', '.join(result.removed_models)}")
+    if banners.added:
+        changes.append(f"added banners: {', '.join(banners.added)}")
+    if banners.removed:
+        changes.append(f"removed banners: {', '.join(banners.removed)}")
+    if banners.replaced:
+        changes.append(f"replaced banners: {', '.join(banners.replaced)}")
     if result.minted:
         changes.append(f"minted secrets: {', '.join(result.minted)}")
     return "; ".join(changes) or "frontend state matches the manifest"
@@ -876,6 +902,8 @@ def _apply_manifest_stage(
     context: _ApplyContext,
     sleep: Callable[[float], None],
     client_factory: Callable[..., owui.Client],
+    *,
+    now: datetime | None,
 ) -> StageResult:
     try:
         ready = owui.wait_ready(
@@ -903,7 +931,10 @@ def _apply_manifest_stage(
         )
     try:
         result = owui.bootstrap(
-            io, client_factory, manifest, rendered_dir=rendered_dir
+            io,
+            client_factory,
+            manifest,
+            rendered_dir=rendered_dir,
         )
     except owui.OwuiError as exc:
         return StageResult("apply-manifest", False, exc.problem, exc.fix)
@@ -914,7 +945,14 @@ def _apply_manifest_stage(
             result.problem or "Open WebUI bootstrap failed",
             result.fix,
         )
-    return StageResult("apply-manifest", True, _manifest_detail(result), "")
+    config = context.inputs.site
+    synced = announcesync.sync(
+        io, rendered_dir, hostname=config.hostname, timezone=ZoneInfo(config.office.timezone),
+        now=now if now is not None else datetime.now(UTC), client_factory=client_factory,
+    )
+    if isinstance(synced, report.Problem):
+        return StageResult("apply-manifest", False, synced.problem, synced.fix)
+    return StageResult("apply-manifest", True, _manifest_detail(result, synced.changes), "")
 
 
 def _verify_stage(
@@ -1062,15 +1100,17 @@ def _rendered_units(context: _ApplyContext, suffix: str) -> tuple[str, ...]:
     )
 
 
-def _applied_units(context: _ApplyContext, suffix: str) -> set[str]:
+def applied_units(applied: AppliedManifest | None, suffix: str) -> set[str]:
+    """Unit names with the given suffix in the last verified apply's record."""
+
     return {
         Path(path).name
-        for path in (context.applied.files if context.applied is not None else {})
+        for path in (applied.files if applied is not None else {})
         if path.startswith("systemd/") and path.endswith(suffix)
     }
 
 
-def _never_loaded(io: Host, unit: str) -> bool:
+def never_loaded(io: Host, unit: str) -> bool:
     """Whether systemd knows no unit of this name, so it is already disabled."""
 
     try:
@@ -1078,6 +1118,25 @@ def _never_loaded(io: Host, unit: str) -> bool:
     except OSError:
         return False
     return result.returncode == 0 and result.stdout.strip() == "not-found"
+
+
+def _systemctl_problem(io: Host, argv: list[str], unit: str, action: str) -> str | None:
+    try:
+        result = io.run(argv)
+    except OSError as exc:
+        return f"systemctl {action} failed for {unit}: {exc}"
+    if result.returncode != 0:
+        return f"systemctl {action} failed for {unit}: {command_detail(result)}"
+    return None
+
+
+def disable_unit(io: Host, unit: str) -> str | None:
+    """Disable a stale unit and report a failure unless it was never loaded."""
+
+    problem = _systemctl_problem(io, ["systemctl", "disable", "--now", unit], unit, "disable")
+    if problem is not None and not never_loaded(io, unit):
+        return problem
+    return None
 
 
 @dataclass(frozen=True)
@@ -1134,31 +1193,24 @@ def _timers_stage(
 
     service_paths = _rendered_units(context, ".service")
     timer_paths = _rendered_units(context, ".timer")
-    stale_timers = tuple(sorted(_applied_units(context, ".timer") - {Path(p).name for p in timer_paths}))
-    stale_services = tuple(sorted(_applied_units(context, ".service") - {Path(p).name for p in service_paths}))
+    stale_timers = tuple(sorted(applied_units(context.applied, ".timer") - {Path(p).name for p in timer_paths}))
+    stale_services = tuple(sorted(applied_units(context.applied, ".service") - {Path(p).name for p in service_paths}))
     if not (service_paths or timer_paths or stale_timers or stale_services):
         return StageResult("timers", True, "timers are current", "")
 
     def run_systemctl(argv: list[str], unit: str, action: str, fix: str) -> StageResult | None:
-        try:
-            result = io.run(argv)
-        except OSError as exc:
-            return StageResult("timers", False, f"systemctl {action} failed for {unit}: {exc}", fix)
-        if result.returncode != 0:
-            return StageResult(
-                "timers", False, f"systemctl {action} failed for {unit}: {command_detail(result)}", fix
-            )
+        problem = _systemctl_problem(io, argv, unit, action)
+        if problem is not None:
+            return StageResult("timers", False, problem, fix)
         return None
 
     failure = run_systemctl(["systemctl", "daemon-reload"], "systemd", "daemon-reload", "journalctl -xe")
     if failure is not None:
         return failure
     for unit in stale_timers + stale_services:
-        failure = run_systemctl(
-            ["systemctl", "disable", "--now", unit], unit, "disable", f"journalctl -u {unit}"
-        )
-        if failure is not None and not _never_loaded(io, unit):
-            return failure
+        problem = disable_unit(io, unit)
+        if problem is not None:
+            return StageResult("timers", False, problem, f"journalctl -u {unit}")
     rendered_root = Path(rendered_dir)
     for relative_path in service_paths:
         unit = Path(relative_path).name
@@ -1261,6 +1313,8 @@ def converge(
     client_factory: Callable[..., owui.Client] | None,
     grafana_client_factory: Callable[..., grafana.Client] | None,
     prune_images: bool = False,
+    announce: Callable[[_ApplyContext], StageResult] | None = None,
+    now: datetime | None = None,
 ) -> int:
     """Run apply's convergence stages after the command preconditions row."""
 
@@ -1283,6 +1337,8 @@ def converge(
     print_stage(rendered_result)
     if not rendered_result.ok or context is None:
         return 1
+    if announce is not None:
+        print_stage(announce(context))
 
     network_result = _network_stage(io, context)
     print_stage(network_result)
@@ -1327,7 +1383,7 @@ def converge(
         context.inputs.site.hostname, ca_path=tls.CA_PATH
     )
     apply_manifest_result = _apply_manifest_stage(
-        io, rendered_dir, context, sleep, factory
+        io, rendered_dir, context, sleep, factory, now=now,
     )
     print_stage(apply_manifest_result)
     if not apply_manifest_result.ok:
@@ -1416,6 +1472,24 @@ def run_apply(
     actual_egress = (
         checkout / "config" / "egress.yaml" if egress_path is None else egress_path
     )
+    raised: tuple[announcesync.RaiseHandle, str, ZoneInfo] | None = None
+
+    def announce(context: _ApplyContext) -> StageResult:
+        nonlocal raised
+        disrupted = _disrupted_services(io, rendered_dir, context)
+        if not disrupted:
+            return StageResult(
+                "announce", True, "nothing raised (no service a turn passes through is recreated or down)", "",
+            )
+        config = context.inputs.site
+        timezone = ZoneInfo(config.office.timezone)
+        handle, row = announcesync.raise_announcement(
+            io, rendered_dir, command=report.command_name("apply"), hostname=config.hostname,
+            timezone=timezone, now=now if now is not None else datetime.now(UTC), client_factory=client_factory,
+        )
+        raised = (handle, config.hostname, timezone)
+        return StageResult(row.name, row.ok, f"{row.detail} (disrupted services: {', '.join(disrupted)})", row.fix)
+
     try:
         return converge(
             io,
@@ -1432,6 +1506,18 @@ def run_apply(
             client_factory=client_factory,
             grafana_client_factory=grafana_client_factory,
             prune_images=True,
+            announce=announce,
+            now=now,
         )
     finally:
-        backuplock.release_claim(io, lock_claim)
+        try:
+            if raised is not None:
+                handle, hostname, timezone = raised
+                cleared = announcesync.clear_announcement(
+                    io, rendered_dir, handle, hostname=hostname, timezone=timezone,
+                    now=now if now is not None else datetime.now(UTC), client_factory=client_factory,
+                )
+                if cleared is not None:
+                    print_stage(cleared)
+        finally:
+            backuplock.release_claim(io, lock_claim)

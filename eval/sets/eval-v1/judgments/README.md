@@ -307,6 +307,48 @@ has a ranked list and every ranked entry is held by the generation, a dropped
 query passing with its null figures, and fails when a judged query has no
 ranked list or a list holds a foreign entry.
 
+### The model assessor
+
+The model assessor supplements the Hole@10 report with relevance grades for
+unjudged passages. It also grades passages attorneys already judged so the run
+can measure disagreement on exact matches. Model grades stay in a separate
+assessments file, and the judgments file holds attorney grades. Grading packets,
+including supplementary packets, draw from a pool file alone, so attorneys
+receive the passages without the model's grades.
+
+On the server, run the assessor from a checkout with the grading kit. Give it
+one or more pool files and an empty output directory, all outside the checkout.
+
+```text
+sudo python3 -B -m tools.judgments.assess <pool file> … --out <dir> [--prior <dir>]
+```
+
+The output directory holds `journal.jsonl` with the grades and reasons, readable
+by its owner alone, `assessments.jsonl` with the grades and coordinates, and
+`summary.json` with counts, costs, and digests. The assessments file is written
+when the journal holds a grade. Use `--prior` with a previous output directory
+to carry forward its journal into a new run; a passage it holds is not graded
+again.
+
+The human core is graded once, from the pool files the attorneys' packets were
+built from, into a directory of its own. Every later arm starts from that core
+and never from another arm's directory, so each arm's disagreement is over the
+same attorney grades. An arm is then its pool file over the core, grading its
+holes alone, and its ranked list scored with the assessments file that run
+wrote:
+
+```text
+sudo python3 -B -m tools.judgments.assess <arm pool file> --out <arm dir> --prior <core dir> --holes-only
+sudo python3 -B -m gideon eval run --slice judgments --ranked <arm ranked file> --assessed <arm dir>/assessments.jsonl --generation <arm generation>
+```
+
+The `--assessed` flag adds to the ranked-list run above. The two
+lines below Hole@10 report assessed and unassessed hole counts, the distribution
+of grades among assessed holes, and the disagreement rate and Cohen's κ against
+attorney grades on the four-grade and relevant-or-irrelevant scales. The run
+computes its metrics and verdict from the ranked list, attorney grades, and
+generation manifest.
+
 ## The intake, for a CSA
 
 The CHU attorney's questions enter through the intake, which checks each for client or case material and appends the reviewed ones. Put them in a UTF-8 text file **outside the checkout** — the intake refuses one inside it — one question per paragraph, blank lines between, each paragraph's first line the review marker `# reviewed <role id> <YYYY-MM-DD>`, with `accept=<kind>[,<kind>…]` naming any soft flag kinds accepted for that question. An invented example:

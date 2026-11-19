@@ -419,6 +419,7 @@ class FakePage:
         drains: Sequence[browser.PageDrain] = (),
         lines: Sequence[str] = (),
         stop_polls: int = 1,
+        banners: Sequence[tuple[str, str | None]] = (),
     ) -> None:
         self.frontend = frontend
         self.phase = "email" if email_form else "auth"
@@ -427,6 +428,7 @@ class FakePage:
         self.lines = list(lines)
         self.line_reads = 0
         self.stop_polls = stop_polls
+        self.banners = tuple(banners)
         self.fills: list[tuple[str, str]] = []
         self.clicks: list[str] = []
         self.presses: list[str] = []
@@ -478,6 +480,12 @@ class FakePage:
             return "General"
         if selector.startswith(browser.INTEGRATION_TOGGLE_SELECTOR):
             return "Web Search"
+        for index, (label, content) in enumerate(self.banners):
+            box = f"{browser.BANNER_CLOSE_SELECTOR} >> nth={index} >> {browser.BANNER_BOX_SELECTOR}"
+            if selector == f"{box} >> {browser.BANNER_TYPE_SELECTOR}":
+                return label
+            if selector == f"{box} >> {browser.BANNER_CONTENT_SELECTOR}":
+                return content
         return None
 
     def texts(self, selector: str) -> Sequence[str]:
@@ -501,6 +509,8 @@ class FakePage:
             return int(self.phase == "email")
         if selector == browser.CHAT_INPUT_SELECTOR:
             return int(self.phase in {"chat", "running", "done"})
+        if selector == browser.BANNER_CLOSE_SELECTOR:
+            return len(self.banners) if self.phase == "chat" else 0
         if selector == browser.COLLAPSIBLE_BUTTON_SELECTOR:
             return int(self.phase in {"running", "done"})
         if selector == browser.STATUS_LINE_SELECTOR:
@@ -781,9 +791,11 @@ class BrowserTurnIntegration(TestCase):
         self.assertIn("browser: ok — browser detail", stdout)
         self.assertIn("signin: ok — signed in as gideon-test-user through the LDAP form", stdout)
         self.assertIn(
-            "observe: ok — selector: General (2 listed: General, Fast); + menu: Attach file, Use tools; integrations: Web Search on",
-            stdout,
+            "observe: ok — selector: General (2 listed: General, Fast); + menu: Attach file, Use tools; "
+            "integrations: Web Search on; banners: none",
+            stdout.splitlines(),
         )
+        self.assertIn(browser.BANNER_SETTLE_SECONDS, page.waits)
         self.assertIn("answered: ok", stdout)
         self.assertIn("line absent", stdout)
         self.assertNotIn(page.token, stdout)
@@ -815,6 +827,61 @@ class BrowserTurnIntegration(TestCase):
         self.assertEqual(record["browser"]["ended_at"], 0.0)
         self.assertFalse(record["verdict"]["reasoning_stored"])
         self.assertEqual(set(record["browser"]["texts"]), {"0"})
+
+    def test_observe_refuses_a_banner_whose_content_is_not_found(self) -> None:
+        page = FakePage(FakeFrontend(), drains=self._drains(), banners=(("INFO", None),))
+        code, stdout, _, _, _ = self._run(page=page, args=[])
+        self.assertNotEqual(code, 0)
+        self.assertIn("observe: refuse — banner 1's type label or content was not found", stdout)
+        self.assertIn("banner selectors in gideon/evaluation/turns/browser.py", stdout)
+        self.assertNotIn("banners: 1", stdout)
+
+    def test_observe_reports_banner_types_and_keeps_the_text_in_the_record(self) -> None:
+        notices = (
+            "The lunar library closes at dusk.",
+            "The lunar bakery has sold out of craters.",
+        )
+        for labels, types in (
+            (("INFO",), ("Info",)),
+            (("INFO", "WARNING"), ("Info", "Warning")),
+            (("ERROR", "SUCCESS"), ("Error", "Success")),
+            (("LUNAR WEATHER",), ("other",)),
+        ):
+            with self.subTest(labels=labels):
+                texts = notices[: len(labels)]
+                page = FakePage(
+                    FakeFrontend(),
+                    drains=self._drains(),
+                    banners=tuple(zip(labels, texts, strict=True)),
+                )
+                code, stdout, stderr, _, host = self._run(page=page, args=[])
+                self.assertEqual(code, 0)
+                self.assertIn(
+                    "observe: ok — selector: General (2 listed: General, Fast); + menu: Attach file, Use tools; "
+                    f"integrations: Web Search on; banners: {len(types)} ({', '.join(types)})",
+                    stdout.splitlines(),
+                )
+                for text in texts:
+                    self.assertNotIn(text, stdout + stderr)
+                # The fade's pause precedes the menus' settles and the banner screenshot.
+                self.assertEqual(page.sleeps[:1], [browser.BANNER_FADE_SECONDS])
+                self.assertEqual(
+                    [path.name for path in page.screenshots],
+                    [
+                        "observe-banners.png",
+                        "observe.png",
+                        "observe-plus.png",
+                        "observe-integrations.png",
+                        "answered.png",
+                    ],
+                )
+                run_record = json.loads(
+                    next(value for key, value in host.files.items() if key.endswith("run.json"))
+                )
+                self.assertEqual(
+                    run_record["browser"]["observation"]["banners"],
+                    [[label, text] for label, text in zip(types, texts, strict=True)],
+                )
 
     def test_progress_line_records_first_paint_and_closing_without_text(self) -> None:
         frontend = FakeFrontend()
@@ -1269,6 +1336,7 @@ class BrowserTurnIntegration(TestCase):
         browser_record = run_record["browser"]
         self.assertEqual(browser_record["requests"], {"on_host": 2, "off_host": 1, "off_hostnames": ["outside.example"]})
         self.assertEqual(browser_record["observation"]["selector_label"], "General")
+        self.assertEqual(browser_record["observation"]["banners"], [])
 
 
     def test_browser_turn_factor_drives_the_window_guard(self) -> None:

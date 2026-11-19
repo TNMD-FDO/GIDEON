@@ -6,12 +6,12 @@ carries the holder's record, a same-process holder passing as nested, and the
 lock dying with its process. The paths stay under ``/run`` because it is a
 root-only tmpfs that needs no cleanup after a reboot, and outside the backup
 staging directory because restore's swap moves that directory as a whole.
+The standing announcements read the two unavailability locks, which gate nothing.
 
 ``claim`` and ``release_claim`` are the shape a command holding a named
 lock uses: the claim carries its passing row's fragment or its failed
 ``preconditions`` row, and the release lets go only of a lock this claim took.
-``held_by`` reads the holder without taking the lock, for a command whose
-answer to a hold is a skip rather than a wait.
+``held_by`` reads the holder without taking the lock.
 """
 
 import dataclasses
@@ -54,6 +54,21 @@ ARCHIVE_LOCK = Lock(
     f"{LOCK_DIR}/archive.lock",
     "archive push",
     "Wait for the running archive push to finish, then retry.",
+)
+WINDOW_LOCK = Lock(
+    f"{LOCK_DIR}/window.lock",
+    "maintenance window",
+    "Wait for the running window command to finish, then retry.",
+)
+UNAVAILABLE_LOCK = Lock(
+    f"{LOCK_DIR}/unavailable.lock",
+    "unavailability announcement",
+    "Nothing waits on this lock; the next announcements sync follows the holder's exit.",
+)
+UNAVAILABLE_NESTED_LOCK = Lock(
+    f"{LOCK_DIR}/unavailable-nested.lock",
+    "nested unavailability announcement",
+    "Nothing waits on this lock; the next announcements sync follows the holder's exit.",
 )
 
 

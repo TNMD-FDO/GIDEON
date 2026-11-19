@@ -128,11 +128,13 @@ def parse_ps(stdout: str) -> tuple[Mapping[str, object], ...] | None:
     return None
 
 
-def running_services(host: Host, rendered_dir: PathLike) -> tuple[str, ...] | None:
-    """The project's running service names, or None when Compose cannot say."""
+def running_services(
+    host: Host, rendered_dir: PathLike, *, timeout: float | None = None,
+) -> tuple[str, ...] | None:
+    """The project's running service names, or None when Compose cannot say in time."""
 
     try:
-        result = host.run(compose_argv(rendered_dir, "ps", "--all", "--format", "json"))
+        result = host.run(compose_argv(rendered_dir, "ps", "--all", "--format", "json"), timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
