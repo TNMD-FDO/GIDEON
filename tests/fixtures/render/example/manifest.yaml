@@ -3,7 +3,7 @@ release: "fixture"
 inputs:
   site_sha256: "13541215f4769fd486db56ad34afeb167fd60cce1af8b9b058a28413cfa396a2"
   host_lock_sha256: "56b34abc306f9fbaf92b8b48f9beaa6a942c481573f06c6edc8d9b890b69d1bd"
-  models_lock_sha256: "12b2c39433ce43a74a3cad2dc1c74964821d6dab9b42e4c3de58bbb328b955f6"
+  models_lock_sha256: "417a41f40d744b0ac66429eb879da4cc4254ffc1c3b68d72ece73cb9c833b093"
   egress_sha256: "e22abee0f29547aedd38bb2ca9ca9f0d2cd3dc4b28c9d6df72ae4fad53d0d3af"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
@@ -15,7 +15,7 @@ inputs:
   build_box: true
 files:
   compose.yaml:
-    sha256: "dd45f0f2f81b237652abeacb28e8d9764210332255fb6baa2efdbd1ee25feeb8"
+    sha256: "a9b2e02c8d1b20132f6280f05329956882466a21970120656eb754006084e3e6"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -268,7 +268,7 @@ services:
   opensearch: "5e566c66fd1232f7aa18d184184fd5680bc9be63896810da914b763f9c387742"
   open-webui: "f88eb45cf0e11080dfb94d23261581ac5cb2a37d12de4d6054d93476dca49895"
   gideon-generator: "5568bee6e672194e56c419842484b9039c037e7902e04191e944c23e7d55fd1e"
-  gideon-embed: "e47c661e7f14b1e0f85c047b292f954b567274c72c6eab013c9afa2d7c899f0c"
+  gideon-embed: "9d97e4fac9021e9e397b98608972b30f723bd6bed9a75828002f02d1b3bb2979"
   gideon-api: "e0df6d9b49ad47f718ab5b41bfa7d95265798e400425745556002d9ce0ea98a5"
   gideon-worker: "01a50e5fb2088fdf111a7982ea30fc0582be559a4263ad2314187ee582d026f3"
   gideon-egress: "d961fa13530a157ee903e72d7e505dc032d5fa0e658054b6e698cbf11d35bae8"

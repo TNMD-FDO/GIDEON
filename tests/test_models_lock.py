@@ -359,6 +359,23 @@ class CommittedLock(unittest.TestCase):
                         profile.requires.gpu.vram_gb,
                     )
 
+    def test_committed_kv_cache_bounds_are_below_each_model_budget(self) -> None:
+        result = load_models_lock(LOCK)
+        self.assertTrue(result.ok, render_errors(result.errors))
+        assert result.lock is not None
+        for profile in result.lock.profiles:
+            card_bytes = profile.requires.gpu.vram_gb * GIGABYTE
+            for model in profile.models:
+                flags = model.serve.flags
+                if "kv-cache-memory-bytes" not in flags:
+                    continue
+                with self.subTest(profile=profile.name, role=model.role):
+                    bound = flags["kv-cache-memory-bytes"]
+                    self.assertIs(type(bound), int)
+                    assert isinstance(bound, int)
+                    budget = Fraction(str(flags["gpu-memory-utilization"])) * card_bytes
+                    self.assertLess(bound, budget)
+
     def test_gpu_one_reserve_matches_shared_ledger(self) -> None:
         if absent_from_export("docs/box-ledger.md", ROOT):
             self.skipTest("shared GPU memory record is absent from the exported tree")
@@ -451,6 +468,24 @@ class CommittedLock(unittest.TestCase):
                 self.assertIsNotNone(FILE_PATH.fullmatch(file.path))
                 self.assertIsNotNone(DIGEST.fullmatch(file.sha256))
                 self.assertGreaterEqual(file.size, 0)
+
+        embed = profile.model("embed")
+        assert embed is not None
+        self.assertEqual(
+            dict(embed.serve.flags),
+            {
+                "runner": "pooling",
+                "convert": "embed",
+                "dtype": "bfloat16",
+                "max-model-len": 8192,
+                "no-enable-chunked-prefill": True,
+                "gpu-memory-utilization": 0.25,
+                "kv-cache-memory-bytes": 6_039_797_760,
+                "hf-overrides": '{"matryoshka_dimensions": [1024]}',
+                "pooler-config": '{"dimensions": 1024}',
+            },
+        )
+        self.assertIs(type(embed.serve.flags["kv-cache-memory-bytes"]), int)
 
     def test_trial_profile_has_exact_release_facts(self) -> None:
         result = load_models_lock(LOCK)

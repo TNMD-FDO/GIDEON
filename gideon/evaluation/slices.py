@@ -56,10 +56,12 @@ class SliceSpec:
     run, even when no counted case routes to it.
     ``judgments`` names the stores surface for the manifest its definition reads.
     ``accepts_assessments`` is whether ``eval run`` admits ``--assessed``, the
-    model assessor's grades file, for the slice. It is a field and not a
-    surface: every surface a slice names is required of each of its runs and
-    decides ``reaches_box``, while the assessments file is optional and read
-    off the box.
+    model assessor's grades file, for the slice. Every surface a slice names
+    is required for each run. The assessments file is optional, so its
+    admission is a field on the spec.
+    A slice names at least one surface on the box, and the ranked-list file
+    alone is not one: a set naming nothing on the box is refused at
+    construction.
     ``engine_calls`` estimates the engine requests one counted run makes; None
     leaves its size bound to the quiet window. ``smoke``'s is the sum of its
     parts' ``turn_calls``; ``guardrails`` run alone keeps None, since the
@@ -90,9 +92,11 @@ class SliceSpec:
                 "every turn passes through the engine, its window, and its lock"
             )
 
-    @property
-    def reaches_box(self) -> bool:
-        return any(surface.on_box for surface in self.surfaces)
+        if not any(surface.on_box for surface in self.surfaces):
+            raise ValueError(
+                "an evaluation slice must name at least one surface on the box "
+                "because every run uses the box's preconditions and record"
+            )
 
 
 _EXTRACTION: Final[SliceSpec] = SliceSpec(

@@ -209,6 +209,11 @@ class EmbedRender(unittest.TestCase):
                     if value is not True:
                         expected_flags.append(str(value))
                 self.assertEqual(command[-len(expected_flags):], expected_flags)
+                cache_bound = "kv-cache-memory-bytes"
+                self.assertEqual(
+                    command[command.index(f"--{cache_bound}") + 1],
+                    str(pin.serve.flags[cache_bound]),
+                )
                 for name in ("hf-overrides", "pooler-config"):
                     with self.subTest(flag=name):
                         value = pin.serve.flags[name]

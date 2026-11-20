@@ -253,7 +253,11 @@ class _RecordFacts:
 
 @dataclass(frozen=True, slots=True)
 class _Prepared:
-    """The context and record inputs resolved before a slice runs."""
+    """The context and record inputs resolved before a slice runs.
+
+    ``record`` is None for a set outside the release, which the record stage
+    skips.
+    """
 
     served_model_name: str | None
     turns: access.TurnAccess | None
@@ -262,7 +266,7 @@ class _Prepared:
     started: datetime
     forced: bool
     overrides: Mapping[str, object]
-    record: _RecordFacts | StageResult
+    record: _RecordFacts | None
     image: ImageAccess | None = None
     generation: GenerationAccess | None = None
     assessments: Assessments | None = None
@@ -279,9 +283,9 @@ class _EngineLockClaim:
 class _RecordOutcome:
     """Whether the record stage refused, and whether it wrote rows at all.
 
-    A skipped record — a set outside the release, an unreachable database —
-    leaves the command running but writes no run row, so no later fix may
-    name a run id that does not exist.
+    A skipped record — a set outside the release — leaves the command running
+    but writes no run row, so no later fix may name a run id that does not
+    exist.
     """
 
     ok: bool
@@ -990,11 +994,11 @@ def _generation_detail(resolved: GenerationAccess | None) -> str:
 
 def _on_box_record_facts(
     request: _Request, seams: _Seams, profile_name: str
-) -> _RecordFacts | StageResult:
-    """Resolve provenance and writer access before a box-facing runner starts."""
+) -> _RecordFacts | StageResult | None:
+    """Return record facts, None for a supplied set, or a preconditions refusal."""
 
     if request.supplied_set:
-        return _SET_SKIP_ROW
+        return None
     resolved_provenance, provenance_fix = _provenance(seams.host, seams.checkout)
     if resolved_provenance is None:
         return StageResult(
@@ -1022,10 +1026,10 @@ def _prepare_on_box(
     supplied_assessments: Assessments | None,
     overrides: Mapping[str, object],
 ) -> _Prepared | None:
-    """Run the ``preconditions`` stage for a slice naming a surface on the box.
+    """Run the ``preconditions`` stage.
 
-    Returns the prepared value with the record's facts, or None after the
-    stage's one refusing row when a required seam is unavailable.
+    Returns the prepared value, or None after the stage's one refusing row
+    when a required seam is unavailable.
     """
 
     if seams.host.geteuid() != 0:
@@ -1077,7 +1081,7 @@ def _prepare_on_box(
             print_stage(resolved_generation)
             return None
         record_facts = _on_box_record_facts(request, seams, config.hardware_profile)
-        if isinstance(record_facts, StageResult) and not record_facts.ok:
+        if isinstance(record_facts, StageResult):
             print_stage(record_facts)
             return None
         writer = (
@@ -1283,7 +1287,7 @@ def _prepare_on_box(
         print_stage(resolved_generation)
         return None
     record_facts = _on_box_record_facts(request, seams, target.profile_name)
-    if isinstance(record_facts, StageResult) and not record_facts.ok:
+    if isinstance(record_facts, StageResult):
         print_stage(record_facts)
         return None
     # One row for the stage, as engine verify prints one. The writer clause
@@ -1327,44 +1331,6 @@ def _prepare_on_box(
         image=image,
         generation=resolved_generation,
     )
-
-
-def _held_record(
-    request: _Request,
-    seams: _Seams,
-    slice_spec: SliceSpec,
-) -> _RecordFacts | StageResult:
-    """Resolve an off-box run's record facts, or hold the row its record stage prints.
-
-    Nothing is printed here: a run that reaches nothing on the box may run
-    anywhere, so a lookup's failure skips or refuses its record after the run
-    and never stops it.
-    """
-
-    if request.supplied_set:
-        return _SET_SKIP_ROW
-    probe_problem = record.probe(seams.host, seams.rendered_dir)
-    if probe_problem is not None:
-        return StageResult(
-            "record",
-            True,
-            f"skipped — no database reachable; rows were not written ({probe_problem})",
-            request.record_root_fix(slice_spec),
-        )
-    site_result = site.load_site(Path(seams.site_path), host=seams.host)
-    if not site_result.ok or site_result.config is None:
-        detail = "; ".join(error.problem for error in site_result.errors)
-        fix = site_result.errors[0].fix if site_result.errors else "Create a valid site file, then retry."
-        return StageResult("record", False, f"site file could not be loaded: {detail}", fix)
-    resolved_provenance, provenance_fix = _provenance(seams.host, seams.checkout)
-    if resolved_provenance is None:
-        return StageResult(
-            "record",
-            False,
-            "git provenance could not be read; rows were not written",
-            provenance_fix or _git_fix(str(seams.checkout)),
-        )
-    return _RecordFacts(site_result.config.hardware_profile, *resolved_provenance)
 
 
 def _active_slice_ids(loaded: LoadedSet, slice_name: str) -> tuple[str, ...]:
@@ -1494,10 +1460,10 @@ def _prepare(
 ) -> _Prepared | None:
     """Resolve the slice's surfaces, optional assessments, and record facts.
 
-    Returns None after exactly one refusing row. A run that reaches the box is
-    recordable before it starts, so its lookups refuse under ``preconditions``;
-    an off-box run's are held for its record stage. A surface the slice does not
-    name leaves its field neutral.
+    Returns None after exactly one refusing row. Record lookups can refuse
+    under ``preconditions`` because a run of the release's set must be
+    recordable before it starts. A surface the slice does not name leaves its
+    field neutral.
     """
 
     ranked_step = _prepare_ranked(
@@ -1513,28 +1479,16 @@ def _prepare(
     if assessed_step is None:
         return None
     supplied_assessments, overrides = assessed_step
-    if slice_spec.reaches_box:
-        return _prepare_on_box(
-            request,
-            seams,
-            pass_value,
-            slice_spec,
-            loaded,
-            started=started,
-            ranked_lists=ranked_lists,
-            supplied_assessments=supplied_assessments,
-            overrides=overrides,
-        )
-    return _Prepared(
-        served_model_name=None,
-        turns=None,
-        ranked=ranked_lists,
-        assessments=supplied_assessments,
-        checkpoint=no_checkpoint,
+    return _prepare_on_box(
+        request,
+        seams,
+        pass_value,
+        slice_spec,
+        loaded,
         started=started,
-        forced=False,
+        ranked_lists=ranked_lists,
+        supplied_assessments=supplied_assessments,
         overrides=overrides,
-        record=_held_record(request, seams, slice_spec),
     )
 
 
@@ -1553,13 +1507,13 @@ def _record(
     requested_repeats: int,
     decision_json: Mapping[str, JSONValue] | None,
 ) -> _RecordOutcome:
-    """Write prepared facts and an engine entry's conditions, or print a held row."""
-
-    if isinstance(prepared.record, StageResult):
-        print_stage(prepared.record)
-        return _RecordOutcome(prepared.record.ok, False)
+    """Write prepared facts and engine conditions, or print the supplied-set skip row."""
 
     facts = prepared.record
+    if facts is None:
+        print_stage(_SET_SKIP_ROW)
+        return _RecordOutcome(True, False)
+
     engine_conditions = (
         seams.conditions(prepared.started, finished)
         if CallSurface.ENGINE in slice_spec.surfaces
@@ -1690,17 +1644,6 @@ def _run_body(
                 False,
                 f"no runner serves slice {slice_name!r}",
                 "Implement the runner named by the slice, then retry.",
-            )
-        )
-        return _RunBodyOutcome(1)
-
-    if request.paths.name == CI_STACK and not slice_spec.reaches_box:
-        print_stage(
-            StageResult(
-                "load",
-                False,
-                f"slice {slice_name} cannot run on the CI sibling: the slice reaches nothing a stack names",
-                "Run this slice with --stack production, then retry.",
             )
         )
         return _RunBodyOutcome(1)

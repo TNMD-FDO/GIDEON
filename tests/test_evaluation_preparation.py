@@ -66,7 +66,7 @@ class SliceSurfaces(unittest.TestCase):
                 self.assertIs(type(spec.surfaces), frozenset)
                 self.assertTrue(all(type(surface) is CallSurface for surface in spec.surfaces))
 
-    def test_reaches_box_matches_surface_membership(self) -> None:
+    def test_every_entry_names_an_on_box_surface(self) -> None:
         on_box = {surface for surface in CallSurface if surface.on_box}
         self.assertEqual(on_box, {
             CallSurface.ENGINE, CallSurface.IMAGE, CallSurface.RECORD,
@@ -74,8 +74,18 @@ class SliceSurfaces(unittest.TestCase):
         })
         for name, spec in SLICE_RUNNERS.items():
             with self.subTest(slice_name=name):
-                self.assertIs(type(spec.reaches_box), bool)
-                self.assertEqual(spec.reaches_box, bool(spec.surfaces & on_box))
+                self.assertTrue(spec.surfaces & on_box)
+
+    def test_construction_requires_an_on_box_surface(self) -> None:
+        spec = SLICE_RUNNERS["judgments"]
+        for surfaces in (frozenset(), frozenset({CallSurface.RANKED_FILE})):
+            with (
+                self.subTest(surfaces=surfaces),
+                self.assertRaisesRegex(ValueError, "must name at least one surface on the box"),
+            ):
+                replace(spec, surfaces=surfaces)
+        surfaces = frozenset({CallSurface.RANKED_FILE, CallSurface.STORES})
+        self.assertEqual(replace(spec, surfaces=surfaces).surfaces, surfaces)
 
     def test_turns_without_the_engine_is_refused_at_construction(self) -> None:
         with self.assertRaisesRegex(ValueError, "turns surface must name the engine surface"):
@@ -176,29 +186,24 @@ def _invoke_planted(
 class PreparationRoutes(unittest.TestCase):
     """Each named surface supplies its runner context and record facts."""
 
-    def test_assessments_reach_the_runner_on_both_preparation_routes(self) -> None:
+    def test_assessments_reach_the_runner_after_preconditions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             checkout, (case_id,) = _fixture(directory, {1: RELEVANT_GRADE})
             ranked_path, _ = _ranked_file(directory, {1: (1,)})
             coordinate = _coordinate(1)
             assessed_path, _ = _assessed_file(directory, ((case_id, coordinate, 0),))
-            for surfaces in (frozenset({CallSurface.RANKED_FILE}), SLICE_RUNNERS["judgments"].surfaces):
-                with self.subTest(surfaces=surfaces):
-                    (code, stdout, stderr), contexts, _ = _invoke_planted(
-                        EvalHost(), checkout, ranked_path, surfaces,
-                        flags=("--assessed", str(assessed_path)),
-                    )
-                    self.assertEqual((code, stderr), (0, ""), stdout)
-                    context, = contexts
-                    self.assertEqual(context.ranked, {case_id: (coordinate,)})
-                    self.assertEqual(context.assessments, Assessments(
-                        {case_id: {coordinate: 0}}, FIXTURE_PROMPT, FIXTURE_MODEL,
-                    ))
-                    stages = [line.split(":", 1)[0] for line in stdout.splitlines() if ": ok" in line]
-                    expected = ["load", "ranked", "assessed"]
-                    if CallSurface.STORES in surfaces:
-                        expected.append("preconditions")
-                    self.assertEqual(stages, [*expected, "run", "record", "gate"])
+            (code, stdout, stderr), contexts, _ = _invoke_planted(
+                EvalHost(), checkout, ranked_path, SLICE_RUNNERS["judgments"].surfaces,
+                flags=("--assessed", str(assessed_path)),
+            )
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        context, = contexts
+        self.assertEqual(context.ranked, {case_id: (coordinate,)})
+        self.assertEqual(context.assessments, Assessments(
+            {case_id: {coordinate: 0}}, FIXTURE_PROMPT, FIXTURE_MODEL,
+        ))
+        stages = [line.split(":", 1)[0] for line in stdout.splitlines() if ": ok" in line]
+        self.assertEqual(stages, ["load", "ranked", "assessed", "preconditions", "run", "record", "gate"])
 
     def test_refused_assessments_stop_before_any_box_preconditions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -432,7 +437,7 @@ class PreparationRoutes(unittest.TestCase):
             self.assertIn("gideon registry mirror", stdout)
             self.assertEqual(host.calls[-1][0][:3], ("docker", "image", "inspect"))
 
-    def test_database_refusal_depends_on_whether_a_surface_reaches_the_box(self) -> None:
+    def test_unreachable_database_refuses_during_preconditions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             checkout, _ids = _fixture(directory, {1: 3})
             ranked_path, _ranked_bytes = _ranked_file(directory, {1: (1,)})
@@ -442,23 +447,15 @@ class PreparationRoutes(unittest.TestCase):
                     (code, stdout, stderr), contexts, _target = _invoke_planted(
                         host, checkout, ranked_path, surfaces
                     )
-                    self.assertEqual(stderr, "")
+                    self.assertEqual((code, stderr), (1, ""), stdout)
+                    self.assertEqual(stdout.count("preconditions: refuse"), 1)
+                    self.assertNotIn("run: ok", stdout)
+                    self.assertEqual(contexts, [])
                     self.assertFalse(
                         any("INSERT INTO eval_runs" in (input or "") for _, input in host.calls)
                     )
-                    if any(surface.on_box for surface in surfaces):
-                        self.assertEqual(code, 1)
-                        self.assertEqual(stdout.count("preconditions: refuse"), 1)
-                        self.assertNotIn("run: ok", stdout)
-                        self.assertEqual(contexts, [])
-                    else:
-                        self.assertEqual(code, 0)
-                        self.assertNotIn("preconditions:", stdout)
-                        self.assertIn("record: ok — skipped — no database reachable", stdout)
-                        self.assertEqual(len(contexts), 1)
-                        self.assertEqual([argv[0] for argv, _ in host.calls], ["docker"])
 
-    def test_supplied_set_holds_skip_row_without_off_box_host_calls(self) -> None:
+    def test_supplied_set_prints_skip_row_without_inserting(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             checkout, _ids = _fixture(directory, {1: 3})
             ranked_path, _ranked_bytes = _ranked_file(directory, {1: (1,)})
@@ -474,41 +471,11 @@ class PreparationRoutes(unittest.TestCase):
                     self.assertEqual(len(contexts), 1)
                     self.assertIn(
                         "record: ok — skipped — a set outside the release is never recorded",
-                        stdout,
+                        stdout.splitlines(),
                     )
                     self.assertFalse(
                         any("INSERT INTO eval_runs" in (input or "") for _, input in host.calls)
                     )
-                    if not any(surface.on_box for surface in surfaces):
-                        self.assertEqual(host.calls, [])
-
-    def test_off_box_site_refusal_prints_after_run_and_verdict(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            broken_site = Path(directory) / "broken-site.yaml"
-            broken_site.write_text("broken: [\n", encoding="utf-8")
-            host = EvalHost()
-            kwargs = _run_kwargs(host)
-            kwargs["site_path"] = broken_site
-            off_box = dict(SLICE_RUNNERS)
-            off_box["extraction"] = replace(off_box["extraction"], surfaces=frozenset())
-            with patch.object(command, "SLICE_RUNNERS", off_box):
-                code, stdout, stderr = _invoke(
-                    ["eval", "run", "--slice", "extraction", "--stack", "production"],
-                    **kwargs,
-                )
-        self.assertEqual((code, stderr), (1, ""))
-        lines = stdout.splitlines()
-        run_index = next(i for i, line in enumerate(lines) if line.startswith("run: ok"))
-        verdict_index = next(i for i, line in enumerate(lines) if line.startswith("verdict "))
-        record_index = next(i for i, line in enumerate(lines) if line.startswith("record: refuse"))
-        gate_index = next(i for i, line in enumerate(lines) if line.startswith("gate:"))
-        # The runner's report sits between the run row and the verdict line.
-        self.assertLess(run_index + 1, verdict_index)
-        self.assertLess(verdict_index, record_index)
-        self.assertLess(record_index, gate_index)
-        self.assertTrue(lines[record_index].startswith(
-            "record: refuse — site file could not be loaded:"
-        ))
 
 
 class StoresPreparation(unittest.TestCase):
@@ -909,32 +876,6 @@ class SiblingSurfaceRule(unittest.TestCase):
         bind = next(line for line in sql.splitlines() if line.startswith("\\set v_name "))
         self.assertEqual(read_psql_set(bind, "v_name"), generation["gen_id"])
 
-    def test_load_refuses_no_box_surface_even_with_a_judge_prompt(self) -> None:
-        replacement = dict(SLICE_RUNNERS)
-        replacement["extraction"] = replace(
-            replacement["extraction"],
-            surfaces=frozenset(),
-            judge_prompt="fictitious-prompt",
-        )
-        with (
-            patch.object(command, "SLICE_RUNNERS", replacement),
-            patch.object(command.stacks.secrets, "select_directory") as select_directory,
-        ):
-            code, stdout, stderr = _invoke(
-                ["eval", "run", "--slice", "extraction", "--stack", "ci"],
-                **_run_kwargs(EvalHost()),
-            )
-            select_directory.assert_called_once()
-        self.assertEqual((code, stderr), (1, ""))
-        self.assertIn(
-            "load: refuse — slice extraction cannot run on the CI sibling: "
-            "the slice reaches nothing a stack names "
-            "Fix: Run this slice with --stack production, then retry.",
-            stdout,
-        )
-        self.assertNotIn("load: ok", stdout)
-        self.assertNotIn("preconditions:", stdout)
-
     def test_load_admits_engine_only_without_a_judge_prompt(self) -> None:
         replacement = dict(SLICE_RUNNERS)
         replacement["extraction"] = replace(
@@ -960,10 +901,10 @@ class SiblingSurfaceRule(unittest.TestCase):
 class PreparationBoundaries(unittest.TestCase):
     """Registry surfaces and prepared record facts stay within their boundaries."""
 
-    def test_derived_flags_have_no_product_or_tool_readers(self) -> None:
-        forbidden = {"reaches_engine", "drives_turns", "takes_ranked"}
+    def test_retired_surface_flags_have_no_readers(self) -> None:
+        forbidden = {"reaches_engine", "drives_turns", "takes_ranked", "reaches_box"}
         readers: list[str] = []
-        for home in (ROOT / "gideon", ROOT / "tools"):
+        for home in (ROOT / "gideon", ROOT / "tools", ROOT / "tests"):
             for path in home.rglob("*.py"):
                 tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
                 readers.extend(

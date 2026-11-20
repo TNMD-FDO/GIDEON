@@ -1223,19 +1223,6 @@ class Command(unittest.TestCase):
             [("docker", "image", "inspect"), ("docker", "run", "--rm")],
         )
 
-    def test_unreachable_database_skips_record_and_runs_no_git_probe(self) -> None:
-        host = EvalHost(probe_rc=1)
-        off_box = dict(SLICE_RUNNERS)
-        off_box["extraction"] = replace(off_box["extraction"], surfaces=frozenset())
-        with patch.object(command, "SLICE_RUNNERS", off_box):
-            code, stdout, _ = _invoke(
-                ["eval", "run", "--slice", "extraction"], **_run_kwargs(host)
-            )
-        self.assertEqual(code, 0)
-        self.assertIn("rows were not written", stdout)
-        _assert_comparison_lines(self, stdout)
-        self.assertEqual([argv[0] for argv, _ in host.calls], ["docker"])
-
     def test_failed_write_refuses_and_gate_is_still_last(self) -> None:
         host = EvalHost(write_rc=1)
         code, stdout, _ = _invoke(
@@ -1745,30 +1732,11 @@ class EngineConditionsRecord(unittest.TestCase):
         )
         self.assertEqual((code, stderr), (0, ""), stdout)
         reader.assert_not_called()
-        self.assertIn("record: ok — skipped", stdout)
+        self.assertIn(
+            "record: ok — skipped — a set outside the release is never recorded",
+            stdout.splitlines(),
+        )
         self.assertFalse(any(payload is not None and "INSERT INTO eval_runs" in payload for _argv, payload in host.calls))
-
-    def test_held_record_does_not_read_conditions_or_write(self) -> None:
-        prepare = command._prepare
-        for ok in (True, False):
-            with self.subTest(ok=ok):
-                host = EvalHost()
-                reader = Mock(side_effect=AssertionError("a held record must not read conditions"))
-                held = report.StageResult("record", ok, "visibly fictitious held record", "")
-
-                def held_prepare(*args: Any, held: report.StageResult = held, **kwargs: Any) -> command._Prepared:
-                    prepared = prepare(*args, **kwargs)
-                    assert prepared is not None
-                    return replace(prepared, record=held)
-
-                with patch.object(command, "_prepare", side_effect=held_prepare):
-                    code, stdout, stderr, _observed = _invoke_engine_command(
-                        host, slice_name="guardrails", conditions=reader,
-                    )
-                self.assertEqual((code, stderr), (0 if ok else 1, ""), stdout)
-                reader.assert_not_called()
-                self.assertIn(report.stage_line(held), stdout)
-                self.assertFalse(any(payload is not None and "INSERT INTO eval_runs" in payload for _argv, payload in host.calls))
 
     def test_failed_write_keeps_its_record_row_and_fix(self) -> None:
         host = EvalHost(write_rc=1)
@@ -1970,24 +1938,27 @@ class EngineStackAndLock(unittest.TestCase):
         self.assertIn(str(production_dir), write_argv)
         self.assertNotIn(stacks.CI_ROOT, write_argv)
 
-    def test_ci_refusals_are_registry_driven_before_the_lock(self) -> None:
+    def test_ci_load_admits_every_registered_slice_before_the_lock(self) -> None:
         for slice_name, spec in SLICE_RUNNERS.items():
-            if spec.reaches_box:
-                continue
             with self.subTest(slice_name=slice_name):
-                if absent_from_export(f"eval/sets/eval-v1/slices/{slice_name}", ROOT):
+                if absent_from_export(SET_ROOT / "slices" / slice_name, ROOT):
                     self.skipTest("in an export this slice's lists are absent, so load refuses it first")
-                host = EvalHost()
+                host = EvalHost(effective_uid=1)
                 with patch.object(command.stacks.secrets, "select_directory"):
                     code, stdout, stderr = _invoke(
                         ["eval", "run", "--slice", slice_name, "--stack", "ci"],
                         **_run_kwargs(host),
                     )
-                self.assertEqual(code, 1)
-                self.assertEqual(stderr, "")
-                self.assertIn("load: refuse", stdout)
-                self.assertIn("the slice reaches nothing a stack names", stdout)
-                self.assertIn("Run this slice with --stack production", stdout)
+                self.assertEqual((code, stderr), (1, ""), stdout)
+                refusal = (
+                    f"ranked: refuse — slice {slice_name} requires --ranked"
+                    if CallSurface.RANKED_FILE in spec.surfaces
+                    else "preconditions: refuse — root privileges are required"
+                )
+                rows = stdout.splitlines()
+                self.assertEqual(len(rows), 2, stdout)
+                self.assertTrue(rows[0].startswith("load: ok — "), stdout)
+                self.assertTrue(rows[1].startswith(refusal), stdout)
                 self.assertEqual(host.lock_records, [])
 
     def test_engine_lock_refusal_nested_pass_and_post_lock_refusal(self) -> None:
@@ -2657,7 +2628,6 @@ class SliceRegistry(unittest.TestCase):
             judgments.surfaces,
             frozenset({CallSurface.RANKED_FILE, CallSurface.STORES}),
         )
-        self.assertTrue(judgments.reaches_box)
 
     def test_only_turn_driven_slices_name_the_turns_surface(self) -> None:
         for slice_name, spec in SLICE_RUNNERS.items():

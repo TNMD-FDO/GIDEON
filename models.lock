@@ -491,11 +491,23 @@ profiles:
         # it on, alone and among concurrent requests, and never with it off,
         # where every step then takes a whole prompt, the default step budget
         # being the window.
-        # gpu-memory-utilization: a per-process budget the server fills at
-        # start, its KV cache taking whatever the weights leave, of the card's
-        # total as the process reports it; 0.25 reads as 24 GB of a 96 GB card
-        # in the convention that reads the generator's 0.92 as about 88, and
-        # a start refuses when less than the budget is free on the card.
+        # gpu-memory-utilization: the per-process budget a start is judged
+        # against, of the card's total as the process reports it; 0.25 reads
+        # as 24 GB of a 96 GB card in the convention that reads the
+        # generator's 0.92 as about 88, and a start refuses when less than
+        # the budget is free on the card. It is preflight's budget and the
+        # card's line, and it holds nothing after the start: measured on the
+        # reference box, the first batched request takes about a gigabyte of
+        # working memory the start's profile does not count, and the hold
+        # then stays flat through a bulk embed's load and at idle.
+        # kv-cache-memory-bytes: E6's byte bound, which replaces the
+        # fraction-sized cache and skips the start's memory profile. It is a
+        # whole number of 8,192-token windows at the engine's 147,456 bytes
+        # per token for this model, sized so the hold's high-water mark
+        # through a bulk embed, that first-use growth included, sits a
+        # gigabyte under the line. With chunked prefill off a step takes at
+        # most one window and the bulk embed keeps two requests in flight,
+        # so the pool needs no more than a few windows.
         # hf-overrides and pooler-config, two settings that only work
         # together: the width list turns the model's variable widths on and
         # refuses every width but 1024, so no client leaves the space, and the
@@ -520,6 +532,7 @@ profiles:
             max-model-len: 8192
             no-enable-chunked-prefill: true
             gpu-memory-utilization: 0.25
+            kv-cache-memory-bytes: 6039797760
             hf-overrides: '{"matryoshka_dimensions": [1024]}'
             pooler-config: '{"dimensions": 1024}'
         files:

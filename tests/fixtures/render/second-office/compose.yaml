@@ -519,6 +519,8 @@ services:
       - "--no-enable-chunked-prefill"
       - "--gpu-memory-utilization"
       - "0.25"
+      - "--kv-cache-memory-bytes"
+      - "6039797760"
       - "--hf-overrides"
       - "{\"matryoshka_dimensions\": [1024]}"
       - "--pooler-config"
