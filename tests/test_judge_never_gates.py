@@ -11,6 +11,7 @@ from typing import cast
 
 import test_golddrop_slice
 from test_evaluation_assessments import FIXTURE_MODEL, FIXTURE_PROMPT
+from test_evaluation_run import fixture_judge_retry
 from test_guardrails_slice import _DECLINE, SAMPLE_IDS, JudgingDoorHost, _fixture_turns
 from test_judge import false_refusal_content, passage_relevance_content, valid_content
 from test_judgments_slice import FIGURE_KEYS, _coordinate, _fixture, _judgments_host
@@ -215,6 +216,7 @@ def _run_registered(
             spec.judge_prompt,
             spec.repeats,
             progress.append,
+            judge_retry=fixture_judge_retry() if prompt is not None else None,
             turns=turns,
             checkout=checkout,
         )

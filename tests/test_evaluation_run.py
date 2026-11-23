@@ -55,6 +55,7 @@ from zoneinfo import ZoneInfo
 
 from test_evaluation_record import read_psql_set
 from test_judge import engine_output, valid_content
+from test_preflight import FakeHost
 
 import gideon
 from gideon.cli import build_parser, main
@@ -66,6 +67,7 @@ from gideon.evaluation import (
     judge,
     reference,
     results,
+    sampling,
     signoffs,
     stacks,
     window,
@@ -82,7 +84,7 @@ from gideon.evaluation.slices import (
 )
 from gideon.extraction import KEYED_TYPES, SECTION_TYPES, ExactObject, extract
 from gideon.extraction.scoring import MIN_RECALL
-from gideon.host import backuplock, models, nogpu, report, site, stack
+from gideon.host import backuplock, models, nogpu, report, site, stack, weights
 from gideon.host.corpus.lockfile import read_lockfile_directory
 from gideon.host.corpus.sources import SOURCES
 from gideon.host.index.generations import generation_name
@@ -100,6 +102,15 @@ RESEARCH_QA_CASES_PATH = Path("eval/sets/eval-v1/research-qa/harvest.jsonl")
 
 NOW = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
 RUN_ID = "11111111-2222-4333-8444-555555555555"
+
+
+def fixture_judge_retry() -> sampling.HeldSet:
+    repository, revision = "example/fictitious-eval-judge", "e" * 40
+    config = weights.snapshot_path(repository, revision, "generation_config.json")
+    host = FakeHost(files={str(config): json.dumps(dict(sampling.THINKING_SAMPLING))})
+    retry = sampling.hold(host, repository, revision, sampling.DEFAULT_SEED)
+    assert isinstance(retry, sampling.HeldSet), retry
+    return retry
 
 
 @lru_cache(maxsize=1)
@@ -808,6 +819,7 @@ class Command(unittest.TestCase):
                     "fixture-profile", "fixture-model", 1000
                 ),
             ),
+            patch.object(command.sampling, "hold_running", return_value=fixture_judge_retry()),
             patch.object(command.window, "window_judgement", return_value=judgement),
             patch.object(command.access, "read_eval_password", return_value="fixture password"),
             patch.object(command.access, "make_client_factory", return_value=cast(object, lambda **_kwargs: object())),
@@ -1540,6 +1552,7 @@ def _invoke_engine_command(
             "resolve_engine_target",
             side_effect=resolve_engine,
         ),
+        patch.object(command.sampling, "hold_running", return_value=fixture_judge_retry()),
         patch.object(command.access, "read_eval_password", return_value="fictitious-password"),
         patch.object(command.access, "make_client_factory", side_effect=make_client),
         patch.object(command.door, "probe", side_effect=probe_door),
@@ -2466,6 +2479,7 @@ class RunnerSelection(unittest.TestCase):
                     "synthesis@1",
                     spec.repeats,
                     lambda _line: None,
+                    judge_retry=fixture_judge_retry() if spec.judge_prompt is not None else None,
                 )
                 if slice_name == "judgments":
                     context = _context(GoldDropHost())
@@ -2850,6 +2864,7 @@ def _challenger_invoke(
         contexts.append(context)
         prompt_id = context.judge_prompt_id
         assert prompt_id is not None and context.served_model_name is not None
+        assert context.judge_retry is not None
         slots = {slot: f"visibly fictitious {slot}" for slot in judge.PROMPT_REGISTRY[prompt_id].slots}
         slots["candidate"] = "visibly-fictitious-case-text-sentinel"
         judge.grade(
@@ -2858,6 +2873,7 @@ def _challenger_invoke(
             served_model_name=context.served_model_name,
             prompt=judge.PROMPT_REGISTRY[prompt_id],
             slots=slots,
+            retry=context.judge_retry,
         )
         case_id = next(case_id for case_id in loaded.slices[slice_name] if case_id in loaded.active_ids)
         verdict = run_results[len(contexts) - 1]
@@ -2878,6 +2894,7 @@ def _challenger_invoke(
     replacement[slice_name] = replace(replacement[slice_name], runner=run_slice)
     with (
         patch.object(command.engine, "resolve_engine_target", return_value=command.engine.EngineTarget("fixture-profile", "fixture-model", 1000)),
+        patch.object(command.sampling, "hold_running", return_value=fixture_judge_retry()),
         patch.object(command.window, "window_judgement", return_value=window.WindowJudgement(True, "fixture window", NOW, NOW + timedelta(hours=1))),
         patch.object(command.stacks.secrets, "select_directory"),
         patch.object(command, "SLICE_RUNNERS", replacement)
@@ -3284,6 +3301,11 @@ class ChallengerPair(unittest.TestCase):
         subject = next(item for item in challenger.SUBJECTS if item.name == entry.subject)
         self.assertEqual(entry.release, SLICE_RUNNERS[subject.slice_name].judge_prompt)
         self.assertEqual([context.judge_prompt_id for context in contexts], [entry.release, entry.challenger])
+        retry = fixture_judge_retry()
+        self.assertEqual([context.judge_retry for context in contexts], [retry, retry])
+        preconditions = [line for line in stdout.splitlines() if line.startswith("preconditions: ok")]
+        for line, prompt_id in zip(preconditions, (entry.release, entry.challenger), strict=True):
+            self.assertIn(f"prompt {prompt_id}, judge retry seed {retry.seed},", line)
         self.assertEqual(len(host.judge_requests), 2)
         self.assertEqual(
             [request["messages"][0]["content"] for request in host.judge_requests],

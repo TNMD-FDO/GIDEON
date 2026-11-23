@@ -22,6 +22,7 @@ from gideon.evaluation import (
     rankmetrics2,
     record,
     reference,
+    sampling,
     stacks,
     window,
 )
@@ -53,7 +54,17 @@ from gideon.evaluation.results import (
 )
 from gideon.evaluation.slices import SLICE_RUNNERS, CallSurface, SliceSpec
 from gideon.evaluation.turns import access, door, run
-from gideon.host import backuplock, courts, engine, images, nogpu, report, site, stack
+from gideon.host import (
+    backuplock,
+    courts,
+    engine,
+    images,
+    nogpu,
+    report,
+    site,
+    stack,
+    weights,
+)
 from gideon.host.index.lexical import live_index_job
 from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK
 from gideon.host.render.owui import GENERAL_MODEL_ID
@@ -203,6 +214,7 @@ class _Seams:
     rendered_dir: PathLike
     site_path: PathLike
     models_path: PathLike
+    models_root: PathLike
     court_path: Path
     clock: Callable[[], datetime]
     conditions: ConditionsReader
@@ -270,6 +282,7 @@ class _Prepared:
     image: ImageAccess | None = None
     generation: GenerationAccess | None = None
     assessments: Assessments | None = None
+    judge_retry: sampling.HeldSet | None = None
 
 
 @dataclass(slots=True)
@@ -1244,6 +1257,18 @@ def _prepare_on_box(
         print_stage(StageResult("preconditions", False, target.problem, target.fix))
         return None
 
+    prompt_id = pass_value.prompt_id if request.mode.challenger else slice_spec.judge_prompt
+    judge_retry: sampling.HeldSet | None = None
+    if prompt_id is not None:
+        held = sampling.hold_running(
+            seams.host, seams.rendered_dir, seams.models_path, target.profile_name, sampling.DEFAULT_SEED,
+            models_root=seams.models_root,
+        )
+        if isinstance(held, Problem):
+            print_stage(StageResult("preconditions", False, held.problem, held.fix))
+            return None
+        judge_retry = held
+
     if request.paths.name == CI_STACK and not seams.host.exists(request.paths.turns_dir / "compose.yaml"):
         print_stage(
             StageResult(
@@ -1293,8 +1318,9 @@ def _prepare_on_box(
     # One row for the stage, as engine verify prints one. The writer clause
     # states the guarantee and no more: the probe proves the role connects, so a
     # write can still fail after the run and is reported at the record stage.
-    prompt_id = pass_value.prompt_id if request.mode.challenger else slice_spec.judge_prompt
-    prompt_id = prompt_id or "none"
+    prompt_detail = f"prompt {prompt_id or 'none'}"
+    if judge_retry is not None:
+        prompt_detail += f", judge retry seed {judge_retry.seed}"
     window_detail = judgement.description + (", forced" if request.force else "")
     writer = (
         "set supplied, so no writer probe"
@@ -1308,7 +1334,7 @@ def _prepare_on_box(
             f"root, no-GPU marker absent, site, {window_detail}, "
             + f"{calls_detail}{lock_detail}, "
             f"profile {target.profile_name}, served model {target.served_model_name}, "
-            f"prompt {prompt_id}, {writer}"
+            f"{prompt_detail}, {writer}"
             + (
                 ", eval password read, door probed"
                 if CallSurface.TURNS in slice_spec.surfaces
@@ -1330,6 +1356,7 @@ def _prepare_on_box(
         record=record_facts,
         image=image,
         generation=resolved_generation,
+        judge_retry=judge_retry,
     )
 
 
@@ -1706,6 +1733,7 @@ def _run_body(
         production_dir=seams.rendered_dir,
         served_model_name=prepared.served_model_name,
         judge_prompt_id=slice_spec.judge_prompt,
+        judge_retry=prepared.judge_retry,
         repeats=slice_spec.repeats,
         progress=print,
         ranked=prepared.ranked,
@@ -1913,6 +1941,7 @@ def run_eval(
     run_id_factory: Callable[[], str] | None = None,
     court_path: PathLike | None = None,
     models_path: PathLike | None = None,
+    models_root: PathLike = weights.MODELS_ROOT,
     sleep: Callable[[float], None] = time.sleep,
     raise_signal: Callable[[int], None] = signal.raise_signal,
 ) -> int:
@@ -2030,6 +2059,7 @@ def run_eval(
         rendered_dir=rendered_dir,
         site_path=site_path,
         models_path=actual_models,
+        models_root=models_root,
         court_path=selected_court_path,
         clock=now,
         conditions=read_engine_conditions if conditions is None else conditions,

@@ -25,10 +25,11 @@ from test_evaluation_set import _synthetic_case
 from test_index_record import row_for
 from test_index_report import report_for
 from test_index_treatment import treatment_for
+from test_preflight import FakeHost
 from test_segmenter_kit import DraftHost
 
-from gideon.evaluation import evalset, record, synthetic
-from gideon.host import backuplock, courts, engine, site, worker
+from gideon.evaluation import evalset, record, sampling, synthetic
+from gideon.host import backuplock, courts, engine, site, weights, worker
 from gideon.host.index import buildreport
 from gideon.host.index import sample as indexsample
 from gideon.host.render.ci import CI_ROOT
@@ -58,6 +59,7 @@ PASSAGE = (
 )
 RENDERED = "/tmp/fictitious-production"
 NOW = datetime(2099, 1, 4, tzinfo=UTC)
+BATCH_SEED = 17
 
 
 def _reply(value: object, *, finish: str = "stop", status: int = 200) -> engine.EngineReply:
@@ -570,6 +572,8 @@ class WindowHost(SyntheticHost):
         elif schema == "closed_book_answer":
             if index != 2:
                 return reply
+            if body["seed"] == BATCH_SEED:
+                return _reply({}, finish="length")
             if self.concurrent and not self.completed[1].wait(5):
                 raise AssertionError("fictitious second document never completed")
             reply = _reply({}, finish="length")
@@ -597,28 +601,49 @@ def _category_host(category: str) -> SyntheticHost:
 def _run(host: SyntheticHost, root: Path, out: Path, *, count: int | None = 2,
          category: str = "lookup", generation: str | None = None,
          site_result: site.SiteLoadResult | None = None, target: engine.EngineTarget | Problem | None = None,
+         hold_problem: Problem | None = None,
          stdout: io.StringIO | None = None,
          court_result: courts.CourtMapLoadResult | None = None,
-         window: int = 1,
+         window: int = 1, batch_seed: int = BATCH_SEED,
          ) -> tuple[int, str, str]:
     output, errors = io.StringIO() if stdout is None else stdout, io.StringIO()
     set_root = root / "eval-v9"
     set_root.mkdir(exist_ok=True, parents=True)
-    args = ["--category", category, "--seed", "17", "--out", str(out), "--set", str(set_root)]
+    args = ["--category", category, "--seed", str(batch_seed), "--out", str(out), "--set", str(set_root)]
     if count is not None:
         args.extend(("--count", str(count)))
     if generation is not None:
         args.extend(("--generation", generation))
     config = cast(site.SiteConfig, SimpleNamespace(hardware_profile="fixture-profile"))
+    engine_target = engine.EngineTarget("fixture-profile", "fixture-model", 100_000) if target is None else target
+    weights_root = root / "fictitious-weights"
+
+    def hold_running(io: object, rendered: PathLike, models_path: PathLike, profile: str, seed: int,
+                     *, models_root: PathLike) -> sampling.HeldSet | Problem:
+        assert io is host and host.claimed and not host.released
+        assert host.claimed[-1][0] == backuplock.ENGINE_LOCK.path
+        assert isinstance(engine_target, engine.EngineTarget)
+        assert (rendered, models_path, profile, seed, models_root) == (
+            RENDERED, root / "checkout/models.lock", engine_target.profile_name, batch_seed, weights_root,
+        )
+        if hold_problem is not None:
+            return hold_problem
+        repository, revision = "example/fictitious-synthetic-generator", "e" * 40
+        path = weights.snapshot_path(repository, revision, "generation_config.json", root=models_root)
+        snapshot = FakeHost(files={str(path): json.dumps(dict(sampling.THINKING_SAMPLING))})
+        return sampling.hold(snapshot, repository, revision, seed, models_root=models_root)
+
     with (
         patch.object(synthetic, "DRAFT_WINDOW", window),
         patch.object(site, "load_site", return_value=site_result if site_result is not None else site.SiteLoadResult(config=config)),
-        patch.object(engine, "resolve_engine_target", return_value=target if target is not None else engine.EngineTarget("fixture-profile", "fixture-model", 100_000)),
+        patch.object(engine, "resolve_engine_target", return_value=engine_target),
+        patch.object(sampling, "hold_running", side_effect=hold_running),
         patch.object(engine, "call_model_server", side_effect=host.engine_call),
         patch.object(courts, "load_court_map", return_value=court_result if court_result is not None else courts.CourtMapLoadResult(court_map=host.court_map)),
     ):
         code = draft.main(
             args, host=cast(draft.DraftHost, host), root=root / "checkout", rendered_dir=RENDERED,
+            models_root=weights_root,
             clock=lambda: NOW, sleep=lambda _seconds: None,
             stdout=output, stderr=errors,
         )
@@ -638,6 +663,8 @@ class Draft(unittest.TestCase):
         value = json.loads((out / "manifest.json").read_bytes())
         self.assertEqual(tuple(value), manifest.MANIFEST_KEYS)
         self.assertEqual(value["format"], manifest.MANIFEST_FORMAT)
+        self.assertEqual(value["seed"], BATCH_SEED)
+        self.assertEqual(value["retry_seed"], BATCH_SEED + 1)
         self.assertEqual(len(value["entries"]), kept)
         sheet = (out / "sheet.txt").read_bytes()
         self.assertEqual(value["sheet_bytes"], len(sheet))
@@ -722,6 +749,9 @@ class Draft(unittest.TestCase):
                         raise AssertionError("later fictitious document never reached its refusal")
                     self.assertFalse(host.released)
                     value = original_document(*args)
+                    if document.opinion_id == 103:
+                        assert isinstance(value, tuple)
+                        value[1].readings_retried += 1
                     finished.append(document.opinion_id)
                     if document.opinion_id == 102:
                         refusal_ready.set()
@@ -761,6 +791,7 @@ class Draft(unittest.TestCase):
                         if scenario == "count":
                             self.assertEqual(len(host.fetched), 3)
                             self.assertIn("engine 4.500 s, prompt tokens 33, completion tokens 21", output)
+                            self.assertIn(f"readings retried 0 at seed {BATCH_SEED}", output)
                             self.assert_checkpoint(root / "draft", 1)
                         elif scenario in {"refusal", "exception"}:
                             self.assertIn("01:", output)
@@ -808,13 +839,15 @@ class Draft(unittest.TestCase):
             self.assertEqual(value["sheet_sha256"], hashlib.sha256(sheet).hexdigest())
             self.assertEqual(value["sheet_bytes"], len(sheet))
             self.assertEqual(value["asked"], 2)
-            self.assertEqual(value["seed"], 17)
+            self.assertEqual(value["seed"], BATCH_SEED)
+            self.assertEqual(value["retry_seed"], BATCH_SEED + 1)
             self.assertEqual(value["discards"], [])
             for entry, line in zip(value["entries"], lines, strict=True):
                 self.assertEqual(tuple(entry), manifest.ENTRY_KEYS)
                 self.assertEqual(entry["draft_sha256"], hashlib.sha256(line).hexdigest())
                 self.assertIsNone(entry["listed"])
                 self.assertIsNone(entry["citations"])
+                self.assertEqual(entry["retried"], [])
                 case = json.loads(line)
                 self.assertEqual(tuple(case), manifest.DRAFT_KEYS)
                 gold = case["gold"][0]
@@ -1108,7 +1141,7 @@ class Draft(unittest.TestCase):
             host = SyntheticHost(5)
             host.documents[0]["status"] = "processing"
             host.set_text(1, PASSAGE)
-            host.replies = [_reply({}, finish="length")]
+            host.replies = [_reply({}, finish="length")] * 2
             output = FlushedOutput()
             original = host.engine_call
 
@@ -1130,16 +1163,18 @@ class Draft(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             host = SyntheticHost(3)
-            host.replies = [_reply({}, finish="length")]
+            host.replies = [_reply({}, finish="length")] * 2
             code, output, errors = _run(host, root, root / "draft", count=1)
             self.assertEqual((code, errors), (0, ""), output)
             self.assertEqual(len(host.fetched), 2)
-            self.assertEqual(len(host.bodies), 4)
+            self.assertEqual(len(host.bodies), 5)
             value = json.loads((root / "draft/manifest.json").read_bytes())
             self.assertEqual(len(value["entries"]), 1)
             self.assertEqual(value["entries"][0]["ordinal"], 1)
             self.assertEqual(value["entries"][0]["source_id"], host.manifest_rows[1]["source_id"])
+            self.assertEqual(value["entries"][0]["retried"], [])
             self.assertEqual(value["discards"], [{"reason": "truncated", "source_id": host.manifest_rows[0]["source_id"], "edge": None, "kind": None}])
+            self.assertIn(f"proposals retried 1 at seed {BATCH_SEED + 1}, unfinished 1", output)
 
     def test_empty_built_or_live_sample_reports_exhaustion_without_engine_calls(self) -> None:
         for state in ("built", "live"):
@@ -1221,12 +1256,11 @@ class Draft(unittest.TestCase):
         cases = (
             ("request-failed", [engine.EngineReply(None, "", None, (), False, None, None, Problem(REASON, REASON))]),
             ("http-status", [_reply({}, status=503)]),
-            ("truncated", [_reply({}, finish="length")]),
+            ("truncated", [_reply({}, finish="length")] * 2),
             ("off-schema", [_reply({"question": QUESTION})]),
             ("closed-book-failed", [_proposal(), _reply({}, status=503)]),
             ("closed-book-failed", [_proposal(), _reply({"answer": ""})]),
             ("closed-book-failed", [_proposal(), engine.EngineReply(None, "", None, (), False, None, None, Problem(REASON, REASON))]),
-            ("closed-book-failed", [_proposal(), _reply({"answer": CLOSED}), _reply({}, finish="length")]),
             ("closed-book-failed", [_proposal(), _reply({"answer": CLOSED}), _reply({"score": 3, "reason": REASON})]),
         )
         for reason, replies in cases:
@@ -1240,6 +1274,101 @@ class Draft(unittest.TestCase):
                 self.assertEqual((root / "draft/drafts.jsonl").read_bytes(), b"")
                 self.assertEqual(host.released, [backuplock.ENGINE_LOCK.path])
                 self.assert_private_absent(output + errors)
+
+    def test_kept_entry_records_proposal_answer_and_reading_retries_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out = root / "draft"
+            host = SyntheticHost(1)
+            truncated = _reply({}, finish="length")
+            host.replies = [truncated, _proposal(), truncated, _reply({"answer": CLOSED}), truncated, _verdict()]
+            code, output, errors = _run(host, root, out, count=1)
+            self.assertEqual((code, errors), (0, ""), output)
+            self.assert_checkpoint(out, 1)
+            value = json.loads((out / "manifest.json").read_bytes())
+            self.assertEqual(value["entries"][0]["retried"], list(manifest.RETRY_KINDS))
+            self.assertEqual(value["discards"], [])
+            proposal, proposal_retry, answer, answer_retry, reading, reading_retry = host.bodies
+            for first, second in ((proposal, proposal_retry), (answer, answer_retry)):
+                self.assertEqual(first["seed"], BATCH_SEED)
+                self.assertEqual(second, {**first, "seed": BATCH_SEED + 1})
+            self.assertEqual(reading_retry["seed"], BATCH_SEED)
+            self.assertNotIn("seed", reading)
+            self.assertIn("engine 9.000 s, prompt tokens 66, completion tokens 42", output)
+            self.assertIn(f"proposals retried 1 at seed {BATCH_SEED + 1}, unfinished 0", output)
+            self.assertIn(f"answers retried 1 at seed {BATCH_SEED + 1}, unfinished 0", output)
+            self.assertIn(f"readings retried 1 at seed {BATCH_SEED}", output)
+            self.assert_private_absent(output + errors + json.dumps(value))
+
+    def test_answer_retry_with_http_failure_counts_retry_and_discards(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out = root / "draft"
+            host = SyntheticHost(1)
+            host.replies = [_proposal(), _reply({}, finish="length"), _reply({}, status=503)]
+            code, output, errors = _run(host, root, out, count=1)
+            self.assertEqual((code, errors), (0, ""), output)
+            self.assertEqual(len(host.bodies), 3)
+            self.assert_checkpoint(out, 0)
+            value = json.loads((out / "manifest.json").read_bytes())
+            self.assertEqual([row["reason"] for row in value["discards"]], ["closed-book-failed"])
+            self.assertIn("discarded 1 (closed-book-failed=1)", output)
+            self.assertIn(f"answers retried 1 at seed {BATCH_SEED + 1}, unfinished 0", output)
+            self.assertIn(f"readings retried 0 at seed {BATCH_SEED}", output)
+            self.assert_private_absent(output + errors + json.dumps(value))
+
+    def test_reading_retry_counts_for_consumed_verdicts_and_failures(self) -> None:
+        for kept, reply in ((1, _verdict()), (0, _reply({}, finish="length"))):
+            with self.subTest(kept=kept), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                out = root / "draft"
+                host = SyntheticHost(1)
+                host.replies = [_proposal(), _reply({"answer": CLOSED}), _reply({}, finish="length"), reply]
+                code, output, errors = _run(host, root, out, count=1)
+                self.assertEqual((code, errors), (0, ""), output)
+                proposal, answer, greedy, sampled = host.bodies
+                for body in (proposal, answer):
+                    self.assertEqual({key: body[key] for key in sampling.THINKING_SAMPLING}, sampling.THINKING_SAMPLING)
+                    self.assertEqual(body["seed"], BATCH_SEED)
+                self.assertEqual(greedy["temperature"], 0)
+                self.assertNotIn("seed", greedy)
+                self.assertEqual(sampled, {**greedy, **sampling.THINKING_SAMPLING, "seed": BATCH_SEED})
+                self.assertIn("engine 6.000 s, prompt tokens 44, completion tokens 28", output)
+                self.assertIn(f"readings retried 1 at seed {BATCH_SEED}", output)
+                self.assert_checkpoint(out, kept)
+                document = json.loads((out / "manifest.json").read_bytes())
+                if kept:
+                    self.assertEqual(tuple(document["entries"][0]), manifest.ENTRY_KEYS)
+                    self.assertEqual(document["entries"][0]["retried"], ["reading"])
+                else:
+                    self.assertEqual([row["reason"] for row in document["discards"]], ["closed-book-failed"])
+                self.assert_private_absent(output + errors)
+
+    def test_sampling_hold_refuses_in_the_engine_stage_before_record_or_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            host = SyntheticHost(1)
+            out = root / "draft"
+            problem = Problem("Fictitious generator pin mismatch", "Restore the fictitious generator's pin.")
+            code, output, errors = _run(host, root, out, hold_problem=problem)
+            self.assertEqual((code, output), (1, ""))
+            self.assertEqual(errors, f"engine: refused — {problem.problem}. Fix: {problem.fix}\n")
+            self.assertEqual((host.calls, host.bodies), ([], []))
+            self.assertEqual(host.released, [backuplock.ENGINE_LOCK.path])
+            self.assertFalse(out.exists())
+
+    def test_out_of_range_seeds_are_usage_errors_before_claiming_engine(self) -> None:
+        for seed in (-1, sampling.MAX_SEED + 1):
+            with self.subTest(seed=seed), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                out = root / "draft"
+                host = SyntheticHost(1)
+                code, output, errors = _run(host, root, out, batch_seed=seed)
+                self.assertEqual((code, output), (2, ""))
+                self.assertIn("usage:", errors)
+                self.assertIn(f"--seed must be between 0 and {sampling.MAX_SEED}", errors)
+                self.assertEqual((host.claimed, host.calls, host.bodies), ([], [], []))
+                self.assertFalse(out.exists())
 
     def test_partial_closed_book_score_keeps_case_without_label(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1257,20 +1386,24 @@ class Draft(unittest.TestCase):
             root = Path(directory)
             out = root / "draft"
             host = SyntheticHost(1)
-            host.replies = [_proposal(), _reply({}, finish="length")]
+            truncated = _reply({}, finish="length")
+            host.replies = [_proposal(), truncated, truncated]
             with patch.object(synthetic, "read_closed_book", wraps=synthetic.read_closed_book) as read:
                 code, output, errors = _run(host, root, out, count=1)
             self.assertEqual((code, errors), (0, ""), output)
             read.assert_not_called()
-            self.assertEqual(len(host.bodies), 2)
+            self.assertEqual(len(host.bodies), 3)
             self.assert_checkpoint(out, 1)
             value = json.loads((out / "manifest.json").read_bytes())
             self.assertEqual((value["entries"][0]["closed_book_score"], value["entries"][0]["label"]), (0, None))
+            self.assertEqual(value["entries"][0]["retried"], ["answer"])
             self.assertEqual(value["discards"], [])
             case = json.loads((out / "drafts.jsonl").read_bytes())
             self.assertEqual(case["closed_book_answer"], synthetic.CLOSED_BOOK_UNFINISHED)
             self.assertEqual(case["labels"], [synthetic.SYNTHETIC_ORIGIN])
-            self.assertIn("engine 3.000 s, prompt tokens 22, completion tokens 14", output)
+            self.assertIn("engine 4.500 s, prompt tokens 33, completion tokens 21", output)
+            self.assertIn(f"answers retried 1 at seed {BATCH_SEED + 1}, unfinished 1", output)
+            self.assertIn(f"readings retried 0 at seed {BATCH_SEED}", output)
             marks = root / "marks.txt"
             marks.write_text((out / "marks.template.txt").read_text()
                              .replace("<CSA role id>", "CSA-1").replace("<ISO date>", "2099-01-04")
@@ -1404,7 +1537,7 @@ class Draft(unittest.TestCase):
 class NearMissDraft(unittest.TestCase):
     """Near misses are checked against the record before generation."""
 
-    def test_draw_slots_sheet_and_format_five_intake_for_each_category(self) -> None:
+    def test_draw_slots_sheet_and_intake_for_each_category(self) -> None:
         for category in ("unanswerable", "poisoned-premise"):
             with self.subTest(category=category), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -1420,7 +1553,7 @@ class NearMissDraft(unittest.TestCase):
                 for path in out.iterdir():
                     self.assertEqual(path.read_bytes(), (repeat / path.name).read_bytes())
                 value = json.loads((out / "manifest.json").read_bytes())
-                self.assertEqual(value["format"], 5)
+                self.assertEqual(value["format"], manifest.MANIFEST_FORMAT)
                 self.assertTrue(all(entry["citations"] is None for entry in value["entries"]))
                 self.assertEqual(tuple(value), manifest.MANIFEST_KEYS)
                 records = [json.loads(line) for line in (out / "drafts.jsonl").read_bytes().splitlines()]
@@ -1481,7 +1614,7 @@ class NearMissDraft(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             host = SyntheticHost(3)
-            captions = [synthetic.invent_caption(17, row["source_id"]) for row in host.manifest_rows]
+            captions = [synthetic.invent_caption(BATCH_SEED, row["source_id"]) for row in host.manifest_rows]
             host.case_names = [f"Fictitious {caption.upper()} appeal" for caption in captions]
             code, output, errors = _run(host, root, root / "draft", category="poisoned-premise")
             self.assertEqual((code, errors), (0, ""), output)
@@ -2428,6 +2561,8 @@ class TreatmentDraft(unittest.TestCase):
                     assert isinstance(value, tuple)
                     result, figures, target, sections = value
                     document = cast(synthetic.DrawDocument, args[4])
+                    if document.item == host.edge_rows[1]["citation_id"]:
+                        figures.readings_retried += 1
                     if document.item == host.edge_rows[0 if reject_first else 1]["citation_id"]:
                         result = "good-law-wording"
                     return result, figures, target, sections
@@ -2451,6 +2586,7 @@ class TreatmentDraft(unittest.TestCase):
                 self.assertIn("listed=1, unlisted=1", output.split("summary:")[1])
                 self.assertIn("engine 13.500 s, prompt tokens 99, completion tokens 63" if reject_first else
                               "engine 9.000 s, prompt tokens 66, completion tokens 42", output)
+                self.assertIn(f"readings retried {int(reject_first)} at seed {BATCH_SEED}", output)
                 self.assertEqual(len(host.bodies), 3 * (2 if window == 1 and not reject_first else 3))
                 self.assertEqual(host.fetched.count(host.manifest_rows[1]["canonical_text_sha256"]),
                                  0 if window == 1 and not reject_first else 2)
@@ -2583,7 +2719,7 @@ class TreatmentDraft(unittest.TestCase):
             self.assertEqual(resolve.call_count, 4)
             self.assertEqual(order.call_count, 2)
             for call, indices in zip(order.call_args_list, ((3, 4), (0, 1, 2)), strict=True):
-                self.assertEqual(call.args[1], 17)
+                self.assertEqual(call.args[1], BATCH_SEED)
                 self.assertEqual({document.item for document in call.args[0]},
                                  {host.edge_rows[index]["citation_id"] for index in indices})
             treatment_line = next(line for line in output.splitlines() if line.startswith("treatment:"))
@@ -2592,7 +2728,7 @@ class TreatmentDraft(unittest.TestCase):
                              "skipped 2 (active-direction=0, actor-drawn=0, agent-unresolved=1, conditional-verb=1, nearest-cite=0, procedural-disposition=0, procedural-object=0, recounted=0, sentence-clipped=0)")
             self.assertIn("kinds negative=2, caution=0, none=1, performed=1, reported=2, listed=2, unlisted=1", output)
             provenance = json.loads((root / "draft/manifest.json").read_bytes())
-            self.assertEqual(provenance["format"], 5)
+            self.assertEqual(provenance["format"], manifest.MANIFEST_FORMAT)
             self.assertEqual(provenance["discards"], [
                 {"reason": reason, "source_id": host.manifest_rows[index]["source_id"],
                  "edge": host.edge_rows[index]["citation_id"], "kind": kind}
@@ -2712,7 +2848,8 @@ class TreatmentDraft(unittest.TestCase):
                 root = Path(directory)
                 host = TreatmentHost(1) if category == "treatment" else AttributionHost()
                 proposal = _reply({"question": QUESTION, "answer": ANSWER}) if category == "treatment" else _proposal(MAJORITY_PASSAGE)
-                host.replies = [proposal, _reply({}, finish="length")]
+                truncated = _reply({}, finish="length")
+                host.replies = [proposal, truncated, truncated]
                 with patch.object(synthetic, "read_closed_book", wraps=synthetic.read_closed_book) as read:
                     code, output, errors = _run(host, root, root / "draft", category=category, count=1)
                 self.assertEqual((code, errors), (0, ""), output)
@@ -2720,10 +2857,11 @@ class TreatmentDraft(unittest.TestCase):
                 provenance = json.loads((root / "draft/manifest.json").read_bytes())
                 self.assertEqual(provenance["entries"][0]["closed_book_score"], 0)
                 self.assertIsNone(provenance["entries"][0]["label"])
+                self.assertEqual(provenance["entries"][0]["retried"], ["answer"])
                 case = json.loads((root / "draft/drafts.jsonl").read_bytes())
                 self.assertEqual(case["closed_book_answer"], synthetic.CLOSED_BOOK_UNFINISHED)
                 self.assertEqual(case["labels"], [synthetic.SYNTHETIC_ORIGIN])
-                self.assertEqual(len(host.bodies), 2)
+                self.assertEqual(len(host.bodies), 3)
 
     def test_treatment_entry_citations_and_sheet_correction_lines(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3449,9 +3587,11 @@ def _family_case(value: Mapping[str, object], category: str, number: int) -> dic
     return case
 
 
-def _review_fixture(root: Path, count: int = 2, *, category: str = "lookup") -> tuple[Path, Path, Path, tuple[str, ...]]:
+def _review_fixture(
+    root: Path, count: int = 2, *, category: str = "lookup", batch_seed: int = BATCH_SEED,
+) -> tuple[Path, Path, Path, tuple[str, ...]]:
     host = TreatmentHost(count) if category == "treatment" else SyntheticHost(count)
-    code, output, errors = _run(host, root, root / "draft", count=max(1, count), category=category)
+    code, output, errors = _run(host, root, root / "draft", count=max(1, count), category=category, batch_seed=batch_seed)
     assert (code, errors) == (0, ""), (output, errors)
     manifest_path = root / "draft/manifest.json"
     marks_path = root / "marks.txt"
@@ -3729,13 +3869,17 @@ class Intake(unittest.TestCase):
                                     f"ordinal {entry['ordinal']:02d}: draft facts differ from the manifest")
                 self.assertEqual({path: path.read_bytes() for path in root.rglob("*") if path.is_file()}, before)
 
-    def test_old_formats_refuse_with_draft_command_and_format_five_appends(self) -> None:
+    def test_old_formats_refuse_with_draft_command_and_format_six_appends(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             set_root, manifest_path, marks_path, known_courts = _review_fixture(Path(directory))
-            provenance = json.loads(manifest_path.read_bytes())
-            self.assertEqual(provenance["format"], 5)
+            current = manifest_path.read_bytes()
+            provenance = json.loads(current)
+            self.assertEqual(provenance["format"], manifest.MANIFEST_FORMAT)
+            del provenance["retry_seed"]
+            for entry in provenance["entries"]:
+                del entry["retried"]
             path = set_root / synthetic.case_path("lookup")
-            for old_format in (1, 2, 3, 4):
+            for old_format in (1, 2, 3, 4, 5):
                 with self.subTest(format=old_format):
                     provenance["format"] = old_format
                     manifest_path.write_text(json.dumps(provenance))
@@ -3744,8 +3888,7 @@ class Intake(unittest.TestCase):
                         "manifest: refused", "format", "Draft this category again", "python3 -m tools.synthetic.draft",
                     )
                     self.assertFalse(path.exists())
-            provenance["format"] = manifest.MANIFEST_FORMAT
-            manifest_path.write_text(json.dumps(provenance))
+            manifest_path.write_bytes(current)
             code, output, errors = _run_intake(manifest_path, marks_path, known_courts)
             self.assertEqual((code, errors), (0, ""), output)
             self.assertEqual(len(path.read_bytes().splitlines()), len(provenance["entries"]))
@@ -4224,12 +4367,34 @@ class Intake(unittest.TestCase):
                 self.assert_refusal(_run_intake(manifest_path, marks_path, known_courts), "drafts: refused")
                 self.assertFalse((set_root / synthetic.case_path("lookup")).exists())
 
+    def test_retry_seed_must_be_the_integer_successor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            set_root, manifest_path, marks_path, known_courts = _review_fixture(Path(directory))
+            provenance = json.loads(manifest_path.read_bytes())
+            for retry_seed in (True, float(provenance["retry_seed"]), -1, sampling.MAX_SEED + 1, provenance["seed"]):
+                with self.subTest(retry_seed=retry_seed):
+                    provenance["retry_seed"] = retry_seed
+                    manifest_path.write_text(json.dumps(provenance))
+                    self.assert_refusal(_run_intake(manifest_path, marks_path, known_courts),
+                                        "manifest: refused", "manifest shape is invalid")
+                    self.assertFalse((set_root / synthetic.case_path("lookup")).exists())
+
+    def test_manifest_accepts_zero_as_the_successor_of_the_seed_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            set_root, manifest_path, marks_path, known_courts = _review_fixture(Path(directory), batch_seed=sampling.MAX_SEED)
+            provenance = json.loads(manifest_path.read_bytes())
+            self.assertEqual((provenance["seed"], provenance["retry_seed"]), (sampling.MAX_SEED, 0))
+            code, output, errors = _run_intake(manifest_path, marks_path, known_courts)
+            self.assertEqual((code, errors), (0, ""), output)
+            self.assertEqual(len((set_root / synthetic.case_path("lookup")).read_bytes().splitlines()), len(provenance["entries"]))
+
     def test_manifest_shape_refusals(self) -> None:
         cases: tuple[tuple[str, object], ...] = (
             ("format", True), ("format", 999), ("set_root", "relative"), ("set_digest", "bad"),
             ("category", "retrieval"), ("template", "lookup@999"), ("template_digest", "a" * 64),
             ("reading", "unknown@1"), ("reading_digest", "a" * 64), ("generation", "bad"),
-            ("seed", True), ("asked", 0), ("asked", 1), ("entries", None), ("discards", {}),
+            ("seed", True), ("seed", -1), ("seed", sampling.MAX_SEED + 1),
+            ("asked", 0), ("asked", 1), ("entries", None), ("discards", {}),
             ("sheet_sha256", "bad"), ("case_pin", [True, "a" * 64]), ("case_pin", [-1, "a" * 64]),
             ("case_pin", [1, "bad"]), ("case_pin", [1]),
             ("read_share", True), ("read_share", 0), ("read_share", synthetic.READ_SHARE),
@@ -4271,6 +4436,8 @@ class Intake(unittest.TestCase):
             ("closed_book_score", None), ("closed_book_score", True), ("closed_book_score", 4),
             ("label", None), ("label", "unknown"),
             ("citations", []), ("citations", [123]),
+            ("retried", ["fictitious-request"]), ("retried", [manifest.RETRY_KINDS[0]] * 2),
+            ("retried", list(reversed(manifest.RETRY_KINDS))), ("retried", manifest.RETRY_KINDS[0]),
         )
         for key, value in cases:
             with self.subTest(key=key, kind=type(value).__name__), tempfile.TemporaryDirectory() as directory:
@@ -4684,14 +4851,15 @@ class SharedManifest(unittest.TestCase):
         self.assertEqual(len(manifest.DISCARD_REASONS), len(set(manifest.DISCARD_REASONS)))
 
     def test_manifest_format_key_order_and_sheet_suffixes(self) -> None:
-        self.assertEqual(manifest.MANIFEST_FORMAT, 5)
+        self.assertEqual(manifest.MANIFEST_FORMAT, 6)
+        self.assertEqual(manifest.RETRY_KINDS, ("proposal", "answer", "reading"))
         self.assertEqual(manifest.ENTRY_KEYS, (
             "ordinal", "source_id", "sha256", "doc_id", "start", "end", "length",
-            "quote_sha256", "closed_book_score", "label", "listed", "citations", "draft_sha256",
+            "quote_sha256", "closed_book_score", "label", "listed", "citations", "retried", "draft_sha256",
         ))
         self.assertEqual(manifest.MANIFEST_KEYS, (
             "format", "set_root", "set_digest", "category", "case_pin", "template",
-            "template_digest", "reading", "reading_digest", "generation", "seed", "asked",
+            "template_digest", "reading", "reading_digest", "generation", "seed", "retry_seed", "asked",
             "read_share", "read_ordinals", "entries", "discards", "sheet_sha256", "sheet_bytes",
         ))
         self.assertIn("document-short", manifest.DISCARD_REASONS)
@@ -4741,8 +4909,9 @@ class SharedManifest(unittest.TestCase):
                 if isinstance(node, ast.Import):
                     names = [alias.name for alias in node.names]
                 elif isinstance(node, ast.ImportFrom):
-                    names = [node.module or ""]
                     self.assertEqual(node.level, 0)
+                    # No exception for tools.judgments: the export omits it and these modules ship.
+                    names = [node.module or ""]
                 for name in names:
                     self.assertTrue(name.split(".")[0] in sys.stdlib_module_names or name.startswith(("gideon.", "tools.segmenter", "tools.synthetic")))
                     if name.startswith("gideon.worker"):

@@ -1,5 +1,8 @@
 """Draft treatment and overruled trap pairs from production, other cases from the sibling's sample.
 
+The batch seed fixes the draws and generator sampling. A proposal or closed-book
+answer that reaches its token reserve retries once with the next seed.
+
 The trap@4 pairs use the generation's recorded treatment snapshot, rejecting qualified
 rows and absent or uncited overruling opinions. Before the draw, an anchor pass
 reads each surviving overruling opinion's text and rows once and rejects pairs
@@ -36,9 +39,9 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Final, TextIO, cast
+from typing import Final, NoReturn, TextIO, cast
 
-from gideon.evaluation import evalset, judge, record, synthetic
+from gideon.evaluation import evalset, judge, record, sampling, synthetic
 from gideon.host import (
     backuplock,
     cas,
@@ -49,6 +52,7 @@ from gideon.host import (
     site,
     stack,
     staging,
+    weights,
 )
 from gideon.host.index import buildreport
 from gideon.host.index import record as indexrecord
@@ -338,6 +342,11 @@ class Figures:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     seconds: float = 0.0
+    proposals_retried: int = 0
+    proposals_unfinished: int = 0
+    answers_retried: int = 0
+    answers_unfinished: int = 0
+    readings_retried: int = 0
 
     def add(self, prompt: int | None, completion: int | None, seconds: float | None) -> None:
         self.prompt_tokens += prompt or 0
@@ -741,10 +750,23 @@ def _window(text: str) -> str:
     return text[:boundary]
 
 
+def _propose(
+    io: DraftHost, rendered_dir: PathLike, served_model_name: str,
+    template: judge.JudgePrompt, slots: Mapping[str, str], figures: Figures, *, held: sampling.HeldSet,
+) -> synthetic.Proposal | judge.Failure:
+    proposal, prompt, completion, seconds, retry_seed = synthetic.propose(
+        io, rendered_dir, served_model_name=served_model_name, template=template, slots=slots, held=held,
+    )
+    figures.add(prompt, completion, seconds)
+    figures.proposals_retried += int(retry_seed is not None)
+    figures.proposals_unfinished += int(isinstance(proposal, judge.Failure) and proposal.code == "truncated")
+    return proposal
+
+
 def _candidate(
     io: DraftHost, rendered_dir: PathLike, served_model_name: str,
     template: judge.JudgePrompt, facts: OpinionFacts, text: str, figures: Figures,
-    *, kind: str = "", target: SectionRow | None = None,
+    *, held: sampling.HeldSet, kind: str = "", target: SectionRow | None = None,
     near: str = "", court_names: Mapping[str, str] | None = None,
     pair: Pair | None = None, overruling_window: str = "",
 ) -> tuple[synthetic.Proposal, synthetic.Retraced, synthetic.ClosedBook] | str:
@@ -767,11 +789,9 @@ def _candidate(
             overruling_cites="; ".join(pair.overruling.cites),
             overruling_year=str(pair.overruling_year), overruling_window=overruling_window,
         )
-    proposal, prompt, completion, seconds = synthetic.propose(
-        io, rendered_dir, served_model_name=served_model_name, template=template,
-        slots={slot: values[slot] for slot in template.slots},
+    proposal = _propose(
+        io, rendered_dir, served_model_name, template, {slot: values[slot] for slot in template.slots}, figures, held=held,
     )
-    figures.add(prompt, completion, seconds)
     if isinstance(proposal, judge.Failure):
         return proposal.code
     retraced = synthetic.retrace(text, proposal.passage)
@@ -788,26 +808,30 @@ def _candidate(
         proposal = replace(proposal, answer=holding + " " + synthetic.overruling_sentence(
             values["caption"], values["overruling_caption"], values["overruling_year"],
         ))
-    return _closed_book(io, rendered_dir, served_model_name, proposal, retraced, figures)
+    return _closed_book(io, rendered_dir, served_model_name, proposal, retraced, figures, held=held)
 
 
 def _closed_book(
     io: DraftHost, rendered_dir: PathLike, served_model_name: str,
     proposal: synthetic.Proposal, retraced: synthetic.Retraced, figures: Figures,
+    *, held: sampling.HeldSet,
 ) -> tuple[synthetic.Proposal, synthetic.Retraced, synthetic.ClosedBook] | str:
-    answer, prompt, completion, seconds = synthetic.answer_closed_book(
-        io, rendered_dir, served_model_name=served_model_name, question=proposal.question,
+    answer, prompt, completion, seconds, retry_seed = synthetic.answer_closed_book(
+        io, rendered_dir, served_model_name=served_model_name, question=proposal.question, held=held,
     )
     figures.add(prompt, completion, seconds)
+    figures.answers_retried += int(retry_seed is not None)
     if isinstance(answer, judge.Failure):
         if answer.code == "truncated":
+            figures.answers_unfinished += 1
             return proposal, retraced, synthetic.ClosedBook(synthetic.CLOSED_BOOK_UNFINISHED, 0, None)
         return "closed-book-failed"
-    reading, prompt, completion, seconds = synthetic.read_closed_book(
+    reading, prompt, completion, seconds, retry_seed = synthetic.read_closed_book(
         io, rendered_dir, served_model_name=served_model_name,
-        question=proposal.question, reference=proposal.answer, candidate=answer.answer,
+        question=proposal.question, reference=proposal.answer, candidate=answer.answer, retry=held,
     )
     figures.add(prompt, completion, seconds)
+    figures.readings_retried += int(retry_seed is not None)
     if isinstance(reading, judge.Failure):
         return "closed-book-failed"
     return proposal, retraced, reading
@@ -931,7 +955,7 @@ def _treatment_candidate(
     io: DraftHost, rendered_dir: PathLike, served_model_name: str,
     template: judge.JudgePrompt, facts: OpinionFacts, document: synthetic.DrawDocument,
     edge: Edge, actor: tuple[int, str] | None, text: str, figures: Figures,
-    qualifier: str | None = None,
+    qualifier: str | None = None, *, held: sampling.HeldSet,
 ) -> tuple[synthetic.Proposal, synthetic.Retraced, synthetic.ClosedBook] | str:
     sections, citations = _document_rows(io, rendered_dir, document, text)
     retraced = _treatment_sentence(rendered_dir, edge, text, sections, citations)
@@ -940,9 +964,9 @@ def _treatment_candidate(
     assert edge.cited is not None and edge.cited.case_name is not None and facts.case_name is not None
     assert edge.cluster is not None
     qualifier = edge.qualifier if qualifier is None else qualifier
-    proposal, prompt, completion, seconds = synthetic.propose(
-        io, rendered_dir, served_model_name=served_model_name, template=template,
-        slots={
+    proposal = _propose(
+        io, rendered_dir, served_model_name, template,
+        {
             "court": facts.court, "decided": facts.decided.isoformat(), "cites": "; ".join(facts.cites),
             "parties": facts.case_name, "cited_parties": edge.cited.case_name,
             "cited_cites": "; ".join(edge.cited.cites), "cited_court": edge.cited.court,
@@ -955,19 +979,19 @@ def _treatment_candidate(
             ),
             "actor": "performed" if actor is None else "reported",
             "sentence": retraced.quote,
-        },
+        }, figures, held=held,
     )
-    figures.add(prompt, completion, seconds)
     if isinstance(proposal, judge.Failure):
         return proposal.code
     if synthetic.good_law_wording(proposal.answer):
         return "good-law-wording"
-    return _closed_book(io, rendered_dir, served_model_name, proposal, retraced, figures)
+    return _closed_book(io, rendered_dir, served_model_name, proposal, retraced, figures, held=held)
 
 
 def _document(
     io: DraftHost, rendered_dir: PathLike, served_model_name: str,
     template: judge.JudgePrompt, document: synthetic.DrawDocument, facts: OpinionFacts,
+    held: sampling.HeldSet,
     edge: Edge | None = None,
     court_names: Mapping[str, str] | None = None,
     actor: tuple[int, str] | None = None,
@@ -1004,11 +1028,12 @@ def _document(
     if edge is not None:
         result = _treatment_candidate(
             io, rendered_dir, served_model_name, template, facts, document, edge, actor, text, figures, qualifier,
+            held=held,
         )
     else:
         result = _candidate(
             io, rendered_dir, served_model_name, template, facts, text, figures,
-            kind=document.kind, target=target, near=document.near, court_names=court_names,
+            held=held, kind=document.kind, target=target, near=document.near, court_names=court_names,
             pair=pair, overruling_window=overruling_window[4] if overruling_window is not None else "",
         )
     return result, figures, target, sections
@@ -1102,7 +1127,7 @@ def _sheet(ordinal: int, document: synthetic.DrawDocument, facts: OpinionFacts,
 
 def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: str,
          count: int | None, seed: int, generation: str | None, rendered_dir: PathLike,
-         site_path: PathLike, models_path: PathLike, now: Callable[[], datetime],
+         site_path: PathLike, models_path: PathLike, models_root: PathLike, now: Callable[[], datetime],
          sleep: Callable[[float], None], stdout: TextIO) -> None:
     if io.geteuid() != 0:
         raise DraftError("set", "root privileges are required", "Run sudo python3 -B -m tools.synthetic.draft with the same flags, then retry.")
@@ -1138,6 +1163,12 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
         )
         if isinstance(target, report.Problem):
             raise DraftError("engine", target.problem, target.fix)
+        held = sampling.hold_running(
+            io, rendered_dir, models_path, target.profile_name, seed, models_root=models_root,
+        )
+        if isinstance(held, report.Problem):
+            raise DraftError("engine", held.problem, held.fix)
+        retry_seed = sampling.next_seed(held.seed)
         treatment_rows: tuple[Mapping[str, object], ...] = ()
         pair_rows: tuple[Pair, ...] = ()
         if category in synthetic.PRODUCTION_CATEGORIES:
@@ -1347,7 +1378,7 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
             document_manifest = dict(zip(manifest.MANIFEST_KEYS, (
                 manifest.MANIFEST_FORMAT, str(set_root.resolve()), loaded.digest, category, pin,
                 template.id, synthetic.TEMPLATE_DIGESTS[template.id], "closed-book@1",
-                synthetic.READING_DIGESTS["closed-book@1"], selected.gen_id, seed, count,
+                synthetic.READING_DIGESTS["closed-book@1"], selected.gen_id, seed, retry_seed, count,
                 read_share, read_ordinals, entries, discards, sheet_digest, len(sheet),
             ), strict=True))
             try:
@@ -1434,7 +1465,7 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                         continue
                     pending.append((document, executor.submit(
                         _document, io, rendered_dir, target.served_model_name,
-                        template, document, facts[document.opinion_id], edges.get(document.item), court_names,
+                        template, document, facts[document.opinion_id], held, edges.get(document.item), court_names,
                         actors.get(document.item), pairs.get(document.item), overruling_windows,
                         citations.get(document.item, ()), qualifiers.get(document.item),
                     )))
@@ -1455,6 +1486,11 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                 pair = pairs.get(document.item)
                 before = figures.seconds
                 figures.add(used.prompt_tokens, used.completion_tokens, used.seconds)
+                figures.proposals_retried += used.proposals_retried
+                figures.proposals_unfinished += used.proposals_unfinished
+                figures.answers_retried += used.answers_retried
+                figures.answers_unfinished += used.answers_unfinished
+                figures.readings_retried += used.readings_retried
                 result = duplicate_reason(document) or result
                 if isinstance(result, str):
                     discard_item(document, result)
@@ -1505,12 +1541,15 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                         pair=pair, overruling_window=overruling_windows.get(document.item),
                         citations=citations.get(document.item, ()), qualifier=qualifiers.get(document.item),
                     ))
+                    retried = [kind for kind, retries in zip(
+                        manifest.RETRY_KINDS, (used.proposals_retried, used.answers_retried, used.readings_retried), strict=True,
+                    ) if retries]
                     entries.append(dict(zip(manifest.ENTRY_KEYS, (
                         ordinal, document.source_id, document.sha256, document.doc_id, retraced.start, retraced.end,
                         len(retraced.quote), hashlib.sha256(retraced.quote.encode("utf-8")).hexdigest(),
                         reading.score, reading.label, edge.listed_row if edge is not None else pair.row_id if pair is not None else None,
                         [cluster for cluster, _ in citations[document.item]] if edge is not None else None,
-                        hashlib.sha256(line).hexdigest(),
+                        retried, hashlib.sha256(line).hexdigest(),
                     ), strict=True)))
                     closed_book_count += int(reading.label is not None)
                     kept_sources.add(document.source_id)
@@ -1550,7 +1589,10 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
         kind_counts = "kinds " + ", ".join(f"{kind}={kinds[kind]}" for kind in summary_kinds) + ", " if summary_kinds else ""
         print(f"summary: kept {len(entries)}, discarded {sum(discarded.values())} ({reasons}), "
               f"{kind_counts}closed-book-answerable {closed_book_count}, engine {figures.seconds:.3f} s, "
-              f"prompt tokens {figures.prompt_tokens}, completion tokens {figures.completion_tokens}", file=stdout, flush=True)
+              f"prompt tokens {figures.prompt_tokens}, completion tokens {figures.completion_tokens}, "
+              f"proposals retried {figures.proposals_retried} at seed {retry_seed}, unfinished {figures.proposals_unfinished}, "
+              f"answers retried {figures.answers_retried} at seed {retry_seed}, unfinished {figures.answers_unfinished}, "
+              f"readings retried {figures.readings_retried} at seed {held.seed}", file=stdout, flush=True)
     finally:
         backuplock.release_claim(io, claim, lock=backuplock.ENGINE_LOCK)
 
@@ -1562,11 +1604,28 @@ def _positive_count(value: str) -> int:
     return count
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Draft synthetic evaluation cases")
+class _Parser(argparse.ArgumentParser):
+    """Argument parser that writes usage errors to the caller's stream.
+
+    Kept here rather than shared with the attorney kits, whose package the
+    public export omits; this module is exported.
+    """
+
+    def __init__(self, prog: str, error_stream: TextIO) -> None:
+        super().__init__(prog=prog, description="Draft synthetic evaluation cases")
+        self.error_stream = error_stream
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(self.error_stream)
+        self.error_stream.write(f"{self.prog}: error: {message}\n")
+        raise SystemExit(2)
+
+
+def _parser(errors: TextIO) -> argparse.ArgumentParser:
+    parser = _Parser("synthetic draft", errors)
     parser.add_argument("--category", required=True)
     parser.add_argument("--count", type=_positive_count, default=None, help="default: the category's planned count")
-    parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument("--seed", type=int, required=True, help="seed for the draws and generator sampling")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--set", dest="set_root", type=Path)
     parser.add_argument("--generation", help="treatment and trap: a built/live production caselaw generation (default: live); other categories: the sibling's sample generation")
@@ -1576,14 +1635,18 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None, *, host: DraftHost | None = None,
          root: Path | None = None, rendered_dir: PathLike = RENDERED_DIR,
          site_path: PathLike = SITE_PATH, models_path: PathLike | None = None,
+         models_root: PathLike = weights.MODELS_ROOT,
          clock: Callable[[], datetime] | None = None, sleep: Callable[[float], None] = time.sleep,
          stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
     """Run the box-side draft under the engine lock with content-free diagnostics."""
 
     output = sys.stdout if stdout is None else stdout
     errors = sys.stderr if stderr is None else stderr
+    parser = _parser(errors)
     try:
-        args = _parser().parse_args(argv)
+        args = parser.parse_args(argv)
+        if not 0 <= args.seed <= sampling.MAX_SEED:
+            parser.error(f"--seed must be between 0 and {sampling.MAX_SEED}")
     except SystemExit as error:
         return int(error.code) if isinstance(error.code, int) else 2
     checkout = DEFAULT_ROOT if root is None else root
@@ -1594,6 +1657,7 @@ def main(argv: Sequence[str] | None = None, *, host: DraftHost | None = None,
             out=args.out, category=args.category, count=args.count, seed=args.seed, generation=args.generation,
             rendered_dir=rendered_dir, site_path=site_path,
             models_path=checkout / "models.lock" if models_path is None else models_path,
+            models_root=models_root,
             now=(lambda: datetime.now(UTC)) if clock is None else clock, sleep=sleep, stdout=output,
         )
     except DraftError as error:

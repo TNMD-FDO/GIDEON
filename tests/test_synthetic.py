@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-from test_judge import StubHost, engine_output, valid_content
+from test_engine_verify import completed
+from test_judge import StubHost, engine_output, held_judge_retry, valid_content
 from test_worker_treatment import Section, citation
 
-from gideon.evaluation import judge, synthetic
+from gideon.evaluation import judge, sampling, synthetic
 from gideon.host import engine, enginesample
 from gideon.host.render.engine import GENERATOR
 from gideon.host.render.worker import SECTION_TYPES
@@ -25,6 +26,7 @@ from tools.synthetic import manifest
 
 TEMPLATE = synthetic.TEMPLATES["lookup@1"]
 READING = synthetic.READINGS["closed-book@1"]
+HELD = held_judge_retry().for_retry()
 QUESTION = "What rule did Fable v. Example apply?"
 ANSWER = "The fictitious court required a written notice before the hearing."
 PASSAGE = (
@@ -41,23 +43,24 @@ def _content(**changes: object) -> str:
     return json.dumps({"question": QUESTION, "answer": ANSWER, "passage": PASSAGE, **changes})
 
 
-def _propose(host: StubHost) -> tuple[synthetic.Proposal | judge.Failure, int | None, int | None, float | None]:
+def _propose(host: StubHost) -> tuple[synthetic.Proposal | judge.Failure, int | None, int | None, float | None, int | None]:
     return synthetic.propose(
         cast(Host, host), "/fictitious-render", served_model_name="fixture-model",
-        template=TEMPLATE, slots=SLOTS,
+        template=TEMPLATE, slots=SLOTS, held=HELD,
     )
 
 
-def _answer(host: StubHost) -> tuple[synthetic.ClosedBook | judge.Failure, int | None, int | None, float | None]:
+def _answer(host: StubHost) -> tuple[synthetic.ClosedBook | judge.Failure, int | None, int | None, float | None, int | None]:
     return synthetic.answer_closed_book(
-        cast(Host, host), "/fictitious-render", served_model_name="fixture-model", question=QUESTION,
+        cast(Host, host), "/fictitious-render", served_model_name="fixture-model", question=QUESTION, held=HELD,
     )
 
 
-def _read(host: StubHost) -> tuple[synthetic.ClosedBook | judge.Failure, int | None, int | None, float | None]:
+def _read(host: StubHost) -> tuple[synthetic.ClosedBook | judge.Failure, int | None, int | None, float | None, int | None]:
     return synthetic.read_closed_book(
         cast(Host, host), "/fictitious-render", served_model_name="fixture-model",
         question=QUESTION, reference=ANSWER, candidate="A fictitious candidate answer.",
+        retry=held_judge_retry(),
     )
 
 
@@ -660,9 +663,9 @@ class CitationWindow(unittest.TestCase):
 
 
 class Requests(unittest.TestCase):
-    """All three requests use the shipped generator with thinking on."""
+    """Generation samples and the reading starts greedy, each with thinking on."""
 
-    def test_three_request_bodies_and_engine_bounds(self) -> None:
+    def test_sampled_generation_and_greedy_reading_bodies_and_bounds(self) -> None:
         cases = (
             (_propose, _content(), TEMPLATE.schema, TEMPLATE.schema_name,
              synthetic.PROPOSAL_MAX_TOKENS, synthetic.PROPOSAL_TIMEOUT_SECONDS),
@@ -677,7 +680,7 @@ class Requests(unittest.TestCase):
                 with patch.object(engine, "call_model_server", wraps=engine.call_model_server) as call:
                     result = run(host)
                 self.assertNotIsInstance(result[0], judge.Failure)
-                self.assertEqual(result[1:], (17, 9, 2.5))
+                self.assertEqual(result[1:], (17, 9, 2.5, None))
                 call.assert_called_once()
                 self.assertIs(call.call_args.args[2], GENERATOR)
                 self.assertEqual(call.call_args.kwargs["path"], "/v1/chat/completions")
@@ -685,7 +688,8 @@ class Requests(unittest.TestCase):
                 assert host.input is not None
                 body = json.loads(host.input)
                 self.assertEqual(body["model"], "fixture-model")
-                self.assertEqual(body["temperature"], 0)
+                expected_sampling = {"temperature": 0} if run is _read else {**sampling.THINKING_SAMPLING, "seed": HELD.seed}
+                self.assertEqual({key: body[key] for key in HELD.request_fields if key in body}, expected_sampling)
                 self.assertIs(body["stream"], False)
                 self.assertEqual(body["max_tokens"], reserve)
                 self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": True})
@@ -721,7 +725,7 @@ class Requests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 synthetic.propose(
                     cast(Host, host), "/fictitious-render", served_model_name="fixture",
-                    template=TEMPLATE, slots=slots,
+                    template=TEMPLATE, slots=slots, held=HELD,
                 )
             self.assertIsNone(host.input)
 
@@ -735,33 +739,82 @@ class Replies(unittest.TestCase):
             question="  What\n\t rule? \r\n", answer=" Written\n notice.  ", passage=passage,
         ))))
         self.assertEqual(result, synthetic.Proposal("What rule?", "Written notice.", passage))
-        self.assertEqual(figures, [17, 9, 2.5])
+        self.assertEqual(figures, [17, 9, 2.5, None])
         self.assertEqual(_answer(StubHost(engine_output(json.dumps({"answer": " A\n\t rule.  "}))))[0],
                          synthetic.ClosedBook("A rule."))
 
-    def test_closed_failure_codes_and_figures_without_reply_text(self) -> None:
+    def test_length_retries_with_the_next_seed_and_sums_both_attempts(self) -> None:
+        first = completed((), stdout=engine_output(
+            None, finish_reason="length", prompt_tokens=12, completion_tokens=31, elapsed=1.25,
+        ))
+        for run, content, outcome in (
+            (_propose, _content(), synthetic.Proposal(QUESTION, ANSWER, PASSAGE)),
+            (_answer, json.dumps({"answer": ANSWER}), synthetic.ClosedBook(ANSWER)),
+        ):
+            second = completed((), stdout=engine_output(content, prompt_tokens=16, completion_tokens=8, elapsed=3.5))
+            host = StubHost("")
+            with self.subTest(request=run.__name__), patch.object(host, "run", side_effect=(first, second)) as calls:
+                self.assertEqual(run(host), (outcome, 12 + 16, 31 + 8, 1.25 + 3.5, HELD.seed + 1))
+                initial, retry = calls.call_args_list
+                self.assertEqual(retry.args, initial.args)
+                self.assertEqual(retry.kwargs["timeout"], initial.kwargs["timeout"])
+                body = json.loads(initial.kwargs["input"])
+                self.assertEqual(body["seed"], HELD.seed)
+                self.assertEqual(json.loads(retry.kwargs["input"]), {**body, "seed": HELD.seed + 1})
+
+    def test_second_length_is_final_and_keeps_known_figures(self) -> None:
+        first = completed((), stdout=engine_output(
+            None, finish_reason="length", prompt_tokens=None, completion_tokens=31, elapsed=1.25,
+        ))
+        second = completed((), stdout=engine_output(
+            None, finish_reason="length", prompt_tokens=16, completion_tokens=None, elapsed=3.5,
+        ))
+        for run in (_propose, _answer):
+            host = StubHost("")
+            with self.subTest(request=run.__name__), patch.object(host, "run", side_effect=(first, second)) as calls:
+                result, *figures = run(host)
+                assert isinstance(result, judge.Failure)
+                self.assertEqual(result.code, "truncated")
+                self.assertEqual(figures, [16, 31, 1.25 + 3.5, HELD.seed + 1])
+                self.assertEqual(calls.call_count, 2)
+
+    def test_failure_codes_are_final_as_first_or_second_replies(self) -> None:
         private = "Fictitious private answer sentinel"
-        for run, good in ((_propose, _content()), (_answer, json.dumps({"answer": ANSWER}))):
-            cases = (
-                ("request-failed", StubHost(engine_output(good), returncode=9)),
-                ("http-status", StubHost(engine_output(private, status=503))),
-                ("truncated", StubHost(engine_output(None, finish_reason="length"))),
-                ("off-schema", StubHost(engine_output(private, finish_reason=private))),
-                ("off-schema", StubHost(engine_output(None))),
-                ("off-schema", StubHost(engine_output("{" + private))),
-                ("off-schema", StubHost(engine_output(json.dumps({private: private})))),
-                ("off-schema", StubHost(engine_output(json.dumps([private])))),
-                ("off-schema", StubHost(engine_output(json.dumps({"answer": "\n\t "})))),
-                ("off-schema", StubHost(engine_output(json.dumps({"answer": "x" * (synthetic.ANSWER_MAX_CHARS + 1)})))),
-            )
-            for code, host in cases:
-                with self.subTest(request=run.__name__, code=code):
-                    result, prompt, completion, seconds = run(host)
-                    assert isinstance(result, judge.Failure)
-                    self.assertEqual(result.code, code)
-                    self.assertNotIn(private, repr(result))
-                    if code != "request-failed":
-                        self.assertEqual((prompt, completion, seconds), (17, 9, 2.5))
+        truncated = completed((), stdout=engine_output(
+            None, finish_reason="length", prompt_tokens=None, completion_tokens=0, elapsed=1.25,
+        ))
+        cases = (
+            ("request-failed", completed((), stdout=truncated.stdout, returncode=9)),
+            ("http-status", completed((), stdout=engine_output(private, status=503, finish_reason="length"))),
+            ("off-schema", completed((), stdout=engine_output(private, finish_reason=private))),
+            ("off-schema", completed((), stdout=engine_output(None))),
+            ("off-schema", completed((), stdout=engine_output("{" + private))),
+            ("off-schema", completed((), stdout=engine_output(json.dumps({private: private})))),
+            ("off-schema", completed((), stdout=engine_output(json.dumps([private])))),
+        )
+        for run in (_propose, _answer):
+            for code, reply in cases:
+                for prior in ((), (truncated,)):
+                    host = StubHost("")
+                    with self.subTest(request=run.__name__, code=code, after_length=bool(prior)), patch.object(
+                        host, "run", side_effect=(*prior, reply),
+                    ) as calls:
+                        result, *figures = run(host)
+                        assert isinstance(result, judge.Failure)
+                        self.assertEqual(result.code, code)
+                        self.assertNotIn(private, repr(result))
+                        self.assertEqual(calls.call_count, len(prior) + 1)
+                        if code == "request-failed":
+                            self.assertEqual(figures, [None, 0, 1.25, HELD.seed + 1] if prior else [None] * 4)
+                        else:
+                            self.assertEqual(figures, [17, 9, 1.25 + 2.5, HELD.seed + 1] if prior else [17, 9, 2.5, None])
+
+    def test_closed_book_refuses_blank_and_over_bound_answers(self) -> None:
+        for answer in ("\n\t ", "x" * (synthetic.ANSWER_MAX_CHARS + 1)):
+            with self.subTest(answer_length=len(answer)):
+                result = _answer(StubHost(engine_output(json.dumps({"answer": answer}))))[0]
+                assert isinstance(result, judge.Failure)
+                self.assertEqual(result.code, "off-schema")
 
     def test_each_proposal_field_refuses_blank_wrong_type_missing_extra_and_over_bound(self) -> None:
         for key, bound in (
@@ -793,11 +846,29 @@ class Replies(unittest.TestCase):
                 self.assertIs(grade.call_args.kwargs["prompt"], READING)
                 self.assertEqual(grade.call_args.kwargs["max_tokens"], synthetic.READING_MAX_TOKENS)
                 self.assertEqual(grade.call_args.kwargs["max_time"], synthetic.READING_TIMEOUT_SECONDS)
+                self.assertEqual(grade.call_args.kwargs["retry"], held_judge_retry())
                 assert isinstance(result, synthetic.ClosedBook)
                 self.assertEqual(result.score, score)
                 self.assertEqual(result.label, synthetic.CLOSED_BOOK_LABEL if score == 3 else None)
                 self.assertEqual(result.answer, "A fictitious candidate answer.")
-                self.assertEqual(figures, [17, 9, 2.5])
+                self.assertEqual(figures, [17, 9, 2.5, None])
+
+    def test_reading_returns_the_retry_seed_on_a_verdict_and_a_failure(self) -> None:
+        truncated = completed((), stdout=engine_output(None, finish_reason="length"))
+        for recovered, response in ((True, completed((), stdout=engine_output(valid_content()))), (False, truncated)):
+            with self.subTest(recovered=recovered):
+                host = StubHost("")
+                with patch.object(host, "run", side_effect=(truncated, response)) as run:
+                    reading, prompt_tokens, completion_tokens, seconds, retry_seed = _read(host)
+                first, second = (json.loads(call.kwargs["input"]) for call in run.call_args_list)
+                self.assertEqual(second, {**first, **sampling.THINKING_SAMPLING, "seed": sampling.DEFAULT_SEED})
+                self.assertEqual((prompt_tokens, completion_tokens, seconds, retry_seed), (34, 18, 5.0, sampling.DEFAULT_SEED))
+                if recovered:
+                    assert isinstance(reading, synthetic.ClosedBook)
+                    self.assertEqual(reading.label, synthetic.CLOSED_BOOK_LABEL)
+                else:
+                    assert isinstance(reading, judge.Failure)
+                    self.assertEqual(reading.code, "closed-book-failed")
 
     def test_failed_reading_has_no_answer_score_or_model_text(self) -> None:
         private = "Fictitious private reading sentinel"
@@ -819,9 +890,9 @@ class Replies(unittest.TestCase):
         host = StubHost(engine_output(json.dumps({"question": QUESTION, "answer": ANSWER})))
         result = synthetic.propose(
             cast(Host, host), "/fictitious-render", served_model_name="fixture-model",
-            template=template, slots=slots,
+            template=template, slots=slots, held=HELD,
         )
-        self.assertEqual(result, (synthetic.Proposal(QUESTION, ANSWER), 17, 9, 2.5))
+        self.assertEqual(result, (synthetic.Proposal(QUESTION, ANSWER), 17, 9, 2.5, None))
         self.assertEqual(synthetic.Proposal(QUESTION, ANSWER).passage, "")
         assert host.input is not None
         body = json.loads(host.input)
@@ -832,7 +903,7 @@ class Replies(unittest.TestCase):
             del document[key]
             failed = synthetic.propose(
                 cast(Host, StubHost(engine_output(json.dumps(document)))), "/fictitious-render",
-                served_model_name="fixture-model", template=template, slots=slots,
+                served_model_name="fixture-model", template=template, slots=slots, held=HELD,
             )[0]
             assert isinstance(failed, judge.Failure)
             self.assertEqual(failed.code, "off-schema")

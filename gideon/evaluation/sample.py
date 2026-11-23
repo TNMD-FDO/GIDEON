@@ -6,6 +6,7 @@ from pathlib import Path
 
 from gideon.evaluation import evalset
 from gideon.host.index import build, sample
+from gideon.host.index import header as context_header
 
 
 def _gold_sources(loaded: evalset.LoadedSet) -> Iterator[tuple[str, str | None]]:
@@ -52,7 +53,7 @@ def gold_hashes(loaded: evalset.LoadedSet) -> Mapping[str, frozenset[str]]:
     return {identifier: frozenset(hashes[identifier]) for identifier in sorted(hashes)}
 
 
-def run_sample_build(args: argparse.Namespace) -> int:
+def run_sample_build(args: argparse.Namespace, *, header: str | None = context_header.RELEASE_HEADER) -> int:
     """Refuse eval-set findings before passing gold and fill inputs to the build."""
 
     root = Path(__file__).parents[2]
@@ -64,4 +65,4 @@ def run_sample_build(args: argparse.Namespace) -> int:
     selection = sample.SampleInputs(
         gold_documents(result.loaded), sample.SAMPLE_FILL_PER_MILLION, result.loaded.version,
     )
-    return build.run_index_build(args, sample=selection)
+    return build.run_index_build(args, sample=selection, header=header)

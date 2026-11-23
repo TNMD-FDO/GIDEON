@@ -20,6 +20,7 @@ import httpx
 import psycopg
 
 import gideon.host.cas
+import gideon.host.index.header as header
 from gideon.host.index.sample import source_id
 from gideon.host.sysio import BytesHost, RealHost
 from gideon.worker import caselaw, chunker, lexical, settings, staging, treatment
@@ -136,11 +137,15 @@ class Point:
 
 @dataclass(frozen=True, slots=True)
 class LedgerRow:
-    """A chunk text's vector home; the generation supplies its embedding space."""
+    """A text and header's vector home in the generation's embedding space."""
 
     content_hash: str
+    header_hash: str
     gen_id: str
     point_id: str
+
+
+type EmbeddingKey = tuple[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,10 +158,12 @@ class EmbedReply:
 
 @dataclass(frozen=True, slots=True)
 class TextGroup:
-    """One representative text and every chunk sharing its content hash."""
+    """One embedding input and every chunk sharing its text and header hashes."""
 
     text: str
     chunks: tuple[chunker.NewChunk, ...]
+    header_hash: str
+    header_bytes: int
 
 
 class GenerationRecord(Protocol):
@@ -171,7 +178,7 @@ class GenerationRecord(Protocol):
     def chunks(self, doc_id: str, pipeline: str) -> tuple[chunker.NewChunk, ...]: ...
     def opinion(self, doc_id: str) -> caselaw.NewOpinion: ...
     def keys_for(self, name: str, hashes: Sequence[str]) -> dict[str, lexical.TextKeys]: ...
-    def ledger_rows(self, space: str, hashes: Sequence[str]) -> tuple[LedgerRow, ...]: ...
+    def ledger_rows(self, space: str, pairs: Sequence[EmbeddingKey]) -> tuple[LedgerRow, ...]: ...
     def start(self, name: str, counts: DenseCounts) -> None: ...
     def progress(self, name: str, counts: DenseCounts, inserts: Sequence[LedgerRow] = (), rehomes: Sequence[LedgerRow] = (), documents: Sequence[lexical.Document] = ()) -> DenseCounts: ...
     def finish(self, name: str, counts: DenseCounts, at: datetime, limited: bool) -> None: ...
@@ -194,7 +201,7 @@ class VectorStore(Protocol):
 
 
 class Embedder(Protocol):
-    """Embed bare canonical slices under one served model and vector width."""
+    """Embed canonical slices with optional headers under one model and vector width."""
 
     def embed(self, texts: Sequence[str]) -> EmbedReply: ...
     def close(self) -> None: ...
@@ -238,15 +245,17 @@ def payload_for(
     return payload
 
 
-def group_by_hash(chunks_with_text: Sequence[tuple[chunker.NewChunk, str]]) -> tuple[TextGroup, ...]:
-    """Keep the first representative of each hash in input order."""
+def group_by_hash(chunks_with_text: Sequence[tuple[chunker.NewChunk, str, str, str]]) -> tuple[TextGroup, ...]:
+    """Keep the first representative of each text and header pair in input order."""
 
-    groups: dict[str, tuple[str, list[chunker.NewChunk]]] = {}
-    for chunk, text in chunks_with_text:
-        if chunk.content_hash not in groups:
-            groups[chunk.content_hash] = (text, [])
-        groups[chunk.content_hash][1].append(chunk)
-    return tuple(TextGroup(text, tuple(chunks)) for text, chunks in groups.values())
+    groups: dict[EmbeddingKey, tuple[str, int, list[chunker.NewChunk]]] = {}
+    for chunk, text, header_text, header_hash in chunks_with_text:
+        pair = (chunk.content_hash, header_hash)
+        if pair not in groups:
+            groups[pair] = (header.embedding_input(header_text, text), len(header_text.encode("utf-8")), [])
+        groups[pair][2].append(chunk)
+    return tuple(TextGroup(text, tuple(chunks), header_hash, header_bytes)
+                 for (_, header_hash), (text, header_bytes, chunks) in groups.items())
 
 
 def pack_requests(representatives: Sequence[TextGroup]) -> tuple[tuple[TextGroup, ...], ...]:
@@ -256,7 +265,7 @@ def pack_requests(representatives: Sequence[TextGroup]) -> tuple[tuple[TextGroup
     batch: list[TextGroup] = []
     tokens = 0
     for representative in representatives:
-        count = max(chunk.token_count for chunk in representative.chunks)
+        count = max(chunk.token_count for chunk in representative.chunks) + representative.header_bytes
         if count > EMBED_TEXT_TOKEN_CAP:
             raise DenseFailure("chunk-too-long")
         if batch and (len(batch) >= EMBED_BATCH_TEXTS or tokens + count > EMBED_BATCH_TOKENS):
@@ -305,17 +314,18 @@ MANIFEST_INSERT_SQL: Final = (
     "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING"
 )
 LEDGER_ROWS_SQL: Final = (
-    "SELECT content_hash, gen_id, point_id FROM chunk_embeddings "
-    "WHERE embedding_space = %s AND content_hash = ANY(%s)"
+    "SELECT content_hash, header_hash, gen_id, point_id FROM chunk_embeddings "
+    "WHERE embedding_space = %s AND (content_hash, header_hash) IN "
+    "(SELECT * FROM unnest(%s::text[], %s::text[]))"
 )
 LEDGER_INSERT_SQL: Final = (
-    "INSERT INTO chunk_embeddings (content_hash, embedding_space, gen_id, point_id) "
-    "SELECT %s, embedding_space, gen_id, %s FROM index_generations WHERE gen_id = %s "
+    "INSERT INTO chunk_embeddings (content_hash, header_hash, embedding_space, gen_id, point_id) "
+    "SELECT %s, %s, embedding_space, gen_id, %s FROM index_generations WHERE gen_id = %s "
     "ON CONFLICT DO NOTHING"
 )
 LEDGER_REHOME_SQL: Final = (
     "UPDATE chunk_embeddings SET gen_id = %s, point_id = %s, embedded_at = now() "
-    "WHERE content_hash = %s AND embedding_space = "
+    "WHERE content_hash = %s AND header_hash = %s AND embedding_space = "
     "(SELECT embedding_space FROM index_generations WHERE gen_id = %s)"
 )
 START_SQL: Final = (
@@ -363,9 +373,11 @@ class PsycopgGenerations(lexical.PsycopgGenerations):
         rows = self._run(CHUNK_COUNTS_SQL, (list(doc_ids), pipeline), read=True, corpus=True)
         return dict(rows)
 
-    def ledger_rows(self, space: str, hashes: Sequence[str]) -> tuple[LedgerRow, ...]:
-        rows = self._run(LEDGER_ROWS_SQL, (space, list(hashes)), read=True)
-        return tuple(LedgerRow(row[0], row[1], str(row[2])) for row in rows)
+    def ledger_rows(self, space: str, pairs: Sequence[EmbeddingKey]) -> tuple[LedgerRow, ...]:
+        content_hashes = [content_hash for content_hash, _ in pairs]
+        header_hashes = [header_hash for _, header_hash in pairs]
+        rows = self._run(LEDGER_ROWS_SQL, (space, content_hashes, header_hashes), read=True)
+        return tuple(LedgerRow(row[0], row[1], row[2], str(row[3])) for row in rows)
 
     def _write(
         self, name: str, counts: DenseCounts, statements: Sequence[tuple[str, tuple[object, ...]]],
@@ -398,8 +410,8 @@ class PsycopgGenerations(lexical.PsycopgGenerations):
     # Dense progress replaces the lexical counter contract on the shared record.
     def progress(self, name: str, counts: DenseCounts, inserts: Sequence[LedgerRow] = (), rehomes: Sequence[LedgerRow] = (), documents: Sequence[lexical.Document] = ()) -> DenseCounts:  # type: ignore[override]
         return self._write(name, counts, [
-            *((LEDGER_INSERT_SQL, (row.content_hash, row.point_id, row.gen_id)) for row in inserts),
-            *((LEDGER_REHOME_SQL, (row.gen_id, row.point_id, row.content_hash, row.gen_id)) for row in rehomes),
+            *((LEDGER_INSERT_SQL, (row.content_hash, row.header_hash, row.point_id, row.gen_id)) for row in inserts),
+            *((LEDGER_REHOME_SQL, (row.gen_id, row.point_id, row.content_hash, row.header_hash, row.gen_id)) for row in rehomes),
         ], documents)
 
     # Dense finish records a vector timestamp and limit instead of lexical bytes.
@@ -729,28 +741,35 @@ class _Progress:
         self.last_log = now
 
 
-def _parse_inputs(inputs: Mapping[str, object]) -> tuple[lexical._Inputs, str, int, int | None]:
+def _parse_inputs(inputs: Mapping[str, object]) -> tuple[lexical._Inputs, str, int, int | None, str | None]:
     if not isinstance(inputs, Mapping):
         raise DenseFailure("invalid")
     values = dict(inputs)
     served_model = values.pop("served_model", None)
     dimensions = values.pop("dimensions", None)
     limit = values.pop("limit", None)
+    header_id = values.pop("header", None)
     if (
         not isinstance(served_model, str) or re.fullmatch(SERVED_MODEL_PATTERN, served_model) is None
         or type(dimensions) is not int or not 0 < dimensions <= DIMENSIONS_MAX
         or limit is not None and (type(limit) is not int or limit < 1)
+        or header_id is not None and (
+            not isinstance(header_id, str) or re.fullmatch(header.HEADER_ID_PATTERN, header_id) is None
+            or header_id not in header.HEADERS
+        )
     ):
         raise DenseFailure("invalid")
     try:
         parsed = lexical._parse_inputs(values)
     except lexical.LexicalFailure as exc:
         raise DenseFailure("invalid", error=exc.error) from exc
-    return parsed, served_model, dimensions, cast(int | None, limit)
+    if header.header_for_space(parsed.embedding_space) != header_id:
+        raise DenseFailure("invalid")
+    return parsed, served_model, dimensions, cast(int | None, limit), header_id
 
 
 def _embed_request(
-    name: str, groups: Sequence[TextGroup], existing: Mapping[str, LedgerRow],
+    name: str, groups: Sequence[TextGroup], existing: Mapping[EmbeddingKey, LedgerRow],
     payloads: Mapping[str, Mapping[str, str | bool]], store: VectorStore, embedder: Embedder, pace: Pace,
 ) -> _WriteOutcome:
     pace.wait_before()
@@ -765,14 +784,15 @@ def _embed_request(
         for chunk in group.chunks:
             points.append(Point(point_id(chunk.chunk_id), vector, payloads[chunk.chunk_id]))
         first = group.chunks[0]
-        row = LedgerRow(first.content_hash, name, point_id(first.chunk_id))
-        (rehomes if first.content_hash in existing else inserts).append(row)
+        pair = (first.content_hash, group.header_hash)
+        row = LedgerRow(*pair, name, point_id(first.chunk_id))
+        (rehomes if pair in existing else inserts).append(row)
     store.upsert(name, points)
     return _WriteOutcome(tuple(inserts), tuple(rehomes), len(groups), reply.prompt_tokens, len(points))
 
 
 def _embed_batches(
-    pool: ThreadPoolExecutor, name: str, batches: Sequence[tuple[TextGroup, ...]], existing: Mapping[str, LedgerRow],
+    pool: ThreadPoolExecutor, name: str, batches: Sequence[tuple[TextGroup, ...]], existing: Mapping[EmbeddingKey, LedgerRow],
     payloads: Mapping[str, Mapping[str, str | bool]], store: VectorStore, embedder: Embedder, pace: Pace,
     progress: _Progress, repairs: Sequence[LedgerRow], present: int, leveled: int,
     documents: Sequence[lexical.Document],
@@ -838,7 +858,7 @@ def _embed_batches(
 
 
 def _fill(
-    parsed: lexical._Inputs, limit: int | None, record: GenerationRecord, store: VectorStore,
+    parsed: lexical._Inputs, limit: int | None, header_id: str | None, record: GenerationRecord, store: VectorStore,
     embedder: Embedder, pace: Pace, store_root: Path, host: BytesHost, progress: _Progress,
 ) -> None:
     source = parsed.snapshot[:-staging.DATE_SUFFIX_LENGTH]
@@ -856,49 +876,66 @@ def _fill(
             hashes = tuple(dict.fromkeys(chunk.content_hash for chunk in all_chunks))
             keys = record.keys_for(parsed.name, hashes) if hashes else {}
             present = store.present(parsed.name, ids) if ids else {}
-            existing = {row.content_hash: row for row in record.ledger_rows(
-                parsed.embedding_space, hashes,
+            opinions: dict[str, caselaw.NewOpinion] = {}
+            header_texts: dict[str, str] = {}
+            pairs: dict[str, EmbeddingKey] = {}
+            if header_id is None:
+                pairs = {chunk.chunk_id: (chunk.content_hash, header.BARE_HEADER_HASH) for chunk in all_chunks}
+            else:
+                for doc_id, document_chunks in chunks.items():
+                    opinion = record.opinion(doc_id)
+                    opinions[doc_id] = opinion
+                    for chunk in document_chunks:
+                        line = header.compose(header_id, opinion.case_name, opinion.reporter_cites, opinion.docket,
+                                              opinion.court, opinion.decided_date, chunk.section_type)
+                        header_texts[chunk.chunk_id] = line
+                        pairs[chunk.chunk_id] = (chunk.content_hash, header.header_hash(line))
+            existing = {(row.content_hash, row.header_hash): row for row in record.ledger_rows(
+                parsed.embedding_space, tuple(dict.fromkeys(pairs.values())),
             )}
-            repairs: dict[str, LedgerRow] = {}
-            missing: dict[str, list[chunker.NewChunk]] = {}
+            repairs: dict[EmbeddingKey, LedgerRow] = {}
+            missing: dict[EmbeddingKey, list[chunker.NewChunk]] = {}
             present_count = 0
             levels: dict[lexical.TextKeys, list[str]] = {}
             for chunk in all_chunks:
                 identifier = point_id(chunk.chunk_id)
+                pair = pairs[chunk.chunk_id]
                 if identifier in present:
                     present_count += 1
                     current = keys[chunk.content_hash]
                     if present[identifier] != current:
                         levels.setdefault(current, []).append(identifier)
-                    if chunk.content_hash not in existing:
-                        repairs.setdefault(chunk.content_hash, LedgerRow(chunk.content_hash, parsed.name, identifier))
+                    if pair not in existing:
+                        repairs.setdefault(pair, LedgerRow(*pair, parsed.name, identifier))
                 else:
-                    missing.setdefault(chunk.content_hash, []).append(chunk)
-            homes: dict[str, list[LedgerRow]] = {}
-            for content_hash in missing:
-                if content_hash in existing:
-                    row = existing[content_hash]
-                    homes.setdefault(row.gen_id, []).append(row)
-            copied: dict[str, tuple[float, ...]] = {}
+                    missing.setdefault(pair, []).append(chunk)
+            # Group matching pairs by generation for one retrieval per home.
+            homes: dict[str, dict[EmbeddingKey, LedgerRow]] = {}
+            for pair in missing:
+                if pair in existing:
+                    row = existing[pair]
+                    homes.setdefault(row.gen_id, {})[pair] = row
+            copied: dict[EmbeddingKey, tuple[float, ...]] = {}
             for home, rows in homes.items():
-                vectors = store.retrieve(home, [row.point_id for row in rows])
-                for row in rows:
+                vectors = store.retrieve(home, [row.point_id for row in rows.values()])
+                for pair, row in rows.items():
                     vector = vectors.get(_canonical_id(row.point_id))
                     if vector is not None:
-                        copied[row.content_hash] = vector
+                        copied[pair] = vector
             payloads: dict[str, Mapping[str, str | bool]] = {}
-            slices: list[tuple[chunker.NewChunk, str]] = []
+            slices: list[tuple[chunker.NewChunk, str, str, str]] = []
             for document in documents:
                 absent = [chunk for chunk in chunks[document.doc_id] if point_id(chunk.chunk_id) not in present]
                 if not absent:
                     continue
-                opinion = record.opinion(document.doc_id)
+                opinion = record.opinion(document.doc_id) if header_id is None else opinions[document.doc_id]
                 for chunk in absent:
                     payloads[chunk.chunk_id] = payload_for(chunk, opinion, parsed.courts, keys[chunk.content_hash])
-                fresh = [chunk for chunk in absent if chunk.content_hash not in copied]
+                fresh = [chunk for chunk in absent if pairs[chunk.chunk_id] not in copied]
                 if fresh:
                     text = lexical.canonical_text(document, store_root, host)
-                    slices.extend((chunk, lexical.slice_for(text, chunk)) for chunk in fresh)
+                    slices.extend((chunk, lexical.slice_for(text, chunk), header_texts.get(chunk.chunk_id, ""),
+                                   pairs[chunk.chunk_id][1]) for chunk in fresh)
             # Validate the entire batch before any embedding or point write.
             batches = pack_requests(group_by_hash(slices))
             leveled_count = 0
@@ -909,12 +946,12 @@ def _fill(
             if copied:
                 points: list[Point] = []
                 rehomes: list[LedgerRow] = []
-                for content_hash, vector in copied.items():
+                for pair, vector in copied.items():
                     selected = [Point(point_id(chunk.chunk_id), vector, payloads[chunk.chunk_id])
-                                for chunk in missing[content_hash]]
+                                for chunk in missing[pair]]
                     points.extend(selected)
-                    if existing[content_hash].gen_id != parsed.name:
-                        rehomes.append(LedgerRow(content_hash, parsed.name, selected[0].id))
+                    if existing[pair].gen_id != parsed.name:
+                        rehomes.append(LedgerRow(*pair, parsed.name, selected[0].id))
                 store.upsert(parsed.name, points)
                 progress.commit(replace(progress.counts,
                                         dense_present=progress.counts.dense_present + present_count,
@@ -981,7 +1018,7 @@ def build(
     progress: _Progress | None = None
     try:
         try:
-            parsed, _served_model, dimensions, limit = _parse_inputs(inputs)
+            parsed, _served_model, dimensions, limit, header_id = _parse_inputs(inputs)
             if type(job) is not int or job < 1:
                 raise DenseFailure("invalid")
             progress = _Progress(parsed.name, job, record, monotonic(), monotonic, DenseCounts())
@@ -1015,7 +1052,7 @@ def build(
                     scope_count = total if limit is None else _sample_scope_total(parsed, record, limit)
                 progress.counts = DenseCounts(dense_total=total, dense_scope=scope_count, dense_limit=limit or 0)
                 record.start(parsed.name, progress.counts)
-                _fill(parsed, limit, record, store, embedder, pace, store_root, host or RealHost(), progress)
+                _fill(parsed, limit, header_id, record, store, embedder, pace, store_root, host or RealHost(), progress)
                 store.set_indexing(parsed.name, SHIPPED_INDEXING_THRESHOLD)
 
                 def indexed(count: int) -> None:

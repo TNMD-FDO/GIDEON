@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from gideon.host import models
-from gideon.host.index import sample
+from gideon.host.index import header, sample
 from gideon.host.render import worker
 from gideon.host.stack import exec_argv
 from gideon.host.stores import converge
@@ -49,6 +49,7 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0028_walk_pipeline.sql": (ROOT / "migrations/0028_walk_pipeline.sql").read_text(),
     f"{ROOT}/migrations/0029_documents_illegible.sql": (ROOT / "migrations/0029_documents_illegible.sql").read_text(),
     f"{ROOT}/migrations/0030_generation_gold.sql": (ROOT / "migrations/0030_generation_gold.sql").read_text(),
+    f"{ROOT}/migrations/0032_chunk_embeddings_header.sql": (ROOT / "migrations/0032_chunk_embeddings_header.sql").read_text(),
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -185,6 +186,7 @@ class Converge(unittest.TestCase):
                 "0028_walk_pipeline",
                 "0029_documents_illegible",
                 "0030_generation_gold",
+                "0032_chunk_embeddings_header",
             ),
         )
 
@@ -361,6 +363,7 @@ class Converge(unittest.TestCase):
                 "0028_walk_pipeline",
                 "0029_documents_illegible",
                 "0030_generation_gold",
+                "0032_chunk_embeddings_header",
             ),
         )
 
@@ -786,3 +789,16 @@ class Migration0025(unittest.TestCase):
         for forbidden in ("DEFAULT", "NOT NULL", "GRANT", "schema_migrations"):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, text)
+
+
+class Migration0032(unittest.TestCase):
+    def test_ledger_adds_the_bare_default_and_rekeys_with_existing_grants(self) -> None:
+        text = MIGRATIONS[f"{ROOT}/migrations/0032_chunk_embeddings_header.sql"]
+        sql = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("--"))
+        self.assertEqual(
+            " ".join(sql.split()),
+            "ALTER TABLE chunk_embeddings ADD COLUMN header_hash text NOT NULL "
+            f"DEFAULT '{header.BARE_HEADER_HASH}' CHECK (header_hash ~ '^[0-9a-f]{{64}}$'); "
+            "ALTER TABLE chunk_embeddings DROP CONSTRAINT chunk_embeddings_pkey; "
+            "ALTER TABLE chunk_embeddings ADD PRIMARY KEY (content_hash, header_hash, embedding_space);",
+        )

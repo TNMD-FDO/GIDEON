@@ -277,6 +277,7 @@ class RecoveryTask(unittest.TestCase):
                 threads.append(threading.current_thread() is threading.main_thread())
                 jobs.append(job)
                 self.assertIsNone(inputs["limit"])
+                self.assertNotIn("header", inputs)
                 self.assertIsInstance(pace, dense.NoBackOff)
                 return original_build(inputs, job, record, store, embedder, pace, store_root,
                                       work_root=work_root, monotonic=lambda: 0.0)
@@ -346,6 +347,25 @@ class RecoveryTask(unittest.TestCase):
         with self.assertRaises(dense.DenseFailure) as raised:
             tasks.dense(context, **dense_inputs())  # type: ignore[arg-type]
         self.assertEqual(raised.exception.reason, "invalid")
+
+    def test_dense_task_passes_a_named_header_and_omits_an_absent_header(self) -> None:
+        context = procrastinate.JobContext(
+            app=procrastinate.App(connector=InMemoryConnector()),
+            job=procrastinate.jobs.Job(id=77, queue=dense.DENSE_QUEUE, lock=None,
+                                      queueing_lock=None, task_name=dense.DENSE_TASK),
+            start_timestamp=0.0, abort_reason=lambda: None,
+        )
+        values = dense_inputs()
+        with (
+            patch.object(dense, "PsycopgGenerations"),
+            patch.object(dense, "HttpxVectorStore"),
+            patch.object(dense, "HttpxEmbedder"),
+            patch.object(dense, "build") as build,
+        ):
+            tasks.dense(context, **{**values, "header": "h1"})  # type: ignore[arg-type]
+            self.assertEqual(build.call_args.args[0], {**values, "limit": None, "sample": None, "header": "h1"})
+            tasks.dense(context, **{**values, "header": None})  # type: ignore[arg-type]
+            self.assertEqual(build.call_args.args[0], {**values, "limit": None, "sample": None})
 
     def test_lexical_jobs_run_off_the_event_loop_and_write_failure_to_the_row(self) -> None:
         inputs = inputs_for()

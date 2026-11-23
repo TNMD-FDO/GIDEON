@@ -51,6 +51,8 @@ from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
+_REPLACED_PREFIX: Final = backupset.STAGING + ".replaced-"
+_FETCH_PREFIX: Final = backupset.STAGING + ".fetch-"
 # The pre-restore row a fresh stack reads; the acceptance harness requires it.
 FRESH_STACK_SKIPPED_DETAIL: Final = "skipped (fresh stack has no backup set in staging)"
 # The two ownership phrases the fetch and files rows carry; the acceptance
@@ -884,7 +886,7 @@ def _fetch_stage(
     gideon_ids: backupset.AccountIds,
     roots: tuple[backupset.InventoryRoot, ...],
 ) -> tuple[StageResult, _Fetched | None]:
-    side = f"{backupset.STAGING}.fetch-{operation_label}"
+    side = f"{_FETCH_PREFIX}{operation_label}"
     remote_root = config.backup.target.path.rstrip("/") or "/"
     source = (
         f"{config.backup.target.user}@{config.backup.target.host}:"
@@ -992,7 +994,7 @@ def _fetch_stage(
     if problem is not None:
         return StageResult("fetch", False, problem.problem, problem.fix or _REOWN_FIX), None
 
-    replaced = f"{backupset.STAGING}.replaced-{operation_label}"
+    replaced = f"{_REPLACED_PREFIX}{operation_label}"
     ownership = (
         f"{claims.gideon_owned} {REOWN_MAPPED_DETAIL} {gideon_ids.uid}:{gideon_ids.gid}"
         if no_record_sets == 0
@@ -1111,7 +1113,7 @@ def _stop_stage(io: Host, rendered_dir: PathLike, *, build_box: bool) -> StageRe
 
 
 def _swap_stage(io: Host, side: str, replaced: str) -> StageResult:
-    if not replaced.startswith(backupset.STAGING + ".replaced-"):
+    if not replaced.startswith(_REPLACED_PREFIX):
         return StageResult("swap", False, f"unsafe replacement path: {replaced}", _stage_fix())
     first = run_stage(
         io,
@@ -1434,9 +1436,32 @@ def _stores_stage(
     if isinstance(level_report, Problem):
         return StageResult("stores", False, level_report.problem, level_report.fix), None, reach
 
+    # Sweep stale trees first so a sweep failure leaves this run's fallback in place.
+    staging_parent = os.path.dirname(backupset.STAGING)
+    try:
+        entries = io.listdir(staging_parent)
+    except OSError as exc:
+        return StageResult(
+            "stores", False, f"cannot list {staging_parent}: {exc}", _stage_fix(),
+        ), level_report, reach
+    stale_removed: list[str] = []
+    for entry in sorted(entries):
+        path = os.path.join(staging_parent, entry)
+        if path == replaced or not path.startswith((_REPLACED_PREFIX, _FETCH_PREFIX)):
+            continue
+        removed = run_stage(
+            io, "stores", ["rm", "-rf", path], f"remove stale staging directory {path}",
+            _stage_fix(),
+        )
+        if not removed.ok:
+            return removed, level_report, reach
+        stale_removed.append(path)
+
+    removal_clauses: list[str] = []
+    trees_removed = list(stale_removed)
     replaced_removed = False
     if replaced is not None:
-        if not replaced.startswith(backupset.STAGING + ".replaced-"):
+        if not replaced.startswith(_REPLACED_PREFIX):
             return StageResult("stores", False, f"unsafe replacement path: {replaced}", _stage_fix()), level_report, reach
         removed = run_stage(
             io,
@@ -1448,6 +1473,10 @@ def _stores_stage(
         if not removed.ok:
             return removed, level_report, reach
         replaced_removed = True
+        trees_removed.append(replaced)
+        removal_clauses.append(removed.detail)
+    if stale_removed:
+        removal_clauses.append(f"removed stale staging directories {', '.join(stale_removed)}")
 
     detail_row: dict[str, object] = {
         "source": source,
@@ -1461,6 +1490,7 @@ def _stores_stage(
         "added": dict(added),
         "reowned": reowned,
         "replaced_removed": replaced_removed,
+        "trees_removed": trees_removed,
         "indexes": derivedstores.recovery_audit(recovered),
         "level": level.level_audit(level_report),
     }
@@ -1486,12 +1516,13 @@ def _stores_stage(
         return StageResult(
             "stores",
             False,
-            f"restore audit write failed: {problem}",
+            "; ".join((f"restore audit write failed: {problem}", *removal_clauses)),
             stack.logs_fix(rendered_dir, "postgres"),
         ), level_report, reach
     clauses = "; ".join((
         *(derivedstores.recovery_clause(result) for result in recovered),
         *level.level_clauses(level_report),
+        *removal_clauses,
     ))
     if reach is not None:
         clauses = f"reached {_reach_detail(reach)}" + (f"; {clauses}" if clauses else "")
@@ -1768,6 +1799,17 @@ def _restore_body(
     else:
         print_stage(StageResult("swap", True, "skipped (staging source)", ""))
 
+    # Named only while on disk: a refused audit write follows the tree's removal.
+    def with_kept_staging(result: StageResult) -> StageResult:
+        if fetched is None or result.ok or not io.exists(fetched.replaced):
+            return result
+        return StageResult(
+            result.name, result.ok,
+            f"{result.detail}; the staging from before this restore is kept at "
+            f"{fetched.replaced} and removed by the next successful restore",
+            result.fix,
+        )
+
     if archive_end:
         files_result = StageResult("files", True, "skipped (every root left in place)", "")
         roots_restored: tuple[str, ...] = ()
@@ -1783,13 +1825,15 @@ def _restore_body(
             gideon_ids=gideon_ids,
             later=later,
         )
-    print_stage(files_result)
+    print_stage(with_kept_staging(files_result))
     if not files_result.ok:
         return 1
 
     reowned = file_reowned + (fetched.reowned if fetched is not None else 0)
     if selected.manifest is None:
-        print_stage(StageResult("postgres", False, "selected set has no manifest", _set_fix()))
+        print_stage(with_kept_staging(
+            StageResult("postgres", False, "selected set has no manifest", _set_fix())
+        ))
         return 1
     postgres_result = _postgres_stage(
         io,
@@ -1800,7 +1844,7 @@ def _restore_body(
         archive_end=archive_end,
         follow_latest=at is not None,
     )
-    print_stage(postgres_result)
+    print_stage(with_kept_staging(postgres_result))
     if not postgres_result.ok:
         return 1
 
@@ -1830,7 +1874,7 @@ def _restore_body(
         archive_end=selection.archive_end,
         reach_wait=stores.REPLAY_WAIT_SECONDS,
     )
-    print_stage(stores_result)
+    print_stage(with_kept_staging(stores_result))
     if not stores_result.ok:
         return 1
     assert level_report is not None

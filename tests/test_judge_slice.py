@@ -17,9 +17,10 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from test_evaluation_record import read_psql_set
+from test_evaluation_run import fixture_judge_retry
 from test_judge import engine_output, valid_content
 
-from gideon.evaluation import command, stacks, window
+from gideon.evaluation import command, sampling, stacks, window
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_cases
 from gideon.evaluation.results import CaseResult, RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS
@@ -66,6 +67,7 @@ class JudgeHost:
         self,
         output: str,
         *,
+        first_output: str | None = None,
         probe_rc: int = 0,
         write_rc: int = 0,
         commit_rc: int = 0,
@@ -76,6 +78,7 @@ class JudgeHost:
         timeout: bool = False,
     ) -> None:
         self.output = output
+        self.first_output = first_output
         self.probe_rc = probe_rc
         self.write_rc = write_rc
         self.commit_rc = commit_rc
@@ -127,8 +130,9 @@ class JudgeHost:
         self.engine_calls.append(input)
         if self.timeout:
             raise subprocess.TimeoutExpired(command_argv, timeout or 0.0)
+        output = self.first_output if len(self.engine_calls) == 1 and self.first_output is not None else self.output
         return subprocess.CompletedProcess(
-            list(command_argv), 0, self.output, "engine diagnostic"
+            list(command_argv), 0, output, "engine diagnostic"
         )
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
@@ -186,6 +190,7 @@ def _runner_context(host: JudgeHost, progress: list[str]) -> RunContext:
         spec.judge_prompt,
         spec.repeats,
         progress.append,
+        judge_retry=fixture_judge_retry(),
     )
 
 
@@ -224,6 +229,7 @@ def _invoke_command(
         target_value = target
     with (
         patch.object(command.engine, "resolve_engine_target", return_value=target_value),
+        patch.object(command.sampling, "hold_running", return_value=fixture_judge_retry()),
         contextlib.redirect_stdout(stdout),
         contextlib.redirect_stderr(stderr),
     ):
@@ -259,6 +265,26 @@ class Runner(unittest.TestCase):
                 self.assertTrue(engine_calls)
                 self.assertTrue(all(RENDERED in argv for argv in engine_calls))
                 self.assertTrue(all(stacks.CI_ROOT not in argv for argv in engine_calls))
+
+    def test_retry_seed_reaches_the_judge_row_and_progress(self) -> None:
+        host = JudgeHost(engine_output(valid_content()), first_output=engine_output(None, finish_reason="length"))
+        progress: list[str] = []
+        context = _runner_context(host, progress)
+        retry = context.judge_retry
+        assert retry is not None
+        result = SLICE_RUNNERS["judge-triples"].runner(_loaded(), "judge-triples", context)
+
+        self.assertTrue(result.verdict, result.report)
+        self.assertEqual(len(host.engine_calls), len(result.results) + 1)
+        greedy, sampled = (json.loads(payload) for payload in host.engine_calls[:2])
+        self.assertEqual(sampled, {**greedy, **sampling.THINKING_SAMPLING, "seed": retry.seed})
+        first, *others = result.results
+        assert first.judge is not None
+        self.assertEqual(first.judge["retry_seed"], retry.seed)
+        self.assertTrue(progress[0].endswith(f"; retried seed {retry.seed}"))
+        self.assertTrue(all("retry_seed" not in row.metrics for row in result.results))
+        self.assertTrue(all(row.judge is not None and "retry_seed" not in row.judge for row in others))
+        self.assertTrue(all("; retried seed " not in line for line in progress[1:]))
 
     def test_progress_is_repeat_major_and_id_ordered(self) -> None:
         loaded, result, progress = _run_runner(engine_output(valid_content()))

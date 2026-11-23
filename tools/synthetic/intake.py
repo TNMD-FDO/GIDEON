@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, TextIO, cast
 
-from gideon.evaluation import evalset, judgments, synthetic
+from gideon.evaluation import evalset, judgments, sampling, synthetic
 from gideon.host import courts
 from gideon.host.index.sample import SAMPLE_SUFFIX, SOURCE_ID_MAX_LENGTH
 from gideon.host.render.worker import GENERATION_PATTERN
@@ -99,6 +99,7 @@ def _load_manifest(path: Path) -> Manifest:
         raise _manifest_problem()
     category = value["category"]
     template, reading = value["template"], value["reading"]
+    seed, retry_seed = value["seed"], value["retry_seed"]
     spec = evalset.SHAPE_REGISTRY.get(("research-qa", category)) if isinstance(category, str) else None
     if (
         not isinstance(value["set_root"], str) or not Path(value["set_root"]).is_absolute()
@@ -110,7 +111,8 @@ def _load_manifest(path: Path) -> Manifest:
         or not isinstance(reading, str) or reading not in synthetic.READINGS
         or value["reading_digest"] != synthetic.READING_DIGESTS[reading]
         or not isinstance(value["generation"], str) or re.fullmatch(GENERATION_PATTERN, value["generation"]) is None
-        or type(value["seed"]) is not int
+        or type(seed) is not int or not 0 <= seed <= sampling.MAX_SEED
+        or type(retry_seed) is not int or retry_seed != sampling.next_seed(seed)
         or type(value["asked"]) is not int or value["asked"] <= 0
         or not isinstance(value["entries"], list) or len(value["entries"]) > value["asked"]
         or type(value["read_share"]) is not int
@@ -141,7 +143,7 @@ def _load_manifest(path: Path) -> Manifest:
         if not isinstance(entry, dict) or tuple(entry) != manifest.ENTRY_KEYS:
             raise _manifest_problem(f"entry {ordinal:02d} keys or order")
         score, label = entry["closed_book_score"], entry["label"]
-        citations = entry["citations"]
+        citations, retried = entry["citations"], entry["retried"]
         if (
             type(entry["ordinal"]) is not int or entry["ordinal"] != ordinal
             or judgments.coordinate_findings(entry)
@@ -156,6 +158,8 @@ def _load_manifest(path: Path) -> Manifest:
                 or any(type(cluster) is not int or cluster <= 0 for cluster in citations)
                 or len(citations) != len(set(citations))
             ))
+            or not isinstance(retried, list)
+            or retried != [kind for kind in manifest.RETRY_KINDS if kind in retried]
         ):
             raise _manifest_problem(f"entry {ordinal:02d}")
         seen.add(entry["source_id"])
@@ -182,7 +186,7 @@ def _load_manifest(path: Path) -> Manifest:
     pin = None if raw_pin is None else (raw_pin[0], raw_pin[1])
     return Manifest(
         set_root=Path(value["set_root"]), set_digest=value["set_digest"], category=category,
-        seed=value["seed"],
+        seed=seed,
         case_pin=pin, template=template, sheet_sha256=value["sheet_sha256"],
         sheet_bytes=value["sheet_bytes"], read_share=value["read_share"],
         read_ordinals=tuple(value["read_ordinals"]), entries=tuple(entries),

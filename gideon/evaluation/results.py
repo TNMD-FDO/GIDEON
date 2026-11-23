@@ -13,6 +13,7 @@ from gideon.host.sysio import Host, PathLike
 if TYPE_CHECKING:
     from gideon.evaluation.assessments import Assessments
     from gideon.evaluation.generation import GenerationAccess
+    from gideon.evaluation.sampling import HeldSet
     from gideon.evaluation.turns.access import TurnAccess
 
 type JSONValue = None | bool | int | float | str | list[JSONValue] | Mapping[str, JSONValue]
@@ -103,6 +104,7 @@ class RunContext:
 
     ``turns_dir`` is the rendered directory of the stack whose turns run.
     ``production_dir`` is the rendered directory of the project whose engine the judge calls.
+    ``judge_retry`` holds the sampling settings and seed for a slice that names a judge prompt.
     ``checkout`` is the tree the run takes its cases, reference, and provenance
     from; a runner reads release content such as seeds beneath it, never beside
     its own module. It is none when no command supplied a checkout.
@@ -129,6 +131,7 @@ class RunContext:
     progress: Callable[[str], None]
     ranked: Mapping[str, tuple[Coordinates, ...]] | None = None
     assessments: Assessments | None = field(default=None, kw_only=True)
+    judge_retry: HeldSet | None = field(default=None, kw_only=True)
     turns: TurnAccess | None = None
     checkpoint: Callable[[], None] = no_checkpoint
     checkout: PathLike | None = None

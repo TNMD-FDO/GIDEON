@@ -9,6 +9,7 @@ from pathlib import Path
 from gideon.host.caselaw import CourtGeography
 from gideon.host.corpus.lockfile import load_lockfile, render_errors
 from gideon.host.corpus.sources import SOURCES
+from gideon.host.index import header, sample
 from gideon.host.index.generations import (
     COLLECTIONS,
     GenerationInputs,
@@ -110,6 +111,23 @@ class Hashes(unittest.TestCase):
                 self.assertNotEqual(digest, inputs_hash(
                     lockfile, self.collection, space, sources=(self.source,),
                 ))
+
+    def test_header_space_names_and_hashes_its_own_generation_and_sample(self) -> None:
+        label = self.lockfile.label
+        space = header.embedding_space(SPACE_ID, "h1")
+        name = generation_name(self.collection, label, space)
+        self.assertEqual(name, f"{self.collection}__{label}__{SPACE_ID}-h1")
+        self.assertNotEqual(name, generation_name(self.collection, label, SPACE_ID))
+        self.assertRegex(sample.sample_name(name), f"^{worker.GENERATION_PATTERN}$")
+        pin = self.lockfile.sources[self.source.name]
+        canonical = "\n".join((self.source.name, pin.sidecar_sha256, *sorted(pin.courts or ()),
+                               self.lockfile.pipeline, space, ""))
+        digest = inputs_hash(self.lockfile, self.collection, space, sources=(self.source,))
+        self.assertEqual(digest, hashlib.sha256(canonical.encode()).hexdigest())
+        bare = inputs_hash(self.lockfile, self.collection, SPACE_ID, sources=(self.source,))
+        self.assertNotEqual(digest, bare)
+        rate = sample.SAMPLE_FILL_PER_MILLION
+        self.assertNotEqual(sample.sample_inputs_hash(digest, label, rate), sample.sample_inputs_hash(bare, label, rate))
 
     def test_labels_and_acquisition_metadata_do_not_change_identity(self) -> None:
         pin = self.lockfile.sources[self.source.name]

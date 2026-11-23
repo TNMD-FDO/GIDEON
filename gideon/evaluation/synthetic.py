@@ -27,7 +27,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Final, Protocol
 
-from gideon.evaluation import judge
+from gideon.evaluation import judge, sampling
 from gideon.host import engine, enginesample
 from gideon.host.render.engine import GENERATOR
 from gideon.host.sysio import Host, PathLike
@@ -929,7 +929,7 @@ def citation_window(text: str, start: int, end: int) -> tuple[int, int]:
 
 
 def _proposal_body(
-    served_model_name: str, template: judge.JudgePrompt, *, slots: Mapping[str, str],
+    served_model_name: str, template: judge.JudgePrompt, *, slots: Mapping[str, str], held: sampling.HeldSet,
 ) -> Mapping[str, object]:
     return {
         "model": served_model_name,
@@ -938,7 +938,7 @@ def _proposal_body(
             {"role": "user", "content": template.user_template.format(**slots)},
         ],
         "max_tokens": PROPOSAL_MAX_TOKENS,
-        "temperature": 0,
+        **held.request_fields,
         "stream": False,
         "response_format": {
             "type": "json_schema",
@@ -948,7 +948,7 @@ def _proposal_body(
     }
 
 
-def _closed_book_body(served_model_name: str, question: str) -> Mapping[str, object]:
+def _closed_book_body(served_model_name: str, question: str, *, held: sampling.HeldSet) -> Mapping[str, object]:
     return {
         "model": served_model_name,
         "messages": [
@@ -956,7 +956,7 @@ def _closed_book_body(served_model_name: str, question: str) -> Mapping[str, obj
             {"role": "user", "content": question},
         ],
         "max_tokens": CLOSED_BOOK_MAX_TOKENS,
-        "temperature": 0,
+        **held.request_fields,
         "stream": False,
         "response_format": {
             "type": "json_schema",
@@ -991,54 +991,75 @@ def _parse(reply: engine.EngineReply, schema: Mapping[str, object]) -> dict[str,
     return document
 
 
+def _request(
+    io: Host, rendered_dir: PathLike, *, body: Mapping[str, object], max_time: int, held: sampling.HeldSet,
+) -> tuple[engine.EngineReply, int | None, int | None, float | None, int | None]:
+    def attempt(request_body: Mapping[str, object]) -> engine.EngineReply:
+        return engine.call_model_server(
+            io, rendered_dir, GENERATOR, path="/v1/chat/completions", body=request_body, max_time=max_time,
+        )
+
+    first = attempt(body)
+    _, finish_reason, prompt_tokens, completion_tokens = engine.completion_values(first)
+    if first.problem is not None or first.status != 200 or finish_reason != "length":
+        return first, prompt_tokens, completion_tokens, first.elapsed, None
+
+    retry = held.for_retry()
+    second = attempt({**body, **retry.request_fields})
+    _, _, retry_prompt_tokens, retry_completion_tokens = engine.completion_values(second)
+    return (
+        second,
+        judge.sum_present(prompt_tokens, retry_prompt_tokens),
+        judge.sum_present(completion_tokens, retry_completion_tokens),
+        judge.sum_present(first.elapsed, second.elapsed),
+        retry.seed,
+    )
+
+
 def propose(
     io: Host, rendered_dir: PathLike, *, served_model_name: str,
-    template: judge.JudgePrompt, slots: Mapping[str, str],
-) -> tuple[Proposal | judge.Failure, int | None, int | None, float | None]:
-    """Propose one case, returning its outcome, token counts, and elapsed seconds."""
+    template: judge.JudgePrompt, slots: Mapping[str, str], held: sampling.HeldSet,
+) -> tuple[Proposal | judge.Failure, int | None, int | None, float | None, int | None]:
+    """Propose one case, returning its outcome, engine figures, and any retry seed."""
 
     if set(slots) != set(template.slots):
         raise ValueError("proposal slots do not match template")
-    reply = engine.call_model_server(
-        io, rendered_dir, GENERATOR, path="/v1/chat/completions",
-        body=_proposal_body(served_model_name, template, slots=slots),
-        max_time=PROPOSAL_TIMEOUT_SECONDS,
+    reply, prompt_tokens, completion_tokens, elapsed, retry_seed = _request(
+        io, rendered_dir, body=_proposal_body(served_model_name, template, slots=slots, held=held),
+        max_time=PROPOSAL_TIMEOUT_SECONDS, held=held,
     )
     parsed = _parse(reply, template.schema)
-    _, _, prompt_tokens, completion_tokens = engine.completion_values(reply)
     outcome = parsed if isinstance(parsed, judge.Failure) else Proposal(
         parsed["question"], parsed["answer"], parsed.get("passage", ""),
     )
-    return outcome, prompt_tokens, completion_tokens, reply.elapsed
+    return outcome, prompt_tokens, completion_tokens, elapsed, retry_seed
 
 
 def answer_closed_book(
-    io: Host, rendered_dir: PathLike, *, served_model_name: str, question: str,
-) -> tuple[ClosedBook | judge.Failure, int | None, int | None, float | None]:
-    """Answer the bare question with no evidence, retaining engine figures."""
+    io: Host, rendered_dir: PathLike, *, served_model_name: str, question: str, held: sampling.HeldSet,
+) -> tuple[ClosedBook | judge.Failure, int | None, int | None, float | None, int | None]:
+    """Answer the bare question, returning the outcome, engine figures, and any retry seed."""
 
-    reply = engine.call_model_server(
-        io, rendered_dir, GENERATOR, path="/v1/chat/completions",
-        body=_closed_book_body(served_model_name, question),
-        max_time=CLOSED_BOOK_TIMEOUT_SECONDS,
+    reply, prompt_tokens, completion_tokens, elapsed, retry_seed = _request(
+        io, rendered_dir, body=_closed_book_body(served_model_name, question, held=held),
+        max_time=CLOSED_BOOK_TIMEOUT_SECONDS, held=held,
     )
     parsed = _parse(reply, _CLOSED_BOOK_SCHEMA)
-    _, _, prompt_tokens, completion_tokens = engine.completion_values(reply)
     outcome = parsed if isinstance(parsed, judge.Failure) else ClosedBook(parsed["answer"])
-    return outcome, prompt_tokens, completion_tokens, reply.elapsed
+    return outcome, prompt_tokens, completion_tokens, elapsed, retry_seed
 
 
 def read_closed_book(
     io: Host, rendered_dir: PathLike, *, served_model_name: str,
-    question: str, reference: str, candidate: str,
-) -> tuple[ClosedBook | judge.Failure, int | None, int | None, float | None]:
-    """Read the source-free answer through the judge and set its leakage label."""
+    question: str, reference: str, candidate: str, retry: sampling.HeldSet,
+) -> tuple[ClosedBook | judge.Failure, int | None, int | None, float | None, int | None]:
+    """Read the answer for its leakage label, returning engine figures and any retry seed."""
 
     grading = judge.grade(
         io, rendered_dir, served_model_name=served_model_name,
         prompt=READINGS["closed-book@1"],
         slots={"question": question, "reference": reference, "candidate": candidate},
-        max_tokens=READING_MAX_TOKENS, max_time=READING_TIMEOUT_SECONDS,
+        max_tokens=READING_MAX_TOKENS, max_time=READING_TIMEOUT_SECONDS, retry=retry,
     )
     if grading.failure is not None:
         # The judge's diagnostics can name a model-written finish reason.
@@ -1050,7 +1071,7 @@ def read_closed_book(
         score = grading.verdict.document["score"]
         assert type(score) is int
         outcome = ClosedBook(candidate, score, CLOSED_BOOK_LABEL if score >= CLOSED_BOOK_SCORE else None)
-    return outcome, grading.prompt_tokens, grading.completion_tokens, grading.elapsed_seconds
+    return outcome, grading.prompt_tokens, grading.completion_tokens, grading.elapsed_seconds, grading.retry_seed
 
 
 def retrace(text: str, passage: str) -> Retraced | Discard:

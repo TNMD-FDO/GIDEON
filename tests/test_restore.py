@@ -194,6 +194,7 @@ class FakeHost:
         source: str = "staging",
         names: Sequence[str] = (LOCAL_SET,),
         side_names: Sequence[str] = (LOCAL_SET,),
+        staging_siblings: Sequence[str] = (os.path.basename(backupset.STAGING),),
         remote_listing: str = "",
         remote_record: backupset.PushRecord | None = None,
         remote_records: Mapping[str, backupset.PushRecord] | None = None,
@@ -269,6 +270,7 @@ class FakeHost:
         self.source = source
         self.names = list(names)
         self.side_names = list(side_names)
+        self.staging_siblings = list(staging_siblings)
         self.sets_absent = sets_absent
         self.remote_listing = remote_listing
         self.remote_record = remote_record or backupset.PushRecord(
@@ -610,10 +612,18 @@ class FakeHost:
         self.files[os.fspath(path)] = text
 
     def exists(self, path: PathLike) -> bool:
-        return os.fspath(path) in self.files or (os.fspath(path) == os.fspath(cas.ROOT) and self.store_live is not None)
+        key = os.fspath(path)
+        if key.startswith(f"{backupset.STAGING}.replaced-"):
+            commands = [argv for argv, _, _, _ in self.calls]
+            return ("mv", backupset.STAGING, key) in commands and not (
+                ("rm", "-rf", key) in commands or ("mv", key, backupset.STAGING) in commands
+            )
+        return key in self.files or (key == os.fspath(cas.ROOT) and self.store_live is not None)
 
     def listdir(self, path: PathLike) -> list[str]:
         key = os.fspath(path)
+        if key == os.path.dirname(backupset.STAGING):
+            return list(self.staging_siblings)
         if key == backupset.SETS_DIR:
             if self.sets_absent:
                 raise FileNotFoundError(key)
@@ -726,6 +736,14 @@ class RenderedRestoreCase(unittest.TestCase):
 
     def _row(self, output: str, name: str) -> str:
         return next(line for line in output.splitlines() if line.startswith(name + ":"))
+
+    def _detail(self, fake: FakeHost) -> dict[str, Any]:
+        sql = next(
+            request for _, request, _, _ in fake.calls
+            if request and "\\set v_kind 'restore'" in request
+        )
+        line = next(line for line in sql.splitlines() if line.startswith("\\set v_detail '"))
+        return json.loads(line.removeprefix("\\set v_detail '").removesuffix("'"))
 
     def _assert_not_stopped(self, fake: FakeHost) -> None:
         self.assertFalse(any(argv[-1] == "down" for argv, _, _, _ in fake.calls))
@@ -922,6 +940,18 @@ class RegistrySeed(RenderedRestoreCase):
 
 
 class RestoreContracts(RenderedRestoreCase):
+    def _assert_kept_staging(self, fake: FakeHost, row: str, fix: str) -> None:
+        replaced = f"{backupset.STAGING}.replaced-{backupset.nightly_label(NOW)}"
+        self.assertIn(
+            f"; the staging from before this restore is kept at {replaced} "
+            "and removed by the next successful restore",
+            row,
+        )
+        self.assertTrue(row.endswith(f"Fix: {fix}"), row)
+        commands = [argv for argv, _, _, _ in fake.calls]
+        self.assertIn(("mv", backupset.STAGING, replaced), commands)
+        self.assertNotIn(("rm", "-rf", replaced), commands)
+
     def test_refuses_while_a_foreign_holder_has_the_lock(self) -> None:
         fake = make_host()
         holder = backuplock.Record("backup push", os.getpid() + 1, NOW)
@@ -1064,10 +1094,11 @@ class RestoreContracts(RenderedRestoreCase):
             "stop: ok — stopped the GIDEON Compose project; no host registry: not the build box",
             output,
         )
-        self.assertIn(
+        self.assertEqual(
+            self._row(output, "stores"),
             "stores: ok — frontend and ingress down; the store tier running; qdrant: no snapshot in the set; opensearch: no snapshot in the set; level: no generation recorded; no host registry: not the build box",
-            output,
         )
+        self.assertEqual(self._detail(fake)["trees_removed"], [])
         self.assertIn(
             "next: ok — frontend and ingress down; the store tier running; no host registry: not the build box",
             output,
@@ -1232,10 +1263,9 @@ class RestoreContracts(RenderedRestoreCase):
             )
 
         self.assertEqual(code, 1, out.getvalue())
-        self.assertIn("stores: refuse", out.getvalue())
-        replaced = f"{backupset.STAGING}.replaced-{REMOTE_SNAPSHOT}"
-        self.assertTrue(any(argv[0] == "mv" and argv[-1] == replaced for argv, _, _, _ in fake.calls))
-        self.assertFalse(any(argv == ("rm", "-rf", replaced) for argv, _, _, _ in fake.calls))
+        row = self._row(out.getvalue(), "stores")
+        self.assertTrue(row.startswith("stores: refuse"), row)
+        self._assert_kept_staging(fake, row, stack.logs_fix(RENDERED, "qdrant"))
 
     def test_active_registry_on_an_undeclared_host_refuses_before_any_stage(self) -> None:
         fake = make_host(registry_active=True)
@@ -2077,6 +2107,134 @@ class RestoreContracts(RenderedRestoreCase):
         self.assertIn("moved back", out.getvalue())
         self.assertFalse(any("pgbackrest" in call[0] and "restore" in call[0] for call in fake.calls))
 
+    def test_target_files_refusal_names_the_kept_staging(self) -> None:
+        fake = make_host(source="target", remote_listing=f"{REMOTE_SNAPSHOT}\t1\n")
+        run = fake.run
+
+        def fail_put_back(argv: Command, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            result = run(argv, **kwargs)
+            if tuple(argv[:3]) == ("rsync", "-a", "--delete"):
+                return completed(argv, returncode=1, stderr="fictitious put-back failure")
+            return result
+
+        with patch.object(fake, "run", side_effect=fail_put_back):
+            code, output, _ = self.run_restore(fake)
+
+        self.assertEqual(code, 1, output)
+        row = self._row(output, "files")
+        self.assertTrue(row.startswith("files: refuse"), row)
+        self.assertIn("fictitious put-back failure", row)
+        self._assert_kept_staging(fake, row, f"Run {report.command('apply')}, then retry.")
+
+    def test_target_postgres_refusal_names_the_kept_staging(self) -> None:
+        fake = make_host(
+            source="target", remote_listing=f"{REMOTE_SNAPSHOT}\t1\n", info_has_label=False,
+        )
+        code, output, _ = self.run_restore(fake)
+
+        self.assertEqual(code, 1, output)
+        row = self._row(output, "postgres")
+        self.assertTrue(row.startswith("postgres: refuse"), row)
+        self.assertIn(f"the repository holds no backup {fake.manifest_value.pgbackrest_label}", row)
+        self._assert_kept_staging(fake, row, f"Run {report.command('backup run')}, then retry.")
+
+    def test_successful_restore_sweeps_only_stale_staging_siblings(self) -> None:
+        staging = os.path.basename(backupset.STAGING)
+        parent = os.path.dirname(backupset.STAGING)
+        stale_names = [f"{staging}.fetch-fictitious", f"{staging}.replaced-fictitious"]
+        stale = [os.path.join(parent, name) for name in stale_names]
+        own_name = f"{staging}.replaced-{backupset.nightly_label(NOW)}"
+        own = os.path.join(parent, own_name)
+        for source in ("staging", "target"):
+            with self.subTest(source=source):
+                siblings = [staging, "bulk", stale_names[1], f"{staging}.keep", stale_names[0]]
+                expected_removals = list(stale)
+                if source == "target":
+                    siblings.insert(0, own_name)
+                    expected_removals.append(own)
+                fake = make_host(
+                    source=source, remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+                    staging_siblings=siblings,
+                )
+
+                code, output, _ = self.run_restore(fake)
+
+                self.assertEqual(code, 0, output)
+                removed = [argv[2] for argv, _, _, _ in fake.calls if argv[:2] == ("rm", "-rf")]
+                self.assertEqual(removed, expected_removals)
+                row = self._row(output, "stores")
+                for path in expected_removals:
+                    self.assertEqual(row.count(path), 1, row)
+                detail = self._detail(fake)
+                self.assertEqual(detail["trees_removed"], [*stale, own] if source == "target" else stale)
+                self.assertIs(detail["replaced_removed"], source == "target")
+
+    def test_staging_sweep_failures_refuse_stores_without_audit(self) -> None:
+        parent = os.path.dirname(backupset.STAGING)
+        staging = os.path.basename(backupset.STAGING)
+        stale = f"{backupset.STAGING}.fetch-fictitious"
+        fix = f"Run {report.command('apply')}, then retry."
+        for operation in ("listdir", "rm"):
+            for source in ("target", "staging"):
+                with self.subTest(operation=operation, source=source):
+                    fake = make_host(
+                        source=source, remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+                        staging_siblings=[staging, os.path.basename(stale)],
+                    )
+                    listdir, run = fake.listdir, fake.run
+
+                    def deny_listing(
+                        path: PathLike, *, operation: str = operation, listdir=listdir,
+                    ) -> list[str]:
+                        if operation == "listdir" and os.fspath(path) == parent:
+                            raise PermissionError("fictitious listing failure")
+                        return listdir(path)
+
+                    def deny_removal(
+                        argv: Command, *, operation: str = operation, run=run, **kwargs: Any,
+                    ) -> subprocess.CompletedProcess[str]:
+                        result = run(argv, **kwargs)
+                        if operation == "rm" and tuple(argv) == ("rm", "-rf", stale):
+                            return completed(argv, returncode=1, stderr="fictitious removal failure")
+                        return result
+
+                    with (
+                        patch.object(fake, "listdir", side_effect=deny_listing),
+                        patch.object(fake, "run", side_effect=deny_removal),
+                    ):
+                        code, output, _ = self.run_restore(fake)
+
+                    self.assertEqual(code, 1, output)
+                    row = self._row(output, "stores")
+                    self.assertTrue(row.startswith("stores: refuse"), row)
+                    if operation == "listdir":
+                        self.assertIn(f"cannot list {parent}: fictitious listing failure", row)
+                    else:
+                        self.assertIn(stale, row)
+                        self.assertIn("fictitious removal failure", row)
+                    if source == "target":
+                        self._assert_kept_staging(fake, row, fix)
+                    else:
+                        self.assertNotIn("the staging from before this restore", row)
+                        self.assertTrue(row.endswith(f"Fix: {fix}"), row)
+                    self.assertFalse(any(
+                        request and "\\set v_kind 'restore'" in request for _, request, _, _ in fake.calls
+                    ))
+
+    def test_refused_audit_after_removal_does_not_name_the_staging_kept(self) -> None:
+        fake = make_host(source="target", remote_listing=f"{REMOTE_SNAPSHOT}\t1\n")
+        replaced = f"{backupset.STAGING}.replaced-{backupset.nightly_label(NOW)}"
+
+        with patch.object(restore.audit, "write_rows", return_value="fictitious audit failure"):
+            code, output, _ = self.run_restore(fake)
+
+        self.assertEqual(code, 1, output)
+        row = self._row(output, "stores")
+        self.assertTrue(row.startswith("stores: refuse — restore audit write failed"), row)
+        self.assertIn(("rm", "-rf", replaced), [argv for argv, _, _, _ in fake.calls])
+        self.assertIn(f"; removed replaced staging directory {replaced}", row)
+        self.assertNotIn("the staging from before this restore", row)
+
     def test_symlink_entries_are_reowned_without_dereferencing(self) -> None:
         value = manifest()
         link = backupset.Entry("link-to-elsewhere", "l", 1, 1000, 1000, 0o777, 100.0, None)
@@ -2216,14 +2374,6 @@ class IndexRestore(RenderedRestoreCase):
             )
         return code, out.getvalue()
 
-    def _detail(self, fake: FakeHost) -> Mapping[str, Any]:
-        sql = next(
-            request for _, request, _, _ in fake.calls
-            if request and "\\set v_kind 'restore'" in request
-        )
-        line = next(line for line in sql.splitlines() if line.startswith("\\set v_detail '"))
-        return json.loads(line.removeprefix("\\set v_detail '").removesuffix("'"))
-
     def test_level_clauses_and_audit_follow_recovery_before_replaced_staging_cleanup(self) -> None:
         live = generation("live")
         built = generation("built", label="corpus-2099-02-03")
@@ -2254,7 +2404,9 @@ class IndexRestore(RenderedRestoreCase):
         clauses = stores_line.split("; ")
         recovery_end = next(i for i, clause in enumerate(clauses) if clause.startswith("opensearch:"))
         level_clauses = [clause for clause in clauses if clause.startswith("level ")]
-        self.assertEqual(clauses[recovery_end + 1:-1], level_clauses)
+        replaced = f"{backupset.STAGING}.replaced-{backupset.nightly_label(NOW)}"
+        self.assertEqual(clauses[recovery_end + 1:-2], level_clauses)
+        self.assertEqual(clauses[-2], f"removed replaced staging directory {replaced}")
         self.assertEqual(len(level_clauses), len(rows))
         self.assertTrue(level_clauses[0].startswith(f"level {live.gen_id}: live, whole"))
         self.assertIn(f"level {built.gen_id}: built -> building", level_clauses[1])
@@ -2287,7 +2439,6 @@ class IndexRestore(RenderedRestoreCase):
         demotion = next(i for i, (_, request, _, _) in enumerate(calls) if request and "DO $demotion$" in request)
         alias_write = next(i for i, (_, request, _, _) in enumerate(calls)
                            if request and 'request = "POST"' in request and "/_aliases" in request)
-        replaced = f"{backupset.STAGING}.replaced-{REMOTE_SNAPSHOT}"
         removed = next(i for i, (argv, _, _, _) in enumerate(calls) if argv == ("rm", "-rf", replaced))
         audit_call = next(i for i, (_, request, _, _) in enumerate(calls) if request and "\\set v_kind 'restore'" in request)
         self.assertLess(recovery, read)
@@ -2899,7 +3050,11 @@ class RestoreBySetLabel(RenderedRestoreCase):
         with contextlib.redirect_stdout(out):
             code = restore.run_restore(argparse.Namespace(source="staging", at=None), host=fake, now=NOW)
         self.assertEqual(code, 1)
-        self.assertIn(f"postgres: refuse — the repository holds no backup {manifest().pgbackrest_label}", out.getvalue())
+        self.assertEqual(
+            self._row(out.getvalue(), "postgres"),
+            f"postgres: refuse — the repository holds no backup {fake.manifest_value.pgbackrest_label} "
+            f"for the selected set Fix: Run {report.command('backup run')}, then retry.",
+        )
         self.assertFalse(any("restore" in call[0] and "pgbackrest" in call[0] and "--delta" in call[0] for call in fake.calls))
 
     def test_set_is_refused_with_at_or_the_target_source(self) -> None:
@@ -2942,11 +3097,6 @@ class ArchiveEndRestore(RenderedRestoreCase):
                 host=fake, now=NOW, sleep=sleeps.append,
             )
         return code, out.getvalue(), err.getvalue(), sleeps
-
-    def _detail(self, fake: FakeHost) -> dict[str, Any]:
-        sql = next(request for _, request, _, _ in fake.calls if request and "\\set v_kind 'restore'" in request)
-        line = next(line for line in sql.splitlines() if line.startswith("\\set v_detail '"))
-        return json.loads(line.removeprefix("\\set v_detail '").removesuffix("'"))
 
     def test_target_source_refuses_before_select_or_ssh(self) -> None:
         fake = make_host(source="target")

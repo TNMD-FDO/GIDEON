@@ -379,7 +379,7 @@ class WorkerBlock(unittest.TestCase):
             (
                 "gideon/worker", "gideon/host/cas.py", "gideon/host/sysio.py",
                 "gideon/host/report.py", "gideon/casecite", "gideon/extraction",
-                "gideon/host/index/sample.py",
+                "gideon/host/index/sample.py", "gideon/host/index/header.py",
             ),
             "Fix: declare the worker package and its store dependencies.",
         )

@@ -783,6 +783,7 @@ def _reading_progress(outcome: _Outcome) -> str:
         f"prompt_tokens {_figure(grading.prompt_tokens)}; "
         f"completion_tokens {_figure(grading.completion_tokens)}; "
         f"seconds {_figure(grading.elapsed_seconds)}"
+        + ("" if grading.retry_seed is None else f"; retried seed {grading.retry_seed}")
     )
 
 
@@ -791,6 +792,7 @@ def _read_controls(
 ) -> list[_Outcome]:
     prompt_id = context.judge_prompt_id
     assert prompt_id is not None
+    assert context.judge_retry is not None
     prompt = judge.PROMPT_REGISTRY[prompt_id]
     assert context.served_model_name is not None
     read_outcomes: list[_Outcome] = []
@@ -809,6 +811,7 @@ def _read_controls(
             served_model_name=context.served_model_name,
             prompt=prompt,
             slots={"question": question, "candidate": outcome.answer},
+            retry=context.judge_retry,
         )
         read_outcome = replace(outcome, answer=None, reading=grading)
         read_outcomes.append(read_outcome)

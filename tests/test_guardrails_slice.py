@@ -27,6 +27,7 @@ from test_evaluation_run import (
     _assert_no_verdict_line,
     _invoke,
     _run_kwargs,
+    fixture_judge_retry,
 )
 from test_judge import engine_output, false_refusal_content
 from test_turns import PASSWORD, Frontend
@@ -34,7 +35,7 @@ from test_turns_door import RENDERED_COMPOSE, _served_name
 from test_turns_door import FakeHost as DoorHost
 
 from gideon import guardrail
-from gideon.evaluation import command, guardrails_slice, stacks, window
+from gideon.evaluation import command, guardrails_slice, sampling, stacks, window
 from gideon.evaluation.evalset import (
     SET_ROOT,
     TIER_2_CATEGORY,
@@ -64,9 +65,11 @@ class JudgingDoorHost(DoorHost):
         readings: Mapping[str, tuple[str, int, int, float]] | None = None,
         *,
         default: tuple[str, int, int, float] | None = None,
+        truncate_first: bool = False,
     ) -> None:
         super().__init__()
         self.readings = dict(readings or {})
+        self.truncate_first = truncate_first
         self.default = default or (
             false_refusal_content(withheld=False, reason="A visibly fictitious reading."),
             17,
@@ -104,12 +107,14 @@ class JudgingDoorHost(DoorHost):
                 reply, prompt_tokens, completion_tokens, elapsed = self.readings.get(
                     candidate, self.default
                 )
+                truncated = self.truncate_first and len(self.judge_requests) == 1
                 command = tuple(str(value) for value in argv)
                 return subprocess.CompletedProcess(
                     command,
                     0,
                     engine_output(
-                        reply,
+                        None if truncated else reply,
+                        finish_reason="length" if truncated else "stop",
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
                         elapsed=elapsed,
@@ -383,6 +388,7 @@ def _fixture_turns(
         "false-refusal@1",
         1,
         lambda _line: None,
+        judge_retry=fixture_judge_retry(),
         turns=access,
         checkout=checkout,
     )
@@ -1587,6 +1593,30 @@ class GuardrailsRunner(unittest.TestCase):
             self.assertNotIn(answer, observed)
         self.assertNotIn(SENTINEL, observed)
 
+    def test_control_retry_seed_reaches_the_judge_row_and_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            answers, declined_id, _disclaimed_id, _positive_id = _decline_answers(loaded)
+            host = JudgingDoorHost(truncate_first=True)
+            _host, _frontend, context = _fixture_turns(loaded, host=host)
+            candidate = answers[declined_id]
+            host.answers[declined_id] = candidate
+            progress: list[str] = []
+            result = _run_fixture(loaded, "guardrails", replace(context, progress=progress.append))
+
+        retry = context.judge_retry
+        assert retry is not None
+        self.assertTrue(result.verdict, result.report)
+        (first_answer, greedy), (second_answer, sampled) = host.judge_requests
+        self.assertEqual((first_answer, second_answer), (candidate, candidate))
+        self.assertEqual(sampled, {**greedy, **sampling.THINKING_SAMPLING, "seed": retry.seed})
+        row = next(row for row in result.results if row.case_id == declined_id)
+        assert row.judge is not None
+        self.assertEqual(row.judge["retry_seed"], retry.seed)
+        self.assertNotIn("retry_seed", row.metrics)
+        line, = (line for line in progress if line.startswith(f"guardrails judge {declined_id}:"))
+        self.assertTrue(line.endswith(f"; retried seed {retry.seed}"))
+
     def test_failed_read_is_unread_and_does_not_change_family_verdict(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             loaded = _small_set(Path(directory) / "eval-v1")
@@ -2184,6 +2214,9 @@ class GuardrailsRunner(unittest.TestCase):
 
 class GuardrailsCommand(unittest.TestCase):
     """The CLI resolves turn access before dispatching and keeps row failures local."""
+
+    def setUp(self) -> None:
+        self.enterContext(patch.object(command.sampling, "hold_running", return_value=fixture_judge_retry()))
 
     def test_command_uses_its_checkout_seed_without_a_set_override(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -41,6 +41,7 @@ from gideon.host.index import (
     smoke,
     treatment,
 )
+from gideon.host.index import header as context_header
 from gideon.host.index import record as indexrecord
 from gideon.host.index.sample import SampleInputs, sample_inputs_hash, sample_name
 from gideon.host.render.ci import CI_QDRANT_DATA_ROOT, CI_ROOT, CI_SECRETS_DIR
@@ -205,7 +206,7 @@ def chunk_guards(
 def collection_inputs(
     loaded: artifacts.CorpusArtifacts, lockfile: Lockfile,
     collection: generations.Collection, registry: Sequence[SourceDefinition],
-    target: engine._EmbedTarget, command_path: str,
+    target: engine._EmbedTarget, command_path: str, *, header: str | None = context_header.RELEASE_HEADER,
 ) -> dense.DenseInputs | Problem:
     """Compute one collection's scope, generation identity, and embedding inputs."""
 
@@ -213,7 +214,11 @@ def collection_inputs(
     if isinstance(scope, Problem):
         return scope
     snapshot, courts, geography = scope
-    space = target.space_id
+    try:
+        space = context_header.embedding_space(target.space_id, header)
+    except ValueError:
+        return Problem("embedding header is invalid",
+                       f"Use a registered header id, then run {report.command(command_path)} again.")
     try:
         name = generations.generation_name(collection.name, lockfile.label, space)
     except ValueError:
@@ -223,7 +228,7 @@ def collection_inputs(
         name, collection.name, lockfile.label, snapshot,
         courts, geography, lockfile.pipeline, space,
         generations.inputs_hash(lockfile, collection.name, space, sources=registry),
-        target.served_name, target.dimensions,
+        target.served_name, target.dimensions, header=header,
     )
 
 
@@ -238,7 +243,7 @@ def _preconditions(
     args: argparse.Namespace, host: IndexHost, rendered_dir: PathLike,
     checkout: Path, registry: Sequence[SourceDefinition], site_path: PathLike,
     command_path: str, *, sample: SampleInputs | None = None,
-    production_dir: PathLike | None = None,
+    production_dir: PathLike | None = None, header: str | None = context_header.RELEASE_HEADER,
 ) -> _Preconditions | Problem:
     collection = next((item for item in generations.COLLECTIONS if item.name == args.collection), None)
     if collection is None:
@@ -321,7 +326,7 @@ def _preconditions(
     guarded = chunk_guards(host, checkout, site_path, command_path, profile=profile)
     if isinstance(guarded, Problem):
         return guarded
-    inputs = collection_inputs(loaded, lockfile, collection, registry, target, command_path)
+    inputs = collection_inputs(loaded, lockfile, collection, registry, target, command_path, header=header)
     if isinstance(inputs, Problem):
         return inputs
     resume_generation = None
@@ -923,7 +928,7 @@ def run_index_build(
     work_root: PathLike = WORK_ROOT,
     sleep: Callable[[float], None] = time.sleep, monotonic: Callable[[], float] = time.monotonic,
     sources: Sequence[SourceDefinition] = SOURCES,
-    dense_limit: int | None = None, sample: SampleInputs | None = None,
+    dense_limit: int | None = None, sample: SampleInputs | None = None, header: str | None = context_header.RELEASE_HEADER,
 ) -> int:
     """Check inputs, record an identity, cluster, build both indexes, materialize treatment, and write the report."""
 
@@ -971,7 +976,7 @@ def run_index_build(
             lock_detail = "; engine lock taken" if engine_lock.state is backuplock.State.HELD else "; engine lock held by this process"
         prepared = _preconditions(
             args, io, rendered_dir, root, sources, site_path, command_path,
-            sample=sample, production_dir=production_dir if sample is not None else None,
+            sample=sample, production_dir=production_dir if sample is not None else None, header=header,
         )
         if isinstance(prepared, Problem):
             return _refuse(active_stage[0], prepared, command_path=command_path if sample is not None else None)

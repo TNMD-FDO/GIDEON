@@ -618,7 +618,10 @@ the budget. A shorter text is shown whole. Attribution applies this window
 rule to the target section's slice. The `@2` user templates add
 `Case name:` after the reporter cites, using the recorded name stripped of
 surrounding whitespace. `lookup@1` still takes its four original slots. The
-proposal uses thinking on and temperature 0; it writes no stored coordinates.
+proposal uses thinking on and samples at the pinned snapshot's thinking-mode
+settings under the batch's `--seed`. A reply that exhausts its reserve is asked
+once more under the next seed, and a proposal still unfinished is discarded as
+`truncated`. The proposal writes no stored coordinates.
 
 The retrace searches the whole canonical text, even when the prompt showed
 only its head. It NFC-normalises the proposed passage and folds whitespace
@@ -635,14 +638,16 @@ Treatment uses the recorded sentence and proposes no passage.
 
 After the passage is fixed and its section and wording checks pass, the
 generator answers the bare question with no
-evidence, thinking on and temperature 0. The reading `closed-book@1` in
+evidence, thinking on, sampled as the proposal is and asked once more under the
+next seed when it exhausts its reserve. The reading `closed-book@1` in
 `READINGS`, with its pinned `READING_DIGESTS` in the same module, grades that
 answer against the expected answer, assembled by code for `trap@4`:
 3 answers, 2 partly answers,
 1 merely related, 0 wrong, no answer, or no answer within the closed-book
 reserve. It penalises nothing for missing
-citations. A score of 3 sets `closed-book-answerable`; the label partitions
-results and gates nothing. When the closed-book answer exhausts its reserve,
+citations. The reading's first request is greedy; a reading that exhausts its
+reserve is asked once more, sampled under the batch's `--seed`. A score of 3 sets `closed-book-answerable`; the label partitions
+results and gates nothing. When the closed-book answer still exhausts its reserve after its retry,
 code keeps the case at score 0 without a label, stores the fixed text
 `(no answer within the closed-book reserve)`, and skips the reading request.
 Every other failed answer or reading discards the candidate as
@@ -812,7 +817,8 @@ python3 -m tools.synthetic.intake <batch-dir>/manifest.json <batch-dir>/marks.tx
 `--count` defaults to the category's planned count: `lookup` 40, `retrieval` 80,
 `synthesis` 50, `existence` 20, `treatment` 30, `section-attribution` 40,
 `unanswerable` 40, `trap` 25, and `poisoned-premise` 15;
-`--seed` is required. For treatment and trap, `--generation` names a production caselaw
+`--seed` is required, lies between 0 and 2⁶³ − 1, and fixes both the draws and
+the generator's sampling. For treatment and trap, `--generation` names a production caselaw
 generation without the sample suffix; other categories require a sample name.
 Intake enforces the same category rule on the manifest's `generation`.
 The draft stops when that many
@@ -835,7 +841,7 @@ The four draft outputs stay outside the checkout:
 | `sheet.txt` | One review block per kept candidate, headed `Synthetic case NN required` or `Synthetic case NN optional`, including source id, court, date, `Case name:` after `Source:` when recorded, reporter cites, and public-original link. Treatment prints `Relation:` with its actor, followed by `Listed: <row id>` for a listed pair, above the header. The cited case's parties, citations, court without a decision date, public-original link, and edge facts appear inside the block. After `Edge:`, `Citations:` lists the sentence's resolved case citations without added dates, each with its cluster, marking the cited case and any reported actor; `Correct:` states the mark form and allowed verbs and qualifiers, so the reader can name a correction from the recorded sentence. Trap prints `Listed: <row id>` above the header. Near-miss blocks add `Near miss:` after `Original:`: the asked court and map name, invented premise, or `overruled by <overruling case name> (<year>)`, with citations and source id for a pair, followed by the behavior word. A trap pair then adds `Overruling window: sha256 <hash> [<start>, <end>) anchor [<start>, <end>)` and the canonical window's text. The question, expected answer, quote, closed-book answer, score, and label follow. |
 | `drafts.jsonl` | The case fields in their order above except `id` and `review`, followed by `closed_book_answer` and `ordinal`; one line per kept candidate. |
 | `marks.template.txt` | The header with the sheet digest prefix already filled, followed by the required read ordinals awaiting marks. |
-| `manifest.json` | Format 5, set root and digest, category file prefix pin or absence, template and reading ids and digests, generation, seed, asked count, read share and ordinals, entries, discards, sheet digest, and sheet byte count. Each entry records its ordinal, source id, canonical hash, document id, coordinates, quote length and hash, closed-book score and label, `listed` (the known-overruled row id for a trap pair or matching treatment pair, otherwise null), `citations`, and exact drafts-line hash. For treatment, `citations` is the non-empty list of distinct resolved case-citation cluster ids in sentence order, including the cited cluster and any integer actor; it is null for every other category. These ids hold a correction to the sentence's recorded citations. No case name, raw citation text, question, answer, quote, or overruling-window text is in the manifest. |
+| `manifest.json` | Format 6, set root and digest, category file prefix pin or absence, template and reading ids and digests, generation, seed, retry seed (the seed plus one, wrapping to 0 past the bound), asked count, read share and ordinals, entries, discards, sheet digest, and sheet byte count. Each entry records its ordinal, source id, canonical hash, document id, coordinates, quote length and hash, closed-book score and label, `listed` (the known-overruled row id for a trap pair or matching treatment pair, otherwise null), `citations`, `retried` (the kept case's requests asked a second time, among `proposal`, `answer`, and `reading` in that order), and exact drafts-line hash. For treatment, `citations` is the non-empty list of distinct resolved case-citation cluster ids in sentence order, including the cited cluster and any integer actor; it is null for every other category. These ids hold a correction to the sentence's recorded citations. No case name, raw citation text, question, answer, quote, or overruling-window text is in the manifest. |
 
 Each discard has `reason`, `source_id`, `edge`, and `kind`, in that order.
 `edge` is null, a citation id, or a trap pair's listed row id, each id of 64 lowercase hexadecimal characters;
@@ -958,8 +964,12 @@ for trap. Kept rows name the asked court id, invented caption, or listed row id
 respectively. The final draft row is:
 
 ```text
-summary: kept N, discarded N (<reason>=n, …), closed-book-answerable N, engine S s, prompt tokens N, completion tokens N
+summary: kept N, discarded N (<reason>=n, …), closed-book-answerable N, engine S s, prompt tokens N, completion tokens N, proposals retried N at seed R, unfinished N, answers retried N at seed R, unfinished N, readings retried N at seed S
 ```
+
+The retry counts cover every candidate consumed, kept or discarded. `R` is the
+manifest's retry seed and `S` the batch's seed; `unfinished` counts the requests
+that exhausted their reserve again on the retry.
 
 Treatment inserts `kinds negative=n, caution=n, none=n, performed=n, reported=n,
 listed=n, unlisted=n,` after the discard
@@ -985,7 +995,7 @@ Use NN correct <key>=<value> … | <expected answer> with keys among actor, verb
 |---|---|---|
 | Draft `set` | Root is required, the set has findings, or the category has no registered synthetic shape and template. | Use the sudo draft command, restore the set, or choose a synthetic category from the table, respectively. |
 | Draft `write` | The output path is inside the checkout, not a directory, or not empty. | Choose a new, empty output directory outside the checkout. |
-| Draft `lock` / `engine` | The engine lock is busy, the host has no GPU, or the site or engine cannot be resolved. | Follow the printed lock fix, use the GPU box, or restore the site and engine as directed. |
+| Draft `lock` / `engine` | The engine lock is busy, the host has no GPU, or the site or engine cannot be resolved; the running generator's repository or revision differs from the checkout's pin; or the running snapshot's `generation_config.json` cannot be read or its sampling keys differ from the draft's. | Follow the printed lock fix, use the GPU box, or restore the site and engine as directed. For the pin, run `sudo python3 -m gideon apply` from the checkout holding the intended model pin, or run the draft from the checkout the box runs. For the snapshot, run `sudo python3 -m gideon models pull` to restore the pinned snapshot, or after a generator bump correct the sampling constants to the new model card's thinking-mode settings, as printed. |
 | Draft `generation` | Treatment or trap has no live production caselaw generation, a named generation is ineligible or is a sample, or the generation record cannot be read. Other categories require an eligible sample and its manifest. | For treatment and trap, run `gideon index promote <generation>` for a production generation, or name a `built` or `live` production generation with `--generation`. For other categories, run `gideon index build caselaw --sample` for a missing sample. Follow the printed `apply` and record fix for an unreadable record. |
 | Draft `generation` | Trap's generation has no build report, no treatment entry, or a null treatment snapshot. | Name a production caselaw generation whose build report records a treatment snapshot with `--generation`, then retry. Follow the printed fix if the report cannot be read. |
 | Draft `pairs` | Listed pair rows are invalid or unreadable, or an overruling citation's span exceeds its canonical text. | Follow the printed record fix or restore the canonical object, then retry. |
@@ -1068,6 +1078,10 @@ above. `Read` and `Rejected` are M and R from intake's
 Discards and the closed-book count come from the draft summary; the reader is
 the CSA role id. A category with no accepted case has a zero split count
 and no committed category file.
+
+The batches dated 2026-11-09 and earlier were drafted with the proposal and the
+closed-book answer decoded greedily, thinking on; a format-6 manifest marks a
+sampled batch.
 
 | Date | Category | Template | Generation | Seed | Asked | Kept | Read | Rejected | Accepted | Corrected | Discards by reason | Closed-book-answerable | Reader | Held out | Propagated |
 |---|---|---|---|---:|---:|---:|---:|---:|---:|---|---|---:|---|---:|---|
@@ -1233,7 +1247,7 @@ today, so every harvest case here is unsigned.
 
 ### The drafts file
 
-The slice 3 draft generator writes the drafts file. It is UTF-8 JSONL kept
+`python3 -m tools.signoffs.draft` writes the drafts file. It is UTF-8 JSONL kept
 **outside the checkout**, one object per line, with these closed keys in this
 order:
 
@@ -1290,6 +1304,105 @@ roster position, and page format. A change to any of those makes an old marks
 file refuse rather than join the set. The intake recomputes every packet digest
 from the manifest and refuses a manifest whose stored digest does not
 recompute.
+
+### Drafting answers, for a CSA
+
+Run the draft on the GPU box as root from the checkout. First run
+the lister on its own and wait for `live: none`.
+
+    python3 -m tools.proofs
+
+Then run the draft with a new or empty directory outside the checkout, under a
+directory your own account owns: both files are handed to that owner, and the
+`out` stage refuses a destination whose nearest existing directory belongs to
+root or another account. This example uses an invented directory.
+
+    sudo python3 -B -m tools.signoffs.draft --out /home/example-csa/drafts-1
+
+The default is every active unsigned case and the live production caselaw
+generation. Repeat `--case <id>` to select cases. Use `--generation <name>` to
+select a built or live production caselaw generation. Use `--seed <int>` to
+choose the generator's sampling seed. The default seed is `0`.
+
+The stage rows appear on stdout in this order.
+
+1. `set` loads the set and prints the wanted count and set digest.
+2. `candidates` finds each case's active judgment query by seed and ranks its primary grade-2 or grade-3 passages, highest grade first.
+3. `out` checks the destination. The check runs again under the lock before any write.
+4. `lock` claims the engine lock, released when the command ends.
+5. `engine` checks the running generator against the checkout's pin and checks the sampling settings against the running snapshot's `generation_config.json`. It compares `min_p` when the snapshot lists it. The row prints the model identifier, `temperature`, `top_p`, `top_k`, `min_p`, and the seed.
+6. `generation` checks each candidate against the manifest and counts `absent` sources and `hash-changed` candidates.
+7. `facts` reads the record for the remaining sources and builds their captions.
+8. `prior` counts drafts carried for wanted cases with the same prompt, model, and generation.
+9. `draft` writes `drafts.jsonl` with the carried lines, or empty, before asking the generator. It checks the offsets in rank order, shows up to twelve valid passages per case, and rewrites the file atomically after each draft.
+10. `write` writes the content-free `summary.json` and prints the counts, engine figures, and the drafts file's line count and SHA-256.
+
+Keep both files outside the checkout. The drafts file holds answers and
+passage text and has mode `0600`. In `summary.json`, `sampling` follows
+`prompt_digest` and records the four sampling settings and the seed for this
+run's own requests. A carried draft's seed is in the summary of the run that
+drafted it. A run that ended before its summary records its seed only in its
+`engine` row, so keep each run's stdout until its drafts are signed.
+
+A case with no passage is listed by id and reason.
+
+- `no-twin` — No active judgment query has the case's seed.
+- `no-graded-passage` — The twin has no primary grade of 2 or 3.
+- `not-in-generation` — Every candidate's source is absent from the manifest or its hash differs.
+- `span-outside-text` — Every remaining candidate has offsets outside its canonical text.
+
+A failed generator request or unusable reply leaves the case `pending`.
+The command records its failure code, seconds, and any available HTTP error
+status, token counts, and problem line, then continues to the next case. It
+writes the summary before refusing for pending cases. Read that evidence
+before retrying. If any pending case has code `http-status`, read the
+generator's log with `docker compose -f /etc/gideon/rendered/compose.yaml logs gideon-generator`,
+correct the cause, and retry with the same seed recorded in `summary.json`.
+For other pending codes, retry with another seed.
+
+Read the lister again, then use the previous directory as `--prior` and give
+the retry a new `--out`. This example retries a run made with the default seed
+using a different seed.
+
+    sudo python3 -B -m tools.signoffs.draft --out /home/example-csa/drafts-2 --prior /home/example-csa/drafts-1 --seed 1
+
+Keep the same `--generation` and `--case` selections if supplied. The retry
+carries matching drafts forward. Build packets when the summary has zero
+pending cases.
+
+Refusals go to stderr and exit 1 in the form
+`<stage>: refused — <problem>. Fix: <fix>`.
+
+| Row | Problem | Fix |
+|---|---|---|
+| `set` | `root privileges are required` | Run `sudo python3 -B -m tools.signoffs.draft` with the same arguments, then retry. |
+| `set`, `candidates`, `draft` | `the checkout cannot be resolved`, `the evaluation set has findings`, `case <id> has multiple active judgment twins`, or `case <id> has no question` | Restore the evaluation set, then retry. |
+| `set` | `case <id> is not active and unsigned` or `requested case N is not active and unsigned` | Name active unsigned cases with `--case`, then retry. |
+| `out` | `the output path cannot be resolved`, `the output directory is inside the checkout`, or `the output directory cannot be created` | Choose a writable empty output directory outside the checkout, then retry. |
+| `out` | `the output path is not an empty directory`, `the output directory is not empty`, or `the output directory cannot be read` | Choose an empty output directory outside the checkout, then retry. |
+| `lock` | `the engine lock is held by pid <pid>` | Wait for it to finish — `ps -p <pid>` says whether it still runs — then retry. |
+| `lock` | `the engine lock cannot be claimed` | Wait for the running evaluation to finish, then retry. If taking the lock failed, the fix is `Repair access to the engine lock, then retry.` |
+| `engine` | `the no-GPU marker refuses drafting` | Run the draft on the GPU box, then retry. |
+| `engine` | `the site file cannot be loaded` or `the generator target is unavailable` | Follow the printed site or engine fix. If there is no site finding, the fix is `Restore the site file, then retry.` |
+| `engine` | `the generator pin cannot be read` | Restore the selected profile's generator pin, then retry. |
+| `engine` | `the generator target check could not run`, `generator container <lookup or inspection> could not run`, `generator container <lookup or inspection> exited N`, `expected one running generator container`, `the running generator command cannot be read`, `the running generator command has no usable repository and revision`, or `the running generator repository or revision differs from the checkout's pin` | Run `sudo python3 -m gideon apply` from the checkout holding the intended model pin, or run the draft from the checkout the box runs. |
+| `engine` | `the checked model identifier names no snapshot` or `the pinned generation_config.json cannot be read as a JSON object` | Run `sudo python3 -m gideon models pull` to restore the pinned snapshot, then retry. |
+| `engine` | `sampling keys differ from the pinned generation_config.json`, followed by the differing keys | Run on a box serving the reference profile's generator, or after a generator bump correct the sampling constants in `gideon/evaluation/sampling.py` to the new model card's thinking-mode settings, then retry. |
+| `generation` | `a sample generation cannot be used for drafting` | Omit `--generation` to use the live production caselaw generation, then retry. |
+| `generation`, `facts` | `no eligible production caselaw generation is recorded`, `multiple eligible production caselaw generations are recorded`, or `generation source id is not an opinion identity` | Run `sudo python3 -m gideon index promote <generation>` for a production caselaw generation, then retry. |
+| `generation` | `generation record command could not run (<type>)` or `generation record command is unavailable (exit 127)` | Run `sudo python3 -m gideon apply`, then retry. Restore Docker Compose and psql, then run `sudo python3 -m gideon index report` again. |
+| `generation` | `generation <record or manifest> read failed (exit N)` or `generation <record or manifest> row is invalid` | Run `sudo python3 -m gideon apply`, then retry. Run `docker compose -f /etc/gideon/rendered/compose.yaml logs postgres`, then run `sudo python3 -m gideon index report` again. |
+| `facts` | `record read could not run`, `record read exited N`, `record reply is not JSON`, `record reply is not a list`, `record reply has invalid document fields`, `record reply has invalid document facts`, or `the record does not hold facts for every wanted source` | Run `sudo python3 -m gideon apply`, then `docker compose -f /etc/gideon/rendered/compose.yaml logs postgres` and retry. |
+| `prior` | `the prior drafts file cannot be read` or `prior drafts line N is invalid` | Run without `--prior` to draft anew. |
+| `draft` | `the drafts file cannot be written` before the initial checkpoint | Choose a writable empty output directory outside the checkout, then retry. |
+| `draft` | `case <id> canonical text is unavailable` or `case <id> canonical text is not UTF-8` | Follow the printed store fix or `Restore the canonical object.`, then use the resume command above. |
+| `draft`, `write` | `the drafts file cannot be written` after the initial checkpoint or `the summary cannot be written` | Run `sudo python3 -B -m tools.signoffs.draft --out <new dir> --prior <this out dir>` with the same selections. |
+| `draft` | `N cases failed to draft` with any `http-status` code | Read the generator log with `docker compose -f /etc/gideon/rendered/compose.yaml logs gideon-generator` and correct the cause. Retry with `--prior`, a new `--out`, the same selections, and the same `--seed`. |
+| `draft` | `N cases failed to draft` with other failure codes only | Retry with `--prior`, a new `--out`, the same selections, and `--seed <another integer>`. |
+
+Invalid arguments exit 2 with `signoffs draft: invalid arguments. Fix: Run
+python3 -m tools.signoffs.draft --help.` An unexpected error exits 1 with
+`signoffs draft: internal error (<type>). Fix: Repair the draft command, then retry.`
 
 ### Building packets, for a CSA
 

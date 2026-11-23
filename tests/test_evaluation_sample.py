@@ -7,10 +7,13 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
+import test_index_build
+from test_corpus_install import NOW, RENDERED
 from test_evaluation_set import (
     _judgment,
     _judgment_case,
@@ -22,8 +25,10 @@ from test_evaluation_set import (
 )
 
 from gideon.evaluation import evalset, judgments, sample, signoffs
-from gideon.host.index.generations import COLLECTIONS
+from gideon.host import worker
+from gideon.host.index.generations import COLLECTIONS, generation_name
 from gideon.host.index.sample import SAMPLE_FILL_PER_MILLION, GoldDocument, SampleInputs
+from gideon.host.render.ci import CI_ROOT
 
 PRIVATE = "FICTITIOUS PRIVATE QUESTION AND ANSWER SENTINEL"
 
@@ -99,11 +104,50 @@ class GoldIntake(unittest.TestCase):
             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors),
         ):
             self.assertEqual(sample.run_sample_build(self.args), 3)
-        build.assert_called_once_with(self.args, sample=SampleInputs(
+        build.assert_called_once_with(self.args, header=None, sample=SampleInputs(
             sample.gold_documents(loaded), SAMPLE_FILL_PER_MILLION, loaded.version,
         ))
         self.assertEqual((output.getvalue(), errors.getvalue()), ("", ""))
         self.assertNotIn(PRIVATE, repr(build.call_args))
+
+    def test_sample_entry_builds_the_named_header_generation_on_the_ci_sibling(self) -> None:
+        fixture = test_index_build.Build()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        label = fixture.fixture.labels[0]
+        fixture.host.current_label = label
+        args = argparse.Namespace(collection=self.args.collection, sample=True, lockfile=label)
+        bare = fixture.inputs(label)
+        space = f"{bare.embedding_space}-h1"
+        name = f"{generation_name(bare.collection, label, space)}__sample"
+        real_build = partial(
+            sample.build.run_index_build, host=fixture.host, rendered_dir=RENDERED,
+            checkout=fixture.fixture.checkout, work_root=fixture.fixture.work,
+            sources=(fixture.fixture.source,), clock=lambda: NOW,
+            sleep=lambda _seconds: None, monotonic=lambda: 0.0,
+        )
+        loaded = self.load()
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            patch.object(sample, "__file__", str(self.checkout / "gideon/evaluation/sample.py")),
+            patch.object(sample.build, "run_index_build", new=real_build),
+            contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors),
+        ):
+            code = sample.run_sample_build(args, header="h1")
+
+        self.assertEqual((code, errors.getvalue()), (0, ""), output.getvalue())
+        self.assertEqual(set(fixture.host.generations), {name})
+        self.assertEqual(fixture.host.generations[name].embedding_space, space)
+        reads = [directory for directory, sql in fixture.host.statement_directories
+                 if "row_to_json(generation)" in sql and worker.bind("v_name", name) in sql]
+        self.assertTrue(reads)
+        self.assertEqual(set(reads), {str(CI_ROOT)})
+        dense = fixture.host.deferred[-1]
+        self.assertEqual((dense["name"], dense["header"]), (name, "h1"))
+        self.assertEqual(dense["sample"], {
+            "gold": [{"source_id": gold.source_id, "sha256": gold.sha256} for gold in sample.gold_documents(loaded)],
+            "fill_per_million": SAMPLE_FILL_PER_MILLION,
+        })
 
     def test_active_case_gold_keeps_hashes_over_must_cites_and_excludes_retired_cases(self) -> None:
         retired = _synthetic_case()

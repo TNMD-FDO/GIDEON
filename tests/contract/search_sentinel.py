@@ -7,6 +7,8 @@ fetches, with controls for the engine and plugin checks. It then drives seven
 ordered managed turns with fresh sentinels and counts matches in every
 container journal and the frontend audit file. It runs with the system Python
 and redirects only the product secret directory into the temporary stack.
+The run takes the shared contract lock (bounded by ``GIDEON_CONTRACT_LOCK_WAIT``),
+clears both throwaway projects before startup, and holds the lock through teardown.
 """
 
 import http.client
@@ -27,6 +29,9 @@ from urllib.parse import quote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import stackguard
 
 import gideon.host.secrets as secret_files
 from gideon.host import owui, owuiturn, stores
@@ -294,7 +299,8 @@ class ContractHost(RealHost):
 class SentinelStack:
     """The temporary Compose project and its generated configuration files."""
 
-    def __init__(self) -> None:
+    def __init__(self, guard: stackguard.LockHandle) -> None:
+        self.guard = guard
         self.directory = Path(tempfile.mkdtemp(prefix="gideon-ci-sentinel-"))
         self.secrets = self.directory / "secrets"
         self.secrets.mkdir(mode=0o700)
@@ -398,7 +404,7 @@ class SentinelStack:
             str(self.compose_file),
             *args,
         ]
-        return subprocess.run(argv, capture_output=True, text=True, check=False)
+        return subprocess.run(argv, capture_output=True, text=True, check=False, pass_fds=(self.guard.fd,))
 
     def require_success(
         self, result: subprocess.CompletedProcess[str], action: str
@@ -559,15 +565,17 @@ class SearchSentinelContract(unittest.TestCase):
     The engine and plugin checks each have a control on the rendered service.
     """
 
+    guard: stackguard.LockHandle
     stack: SentinelStack
     original_secrets_dir: Path
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.stack = SentinelStack()
-        cls.original_secrets_dir = secret_files.SECRETS_DIR
-        setattr(secret_files, "SECRETS_DIR", cls.stack.secrets)  # noqa: B010
+        cls.guard = stackguard.guard()
         try:
+            cls.original_secrets_dir = secret_files.SECRETS_DIR
+            cls.stack = SentinelStack(cls.guard)
+            setattr(secret_files, "SECRETS_DIR", cls.stack.secrets)  # noqa: B010
             postgres = cls.stack.compose("up", "-d", "postgres")
             cls.stack.require_success(postgres, "docker compose up postgres")
             cls.stack.wait_healthy("postgres")
@@ -613,8 +621,13 @@ class SearchSentinelContract(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        setattr(secret_files, "SECRETS_DIR", cls.original_secrets_dir)  # noqa: B010
-        cls.stack.down()
+        try:
+            # Absent when the stack's construction itself raised.
+            if hasattr(cls, "stack"):
+                setattr(secret_files, "SECRETS_DIR", cls.original_secrets_dir)  # noqa: B010
+                cls.stack.down()
+        finally:
+            cls.guard.release()
 
     def test_0_frontend_page_carries_the_rendered_image_policy(self) -> None:
         self.assertTrue(self.stack.rendered["CONTENT_SECURITY_POLICY"])

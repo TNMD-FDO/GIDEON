@@ -78,10 +78,12 @@ EXCLUDED = {
     "test_corpus_install_build": "The module reads a pin file as one input of a command test.",
     "test_evaluation_preparation": "The module reads a pin file as one input of a command test.",
     "test_evaluation_run": "The module reads a pin file as one input of a command test.",
+    "test_evaluation_sampling": "The module names a fictitious pin file as one input of the sampling hold.",
     "test_index_build": "The module reads a pin file as one input of a command test.",
     "test_judgments_pool": "The module reads a pin file as one input of a command test.",
     "test_office_values": "The module walks the whole tree and reads no pinned value.",
     "test_smoke_slice": "The module reads a pin file as one input of a command test.",
+    "test_synthetic_kit": "The module reads a pin file as one input of a command test.",
 }
 
 

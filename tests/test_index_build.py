@@ -56,6 +56,7 @@ from gideon.host.index import (
     dense,
     generations,
     guards,
+    header,
     lexical,
     reserve,
     sample,
@@ -110,6 +111,7 @@ class Build(unittest.TestCase):
         collection: str = "caselaw", sleep: Callable[[float], None] | None = None,
         dense_limit: int | None = None,
         sources: tuple[SourceDefinition, ...] | None = None,
+        header_id: str | None = None,
     ) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         self.host.current_label = label or self.fixture.labels[-1]
@@ -125,7 +127,7 @@ class Build(unittest.TestCase):
                 work_root=self.fixture.work,
                 sources=sources if sources is not None else (self.fixture.source,), clock=lambda: NOW,
                 monotonic=lambda: self.time, sleep=sleep or tick, dense_limit=dense_limit,
-                sample=sample,
+                sample=sample, header=header_id,
             )
         return code, out.getvalue(), err.getvalue()
 
@@ -240,6 +242,62 @@ class Build(unittest.TestCase):
 
     def sample_inputs(self, gold: tuple[GoldDocument, ...] = ()) -> SampleInputs:
         return SampleInputs(gold, sample.SAMPLE_FILL_PER_MILLION, "eval-v1000")
+
+    def test_header_build_uses_a_distinct_space_name_and_both_inputs_hashes(self) -> None:
+        label = self.fixture.labels[0]
+        bare = self.inputs(label)
+        lockfile = self.fixture._lockfile()
+        space = header.embedding_space(bare.embedding_space, "h1")
+        name = generations.generation_name(bare.collection, label, space)
+        base_hash = generations.inputs_hash(lockfile, bare.collection, space, sources=(self.fixture.source,))
+        self.assertNotEqual(space, bare.embedding_space)
+        self.assertNotEqual(name, bare.name)
+        self.assertNotEqual(base_hash, bare.inputs_hash)
+        selection = self.sample_inputs()
+        bare_sample_hash = sample.sample_inputs_hash(bare.inputs_hash, label, selection.fill_per_million)
+        header_sample_hash = sample.sample_inputs_hash(base_hash, label, selection.fill_per_million)
+        self.assertNotEqual(header_sample_hash, bare_sample_hash)
+
+        with patch.object(build, "collection_inputs", wraps=build.collection_inputs) as collect:
+            code, out, err = self.run_build(label, sample=selection, header_id="h1")
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(collect.call_args.kwargs, {"header": "h1"})
+        sample_name = sample.sample_name(name)
+        self.assertEqual(set(self.host.generations), {sample_name})
+        row = self.host.generations[sample_name]
+        self.assertEqual((row.embedding_space, row.inputs_hash), (space, header_sample_hash))
+        self.assertIn(f"embedding space {space}", out)
+        self.assertEqual(list(self.host.task_by_job.values()), [DUPES_TASK, LEXICAL_TASK, DENSE_TASK])
+        for arguments in self.host.deferred:
+            self.assertEqual((arguments["name"], arguments["embedding_space"], arguments["inputs_hash"]),
+                             (sample_name, space, header_sample_hash))
+        self.assertTrue(all("header" not in arguments for arguments in self.host.deferred[:-1]))
+        self.assertEqual(self.host.deferred[-1]["header"], "h1")
+
+    def test_index_build_parser_does_not_set_or_accept_a_header(self) -> None:
+        parser = build_parser()
+        for flags in ([], ["--sample"]):
+            with self.subTest(flags=flags):
+                args = parser.parse_args(["index", "build", "caselaw", *flags])
+                self.assertNotIn("header", vars(args))
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+                    parser.parse_args(["index", "build", "caselaw", *flags, "--header", "h1"])
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_corpus_install_builds_in_the_bare_profile_space(self) -> None:
+        label = self.fixture.labels[0]
+        bare = self.inputs(label)
+
+        code, out, err = self.fixture.run_install(label)
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(set(self.host.generations), {bare.name})
+        row = self.host.generations[bare.name]
+        self.assertEqual((row.embedding_space, row.inputs_hash), (bare.embedding_space, bare.inputs_hash))
+        self.assertEqual(list(self.host.task_by_job.values()), [DUPES_TASK, LEXICAL_TASK, DENSE_TASK])
+        for arguments in self.host.deferred:
+            self.assertEqual(arguments["embedding_space"], bare.embedding_space)
+            self.assertNotIn("header", arguments)
 
     def assert_sample_fix(self, output: str, label: str) -> None:
         """Every refusal includes a complete sample retry that the CLI accepts."""

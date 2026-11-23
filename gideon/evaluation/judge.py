@@ -3,9 +3,10 @@
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
+from gideon.evaluation import sampling
 from gideon.host import engine, enginesample
 from gideon.host.render.engine import GENERATOR
 from gideon.host.sysio import Host, PathLike
@@ -211,10 +212,12 @@ PASSAGE_RELEVANCE_VERDICT_SCHEMA: Final[Mapping[str, object]] = {
 # completed reading used 2010. At the measured 2048 tokens in 43.7 s, a
 # reading that spends the whole reserve takes about 87 s, inside
 # JUDGE_TIMEOUT_SECONDS. A later correction is this constant and this
-# comment under the same prompt ids.
+# comment under the same prompt ids. A grading retried after a length finish
+# can spend twice the request's token reserve.
 JUDGE_MAX_TOKENS: Final[int] = 4096
 # exempt: acceptance bounds. The starting request bound for one
-# serial judge grading, sized from the structured engine check.
+# serial judge request, sized from the structured engine check. A retried
+# grading can spend twice this bound.
 JUDGE_TIMEOUT_SECONDS: Final[int] = 180
 
 
@@ -341,6 +344,7 @@ class Grading:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     elapsed_seconds: float | None = None
+    retry_seed: int | None = None
 
     def __post_init__(self) -> None:
         if (self.verdict is None) == (self.failure is None):
@@ -379,6 +383,7 @@ def _request_body(
     *,
     slots: Mapping[str, str],
     max_tokens: int,
+    retry: sampling.HeldSet | None = None,
 ) -> Mapping[str, object]:
     user_message = prompt.user_template.format(**slots)
     return {
@@ -388,7 +393,7 @@ def _request_body(
             {"role": "user", "content": user_message},
         ],
         "max_tokens": max_tokens,
-        "temperature": 0,
+        **({"temperature": 0} if retry is None else retry.request_fields),
         "stream": False,
         "response_format": {
             "type": "json_schema",
@@ -401,36 +406,12 @@ def _request_body(
     }
 
 
-def grade(
-    io: Host,
-    rendered_dir: PathLike,
-    *,
-    served_model_name: str,
+def _read_reply(
     prompt: JudgePrompt,
-    slots: Mapping[str, str],
-    max_tokens: int = JUDGE_MAX_TOKENS,
-    max_time: int = JUDGE_TIMEOUT_SECONDS,
+    reply: engine.EngineReply,
+    completion: tuple[str | None, str | None, int | None, int | None],
+    *, max_tokens: int,
 ) -> Grading:
-    """Grade one document through the in-container engine seam."""
-
-    if set(slots) != set(prompt.slots):
-        missing = sorted(set(prompt.slots) - set(slots))
-        extra = sorted(set(slots) - set(prompt.slots))
-        raise ValueError(f"judge slots do not match prompt (missing={missing}, extra={extra})")
-
-    reply = engine.call_model_server(
-        io,
-        rendered_dir,
-        GENERATOR,
-        path="/v1/chat/completions",
-        body=_request_body(
-            served_model_name,
-            prompt,
-            slots=slots,
-            max_tokens=max_tokens,
-        ),
-        max_time=max_time,
-    )
     if reply.problem is not None:
         # A transport failure has no elapsed time; a reply whose body would not
         # parse has one, so the figure is passed through either way.
@@ -438,7 +419,7 @@ def grade(
             prompt, "request-failed", "engine request failed", elapsed_seconds=reply.elapsed
         )
 
-    content, finish_reason, prompt_tokens, completion_tokens = engine.completion_values(reply)
+    content, finish_reason, prompt_tokens, completion_tokens = completion
     elapsed_seconds = reply.elapsed
     if reply.status != 200:
         return _failed(
@@ -449,10 +430,8 @@ def grade(
             completion_tokens=completion_tokens,
             elapsed_seconds=elapsed_seconds,
         )
-    # The finish reason is read BEFORE the content: a reply that spent its whole
-    # reserve inside the reasoning block finishes on 'length' with no content at
-    # all, and that is the plan's named risk, so it must be reported as the
-    # unfinished reply it is and never as a missing field.
+    # Read the finish reason first because a reply cut inside its reasoning can
+    # reach the token reserve before producing any content.
     if finish_reason != "stop":
         return _failed(
             prompt,
@@ -534,6 +513,57 @@ def grade(
     )
 
 
+def sum_present[Number: (int, float)](first: Number | None, second: Number | None) -> Number | None:
+    if first is None:
+        return second
+    return first if second is None else first + second
+
+
+def grade(
+    io: Host,
+    rendered_dir: PathLike,
+    *,
+    served_model_name: str,
+    prompt: JudgePrompt,
+    slots: Mapping[str, str],
+    max_tokens: int = JUDGE_MAX_TOKENS,
+    max_time: int = JUDGE_TIMEOUT_SECONDS,
+    retry: sampling.HeldSet,
+) -> Grading:
+    """Grade one document, retrying a length finish once with held sampling."""
+
+    if set(slots) != set(prompt.slots):
+        missing = sorted(set(prompt.slots) - set(slots))
+        extra = sorted(set(slots) - set(prompt.slots))
+        raise ValueError(f"judge slots do not match prompt (missing={missing}, extra={extra})")
+
+    def attempt(held: sampling.HeldSet | None) -> tuple[Grading, bool]:
+        reply = engine.call_model_server(
+            io,
+            rendered_dir,
+            GENERATOR,
+            path="/v1/chat/completions",
+            body=_request_body(served_model_name, prompt, slots=slots, max_tokens=max_tokens, retry=held),
+            max_time=max_time,
+        )
+        completion = engine.completion_values(reply)
+        _, finish_reason, _, _ = completion
+        truncated = reply.problem is None and reply.status == 200 and finish_reason == "length"
+        return _read_reply(prompt, reply, completion, max_tokens=max_tokens), truncated
+
+    first, truncated = attempt(None)
+    if not truncated:
+        return first
+    second, _ = attempt(retry)
+    return replace(
+        second,
+        retry_seed=retry.seed,
+        prompt_tokens=sum_present(first.prompt_tokens, second.prompt_tokens),
+        completion_tokens=sum_present(first.completion_tokens, second.completion_tokens),
+        elapsed_seconds=sum_present(first.elapsed_seconds, second.elapsed_seconds),
+    )
+
+
 def render_judge(
     grading: Grading, *, band: tuple[int, int] | None = None
 ) -> dict[str, object]:
@@ -557,4 +587,6 @@ def render_judge(
         field.update(failed=grading.failure.code, detail=grading.failure.detail)
         if band is not None:
             field["band"] = [band[0], band[1]]
+    if grading.retry_seed is not None:
+        field["retry_seed"] = grading.retry_seed
     return field

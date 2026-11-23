@@ -18,7 +18,10 @@ to the rendered values after restart. The banner list follows the supplied set
 and starts empty after a restart.
 
 Environment: ``GIDEON_CONTRACT_REGISTRY`` (default ``127.0.0.1:5000``),
-``GIDEON_CONTRACT_PORT`` (default ``18081``).  The caller needs Docker access.
+``GIDEON_CONTRACT_PORT`` (default ``18081``), and ``GIDEON_CONTRACT_LOCK_WAIT``
+(seconds, default 900). The caller needs Docker access.
+The run takes the shared contract lock, clears both throwaway projects before
+startup, and holds the lock through teardown.
 """
 
 import json
@@ -37,6 +40,9 @@ from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import stackguard
 
 import gideon.host.secrets as secret_files
 from gideon.host import owui, stores
@@ -123,7 +129,8 @@ def image_references() -> dict[str, str]:
 class ContractStack:
     """The throwaway project: a temp directory holding the Compose file, secrets, and env."""
 
-    def __init__(self) -> None:
+    def __init__(self, guard: stackguard.LockHandle) -> None:
+        self.guard = guard
         self.directory = Path(tempfile.mkdtemp(prefix="gideon-ci-contract-"))
         self.secrets = self.directory / "secrets"
         self.secrets.mkdir(mode=0o700)
@@ -168,7 +175,7 @@ class ContractStack:
 
     def compose(self, *args: str) -> subprocess.CompletedProcess[str]:
         argv = ["docker", "compose", "--project-directory", str(self.directory), "-f", str(self.directory / "compose.yaml"), *args]
-        return subprocess.run(argv, capture_output=True, text=True, check=False)
+        return subprocess.run(argv, capture_output=True, text=True, check=False, pass_fds=(self.guard.fd,))
 
     def wait_healthy(self, service: str) -> None:
         for _ in range(HEALTHY_ATTEMPTS):
@@ -204,18 +211,20 @@ def client_factory(*, api_key: str | None = None, token: str | None = None) -> o
 
 
 class ApplyManifestContract(unittest.TestCase):
+    guard: stackguard.LockHandle
     stack: ContractStack
     original_secrets_dir: Path
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.stack = ContractStack()
-        # The product resolves secret paths at call time through the secrets
-        # module; pointing that one constant at the stack's directory is the
-        # harness's seam (never the real /etc/gideon/secrets).
-        cls.original_secrets_dir = secret_files.SECRETS_DIR
-        setattr(secret_files, "SECRETS_DIR", cls.stack.secrets)  # noqa: B010
+        cls.guard = stackguard.guard()
         try:
+            cls.original_secrets_dir = secret_files.SECRETS_DIR
+            cls.stack = ContractStack(cls.guard)
+            # The product resolves secret paths at call time through the secrets
+            # module; pointing that one constant at the stack's directory is the
+            # harness's seam (never the real /etc/gideon/secrets).
+            setattr(secret_files, "SECRETS_DIR", cls.stack.secrets)  # noqa: B010
             up = cls.stack.compose("up", "-d", "postgres")
             assert up.returncode == 0, up.stderr
             cls.stack.wait_healthy("postgres")
@@ -237,8 +246,13 @@ class ApplyManifestContract(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        setattr(secret_files, "SECRETS_DIR", cls.original_secrets_dir)  # noqa: B010
-        cls.stack.down()
+        try:
+            # Absent when the stack's construction itself raised.
+            if hasattr(cls, "stack"):
+                setattr(secret_files, "SECRETS_DIR", cls.original_secrets_dir)  # noqa: B010
+                cls.stack.down()
+        finally:
+            cls.guard.release()
 
     def manifest(self) -> dict[str, object]:
         document = owui.load_manifest(ContractHost(), MANIFEST)

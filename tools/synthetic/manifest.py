@@ -9,16 +9,17 @@ from typing import Final
 
 from gideon.evaluation import synthetic
 
-MANIFEST_FORMAT: Final[int] = 5
+MANIFEST_FORMAT: Final[int] = 6
 MANIFEST_KEYS: Final[tuple[str, ...]] = (
     "format", "set_root", "set_digest", "category", "case_pin", "template",
-    "template_digest", "reading", "reading_digest", "generation", "seed", "asked",
+    "template_digest", "reading", "reading_digest", "generation", "seed", "retry_seed", "asked",
     "read_share", "read_ordinals", "entries", "discards", "sheet_sha256", "sheet_bytes",
 )
 ENTRY_KEYS: Final[tuple[str, ...]] = (
     "ordinal", "source_id", "sha256", "doc_id", "start", "end", "length",
-    "quote_sha256", "closed_book_score", "label", "listed", "citations", "draft_sha256",
+    "quote_sha256", "closed_book_score", "label", "listed", "citations", "retried", "draft_sha256",
 )
+RETRY_KINDS: Final[tuple[str, ...]] = ("proposal", "answer", "reading")
 DRAFT_KEYS: Final[tuple[str, ...]] = tuple(
     key for key in synthetic.CASE_KEYS if key not in {"id", "review"}
 ) + ("closed_book_answer", "ordinal")

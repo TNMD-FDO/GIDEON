@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Final, Literal
 
 from gideon.host import report, stack, worker
-from gideon.host.index import lexical
+from gideon.host.index import header, lexical
 from gideon.host.index.generations import GenerationInputs
 from gideon.host.render.engine import EMBED_SERVICE_NAME
 from gideon.host.render.qdrant import (
@@ -34,10 +34,11 @@ TRIPWIRE_DAYS: Final = 21
 
 @dataclass(frozen=True, slots=True)
 class DenseInputs(GenerationInputs):
-    """The generation's immutable scope plus its served model and vector width."""
+    """The generation's scope, served model, vector width, and optional header."""
 
     served_model: str
     dimensions: int
+    header: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,10 +69,21 @@ def defer_dense(
         return Problem("dense dimensions are invalid", f"Use a profile vector width from 1 to {DIMENSIONS_MAX}, {retry}")
     if limit is not None and (type(limit) is not int or limit < 1):
         return Problem("dense document limit is invalid", f"Use a positive integer document limit, {retry}")
+    header_id = inputs.header
+    if header_id is not None and (
+        not isinstance(header_id, str) or re.fullmatch(header.HEADER_ID_PATTERN, header_id) is None
+        or header_id not in header.HEADERS
+    ):
+        return Problem("dense header is invalid", f"Use a registered header id, {retry}")
+    if header.header_for_space(inputs.embedding_space) != header_id:
+        return Problem("dense header disagrees with the embedding space",
+                       f"Use the header selected by the generation's embedding space, {retry}")
     args = lexical._arguments(inputs)
     args.update(served_model=inputs.served_model, dimensions=inputs.dimensions)
     if limit is not None:
         args["limit"] = limit
+    if header_id is not None:
+        args["header"] = header_id
     return worker.defer(host, rendered_dir, task=DENSE_TASK, queue=DENSE_QUEUE,
                         args=args, lock=f"{DENSE_LOCK_PREFIX}{inputs.name}")
 

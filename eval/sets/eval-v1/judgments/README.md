@@ -320,7 +320,7 @@ On the server, run the assessor from a checkout with the grading kit. Give it
 one or more pool files and an empty output directory, all outside the checkout.
 
 ```text
-sudo python3 -B -m tools.judgments.assess <pool file> … --out <dir> [--prior <dir>]
+sudo python3 -B -m tools.judgments.assess <pool file> … --out <dir> [--prior <dir>] [--seed <int>]
 ```
 
 The output directory holds `journal.jsonl` with the grades and reasons, readable
@@ -329,6 +329,14 @@ by its owner alone, `assessments.jsonl` with the grades and coordinates, and
 when the journal holds a grade. Use `--prior` with a previous output directory
 to carry forward its journal into a new run; a passage it holds is not graded
 again.
+
+A grade whose first reply runs out its token reserve unfinished is asked once
+more, sampled at the generator's thinking-mode settings under a seed: `0` by
+default, or the one `--seed` names. Before grading, the assessor checks those
+settings against the running snapshot's `generation_config.json`. A retried
+grade's journal line ends with its `retry_seed`, and `summary.json` counts the
+retried grades. A grade still unfinished after its retry fails, and the
+printed fix names `--seed <another integer>` for the next run.
 
 The human core is graded once, from the pool files the attorneys' packets were
 built from, into a directory of its own. Every later arm starts from that core

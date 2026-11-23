@@ -17,6 +17,7 @@ from typing import cast
 from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
+from test_engine_verify import completed, models_text
 from test_evaluation_assessments import FIXTURE_MODEL, FIXTURE_PROMPT
 from test_evaluation_record import read_psql_set
 from test_evaluation_run import (
@@ -37,7 +38,7 @@ from test_judgments_slice import (
     _ranked_file,
 )
 
-from gideon.evaluation import command
+from gideon.evaluation import command, sampling
 from gideon.evaluation.assessments import (
     ASSESSMENTS_FIX,
     ASSESSMENTS_LABEL,
@@ -47,13 +48,14 @@ from gideon.evaluation.evalset import SET_ROOT, LoadedSet
 from gideon.evaluation.rankmetrics import RELEVANT_GRADE
 from gideon.evaluation.results import RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS, CallSurface
-from gideon.host import report, secrets
+from gideon.host import backuplock, models, report, secrets, stack, weights
 from gideon.host.corpus.lockfile import (
     read_lockfile_directory,
     render_errors,
     render_lockfile,
 )
 from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK
+from gideon.host.render.engine import GENERATOR
 from gideon.host.sysio import ReadBytesHost
 
 
@@ -164,6 +166,7 @@ def _invoke_planted(
     with (
         patch.object(command, "SLICE_RUNNERS", replacement),
         patch.object(command.engine, "resolve_engine_target", return_value=target),
+        patch.object(command.sampling, "hold_running") as hold,
         patch.object(command.access, "read_eval_password", return_value="fictitious-password"),
         patch.object(
             command.access, "make_client_factory", return_value=lambda: object()
@@ -176,6 +179,7 @@ def _invoke_planted(
         patch.object(command.stacks.secrets, "select_directory") as select_directory,
     ):
         outcome = _invoke(argv, **kwargs)
+        hold.assert_not_called()
         if stack_name == CI_STACK:
             select_directory.assert_called_once()
         else:
@@ -185,6 +189,76 @@ def _invoke_planted(
 
 class PreparationRoutes(unittest.TestCase):
     """Each named surface supplies its runner context and record facts."""
+
+    def test_judge_hold_uses_injected_paths_under_the_lock_and_refuses_a_different_pin(self) -> None:
+        lock_text = models_text()
+        lock = models.load_models_lock_text(lock_text).lock
+        assert lock is not None
+        profile = lock.profile(lock.reference)
+        assert profile is not None
+        pin = profile.model(GENERATOR.role)
+        assert pin is not None
+        slice_name = "judge-triples"
+        spec = SLICE_RUNNERS[slice_name]
+        target = command.engine.EngineTarget(profile.name, pin.serve.served_name, 1000)
+        rendered = Path("/tmp/fictitious-judge-production")
+        container = "fictitious-judge-container"
+        locate = stack.compose_argv(rendered, "ps", "--status", "running", "--quiet", GENERATOR.service_name)
+        inspect_command = ["docker", "container", "inspect", "--format", "{{json .Config.Cmd}}", "--", container]
+        other_digit = "f" if pin.revision[0] != "f" else "e"
+        with tempfile.TemporaryDirectory() as directory:
+            models_path = Path(directory) / "fictitious-models.lock"
+            models_path.write_text(lock_text, encoding="utf-8")
+            models_root = Path(directory) / "fictitious-weights"
+            config = weights.snapshot_path(pin.repo, pin.revision, "generation_config.json", root=models_root)
+            config.parent.mkdir(parents=True)
+            config.write_text(json.dumps(dict(sampling.THINKING_SAMPLING)), encoding="utf-8")
+
+            for revision in (pin.revision, other_digit + pin.revision[1:]):
+                with self.subTest(matched=revision == pin.revision):
+                    host = EvalHost()
+
+                    def pin_reply(
+                        argv: list[str], *, host: EvalHost = host, revision: str = revision,
+                    ) -> subprocess.CompletedProcess[str]:
+                        self.assertIn(backuplock.ENGINE_LOCK.path, host.locks)
+                        if argv == locate:
+                            return completed(argv, stdout=container)
+                        self.assertEqual(argv, inspect_command)
+                        return completed(argv, stdout=json.dumps([pin.repo, "--revision", revision]))
+
+                    with (
+                        patch.object(command.engine, "resolve_engine_target", return_value=target),
+                        patch.object(host, "run", side_effect=pin_reply),
+                        patch.object(host, "read_text", wraps=host.read_text) as read,
+                        patch.object(command, "_run_repeats", return_value=command._RunRepeats(
+                            SliceResult(True, "Fictitious judge report.", ()), 1, 1, None,
+                        )) as runner,
+                    ):
+                        kwargs = _run_kwargs(host)
+                        kwargs.update(rendered_dir=rendered, models_path=models_path, models_root=models_root)
+                        code, stdout, stderr = _invoke(
+                            ["eval", "run", "--slice", slice_name, "--set", str(ROOT / SET_ROOT), "--force"],
+                            **kwargs,
+                        )
+                    self.assertEqual(stderr, "", stdout)
+                    self.assertEqual(host.locks, {})
+                    rows = [line for line in stdout.splitlines() if line.startswith("preconditions:")]
+                    row, = rows
+                    if revision == pin.revision:
+                        self.assertEqual(code, 0, stdout)
+                        self.assertTrue(row.startswith("preconditions: ok"), row)
+                        self.assertIn(f"prompt {spec.judge_prompt}, judge retry seed {sampling.DEFAULT_SEED},", row)
+                        runner.assert_called_once()
+                        context = runner.call_args.args[3]
+                        self.assertEqual(context.judge_retry.seed, sampling.DEFAULT_SEED)
+                        read.assert_any_call(config)
+                    else:
+                        self.assertEqual(code, 1, stdout)
+                        self.assertIn("preconditions: refuse — the running generator repository or revision differs", row)
+                        self.assertIn(f"Run {report.command('apply')} from the checkout holding the intended model pin", stdout)
+                        runner.assert_not_called()
+                        self.assertNotIn(config, [call.args[0] for call in read.call_args_list])
 
     def test_assessments_reach_the_runner_after_preconditions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -198,6 +272,7 @@ class PreparationRoutes(unittest.TestCase):
             )
         self.assertEqual((code, stderr), (0, ""), stdout)
         context, = contexts
+        self.assertIsNone(context.judge_retry)
         self.assertEqual(context.ranked, {case_id: (coordinate,)})
         self.assertEqual(context.assessments, Assessments(
             {case_id: {coordinate: 0}}, FIXTURE_PROMPT, FIXTURE_MODEL,

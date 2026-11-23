@@ -37,8 +37,8 @@ from test_worker_lexical import (
 )
 
 from gideon.host import cas
-from gideon.host.index import sample
-from gideon.worker import chunker, dense, lexical, logs, settings, treatment
+from gideon.host.index import header, sample
+from gideon.worker import caselaw, chunker, dense, lexical, logs, settings, treatment
 
 WIDTH = 3
 SERVED = "fictitious-embedding-model"
@@ -104,29 +104,45 @@ class Projections(unittest.TestCase):
         first = chunk_for()
         duplicate = replace(first, chunk_id="2" * 64, doc_id="d" * 64)
         different = chunk_for(3)
-        groups = dense.group_by_hash(((first, TEXT[2:]), (different, TEXT[3:]), (duplicate, TEXT[2:])))
+        bare = header.BARE_HEADER_HASH
+        groups = dense.group_by_hash(((first, TEXT[2:], "", bare), (different, TEXT[3:], "", bare),
+                                      (duplicate, TEXT[2:], "", bare)))
         self.assertEqual(groups, (
-            dense.TextGroup(TEXT[2:], (first, duplicate)), dense.TextGroup(TEXT[3:], (different,)),
+            dense.TextGroup(TEXT[2:], (first, duplicate), bare, 0), dense.TextGroup(TEXT[3:], (different,), bare, 0),
         ))
         self.assertEqual(dense.group_by_hash(()), ())
         self.assertEqual(lexical.slice_for(TEXT, first), groups[0].text)
 
     def test_packing_keeps_order_and_obeys_both_bounds(self) -> None:
-        groups = tuple(dense.TextGroup(f"fictitious-text-{index}", (replace(chunk_for(), token_count=1),))
+        bare = header.BARE_HEADER_HASH
+        groups = tuple(dense.TextGroup(f"fictitious-text-{index}", (replace(chunk_for(), token_count=1),), bare, 0)
                        for index in range(dense.EMBED_BATCH_TEXTS + 1))
         packed = dense.pack_requests(groups)
         self.assertEqual(packed, (groups[:dense.EMBED_BATCH_TEXTS], groups[dense.EMBED_BATCH_TEXTS:]))
-        token_groups = tuple(dense.TextGroup(f"fictitious-text-{index}", (replace(chunk_for(), token_count=count),))
+        token_groups = tuple(dense.TextGroup(f"fictitious-text-{index}", (replace(chunk_for(), token_count=count),), bare, 0)
                              for index, count in enumerate((4, 6, 1)))
         with patch.object(dense, "EMBED_BATCH_TOKENS", 10):
             self.assertEqual(dense.pack_requests(token_groups), (token_groups[:2], token_groups[2:]))
         self.assertEqual(dense.pack_requests(()), ())
-        at_cap = dense.TextGroup("fictitious-long-text", (replace(chunk_for(), token_count=dense.EMBED_TEXT_TOKEN_CAP),))
+        at_cap = dense.TextGroup("fictitious-long-text", (replace(chunk_for(), token_count=dense.EMBED_TEXT_TOKEN_CAP),), bare, 0)
         self.assertEqual(dense.pack_requests((at_cap,)), ((at_cap,),))
         over_cap = replace(at_cap, chunks=(replace(at_cap.chunks[0], token_count=dense.EMBED_TEXT_TOKEN_CAP + 1),))
         with self.assertRaises(dense.DenseFailure) as raised:
             dense.pack_requests((*groups, over_cap))
         self.assertEqual(raised.exception.reason, "chunk-too-long")
+
+    def test_header_bytes_count_against_the_batch_token_bound(self) -> None:
+        line = "Fictitious Áster"
+        digest = header.header_hash(line)
+        first, second = replace(chunk_for(), token_count=4), replace(chunk_for(3), token_count=6)
+        groups = dense.group_by_hash(((first, TEXT[2:], line, digest), (second, TEXT[3:], line, digest)))
+        header_bytes = len(line.encode("utf-8"))
+        self.assertEqual(tuple(group.header_bytes for group in groups), (header_bytes, header_bytes))
+        total = first.token_count + second.token_count + 2 * header_bytes
+        with patch.object(dense, "EMBED_BATCH_TOKENS", total):
+            self.assertEqual(dense.pack_requests(groups), (groups,))
+        with patch.object(dense, "EMBED_BATCH_TOKENS", total - 1):
+            self.assertEqual(dense.pack_requests(groups), ((groups[0],), (groups[1],)))
 
     def test_config_compare_checks_only_release_keys(self) -> None:
         config = info_for()["config"]
@@ -172,10 +188,10 @@ class LedgerConnection(_CapturedConnection):
         self.fail_statement: str | None = None
         self.rowcount = 0
         self.manifest: set[tuple[object, object]] = set()
-        self.ledger: set[object] = set()
+        self.ledger: set[tuple[object, object]] = set()
         self.stored_counts: dict[str, object] = {}
         self.pending_manifest: set[tuple[object, object]] = set()
-        self.pending_ledger: set[object] = set()
+        self.pending_ledger: set[tuple[object, object]] = set()
         self.pending_counts: dict[str, object] | None = None
 
     def execute(self, statement: str, parameters: tuple[object, ...]) -> None:
@@ -187,7 +203,7 @@ class LedgerConnection(_CapturedConnection):
             self.rowcount = int(key not in self.manifest | self.pending_manifest)
             self.pending_manifest.add(key)
         elif statement == dense.LEDGER_INSERT_SQL:
-            self.pending_ledger.add(parameters[0])
+            self.pending_ledger.add((parameters[0], parameters[1]))
         elif statement == dense.PROGRESS_SQL:
             self.pending_counts = json.loads(cast(str, parameters[0]))
 
@@ -231,7 +247,7 @@ class RecordAdapter(unittest.TestCase):
         self.record = dense.PsycopgGenerations(connect=connect, worker_settings=worker_settings)
         self.addCleanup(self.record.close)
         chunk = chunk_for()
-        self.row = dense.LedgerRow(chunk.content_hash, NAME, dense.point_id(chunk.chunk_id))
+        self.row = dense.LedgerRow(chunk.content_hash, header.BARE_HEADER_HASH, NAME, dense.point_id(chunk.chunk_id))
 
     def test_record_inherits_the_existing_reads_state_and_cleanup(self) -> None:
         for name in ("read", "resume", "fail", "chunks", "opinion", "close"):
@@ -254,7 +270,7 @@ class RecordAdapter(unittest.TestCase):
         updated = self.record.progress(NAME, counts, (self.row,), documents=(document, document))
         self.assertEqual(updated.dense_manifest, 5)
         self.assertEqual(self.writer.commits, 1)
-        self.assertEqual(self.writer.ledger, {self.row.content_hash})
+        self.assertEqual(self.writer.ledger, {(self.row.content_hash, self.row.header_hash)})
         self.assertEqual(self.writer.manifest, {(NAME, sample.source_id(document.source, document.opinion_id))})
         self.assertEqual(self.writer.stored_counts, asdict(updated))
         inserts = [(sql, parameters) for sql, parameters in self.writer.statements if sql == dense.MANIFEST_INSERT_SQL]
@@ -318,18 +334,29 @@ class RecordAdapter(unittest.TestCase):
         self.assertEqual(self.stream.names, ["dense_documents"])
         self.assertEqual(self.stream.itersize, dense.DOCUMENT_BATCH_SIZE)
 
-    def test_ledger_read_insert_and_rehome_bind_space_hash_and_canonical_uuid(self) -> None:
-        self.writer.rows = [(self.row.content_hash, self.row.gen_id, uuid.UUID(self.row.point_id))]
-        self.assertEqual(self.record.ledger_rows("fictitious-space", (self.row.content_hash,)), (self.row,))
-        self.assertEqual(self.writer.statements[-1], (dense.LEDGER_ROWS_SQL, ("fictitious-space", [self.row.content_hash])))
-        self.assertIn("embedding_space = %s AND content_hash = ANY(%s)", dense.LEDGER_ROWS_SQL)
+    def test_ledger_read_insert_and_rehome_bind_space_hash_pair_and_canonical_uuid(self) -> None:
+        other = replace(self.row, header_hash=header.header_hash("Fictitious header"), point_id=dense.point_id("f" * 64))
+        rows = (self.row, other)
+        self.writer.rows = [(row.content_hash, row.header_hash, row.gen_id, uuid.UUID(row.point_id)) for row in rows]
+        pairs = tuple((row.content_hash, row.header_hash) for row in rows)
+        self.assertEqual(self.record.ledger_rows("fictitious-space", pairs), rows)
+        self.assertEqual(self.writer.statements[-1], (dense.LEDGER_ROWS_SQL, (
+            "fictitious-space", [self.row.content_hash, other.content_hash], [self.row.header_hash, other.header_hash],
+        )))
+        self.assertIn("SELECT content_hash, header_hash, gen_id, point_id FROM chunk_embeddings", dense.LEDGER_ROWS_SQL)
+        self.assertIn("embedding_space = %s AND (content_hash, header_hash) IN", dense.LEDGER_ROWS_SQL)
+        self.assertIn("FROM unnest(%s::text[], %s::text[])", dense.LEDGER_ROWS_SQL)
         self.record.progress(NAME, dense.DenseCounts(), (self.row,), (self.row,))
-        self.assertEqual(self.writer.statements[-3], (dense.LEDGER_INSERT_SQL, (self.row.content_hash, self.row.point_id, self.row.gen_id)))
+        self.assertEqual(self.writer.statements[-3], (dense.LEDGER_INSERT_SQL, (
+            self.row.content_hash, self.row.header_hash, self.row.point_id, self.row.gen_id,
+        )))
         self.assertIn("ON CONFLICT DO NOTHING", dense.LEDGER_INSERT_SQL)
-        self.assertIn("embedding_space, gen_id", dense.LEDGER_INSERT_SQL)
-        self.assertEqual(self.writer.statements[-2], (dense.LEDGER_REHOME_SQL, (self.row.gen_id, self.row.point_id, self.row.content_hash, self.row.gen_id)))
+        self.assertIn("content_hash, header_hash, embedding_space, gen_id", dense.LEDGER_INSERT_SQL)
+        self.assertEqual(self.writer.statements[-2], (dense.LEDGER_REHOME_SQL, (
+            self.row.gen_id, self.row.point_id, self.row.content_hash, self.row.header_hash, self.row.gen_id,
+        )))
         self.assertIn("embedded_at = now()", dense.LEDGER_REHOME_SQL)
-        self.assertIn("WHERE content_hash = %s AND embedding_space =", dense.LEDGER_REHOME_SQL)
+        self.assertIn("WHERE content_hash = %s AND header_hash = %s AND embedding_space =", dense.LEDGER_REHOME_SQL)
         self.assertEqual(self.writer.statements[-1][0], dense.PROGRESS_SQL)
         self.assertEqual(self.writer.commits, 2)
 
@@ -404,8 +431,8 @@ class RecordAdapter(unittest.TestCase):
             "dbname": config.database_name, "user": config.database_role,
             "password": "fictitious-secret", "autocommit": False,
         })
-        self.writer.rows = [(self.row.content_hash, self.row.gen_id, self.row.point_id)]
-        self.assertEqual(self.record.ledger_rows("fictitious-space", (self.row.content_hash,)), (self.row,))
+        self.writer.rows = [astuple(self.row)]
+        self.assertEqual(self.record.ledger_rows("fictitious-space", ((self.row.content_hash, self.row.header_hash),)), (self.row,))
         self.assertEqual(self.writer.commits, 2)
         counts = dense.DenseCounts(dense_total=19, dense_scope=7, dense_embedded=3)
         for write in (
@@ -854,6 +881,10 @@ def dense_inputs() -> dict[str, object]:
     return {**inputs_for(), "served_model": SERVED, "dimensions": WIDTH}
 
 
+def bare_ledger_key(content_hash: str) -> tuple[str, str, str]:
+    return cast(str, dense_inputs()["embedding_space"]), content_hash, header.BARE_HEADER_HASH
+
+
 class FakeVectorStore:
     """Retain acknowledged points across client instances and attempted builds."""
 
@@ -945,7 +976,7 @@ class FakeDenseRecord:
         self.store, self.events = store, events
         self.document_rows = [lexical.Document("a" * 64, digest, "fictions", 1), lexical.Document("d" * 64, digest, "fictions", 2)]
         self.chunk_rows = {"a" * 64: (chunk_for(),), "d" * 64: ()}
-        self.ledger: dict[str, dense.LedgerRow] = {}
+        self.ledger: dict[tuple[str, str, str], dense.LedgerRow] = {}
         self.manifest: dict[tuple[str, str], lexical.Document] = {}
         self.counts = dense.DenseCounts()
         self.commits: list[tuple[dense.DenseCounts, tuple[dense.LedgerRow, ...], tuple[dense.LedgerRow, ...]]] = []
@@ -961,6 +992,7 @@ class FakeDenseRecord:
         self.built_at: datetime | None = None
         self.finished: tuple[dense.DenseCounts, datetime, bool] | None = None
         self.opinion_reads: list[str] = []
+        self.opinions: dict[str, caselaw.NewOpinion] = {}
         self.text_keys: dict[str, lexical.TextKeys] = {}
         self.key_reads: list[tuple[str, tuple[str, ...]]] = []
         self.chunk_reads: list[str] = []
@@ -1011,19 +1043,21 @@ class FakeDenseRecord:
         self.chunk_reads.append(doc_id)
         return self.chunk_rows[doc_id]
 
-    def opinion(self, doc_id: str):
+    def opinion(self, doc_id: str) -> caselaw.NewOpinion:
         self._main()
+        self.events.append("opinion")
         self.opinion_reads.append(doc_id)
-        return replace(opinion_for(), doc_id=doc_id)
+        return self.opinions.get(doc_id) or replace(opinion_for(), doc_id=doc_id)
 
     def keys_for(self, name: str, hashes: Sequence[str]) -> dict[str, lexical.TextKeys]:
         self._main()
         self.key_reads.append((name, tuple(hashes)))
         return {content_hash: self.text_keys.get(content_hash, lexical.TextKeys(content_hash, False)) for content_hash in hashes}
 
-    def ledger_rows(self, space: str, hashes: Sequence[str]) -> tuple[dense.LedgerRow, ...]:
+    def ledger_rows(self, space: str, pairs: Sequence[dense.EmbeddingKey]) -> tuple[dense.LedgerRow, ...]:
         self._main()
-        return tuple(self.ledger[content_hash] for content_hash in hashes if content_hash in self.ledger)
+        self.events.append("ledger")
+        return tuple(self.ledger[space, *pair] for pair in pairs if (space, *pair) in self.ledger)
 
     def start(self, name: str, counts: dense.DenseCounts) -> None:
         self._main()
@@ -1038,11 +1072,14 @@ class FakeDenseRecord:
             raise self.progress_failure
         for row in (*inserts, *rehomes):
             assert row.point_id in self.store.collections[row.gen_id], "ledger committed before an acknowledged point"
+        assert self.generation is not None
+        space = self.generation.embedding_space
         for row in inserts:
-            self.ledger.setdefault(row.content_hash, row)
+            self.ledger.setdefault((space, row.content_hash, row.header_hash), row)
         for row in rehomes:
-            assert row.content_hash in self.ledger
-            self.ledger[row.content_hash] = row
+            ledger_key = (space, row.content_hash, row.header_hash)
+            assert ledger_key in self.ledger
+            self.ledger[ledger_key] = row
         inserted = 0
         for document in documents:
             assert self.chunk_rows[document.doc_id], "A document without lexical chunks has no manifest row."
@@ -1138,6 +1175,191 @@ class Build(unittest.TestCase):
     def run_build(self, values: dict[str, object] | None = None) -> dense.DenseCounts:
         return dense.build(values or dense_inputs(), 77, self.record, self.store, self.embedder, self.pace,
                            self.store_root, work_root=self.work_root, clock=lambda: NOW, monotonic=lambda: self.seconds)
+
+    def header_inputs(self) -> dict[str, object]:
+        values = dense_inputs()
+        space = header.embedding_space(cast(str, values["embedding_space"]), "h1")
+        name = f"{NAME.rsplit('__', 1)[0]}__{space}"
+        return {**values, "name": name, "embedding_space": space, "header": "h1"}
+
+    def select_header_generation(self) -> dict[str, object]:
+        values = self.header_inputs()
+        assert self.record.generation is not None
+        self.record.generation = replace(self.record.generation, gen_id=cast(str, values["name"]),
+                                         embedding_space=cast(str, values["embedding_space"]))
+        return values
+
+    def test_bare_build_ignores_header_homes_in_both_spaces(self) -> None:
+        chunk = chunk_for()
+        bare_space = cast(str, dense_inputs()["embedding_space"])
+        header_space = cast(str, self.header_inputs()["embedding_space"])
+        digest = header.header_hash("Fictitious header")
+        identifier = dense.point_id("f" * 64)
+        planted = {}
+        for space in (bare_space, header_space):
+            home = f"caselaw__corpus-2098-01-01__{space}"
+            self.store.collections[home] = {identifier: dense.Point(identifier, (0.7, 0.8, 0.9), {})}
+            planted[(space, chunk.content_hash, digest)] = dense.LedgerRow(chunk.content_hash, digest, home, identifier)
+        self.record.ledger.update(planted)
+
+        counts = self.run_build()
+
+        self.assertEqual((counts.dense_embedded, counts.dense_copied), (1, 0))
+        self.assertEqual(self.store.retrievals, [])
+        self.assertEqual(self.embedder.calls, [(TEXT[chunk.char_start:chunk.char_end],)])
+        bare_row = dense.LedgerRow(chunk.content_hash, header.BARE_HEADER_HASH, NAME, dense.point_id(chunk.chunk_id))
+        self.assertEqual(self.record.ledger, {**planted, (bare_space, chunk.content_hash, header.BARE_HEADER_HASH): bare_row})
+        self.assertEqual(self.record.commits[0][1:], ((bare_row,), ()))
+
+    def test_header_build_leaves_the_bare_home_and_point_unchanged(self) -> None:
+        chunk = chunk_for()
+        identifier = dense.point_id(chunk.chunk_id)
+        bare_space = cast(str, dense_inputs()["embedding_space"])
+        self.run_build()
+        bare_point = self.store.collections[NAME][identifier]
+        bare_key = (bare_space, chunk.content_hash, header.BARE_HEADER_HASH)
+        bare_row = self.record.ledger[bare_key]
+        values = self.select_header_generation()
+        self.embedder.calls.clear()
+
+        counts = self.run_build(values)
+
+        self.assertEqual((counts.dense_embedded, counts.dense_copied), (1, 0))
+        self.assertEqual(self.store.retrievals, [])
+        self.assertEqual(self.record.ledger[bare_key], bare_row)
+        self.assertEqual(self.store.collections[NAME][identifier], bare_point)
+        self.assertEqual(self.store.collections[cast(str, values["name"])][identifier].payload, bare_point.payload)
+        self.assertEqual(len(self.record.ledger), 2)
+
+    def test_bare_build_preserves_read_request_and_commit_order(self) -> None:
+        chunk = chunk_for()
+        with (
+            patch.object(self.record, "ledger_rows", wraps=self.record.ledger_rows) as ledger_read,
+            patch.object(lexical, "canonical_text", wraps=lexical.canonical_text) as canonical_read,
+        ):
+            counts = self.run_build()
+        self.assertEqual(self.record.scopes, [None, None])
+        self.assertEqual(self.record.limits, [None])
+        self.assertEqual(self.record.chunk_reads, [document.doc_id for document in self.record.document_rows])
+        self.assertEqual(self.record.key_reads, [(NAME, (chunk.content_hash,))])
+        ledger_read.assert_called_once_with(dense_inputs()["embedding_space"], ((chunk.content_hash, header.BARE_HEADER_HASH),))
+        self.assertEqual(self.record.opinion_reads, [chunk.doc_id])
+        canonical_read.assert_called_once()
+        self.assertEqual(self.embedder.calls, [(TEXT[chunk.char_start:chunk.char_end],)])
+        self.assertEqual(self.events, [
+            "info", "create", "indexes", "pause", "start", "present", "ledger", "opinion",
+            "embed", "upsert-ack", "commit", "restore", "wait-green", "info", "finish",
+            "record-close", "store-close", "embed-close",
+        ])
+        row = dense.LedgerRow(chunk.content_hash, header.BARE_HEADER_HASH, NAME, dense.point_id(chunk.chunk_id))
+        self.assertEqual(self.record.commits, [(replace(counts, dense_points=0, dense_indexed=0), (row,), ())])
+        self.assertEqual(self.record.manifest_commits, [(self.record.document_rows[0],)])
+
+    def test_header_groups_by_text_and_header_and_only_changes_embedding_input(self) -> None:
+        first = chunk_for()
+        second = replace(first, doc_id=self.record.document_rows[1].doc_id, chunk_id="2" * 64)
+        duplicate = replace(second, chunk_id="3" * 64)
+        self.record.chunk_rows[second.doc_id] = (second, duplicate)
+        first_opinion = replace(opinion_for(), case_name="Fictitious Áster v. Fable")
+        second_opinion = replace(first_opinion, doc_id=second.doc_id, case_name="Fictitious Birch v. Fable")
+        self.record.opinions = {first.doc_id: first_opinion, second.doc_id: second_opinion}
+        values = self.select_header_generation()
+
+        with self.assertLogs(dense.logger, level="INFO") as logs_capture:
+            counts = self.run_build(values)
+
+        self.assertEqual((counts.dense_embedded, counts.dense_texts, counts.dense_requests), (3, 2, 1))
+        first_header = "Fictitious Áster v. Fable, 7 Fiction 11 (court1 2099) — majority"
+        second_header = "Fictitious Birch v. Fable, 7 Fiction 11 (court1 2099) — majority"
+        text_slice = TEXT[first.char_start:first.char_end]
+        self.assertEqual(self.embedder.calls, [(f"{first_header}\n\n{text_slice}", f"{second_header}\n\n{text_slice}")])
+        self.assertEqual(self.record.opinion_reads, [first.doc_id, second.doc_id])
+        self.assertEqual(self.events[:self.events.index("ledger")].count("opinion"), 2)
+        name = cast(str, values["name"])
+        space = cast(str, values["embedding_space"])
+        expected = {}
+        for chunk, line in ((first, first_header), (second, second_header)):
+            digest = header.header_hash(line)
+            expected[(space, chunk.content_hash, digest)] = dense.LedgerRow(chunk.content_hash, digest, name, dense.point_id(chunk.chunk_id))
+        self.assertEqual(self.record.ledger, expected)
+        points = self.store.collections[name]
+        self.assertEqual(set(points), {dense.point_id(chunk.chunk_id) for chunk in (first, second, duplicate)})
+        for chunk, opinion in ((first, first_opinion), (second, second_opinion), (duplicate, second_opinion)):
+            point = points[dense.point_id(chunk.chunk_id)]
+            self.assertEqual(point.payload, dense.payload_for(chunk, opinion, GEO, lexical.TextKeys(chunk.content_hash, False)))
+        for sentinel in (first_header, second_header, first_opinion.case_name, second_opinion.case_name, text_slice):
+            self.assertNotIn(sentinel, "\n".join(logs_capture.output))
+
+    def test_header_copy_and_presence_repair_write_separate_rows_for_the_same_slice(self) -> None:
+        copied = chunk_for()
+        present = replace(copied, chunk_id="2" * 64, section_type="dissent")
+        self.record.chunk_rows[copied.doc_id] = (copied, present)
+        values = self.select_header_generation()
+        name = cast(str, values["name"])
+        space = cast(str, values["embedding_space"])
+        opinion = opinion_for()
+        copied_hash, present_hash = (
+            header.header_hash(header.compose("h1", opinion.case_name, opinion.reporter_cites, opinion.docket,
+                                             opinion.court, opinion.decided_date, chunk.section_type))
+            for chunk in (copied, present)
+        )
+        home = f"caselaw__corpus-2098-01-01__{space}"
+        home_id = dense.point_id("f" * 64)
+        copied_vector = (0.7, 0.8, 0.9)
+        self.store.collections[home] = {home_id: dense.Point(home_id, copied_vector, {})}
+        present_id = dense.point_id(present.chunk_id)
+        payload = dense.payload_for(present, opinion, GEO, lexical.TextKeys(present.content_hash, False))
+        present_point = dense.Point(present_id, (0.1, 0.2, 0.3), payload)
+        self.store.collections[name] = {present_id: present_point}
+        copied_key = (space, copied.content_hash, copied_hash)
+        self.record.ledger[copied_key] = dense.LedgerRow(copied.content_hash, copied_hash, home, home_id)
+        cas.object_path(self.digest, self.store_root).unlink()
+
+        counts = self.run_build(values)
+
+        self.assertEqual((counts.dense_present, counts.dense_copied, counts.dense_embedded), (1, 1, 0))
+        self.assertEqual(self.store.retrievals, [(home, (home_id,))])
+        self.assertEqual(self.embedder.calls, [])
+        copied_id = dense.point_id(copied.chunk_id)
+        copied_row = dense.LedgerRow(copied.content_hash, copied_hash, name, copied_id)
+        repaired_row = dense.LedgerRow(present.content_hash, present_hash, name, present_id)
+        self.assertEqual(self.record.ledger, {copied_key: copied_row, (space, present.content_hash, present_hash): repaired_row})
+        self.assertEqual(self.record.commits[0][1:], ((repaired_row,), (copied_row,)))
+        self.assertEqual(self.store.collections[name][present_id], present_point)
+        self.assertEqual(self.store.collections[name][copied_id].vector, copied_vector)
+
+    def test_header_argument_refusals_precede_generation_reads(self) -> None:
+        header_values = self.header_inputs()
+        bare_values = dense_inputs()
+        invalid = (
+            {**bare_values, "header": "h1"},
+            {key: value for key, value in header_values.items() if key != "header"},
+            {**header_values, "header": None},
+            {**header_values, "header": "h999"},
+            {**header_values, "header": "h1\n"},
+            {**header_values, "header": 1},
+        )
+        with patch.object(self.record, "read", wraps=self.record.read) as read:
+            for values in invalid:
+                with self.subTest(values=values), self.assertRaises(dense.DenseFailure) as raised:
+                    self.run_build(values)
+                self.assertEqual(raised.exception.reason, "invalid")
+        read.assert_not_called()
+
+    def test_header_bytes_over_the_per_text_cap_send_no_request_or_point_write(self) -> None:
+        chunk = chunk_for()
+        opinion = opinion_for()
+        line = header.compose("h1", opinion.case_name, opinion.reporter_cites, opinion.docket,
+                              opinion.court, opinion.decided_date, chunk.section_type)
+        count = dense.EMBED_TEXT_TOKEN_CAP - len(line)
+        self.assertGreater(count + len(line.encode("utf-8")), dense.EMBED_TEXT_TOKEN_CAP)
+        self.record.chunk_rows[chunk.doc_id] = (replace(chunk, token_count=count),)
+        with self.assertRaises(dense.DenseFailure) as raised:
+            self.run_build(self.select_header_generation())
+        self.assertEqual(raised.exception.reason, "chunk-too-long")
+        self.assertEqual(self.embedder.calls, [])
+        self.assertNotIn("upsert-ack", self.events)
+        self.assertFalse(self.record.ledger)
 
     def distinct_chunks(self, count: int) -> None:
         self.record.document_rows = []
@@ -1308,7 +1530,8 @@ class Build(unittest.TestCase):
         identifier = dense.point_id(chunk.chunk_id)
         point = self.store.collections[NAME][identifier]
         self.assertEqual(point.payload, dense.payload_for(chunk, opinion_for(), GEO, lexical.TextKeys(chunk.content_hash, False)))
-        self.assertEqual(self.record.ledger[chunk.content_hash], dense.LedgerRow(chunk.content_hash, NAME, identifier))
+        self.assertEqual(self.record.ledger[bare_ledger_key(chunk.content_hash)],
+                         dense.LedgerRow(chunk.content_hash, header.BARE_HEADER_HASH, NAME, identifier))
         self.assertEqual(self.record.finished, (counts, NOW, False))
         self.assertEqual((self.record.dense_built_at, self.record.built_at), (NOW, NOW))
         assert self.record.generation is not None
@@ -1355,7 +1578,7 @@ class Build(unittest.TestCase):
         counts = self.run_build()
         self.assertEqual((counts.dense_present, counts.dense_embedded, counts.dense_copied, counts.dense_requests), (1, 0, 0, 0))
         self.assertEqual(counts.dense_manifest, 1)
-        self.assertEqual(self.record.ledger[chunk.content_hash].point_id, identifier)
+        self.assertEqual(self.record.ledger[bare_ledger_key(chunk.content_hash)].point_id, identifier)
         self.assertFalse(self.embedder.calls)
         self.assertFalse(self.record.opinion_reads)
         self.assertNotIn("create", self.events)
@@ -1366,7 +1589,9 @@ class Build(unittest.TestCase):
         identifier = dense.point_id(chunk.chunk_id)
         keys = lexical.TextKeys("fictitious-shared-cluster", True)
         self.record.text_keys[chunk.content_hash] = keys
-        self.record.ledger[chunk.content_hash] = dense.LedgerRow(chunk.content_hash, NAME, identifier)
+        self.record.ledger[bare_ledger_key(chunk.content_hash)] = dense.LedgerRow(
+            chunk.content_hash, header.BARE_HEADER_HASH, NAME, identifier,
+        )
         self.store.collections[NAME] = {identifier: dense.Point(identifier, (0.1, 0.2, 0.3), {"court": "fictitious-court"})}
         cas.object_path(self.digest, self.store_root).unlink()
         counts = self.run_build()
@@ -1400,7 +1625,9 @@ class Build(unittest.TestCase):
         home = "caselaw__corpus-2098-01-01__example-space"
         home_id = dense.point_id("f" * 64)
         self.store.collections[home] = {home_id: dense.Point(home_id, (0.7, 0.8, 0.9), {})}
-        self.record.ledger[chunks[3].content_hash] = dense.LedgerRow(chunks[3].content_hash, home, home_id)
+        self.record.ledger[bare_ledger_key(chunks[3].content_hash)] = dense.LedgerRow(
+            chunks[3].content_hash, header.BARE_HEADER_HASH, home, home_id,
+        )
         counts = self.run_build()
         self.assertEqual((counts.dense_present, counts.dense_leveled, counts.dense_copied, counts.dense_embedded), (3, 3, 1, 1))
         self.assertEqual(self.record.key_reads, [(NAME, tuple(chunk.content_hash for chunk in chunks))])
@@ -1471,13 +1698,17 @@ class Build(unittest.TestCase):
         home = "caselaw__corpus-2098-01-01__example-space"
         identifier = dense.point_id("f" * 64)
         self.store.collections[home] = {identifier: dense.Point(identifier, (0.7, 0.8, 0.9), {})}
-        self.record.ledger[chunk.content_hash] = dense.LedgerRow(chunk.content_hash, home, identifier)
+        self.record.ledger[bare_ledger_key(chunk.content_hash)] = dense.LedgerRow(
+            chunk.content_hash, header.BARE_HEADER_HASH, home, identifier,
+        )
         cas.object_path(self.digest, self.store_root).unlink()
         counts = self.run_build()
         self.assertEqual((counts.dense_copied, counts.dense_embedded, counts.dense_texts), (2, 0, 0))
         self.assertEqual(counts.dense_manifest, 1)
         self.assertEqual(self.store.retrievals, [(home, (identifier,))])
-        self.assertEqual(self.record.ledger[chunk.content_hash], dense.LedgerRow(chunk.content_hash, NAME, dense.point_id(chunk.chunk_id)))
+        self.assertEqual(self.record.ledger[bare_ledger_key(chunk.content_hash)], dense.LedgerRow(
+            chunk.content_hash, header.BARE_HEADER_HASH, NAME, dense.point_id(chunk.chunk_id),
+        ))
         self.assertEqual(len(self.record.commits[0][2]), 1)
         self.assertFalse(self.embedder.calls)
 
@@ -1486,12 +1717,16 @@ class Build(unittest.TestCase):
         for home in ("caselaw__corpus-2098-01-01__example-space", NAME):
             with self.subTest(home=home):
                 self.store.collections.clear()
-                self.record.ledger[chunk.content_hash] = dense.LedgerRow(chunk.content_hash, home, dense.point_id("f" * 64))
+                self.record.ledger[bare_ledger_key(chunk.content_hash)] = dense.LedgerRow(
+                    chunk.content_hash, header.BARE_HEADER_HASH, home, dense.point_id("f" * 64),
+                )
                 self.record.commits.clear()
                 counts = self.run_build()
                 self.assertEqual((counts.dense_embedded, counts.dense_copied), (1, 0))
                 self.assertEqual(self.record.commits[0][1], ())
-                self.assertEqual(self.record.commits[0][2], (dense.LedgerRow(chunk.content_hash, NAME, dense.point_id(chunk.chunk_id)),))
+                self.assertEqual(self.record.commits[0][2], (dense.LedgerRow(
+                    chunk.content_hash, header.BARE_HEADER_HASH, NAME, dense.point_id(chunk.chunk_id),
+                ),))
 
     def test_same_hash_embeds_one_text_and_reads_each_document_once(self) -> None:
         chunk = chunk_for()
@@ -1631,7 +1866,9 @@ class Build(unittest.TestCase):
         home = "caselaw__corpus-2098-01-01__example-space"
         identifier = dense.point_id("f" * 64)
         self.store.collections[home] = {identifier: dense.Point(identifier, (0.7, 0.8, 0.9), {})}
-        self.record.ledger[chunk.content_hash] = dense.LedgerRow(chunk.content_hash, home, identifier)
+        self.record.ledger[bare_ledger_key(chunk.content_hash)] = dense.LedgerRow(
+            chunk.content_hash, header.BARE_HEADER_HASH, home, identifier,
+        )
         with self.assertRaises(dense.DenseFailure) as raised:
             self.run_build()
         self.assertEqual(raised.exception.reason, "chunk-too-long")

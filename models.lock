@@ -40,7 +40,9 @@ profiles:
     # The Max-Q's lower clocks are accepted, since nothing the profile
     # fixes depends on clocks. The data-volume floor is
     # a capacity starting value under the corpus footprint rule, corrected
-    # by the measured footprint once the corpus lands.
+    # by the measured footprint once the corpus lands. Confirmed 2026-11-21
+    # by M31, the footprint measured after the first promoted generation,
+    # a part of the corpus too small to restate the floor from.
     requires:
       platform: x86_64
       gpu:

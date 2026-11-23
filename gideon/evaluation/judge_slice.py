@@ -54,6 +54,7 @@ def _progress_line(case_id: str, repeat: int, grading: judge.Grading) -> str:
         f"prompt_tokens {_figure(grading.prompt_tokens)}; "
         f"completion_tokens {_figure(grading.completion_tokens)}; "
         f"seconds {_figure(grading.elapsed_seconds)}"
+        + ("" if grading.retry_seed is None else f"; retried seed {grading.retry_seed}")
     )
 
 
@@ -115,6 +116,7 @@ def run_judge_triples(eval_set: LoadedSet, slice_name: str, context: RunContext)
     """Grade active triples in id order, completing every earlier repeat first."""
 
     assert context.judge_prompt_id is not None
+    assert context.judge_retry is not None
     assert context.served_model_name is not None
     prompt = judge.PROMPT_REGISTRY[context.judge_prompt_id]
     selected = select_cases(eval_set, slice_name)
@@ -141,6 +143,7 @@ def run_judge_triples(eval_set: LoadedSet, slice_name: str, context: RunContext)
                     "reference": reference,
                     "candidate": candidate,
                 },
+                retry=context.judge_retry,
             )
             judge_field = cast(
                 Mapping[str, JSONValue], judge.render_judge(grading, band=bands[case_id])

@@ -11,6 +11,7 @@ from test_index_lexical_host import JOB_ID, QueueHost, sample_inputs
 from test_index_record import NAME, RENDERED, inputs_for, row_for
 
 from gideon.host import caselaw, report, stack, worker
+from gideon.host.index import header
 from gideon.host.index.dense import (
     TRIPWIRE_DAYS,
     DenseInputs,
@@ -71,6 +72,8 @@ class Defer(unittest.TestCase):
             "courts": {court: asdict(geography) for court, geography in inputs.geography.items()},
             "served_model": inputs.served_model, "dimensions": inputs.dimensions,
         })
+        self.assertIsNone(inputs.header)
+        self.assertNotIn("header", args)
         self.assertNotIn("sample", args)
         for key, value in (("v_task", DENSE_TASK), ("v_queue", DENSE_QUEUE),
                            ("v_lock", f"{DENSE_LOCK_PREFIX}{inputs.name}")):
@@ -79,6 +82,42 @@ class Defer(unittest.TestCase):
         for value in (inputs.name, inputs.label, inputs.snapshot, inputs.inputs_hash, inputs.served_model):
             self.assertNotIn(value, " ".join(argv))
         self.assertIn(":'v_lock'", sql)
+
+    def test_named_header_reaches_the_dense_job_only_on_stdin(self) -> None:
+        bare = dense_inputs()
+        space = header.embedding_space(bare.embedding_space, "h1")
+        inputs = replace(bare, name=f"{bare.name}-h1", embedding_space=space, header="h1")
+        host = QueueHost()
+
+        self.assertEqual(defer_dense(host, RENDERED, inputs), JOB_ID)
+
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        assert sql is not None
+        args_line = next(line for line in sql.splitlines() if line.startswith("\\set v_args "))
+        args = json.loads(args_line.removeprefix("\\set v_args '").removesuffix("'"))
+        self.assertEqual((args["header"], args["embedding_space"]), (inputs.header, space))
+        self.assertNotIn("h1", " ".join(argv))
+
+    def test_invalid_header_and_both_space_disagreements_refuse_before_queueing(self) -> None:
+        bare = dense_inputs()
+        space = header.embedding_space(bare.embedding_space, "h1")
+        named_space = replace(bare, name=f"{bare.name}-h1", embedding_space=space)
+        command = "index build caselaw --sample"
+        for inputs, problem in (
+            (replace(named_space, header="h999"), "dense header is invalid"),
+            (replace(named_space, header="Fictitious header argument"), "dense header is invalid"),
+            (replace(bare, header="h1"), "dense header disagrees with the embedding space"),
+            (named_space, "dense header disagrees with the embedding space"),
+        ):
+            with self.subTest(header=inputs.header, space=inputs.embedding_space):
+                host = QueueHost()
+                result = defer_dense(host, RENDERED, inputs, command_path=command)
+                assert isinstance(result, Problem)
+                self.assertEqual(result.problem, problem)
+                self.assertIn(report.command(command), result.fix)
+                self.assertNotIn("Fictitious header argument", result.problem + result.fix)
+                self.assertEqual(host.calls, [])
 
     def test_sample_arguments_reach_the_dense_job_only_on_stdin(self) -> None:
         sample = sample_inputs()

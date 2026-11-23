@@ -11,10 +11,13 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from gideon.evaluation import challenger, judge, record, results
-from gideon.host import engine, stack
+from test_engine_verify import completed
+from test_preflight import FakeHost
+
+from gideon.evaluation import challenger, judge, record, results, sampling
+from gideon.host import engine, stack, weights
 from gideon.host.render.engine import (
     ENGINE_PORT,
     ENGINE_SECRET_NAME,
@@ -48,8 +51,8 @@ def engine_output(
     *,
     status: int = 200,
     finish_reason: str | None = "stop",
-    prompt_tokens: int = 17,
-    completion_tokens: int = 9,
+    prompt_tokens: int | None = 17,
+    completion_tokens: int | None = 9,
     elapsed: float = 2.5,
 ) -> str:
     response = {
@@ -132,6 +135,16 @@ def passage_relevance_content(
     return json.dumps({"grade": grade, "reason": reason})
 
 
+def held_judge_retry() -> sampling.HeldSet:
+    repository = "example/fictitious-judge-generator"
+    revision = "e" * 40
+    path = weights.snapshot_path(repository, revision, "generation_config.json")
+    host = FakeHost(files={str(path): json.dumps(dict(sampling.THINKING_SAMPLING))})
+    retry = sampling.hold(host, repository, revision, sampling.DEFAULT_SEED)
+    assert isinstance(retry, sampling.HeldSet), retry
+    return retry
+
+
 def run_grade(
     host: StubHost,
     *,
@@ -144,6 +157,7 @@ def run_grade(
         served_model_name="fixture-model",
         prompt=prompt,
         slots=slots,
+        retry=held_judge_retry(),
     )
 
 
@@ -155,6 +169,11 @@ class Request(unittest.TestCase):
         with patch.object(engine, "call_model_server", wraps=engine.call_model_server) as call:
             run_grade(host)
         self.assertIs(call.call_args.args[2], GENERATOR)
+
+    def test_retry_is_keyword_only_and_required(self) -> None:
+        parameter = inspect.signature(judge.grade).parameters["retry"]
+        self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertIs(parameter.default, inspect.Parameter.empty)
 
     def test_reserve_overrides_are_keyword_only_and_default_to_judge_bounds(self) -> None:
         parameters = inspect.signature(judge.grade).parameters
@@ -178,7 +197,7 @@ class Request(unittest.TestCase):
                 with patch.object(engine, "call_model_server", wraps=engine.call_model_server) as call:
                     grading = judge.grade(
                         cast(Any, host), RENDERED, served_model_name="fixture-model",
-                        prompt=PROMPT, slots=SLOTS, **overrides,
+                        prompt=PROMPT, slots=SLOTS, retry=held_judge_retry(), **overrides,
                     )
                 self.assertIsNotNone(grading.verdict)
                 call.assert_called_once()
@@ -309,7 +328,7 @@ class Request(unittest.TestCase):
         for slot, value in PASSAGE_RELEVANCE_SLOTS.items():
             self.assertIn(f"<{slot}>\n{value}\n</{slot}>", user)
         assert host.input is not None
-        self.assertEqual(json.loads(host.input), {
+        self.assertEqual(host.input, json.dumps({
             "model": "fixture-model",
             "messages": [
                 {"role": "system", "content": prompt.system},
@@ -336,7 +355,7 @@ class Request(unittest.TestCase):
                 },
             },
             "chat_template_kwargs": {"enable_thinking": True},
-        })
+        }))
 
     def test_exec_argv_names_the_secret_path_and_nothing_more(self) -> None:
         host = StubHost(engine_output(valid_content()))
@@ -384,6 +403,133 @@ class Request(unittest.TestCase):
         self.assertNotIn("read_secret", calls)
 
 
+class Retry(unittest.TestCase):
+    """Only a length finish on a usable HTTP 200 reply spends a sampled request."""
+
+    def setUp(self) -> None:
+        self.retry = held_judge_retry()
+
+    def grade_replies(
+        self, *replies: subprocess.CompletedProcess[str],
+        max_tokens: int = judge.JUDGE_MAX_TOKENS, max_time: int = judge.JUDGE_TIMEOUT_SECONDS,
+    ) -> tuple[judge.Grading, Mock]:
+        host = StubHost("")
+        with patch.object(host, "run", side_effect=replies) as run:
+            grading = judge.grade(
+                cast(Any, host), RENDERED, served_model_name="fixture-model", prompt=PROMPT, slots=SLOTS,
+                max_tokens=max_tokens, max_time=max_time, retry=self.retry,
+            )
+        return grading, run
+
+    def test_finished_greedy_reply_keeps_its_verdict_and_has_no_retry_seed(self) -> None:
+        content = valid_content()
+        grading, run = self.grade_replies(completed((), stdout=engine_output(content)))
+        run.assert_called_once()
+        self.assertEqual(grading.verdict, judge.Verdict(json.loads(content)))
+        self.assertIsNone(grading.retry_seed)
+        self.assertEqual(judge.render_judge(grading), {"prompt": PROMPT.id, **json.loads(content)})
+
+    def test_retry_preserves_greedy_wire_bytes_and_request_bounds_then_reports_second_verdict(self) -> None:
+        reserve = judge.JUDGE_MAX_TOKENS + 19
+        bound = judge.JUDGE_TIMEOUT_SECONDS + 7
+        reason = "Fictitious sampled verdict that must stay out of repr."
+        content = valid_content(score=2, reason=reason, modes=("omits-key-point",))
+        grading, run = self.grade_replies(
+            completed((), stdout=engine_output(
+                None, finish_reason="length", prompt_tokens=37, completion_tokens=reserve, elapsed=8.5,
+            )),
+            completed((), stdout=engine_output(content, prompt_tokens=41, completion_tokens=13, elapsed=3.25)),
+            max_tokens=reserve, max_time=bound,
+        )
+        greedy, sampled = run.call_args_list
+        body = {
+            "model": "fixture-model",
+            "messages": [
+                {"role": "system", "content": PROMPT.system},
+                {"role": "user", "content": PROMPT.user_template.format(**SLOTS)},
+            ],
+            "max_tokens": reserve,
+            "temperature": 0,
+            "stream": False,
+            "response_format": {"type": "json_schema", "json_schema": {"name": PROMPT.schema_name, "schema": PROMPT.schema}},
+            "chat_template_kwargs": {"enable_thinking": True},
+        }
+        self.assertEqual(greedy.kwargs["input"], json.dumps(body))
+        self.assertEqual(sampled.args, greedy.args)
+        self.assertEqual(greedy.kwargs["timeout"], bound + engine.RUN_TIMEOUT_MARGIN_SECONDS)
+        self.assertEqual(sampled.kwargs["timeout"], greedy.kwargs["timeout"])
+        self.assertEqual(json.loads(sampled.kwargs["input"]), {**body, **sampling.THINKING_SAMPLING, "seed": self.retry.seed})
+        self.assertEqual(grading.verdict, judge.Verdict(json.loads(content)))
+        self.assertEqual(grading.retry_seed, self.retry.seed)
+        self.assertEqual((grading.prompt_tokens, grading.completion_tokens, grading.elapsed_seconds), (37 + 41, reserve + 13, 8.5 + 3.25))
+        self.assertEqual(judge.render_judge(grading, band=(1, 2)), {
+            "prompt": PROMPT.id, **json.loads(content), "band": [1, 2], "in_band": True, "retry_seed": self.retry.seed,
+        })
+        self.assertNotIn(reason, repr(grading))
+        self.assertIn("<redacted>", repr(grading))
+
+    def test_second_length_is_final_and_preserves_known_figures(self) -> None:
+        reserve = judge.JUDGE_MAX_TOKENS + 11
+        grading, run = self.grade_replies(
+            completed((), stdout=engine_output(
+                None, finish_reason="length", prompt_tokens=None, completion_tokens=reserve, elapsed=8.5,
+            )),
+            completed((), stdout=engine_output(
+                None, finish_reason="length", prompt_tokens=29, completion_tokens=None, elapsed=3.5,
+            )),
+            max_tokens=reserve,
+        )
+        self.assertEqual(run.call_count, 2)
+        self.assertIsNone(grading.verdict)
+        assert grading.failure is not None
+        self.assertEqual(grading.failure.code, "finish-reason")
+        self.assertIn(f"{reserve} token reserve", grading.failure.detail)
+        self.assertEqual(grading.retry_seed, self.retry.seed)
+        self.assertEqual((grading.prompt_tokens, grading.completion_tokens, grading.elapsed_seconds), (29, reserve, 8.5 + 3.5))
+        self.assertEqual(judge.render_judge(grading), {
+            "prompt": PROMPT.id, "failed": "finish-reason", "detail": grading.failure.detail, "retry_seed": self.retry.seed,
+        })
+
+    def test_transport_failure_retains_known_elapsed_and_leaves_missing_figures_absent(self) -> None:
+        grading, run = self.grade_replies(
+            completed((), stdout=engine_output(None, finish_reason="length", prompt_tokens=None, completion_tokens=0, elapsed=1.25)),
+            completed((), returncode=7),
+        )
+        self.assertEqual(run.call_count, 2)
+        self.assertIsNone(grading.prompt_tokens)
+        self.assertEqual(grading.completion_tokens, 0)
+        self.assertEqual(grading.elapsed_seconds, 1.25)
+        self.assertEqual(grading.retry_seed, self.retry.seed)
+
+    def test_other_failures_are_final_as_first_or_second_replies(self) -> None:
+        private = "Fictitious reply text that must not enter a failure."
+        truncated = completed((), stdout=engine_output(None, finish_reason="length"))
+        for code, reply in (
+            ("request-failed", completed((), returncode=9, stdout=truncated.stdout, stderr=private)),
+            ("http-status", completed((), stdout=engine_output(private, status=503, finish_reason="length"))),
+            ("finish-reason", completed((), stdout=engine_output(private, finish_reason="content_filter"))),
+            ("finish-reason", completed((), stdout=engine_output(private, finish_reason=None))),
+            ("no-content", completed((), stdout=engine_output(None))),
+            ("invalid-json", completed((), stdout=engine_output(private))),
+            ("schema-violation", completed((), stdout=engine_output(valid_content(score=9, reason=private)))),
+            ("empty-reason", completed((), stdout=engine_output(valid_content(reason=" \n\t")))),
+        ):
+            for prior_replies in ((), (truncated,)):
+                with self.subTest(code=code, after_length=bool(prior_replies)):
+                    grading, run = self.grade_replies(*prior_replies, reply)
+                    self.assertEqual(run.call_count, len(prior_replies) + 1)
+                    self.assertIsNone(grading.verdict)
+                    assert grading.failure is not None
+                    self.assertEqual(grading.failure.code, code)
+                    self.assertEqual(grading.retry_seed, self.retry.seed if prior_replies else None)
+                    field = judge.render_judge(grading)
+                    if prior_replies:
+                        self.assertEqual(field["retry_seed"], self.retry.seed)
+                    else:
+                        self.assertNotIn("retry_seed", field)
+                    self.assertNotIn(private, repr(grading))
+
+
 class Failures(unittest.TestCase):
     """Every engine or verdict refusal is a scoreless, content-free grading."""
 
@@ -394,9 +540,8 @@ class Failures(unittest.TestCase):
             ("http-status", StubHost(engine_output(valid_content(), status=503))),
             ("finish-reason", StubHost(engine_output(valid_content(), finish_reason="length"))),
             ("no-content", StubHost(engine_output(None))),
-            # The plan's named risk: the whole reserve spent inside the reasoning
-            # block returns no content AND finish reason 'length'. That is an
-            # unfinished reply, never a missing field.
+            # A reply can spend its whole reserve inside the reasoning block
+            # and finish on length without producing content.
             (
                 "finish-reason",
                 StubHost(engine_output(None, finish_reason="length")),
@@ -419,6 +564,7 @@ class Failures(unittest.TestCase):
                     served_model_name="fixture-model",
                     prompt=PROMPT,
                     slots={**SLOTS, "candidate": candidate},
+                    retry=held_judge_retry(),
                 )
                 self.assertIsNone(grading.verdict)
                 self.assertIsNotNone(grading.failure)
@@ -550,7 +696,12 @@ class Normalisation(unittest.TestCase):
                 self.assertEqual(field["in_band"], inside)
 
     def test_unfinished_reply_names_the_token_reserve(self) -> None:
-        grading = run_grade(StubHost(engine_output(None, finish_reason="length")))
+        host = StubHost(engine_output(None, finish_reason="length"))
+        with patch.object(host, "run", wraps=host.run) as run:
+            grading = run_grade(host)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(grading.retry_seed, sampling.DEFAULT_SEED)
+        self.assertEqual(judge.render_judge(grading)["retry_seed"], sampling.DEFAULT_SEED)
         assert grading.failure is not None
         self.assertEqual(grading.failure.code, "finish-reason")
         self.assertIn(str(judge.JUDGE_MAX_TOKENS), grading.failure.detail)
@@ -561,7 +712,7 @@ class Normalisation(unittest.TestCase):
         grading = judge.grade(
             cast(Any, StubHost(engine_output(None, finish_reason="length"))),
             RENDERED, served_model_name="fixture-model", prompt=PROMPT, slots=SLOTS,
-            max_tokens=reserve,
+            max_tokens=reserve, retry=held_judge_retry(),
         )
         self.assertIsNone(grading.verdict)
         assert grading.failure is not None
