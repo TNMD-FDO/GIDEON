@@ -232,6 +232,8 @@ class FakeHost:
                 return completed(command, stdout="gideon 1.2.3\n")
             if script.startswith("sudo sh -c "):
                 return completed(command)
+            if script == fullrestore.TRUST_FORWARD_SCRIPT:
+                return completed(command, stdout="Docker names 127.0.0.1:5000 plain\n")
             if "sudo ./preflight.sh" in script:
                 return completed(command, stdout="preflight: ok\n")
             if "sudo ./install.sh" in script:
@@ -799,6 +801,7 @@ class HarnessCli(unittest.TestCase):
         self.assertIn("Acceptance dry run (full restore):", out)
         self.assertIn("stages: " + ", ".join(FULL_RESTORE_IDENTIFIERS), out)
         self.assertIn(f"run directory: {HARNESS_ROOT / DEFAULT_RESTORE_VM_NAME}", out)
+        self.assertIn("VM: 8 vCPUs, 80 GiB RAM, machine pc", out)
         self.assertEqual(host.calls, [])
         self.assertEqual(host.writes, [])
 
@@ -1045,6 +1048,42 @@ class FullRestoreContracts(unittest.TestCase):
             with self.subTest(observed=observed):
                 self.assertTrue(fullrestore.compare_counts(expected, observed))
 
+    def test_compare_counts_lets_the_queue_tables_fall_short_and_never_exceed(self) -> None:
+        # v0.4.0's fourth cut: one `retry_stalled_jobs` run after the copy.
+        expected = {
+            "gideon": {
+                "public.procrastinate_events": 210912,
+                "public.procrastinate_jobs": 70280,
+                "public.users": 3,
+            },
+            "openwebui": {"main.chats": 4},
+        }
+        short = {database: dict(counts) for database, counts in expected.items()}
+        short["gideon"]["public.procrastinate_events"] -= 3
+        short["gideon"]["public.procrastinate_jobs"] -= 1
+
+        self.assertEqual(fullrestore.compare_counts(expected, short), ())
+        detail = fullrestore._counts_detail(expected, short, ())
+        self.assertIn("queue short of the manifest", detail)
+        self.assertIn("gideon.public.procrastinate_events 210912 -> 210909", detail)
+        self.assertIn("gideon.public.procrastinate_jobs 70280 -> 70279", detail)
+        self.assertNotIn("queue short", fullrestore._counts_detail(expected, expected, ()))
+
+        for name in fullrestore.QUEUE_TABLES:
+            above = {database: dict(counts) for database, counts in expected.items()}
+            above["gideon"][name] += 1
+            absent = {database: dict(counts) for database, counts in expected.items()}
+            del absent["gideon"][name]
+            for observed in (above, absent):
+                with self.subTest(name=name, observed=observed["gideon"]):
+                    self.assertEqual(fullrestore.compare_counts(expected, observed), (f"gideon.{name}",))
+        # The rule names the product database's queue alone; elsewhere a table is exact.
+        other = {"openwebui": {"public.procrastinate_jobs": 5}}
+        self.assertTrue(fullrestore.compare_counts(other, {"openwebui": {"public.procrastinate_jobs": 4}}))
+        self.assertTrue(
+            fullrestore.compare_counts(expected, {**short, "gideon": {**short["gideon"], "public.users": 2}})
+        )
+
     def test_compare_counts_rejects_two_audit_partitions_one_higher(self) -> None:
         expected = {
             "gideon": {
@@ -1122,6 +1161,37 @@ class FullRestoreContracts(unittest.TestCase):
         self.assertIn(label, result.detail)
         self.assertIn("7 bytes", result.detail)
 
+    def test_snapshot_copies_the_store_a_set_pins_in_staging(self) -> None:
+        # v0.4.0's first full restore: a set of the staging-store form reached
+        # the VM without the shared store copy, and the fetch's reown refused.
+        host, ctx, pinned, _ = restore_context_with_store()
+        staged = replace(pinned, version=backupset.STORE_IN_STAGING_VERSION)
+        assert ctx.restore_set is not None
+        ctx.restore_set = replace(ctx.restore_set, manifest=staged)
+        self.assertEqual(
+            fullrestore._staged_store(staged), (f"{backupset.STAGING}/./{STORE_ROW.name}",)
+        )
+        self.assertEqual(fullrestore._staged_store(pinned), ())
+        fixed = datetime(2026, 9, 17, 2, tzinfo=UTC)
+        partial = f"{services.ACCEPTANCE_TARGET_PATH}/{backupset.nightly_label(fixed)}{backupset.PARTIAL_SUFFIX}"
+        create = vm_root_argv(ctx, f"install -d -m 0750 {partial}")
+        rsync = (
+            "rsync", "-aH", "--no-owner", "--no-group", "--relative", "--stats",
+            "-e", vm.ssh_option_string(ctx), "--rsync-path", "sudo rsync",
+            f"{backupset.STAGING}/./sets/{staged.label}",
+            f"{backupset.STAGING}/./pgbackrest",
+            f"{backupset.STAGING}/./{STORE_ROW.name}",
+            f"{vm.CSA_ACCOUNT}@{ctx.address}:{partial}/",
+        )
+        host.commands[create] = completed(create)
+        host.commands[rsync] = completed(rsync, returncode=23, stderr="copy failed")
+
+        with patch.object(fullrestore, "_now", return_value=fixed):
+            result = fullrestore.snapshot(ctx)
+
+        self.assertFalse(result.ok)
+        self.assertIn(rsync, [call[0] for call in host.calls])
+
     def test_snapshot_refuses_a_nonzero_rsync_without_finalizing(self) -> None:
         host, ctx, manifest = restore_context()
         label = backupset.nightly_label(datetime(2026, 9, 17, 2, tzinfo=UTC))
@@ -1174,6 +1244,88 @@ class FullRestoreContracts(unittest.TestCase):
         forward = restore_argv.index("-R")
         self.assertEqual(restore_argv[forward + 1], "127.0.0.1:5000:127.0.0.1:5000")
         self.assertIn("ExitOnForwardFailure=yes", restore_argv)
+        # Docker 29.10 trusts that port as plain only once it is named, so the
+        # trust step runs first, its program on stdin.
+        trust_argv = tuple(vm.ssh_argv(ctx, fullrestore.TRUST_FORWARD_SCRIPT))
+        commands = [call[0] for call in host.calls]
+        self.assertLess(commands.index(trust_argv), commands.index(restore_argv))
+        trust_call = host.calls[commands.index(trust_argv)]
+        self.assertEqual(trust_call[2], fullrestore.TRUST_FORWARD_PROGRAM)
+        self.assertIn("127.0.0.1:5000", shlex.split(trust_argv[-1])[0])
+
+    def test_restore_refuses_when_the_registry_forward_cannot_be_named_plain(self) -> None:
+        host, ctx, _manifest = restore_context()
+        ctx.snapshot_label = "20260917T020000Z"
+        trust_argv = tuple(vm.ssh_argv(ctx, fullrestore.TRUST_FORWARD_SCRIPT))
+        host.commands[trust_argv] = completed(
+            trust_argv, returncode=1, stderr="Docker does not name 127.0.0.1:5000 plain after the reload"
+        )
+
+        restored = fullrestore.restore_target(ctx)
+
+        self.assertFalse(restored.ok)
+        self.assertEqual(restored.name, "restore")
+        self.assertIn("127.0.0.1:5000", restored.detail)
+        self.assertIn("/etc/docker/daemon.json", restored.detail)
+        self.assertNotIn("gideon restore", repr(host.calls))
+
+    def test_trust_forward_program_appends_once_and_reloads_only_on_change(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            calls = root / "calls"
+            (bin_dir / "systemctl").write_text(f'#!/bin/sh\necho "systemctl $*" >> {calls}\n')
+            (bin_dir / "docker").write_text(
+                "#!/bin/sh\n"
+                f'echo "docker $1" >> {calls}\n'
+                """echo '{"127.0.0.1:5000":{"Secure":false},"192.0.2.1:5000":{"Secure":false}}'\n"""
+            )
+            for tool in bin_dir.iterdir():
+                tool.chmod(0o755)
+            daemon = root / "daemon.json"
+            daemon.write_text(
+                json.dumps({"insecure-registries": ["192.0.2.1:5000"], "log-driver": "journald"})
+            )
+            env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+            argv = ["python3", "-", str(daemon), fullrestore.REGISTRY_LOOPBACK]
+            for _ in range(2):
+                ran = subprocess.run(
+                    argv, input=fullrestore.TRUST_FORWARD_PROGRAM, env=env,
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(ran.returncode, 0, ran.stderr)
+                self.assertEqual(ran.stdout, "Docker names 127.0.0.1:5000 plain\n")
+
+            settings = json.loads(daemon.read_text())
+            self.assertEqual(settings["insecure-registries"], ["192.0.2.1:5000", "127.0.0.1:5000"])
+            self.assertEqual(settings["log-driver"], "journald")
+            self.assertEqual(daemon.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(
+                calls.read_text().splitlines(),
+                ["systemctl reload docker", "docker info", "docker info"],
+            )
+
+    def test_trust_forward_program_fails_when_docker_keeps_the_forward_secure(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "systemctl").write_text("#!/bin/sh\nexit 0\n")
+            (bin_dir / "docker").write_text("""#!/bin/sh\necho '{"127.0.0.1:5000":{"Secure":true}}'\n""")
+            for tool in bin_dir.iterdir():
+                tool.chmod(0o755)
+            daemon = root / "daemon.json"
+            daemon.write_text("{}")
+            env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+            program = fullrestore.TRUST_FORWARD_PROGRAM.replace("time.sleep(1)", "time.sleep(0)")
+            ran = subprocess.run(
+                ["python3", "-", str(daemon), fullrestore.REGISTRY_LOOPBACK],
+                input=program, env=env, capture_output=True, text=True, check=False,
+            )
+
+            self.assertEqual(ran.returncode, 1)
+            self.assertIn("Docker does not name 127.0.0.1:5000 plain after the reload", ran.stderr)
 
     def test_restore_requires_recovery_clauses_for_roots_in_the_set(self) -> None:
         host, ctx, manifest = restore_context()
@@ -2092,6 +2244,8 @@ class PhaseBBuild(unittest.TestCase):
         self.assertLess(volumes_mib, lvm_mib)
         self.assertEqual(image.OS_DISK_SIZE, f"{image.OS_DISK_GIB}G")
         self.assertGreaterEqual(image.ROOT_LV_MIB, 2 * 36 * 1024)  # the snapshot, twice over
+        # v0.4.0's set, 234,334,115,559 bytes, filled the 128 GiB root LV; half again.
+        self.assertGreaterEqual(image.ROOT_LV_MIB * 1024 * 1024, 234_334_115_559 * 3 // 2)
         script = image._guestfish_script(RUN_DIR / "os.qcow2", IMAGE)
         self.assertIn(f"lvcreate root ubuntu-vg {image.ROOT_LV_MIB}", script.splitlines())
         self.assertIn(f"part-add /dev/sda p {lvm_start} {lvm_end}", script.splitlines())

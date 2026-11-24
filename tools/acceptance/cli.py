@@ -17,6 +17,7 @@ from tools.acceptance.context import (
     DEFAULT_RESTORE_VM_NAME,
     DEFAULT_SITE_PATH,
     DEFAULT_VM_NAME,
+    FULL_RESTORE_MEMORY_MIB,
     HARNESS_ROOT,
     RunSpec,
     SinkFactory,
@@ -226,6 +227,8 @@ def main(
     )
     if options.pair:
         spec = replace(spec, vcpus=pair.PAIR_VCPUS, memory_mib=pair.PAIR_MEMORY_MIB)
+    if options.full_restore:
+        spec = replace(spec, memory_mib=FULL_RESTORE_MEMORY_MIB)
     if options.dry_run:
         _plan(spec)
         return 0

@@ -26,6 +26,13 @@ from tools.pinwatch.fetch import Fetcher
 HARNESS_ROOT: Final = Path("/data/acceptance")
 DEFAULT_VM_NAME: Final = "gideon-acceptance"
 DEFAULT_RESTORE_VM_NAME: Final = "gideon-acceptance-restore"
+# The full-restore form puts the box's promoted generation back into both
+# stores, about 60 GB resident at the first promote (qdrant 27,576,979,456
+# and opensearch 32,673,525,760 bytes by their cgroups), so its VM holds that
+# beside Postgres, the worker, and the OS: 80 GiB, set by the developer at
+# v0.4.0 inside GIDEON's host-RAM line in the box ledger. The other forms
+# keep RunSpec's 16 GiB.
+FULL_RESTORE_MEMORY_MIB: Final = 80 * 1024
 DEFAULT_COTENANT_VM_NAMES: Final[Mapping[str, str]] = {
     "before": "gideon-acceptance-cotenant-before",
     "after": "gideon-acceptance-cotenant-after",

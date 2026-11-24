@@ -44,7 +44,39 @@ FULL_RESTORE_FIX: Final = (
 # its loopback registry; the restore's one-off and store-tier containers pull
 # them there, so the VM's loopback port reaches the same registry (the one
 # the VM's own site names on the bridge) over the restore's SSH session.
-REGISTRY_FORWARD: Final = "127.0.0.1:5000:127.0.0.1:5000"
+REGISTRY_LOOPBACK: Final = "127.0.0.1:5000"
+REGISTRY_FORWARD: Final = f"{REGISTRY_LOOPBACK}:{REGISTRY_LOOPBACK}"
+# Docker 29.10 trusts a loopback registry over plain HTTP only while
+# `insecure-registries` is unset, and the VM's provision sets it to the bridge
+# registry, so before the restore the forward's authority joins that list and
+# Docker reloads (a SIGHUP: no container restarts). The program travels on
+# stdin; it reads Docker's own answer back and fails unless the authority is
+# plain.
+DAEMON_FILE: Final = "/etc/docker/daemon.json"
+TRUST_FORWARD_SCRIPT: Final = f"sudo python3 - {DAEMON_FILE} {REGISTRY_LOOPBACK}"
+TRUST_FORWARD_PROGRAM: Final = """\
+import json, os, pathlib, subprocess, sys, tempfile, time
+path, authority = pathlib.Path(sys.argv[1]), sys.argv[2]
+settings = json.loads(path.read_text())
+registries = settings.setdefault("insecure-registries", [])
+if authority not in registries:
+    registries.append(authority)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
+        stream.write(json.dumps(settings, indent=2, sort_keys=True) + "\\n")
+    os.chmod(stream.name, 0o644)
+    os.replace(stream.name, path)
+    subprocess.run(["systemctl", "reload", "docker"], check=True)
+for _ in range(30):
+    probe = subprocess.run(
+        ["docker", "info", "--format", "{{json .RegistryConfig.IndexConfigs}}"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode == 0 and json.loads(probe.stdout).get(authority, {}).get("Secure") is False:
+        print(f"Docker names {authority} plain")
+        sys.exit(0)
+    time.sleep(1)
+sys.exit(f"Docker does not name {authority} plain after the reload")
+"""
 COPY_TIMEOUT_SECONDS: Final = 3600
 RESTORE_TIMEOUT_SECONDS: Final = 3600
 APPLY_TIMEOUT_SECONDS: Final = 3600
@@ -81,6 +113,16 @@ def _pinned_store(
         if root.kind is backupset.RootKind.STORE and (pin := manifest.listings.get(root.name)) is not None:
             return root, pin
     return None
+
+
+def _staged_store(manifest: backupset.Manifest) -> tuple[str, ...]:
+    """Name the shared store copy a set pins in staging, beside its set directory."""
+
+    pinned = _pinned_store(manifest)
+    if pinned is None or not manifest.store_in_staging:
+        return ()
+    root, _ = pinned
+    return (f"{backupset.STAGING}/./{root.name}",)
 
 
 def _available(host: Host) -> tuple[int | None, str | None]:
@@ -264,6 +306,7 @@ def snapshot(ctx: HarnessContext) -> StageResult:
         "sudo rsync",
         f"{backupset.STAGING}/./sets/{ref.label}",
         f"{backupset.STAGING}/./pgbackrest",
+        *_staged_store(manifest),
         destination,
     ]
     try:
@@ -327,6 +370,13 @@ def restore_target(ctx: HarnessContext) -> StageResult:
     if selected is None or ctx.snapshot_label is None:
         return _restore_failure(ctx, "snapshot or selected set is missing")
     ref, manifest = selected
+    trusted = vm.ssh(ctx, TRUST_FORWARD_SCRIPT, input=TRUST_FORWARD_PROGRAM)
+    if trusted.returncode != 0:
+        return _stage_failure(
+            "restore",
+            f"could not name the registry forward {REGISTRY_LOOPBACK} plain in the VM's "
+            f"{DAEMON_FILE}: {command_detail(trusted)}",
+        )
     result, text = vm.run_product(
         ctx,
         "restore",
@@ -433,6 +483,14 @@ def _counts_detail(
         values = observed.get(database, {})
         tables = ", ".join(f"{name}={values[name]}" for name in sorted(values))
         databases.append(f"{database}: {tables or '-'}")
+    wanted, found = expected.get(QUEUE_DATABASE, {}), observed.get(QUEUE_DATABASE, {})
+    short = [
+        f"{QUEUE_DATABASE}.{name} {wanted[name]} -> {found[name]}"
+        for name in QUEUE_TABLES
+        if name in wanted and name in found and found[name] < wanted[name]
+    ]
+    if short:
+        databases.append(f"queue short of the manifest, the worker's rows after the copy: {', '.join(short)}")
     if not mismatches:
         return "; ".join(databases)
     differences: list[str] = []
@@ -547,6 +605,15 @@ def store(ctx: HarnessContext) -> StageResult:
 
 _AUDIT_TABLE: Final = "public.audit_log"
 _AUDIT_PARTITION_PREFIX: Final = f"{_AUDIT_TABLE}_"
+# `backup run` takes its Postgres copy and then counts the live tables while
+# the box's worker runs, and an immediate restore stops at the copy's
+# consistency point, before those counts (the drill's writer drift). The queue
+# is that writer, Procrastinate's `retry_stalled_jobs` deferring a job and its
+# three events every minute, so its two tables may come back short of the
+# manifest and never above it (the developer's ruling at v0.4.0); every other
+# table is exact.
+QUEUE_DATABASE: Final = "gideon"
+QUEUE_TABLES: Final = ("public.procrastinate_events", "public.procrastinate_jobs")
 
 
 def _audit_partition(name: str) -> bool:
@@ -577,6 +644,11 @@ def _count_mismatches(
     for name in sorted(names):
         if name == _AUDIT_TABLE or _audit_partition(name):
             continue
+        if database == QUEUE_DATABASE and name in QUEUE_TABLES:
+            wanted, found = expected.get(name), observed.get(name)
+            if wanted is None or found is None or found > wanted:
+                mismatches.append(f"{database}.{name}")
+            continue
         if expected.get(name) != observed.get(name):
             mismatches.append(f"{database}.{name}")
 
@@ -603,7 +675,7 @@ def compare_counts(
     expected: Mapping[str, Mapping[str, int]],
     observed: Mapping[str, Mapping[str, int]],
 ) -> tuple[str, ...]:
-    """Return table names whose restored counts violate the audit-row rule."""
+    """Return table names whose restored counts violate the audit-row or queue rule."""
 
     mismatches: list[str] = []
     for database in sorted(set(expected) | set(observed)):

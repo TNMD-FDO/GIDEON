@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.4.0](docs/release-notes/v0.4.0.md) — 2026-11-23 — corpus machinery and tranche 1; slice 3 closes
 - [v0.3.202](docs/release-notes/v0.3.202.md) — 2026-11-23 — tranche 1 of the case-law index promoted, E10 a loss, a stopped restore naming kept staging, seeded eval retries
 - [v0.3.201](docs/release-notes/v0.3.201.md) — 2026-11-20 — the embedding server held inside its GPU share, tranche 1 of the case-law index built, a cycle yielding the box
 - [v0.3.200](docs/release-notes/v0.3.200.md) — 2026-11-19 — Mojeek in web search, banners GIDEON sets itself, a maintenance window recorded once, the E1 and E11 decisions

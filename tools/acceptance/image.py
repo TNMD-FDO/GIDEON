@@ -31,9 +31,11 @@ from gideon.host.sysio import Host
 from tools.acceptance.context import HarnessContext, checkout_git
 
 # The root LV holds the loopback backup target (`/srv/gideon-backup`), so the
-# full restore's snapshot of the box's set (36 GB at v0.1.77, the registry's
-# images) lands there; the qcow2 is sparse, so the size costs nothing unwritten.
-OS_DISK_GIB: Final = 160
+# full restore's snapshot of the box's set lands there: 36 GB at v0.1.77, the
+# registry's images, and 234,334,115,559 bytes at v0.4.0 with the promoted
+# generation's store snapshots, which filled a 128 GiB root LV. The qcow2 is
+# sparse, so the size costs nothing unwritten.
+OS_DISK_GIB: Final = 512
 OS_DISK_SIZE: Final = f"{OS_DISK_GIB}G"
 DATA_DISK_SIZE: Final = "2T"
 SECTOR_SIZE: Final = 512
@@ -46,7 +48,7 @@ BOOT_MIB: Final = 1024
 BIOS_BOOT_TYPE: Final = "21686148-6449-6E6F-744E-656564454649"
 ESP_TYPE: Final = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 LVM_TYPE: Final = "E6D6D379-F507-44C2-A23C-238F2A3DF928"
-ROOT_LV_MIB: Final = 128 * 1024
+ROOT_LV_MIB: Final = 448 * 1024
 # The Docker LV holds the no-GPU image set unpacked (13.5 GB with the lexical
 # store's image) beside the compressed layers a pull keeps while it extracts.
 DOCKER_LV_MIB: Final = 24 * 1024
