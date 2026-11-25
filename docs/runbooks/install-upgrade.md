@@ -90,6 +90,8 @@ Every step can be re-run. A refusal prints its fix and exits non-zero; make the 
 
    The embedding server, `gideon-embed`, is the engine's sibling on the same image. It uses the recorded GPU 1 card by UUID, with a fixed share of that card held from its start. Its own key, `/etc/gideon/secrets/embed_api_key`, is read inside its container, and the same wait applies. It starts only when that share is free on the card; otherwise its logs name the shortfall, and `verify` fails naming them.
 
+   The reranker, `gideon-rerank-2`, orders a Legal answer's passages by relevance. It is the third server on the same image and the second on the recorded GPU 1 card. Its key is `/etc/gideon/secrets/rerank_2_api_key`, read inside its container, and the same wait and the same start condition apply. It scores through a prompt template GIDEON renders to `/etc/gideon/rendered/model-servers/qwen3_reranker.jinja` and mounts read-only. A profile that pins no reranker, the trial profile among them, renders none.
+
    The engine's API key is the generated secret `/etc/gideon/secrets/engine_api_key`. The `secrets` stage creates it only when absent. It is read inside the container and does not appear in the Compose file, argv, or a row. Each model server requires its key on every route but `/health` and `/metrics`. GIDEON middleware enforces this, loaded by the engine from a rendered file, so a client without the key sees 401 on any other route.
 
    The start-up log (the `GPU KV cache size` and `Maximum concurrency` lines) is in the journal at every boot: `sudo journalctl CONTAINER_NAME=gideon-gideon-generator-1 -b`. A vLLM image or model pin bump restarts the engine inside apply after the `models` stage. A rollback to a release without the engine removes its container as an orphan and leaves the key file. On a no-GPU host none of this is rendered.
@@ -98,15 +100,19 @@ Every step can be re-run. A refusal prints its fix and exits non-zero; make the 
 
    Since `v0.2.29` the frontend is not among the consumers: the engine's key left its env file at the cutover. The frontend's own connection key is `gideon_api_key`. Run `gideon secrets rotate gideon_api_key` to recreate `gideon-api` (its mount) and the frontend (its env file's owner).
 
-   Run `gideon secrets rotate embed_api_key` to recreate the embedding server alone, with a cold start bounded by the same wait. Nothing else consumes its key yet.
+   Run `gideon secrets rotate embed_api_key` to recreate the embedding server, with a cold start bounded by the same wait, then its key's other mounts, `gideon-api` and `gideon-worker`, in seconds.
+
+   Run `gideon secrets rotate rerank_2_api_key` to recreate the reranker, with a cold start bounded by the same wait, then its key's other mount, `gideon-api`, in seconds.
 
    General is the chat branch users talk to, with internet search and no case-matter access. Once General is live, rotate in an announced maintenance window if the rotation recreates the engine, because the cold start makes General unavailable. A maintenance window is an announced span when General may be unavailable; §2 sets its rules. The command does not gate on the clock.
 
    The same command rotates `webui_secret_key`, recreating the frontend once and ending every signed-in session. For `searxng_secret_key`, it recreates SearXNG through the recreate rule. With search off, nothing consumes that key, and the command says so and writes nothing.
 
-   Rotating `qdrant_api_key` recreates the vector store in seconds. Nothing else consumes that key yet. A `qdrant_read_only_api_key` rotation recreates the store in seconds, then the frontend. Signed-in sessions stay because the session key does not move.
+   Rotating `qdrant_api_key` recreates the vector store in seconds. Nothing else consumes that key yet. A `qdrant_read_only_api_key` rotation recreates the store and `gideon-api` in seconds, then the frontend. Signed-in sessions stay because the session key does not move.
 
-   For `opensearch_password`, the lexical store is recreated and takes about ten seconds to become healthy. Rotating `opensearch_metrics_password` recreates the lexical store and Prometheus, and the scrape resumes within a minute.
+   On the build box, the `gideon-ci` sibling mounts four of production's files by path: the engine key, the embedding key, and the metrics-reader and turn-reader passwords. A file secret is a bind mount, and `tools.cistack up` recreates nothing that stands, so after rotating either key run `sudo python3 -m tools.cistack down`, then `sudo python3 -m tools.cistack up`.
+
+   For `opensearch_password`, the lexical store is recreated and takes about ten seconds to become healthy. Rotating `opensearch_metrics_password` recreates the lexical store and Prometheus, and the scrape resumes within a minute. Rotating `opensearch_turn_password` recreates the lexical store and `gideon-api`.
 
    For `opensearch_transport_key` and `opensearch_transport_cert`, the lexical store is recreated. Rotating the certificate alone renews it from its standing key before its ten-year end date. Rotating the key re-issues the certificate with it.
 

@@ -26,7 +26,11 @@ from gideon.host import apply as apply_module
 from gideon.host.images import RegistryTarget, parse_registry, reference
 from gideon.host.models import MemoryRow
 from gideon.host.render import RenderedFile, RenderedSet, RenderInputs
-from gideon.host.render.api import API_SECRET_NAME, API_SERVICE_NAME
+from gideon.host.render.api import (
+    API_SECRET_NAME,
+    API_SERVICE_NAME,
+    TURN_READER_SECRET_NAME,
+)
 from gideon.host.render.ci import (
     EMBED_RELAY_SERVICE_NAME,
     RECORD_RELAY_SERVICE_NAME,
@@ -60,10 +64,12 @@ from gideon.host.render.engine import (
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
     GENERATOR,
+    RERANK,
 )
 from gideon.host.render.opensearch import (
     OPENSEARCH_PASSWORD_SECRET_NAME,
     OPENSEARCH_SERVICE_NAME,
+    OPENSEARCH_TURN_SECRET_NAME,
 )
 from gideon.host.render.searxng import SEARXNG_SERVICE_NAME
 from gideon.host.render.services import (
@@ -313,10 +319,15 @@ class Registry(unittest.TestCase):
             ENGINE_SECRET_NAME,
             API_SECRET_NAME,
             "postgres_gideon_audit_password",
+            TURN_READER_SECRET_NAME,
         ):
             with self.subTest(secret=name):
                 self.assertNotIn(name, declared)
         self.assertIn(EMBED_SECRET_NAME, declared)
+        self.assertEqual(
+            declared[OPENSEARCH_TURN_SECRET_NAME],
+            {"file": f"/etc/gideon/secrets/{OPENSEARCH_TURN_SECRET_NAME}"},
+        )
 
     def test_substituted_registry_derives_secrets_from_applying_blocks(self) -> None:
         """A credential joins through its rendered block alone."""
@@ -519,11 +530,21 @@ class Registry(unittest.TestCase):
                 self.assertTrue(set(stores) <= applying)
 
     def test_turn_path_services_are_projected_in_registry_order(self) -> None:
-        expected = ("caddy", "postgres", "open-webui", ENGINE_SERVICE_NAME, API_SERVICE_NAME, SEARXNG_SERVICE_NAME)
+        expected = (
+            "caddy",
+            "postgres",
+            "qdrant",
+            "opensearch",
+            "open-webui",
+            ENGINE_SERVICE_NAME,
+            EMBED_SERVICE_NAME,
+            RERANK.service_name,
+            API_SERVICE_NAME,
+            SEARXNG_SERVICE_NAME,
+        )
         self.assertEqual(turn_path_services(), expected)
         self.assertEqual(TURN_PATH_SERVICES, expected)
         self.assertFalse(ServiceDefinition.turn_path)
-        self.assertFalse(EmbedService.turn_path)
 
     def test_slow_starters_have_positive_allowances_and_matching_healthchecks(
         self,
@@ -537,6 +558,7 @@ class Registry(unittest.TestCase):
             {
                 ENGINE_SERVICE_NAME: GENERATOR.ready_seconds,
                 EMBED_SERVICE_NAME: EMBED.ready_seconds,
+                RERANK.service_name: RERANK.ready_seconds,
             },
         )
         for name, seconds in allowances.items():

@@ -1,0 +1,17 @@
+{#- GIDEON's score template for Qwen/Qwen3-Reranker-4B at revision
+22e683669bc0f0bd69640a1354a6d0aebcfeede5. It renders the model card's
+Transformers prompt exactly, its final </think> followed by two newlines.
+The instruction is the request's instruction field, else the card's default
+sentence. The last expression writes the closing newline and strips what
+follows it, so the environment's trailing-newline rule moves nothing. -#}
+<|im_start|>system
+Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>
+<|im_start|>user
+<Instruct>: {{ instruction | default("Given a web search query, retrieve relevant passages that answer the query", true) }}
+<Query>: {{ messages | selectattr("role", "eq", "query") | map(attribute="content") | first }}
+<Document>: {{ messages | selectattr("role", "eq", "document") | map(attribute="content") | first }}<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+{{ "\n" -}}

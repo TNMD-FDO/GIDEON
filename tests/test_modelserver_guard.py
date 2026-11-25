@@ -72,6 +72,7 @@ class RouteDecisions(unittest.TestCase):
 
     def test_routes_refuse_missing_and_wrong_keys(self) -> None:
         paths = (
+            "/classify",
             "/pooling",
             "/score",
             "/rerank",

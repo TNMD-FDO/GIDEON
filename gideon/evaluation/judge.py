@@ -377,35 +377,6 @@ def _collapse_enumerated_strings(values: list[object]) -> list[str]:
     return collapsed
 
 
-def _request_body(
-    served_model_name: str,
-    prompt: JudgePrompt,
-    *,
-    slots: Mapping[str, str],
-    max_tokens: int,
-    retry: sampling.HeldSet | None = None,
-) -> Mapping[str, object]:
-    user_message = prompt.user_template.format(**slots)
-    return {
-        "model": served_model_name,
-        "messages": [
-            {"role": "system", "content": prompt.system},
-            {"role": "user", "content": user_message},
-        ],
-        "max_tokens": max_tokens,
-        **({"temperature": 0} if retry is None else retry.request_fields),
-        "stream": False,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": prompt.schema_name,
-                "schema": prompt.schema,
-            },
-        },
-        "chat_template_kwargs": {"enable_thinking": True},
-    }
-
-
 def _read_reply(
     prompt: JudgePrompt,
     reply: engine.EngineReply,
@@ -538,12 +509,17 @@ def grade(
         raise ValueError(f"judge slots do not match prompt (missing={missing}, extra={extra})")
 
     def attempt(held: sampling.HeldSet | None) -> tuple[Grading, bool]:
+        body = sampling.chat_request(
+            served_model_name, system_text=prompt.system, user_text=prompt.user_template.format(**slots),
+            max_tokens=max_tokens, schema_name=prompt.schema_name, schema=prompt.schema, enable_thinking=True,
+            sampling_fields=None if held is None else held.request_fields,
+        )
         reply = engine.call_model_server(
             io,
             rendered_dir,
             GENERATOR,
             path="/v1/chat/completions",
-            body=_request_body(served_model_name, prompt, slots=slots, max_tokens=max_tokens, retry=held),
+            body=body,
             max_time=max_time,
         )
         completion = engine.completion_values(reply)

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from shlex import quote
 
 from gideon.host.images import ImagePin, RegistryTarget
+from gideon.host.models import HardwareProfile
 from gideon.host.render import RenderInputs
 
 
@@ -35,6 +36,12 @@ class ServiceDefinition:
         """Whether this service belongs in the rendered project."""
 
         del inputs
+        return True
+
+    def renderable(self, profile: HardwareProfile) -> bool:
+        """Whether this profile can render the service on any host."""
+
+        del profile
         return True
 
     def block(
@@ -115,6 +122,7 @@ def _registered_services() -> tuple[ServiceDefinition, ...]:
     from gideon.host.render.services.postgres_exporter import PostgresExporterService
     from gideon.host.render.services.prometheus import PrometheusService
     from gideon.host.render.services.qdrant import QdrantService
+    from gideon.host.render.services.rerank import RerankService
     from gideon.host.render.services.searxng import SearxngService
     from gideon.host.render.services.worker import WorkerService
 
@@ -129,6 +137,7 @@ def _registered_services() -> tuple[ServiceDefinition, ...]:
         OpenWebuiService(),
         GeneratorService(),
         EmbedService(),
+        RerankService(),
         ApiService(),
         WorkerService(),
         EgressService(),
@@ -153,6 +162,12 @@ def all_service_names() -> tuple[str, ...]:
     """Every defined service name, regardless of host or site."""
 
     return tuple(service.name for service in SERVICES)
+
+
+def renderable_service_names(profile: HardwareProfile) -> tuple[str, ...]:
+    """Names the profile can render, regardless of host or site."""
+
+    return tuple(service.name for service in SERVICES if service.renderable(profile))
 
 
 def declared_sources() -> dict[str, tuple[str, ...]]:

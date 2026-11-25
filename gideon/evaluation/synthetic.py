@@ -928,44 +928,6 @@ def citation_window(text: str, start: int, end: int) -> tuple[int, int]:
     return first, last
 
 
-def _proposal_body(
-    served_model_name: str, template: judge.JudgePrompt, *, slots: Mapping[str, str], held: sampling.HeldSet,
-) -> Mapping[str, object]:
-    return {
-        "model": served_model_name,
-        "messages": [
-            {"role": "system", "content": template.system},
-            {"role": "user", "content": template.user_template.format(**slots)},
-        ],
-        "max_tokens": PROPOSAL_MAX_TOKENS,
-        **held.request_fields,
-        "stream": False,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {"name": template.schema_name, "schema": template.schema},
-        },
-        "chat_template_kwargs": {"enable_thinking": True},
-    }
-
-
-def _closed_book_body(served_model_name: str, question: str, *, held: sampling.HeldSet) -> Mapping[str, object]:
-    return {
-        "model": served_model_name,
-        "messages": [
-            {"role": "system", "content": _CLOSED_BOOK_SYSTEM_TEXT},
-            {"role": "user", "content": question},
-        ],
-        "max_tokens": CLOSED_BOOK_MAX_TOKENS,
-        **held.request_fields,
-        "stream": False,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {"name": "closed_book_answer", "schema": _CLOSED_BOOK_SCHEMA},
-        },
-        "chat_template_kwargs": {"enable_thinking": True},
-    }
-
-
 def _parse(reply: engine.EngineReply, schema: Mapping[str, object]) -> dict[str, str] | judge.Failure:
     content, finish_reason, _, _ = engine.completion_values(reply)
     if reply.problem is not None:
@@ -1024,9 +986,13 @@ def propose(
 
     if set(slots) != set(template.slots):
         raise ValueError("proposal slots do not match template")
+    body = sampling.chat_request(
+        served_model_name, system_text=template.system, user_text=template.user_template.format(**slots),
+        max_tokens=PROPOSAL_MAX_TOKENS, schema_name=template.schema_name, schema=template.schema,
+        enable_thinking=True, sampling_fields=held.request_fields,
+    )
     reply, prompt_tokens, completion_tokens, elapsed, retry_seed = _request(
-        io, rendered_dir, body=_proposal_body(served_model_name, template, slots=slots, held=held),
-        max_time=PROPOSAL_TIMEOUT_SECONDS, held=held,
+        io, rendered_dir, body=body, max_time=PROPOSAL_TIMEOUT_SECONDS, held=held,
     )
     parsed = _parse(reply, template.schema)
     outcome = parsed if isinstance(parsed, judge.Failure) else Proposal(
@@ -1040,9 +1006,13 @@ def answer_closed_book(
 ) -> tuple[ClosedBook | judge.Failure, int | None, int | None, float | None, int | None]:
     """Answer the bare question, returning the outcome, engine figures, and any retry seed."""
 
+    body = sampling.chat_request(
+        served_model_name, system_text=_CLOSED_BOOK_SYSTEM_TEXT, user_text=question,
+        max_tokens=CLOSED_BOOK_MAX_TOKENS, schema_name="closed_book_answer", schema=_CLOSED_BOOK_SCHEMA,
+        enable_thinking=True, sampling_fields=held.request_fields,
+    )
     reply, prompt_tokens, completion_tokens, elapsed, retry_seed = _request(
-        io, rendered_dir, body=_closed_book_body(served_model_name, question, held=held),
-        max_time=CLOSED_BOOK_TIMEOUT_SECONDS, held=held,
+        io, rendered_dir, body=body, max_time=CLOSED_BOOK_TIMEOUT_SECONDS, held=held,
     )
     parsed = _parse(reply, _CLOSED_BOOK_SCHEMA)
     outcome = parsed if isinstance(parsed, judge.Failure) else ClosedBook(parsed["answer"])

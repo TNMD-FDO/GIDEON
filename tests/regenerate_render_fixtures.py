@@ -16,6 +16,7 @@ FIXED_SECRETS = {
     "gideon_admin_password": "gideon-admin-password",
     "engine_api_key": "engine-api-key",
     "embed_api_key": "embed-api-key",
+    "rerank_2_api_key": "fictitious-reranker-key",
     "gideon_api_key": "gideon-api-key",
     "searxng_secret_key": "searxng-secret-key",
     "qdrant_api_key": "qdrant-api-key",

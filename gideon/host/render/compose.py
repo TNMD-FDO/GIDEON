@@ -11,6 +11,7 @@ from gideon.host.render.owui import PERMISSIONS_TEMPLATE
 from gideon.host.render.services import (
     all_service_names,
     applying_services,
+    renderable_service_names,
     store_services,
     turn_path_services,
 )
@@ -162,10 +163,10 @@ def _compose_document(inputs: RenderInputs) -> Mapping[str, object]:
             "Correct registry in /etc/gideon/site.yaml, then re-run render."
         )
 
-    # The memory table is held to every defined service in both directions,
-    # before the marker and the site gate which ones this host runs: the lock
-    # is release content, complete everywhere, so a no-GPU host or a
-    # search-off site refuses the same lock a GPU host would.
+    # The memory table is held to the services the profile can render on any
+    # host, in both directions, before the marker and the site gate which ones
+    # this host runs: the lock is release content, complete everywhere, so a
+    # no-GPU host or a search-off site refuses the same lock a GPU host would.
     known_services = all_service_names()
     unknown_services = tuple(
         row.service
@@ -180,8 +181,19 @@ def _compose_document(inputs: RenderInputs) -> Mapping[str, object]:
             f"{names}, which no GIDEON service is called; the services are {allowed}. "
             "Remove or rename the row in models.lock, then re-run render."
         )
+    renderable_services = renderable_service_names(inputs.profile)
+    omitted_services = tuple(
+        row.service for row in inputs.profile.memory if row.service not in renderable_services
+    )
+    if omitted_services:
+        names = ", ".join(f"'{name}'" for name in omitted_services)
+        rows = ", ".join(f"memory.{name}" for name in omitted_services)
+        raise ValueError(
+            f"Cannot render Compose: profile {inputs.profile.name} pins no model for the "
+            f"roles of {names}. Remove {rows} from models.lock, then re-run render."
+        )
     missing_services = tuple(
-        name for name in known_services if inputs.profile.memory_row(name) is None
+        name for name in renderable_services if inputs.profile.memory_row(name) is None
     )
     if missing_services:
         names = ", ".join(f"service '{name}'" for name in missing_services)

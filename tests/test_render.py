@@ -81,6 +81,7 @@ from gideon.host.render.engine import (
     ENGINE_SERVICE_NAME,
     INTEGRATION_NETWORK_NAME,
     MODEL_SERVERS,
+    RERANK,
     engine_metrics_target,
 )
 from gideon.host.render.facts import FactsError, HostFacts, gather_facts
@@ -119,6 +120,7 @@ from gideon.host.render.routeguard import (
     route_guard_import_path,
     route_guard_mount,
 )
+from gideon.host.render.scoretemplate import SCORE_TEMPLATE_PATH
 from gideon.host.render.searxng import SEARXNG_JOB_NAME, searxng_health_url
 from gideon.host.render.services import declared_sources
 from gideon.host.render.services.generator import (
@@ -307,6 +309,20 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
     return replace(base, **overrides)  # type: ignore[arg-type]
 
 
+def trial_inputs() -> RenderInputs:
+    lock = load_models_lock(ROOT / "models.lock").lock
+    assert lock is not None
+    profile = lock.profile("1x32v-120d")
+    assert profile is not None
+    base = inputs()
+    return replace(
+        base,
+        profile=profile,
+        site=replace(base.site, hardware_profile=profile.name),
+        facts=replace(base.facts, gpu_uuids=base.facts.gpu_uuids[:profile.requires.gpu.count]),
+    )
+
+
 class Facts(unittest.TestCase):
     SMI = ("nvidia-smi", "-L")
 
@@ -451,6 +467,7 @@ class Registry(unittest.TestCase):
                 "open-webui/manifest.yaml",
                 "gideon-api/instruction.txt",
                 "model-servers/gideon_route_guard.py",
+                SCORE_TEMPLATE_PATH,
                 "searxng/settings.yml",
                 "searxng/env",
                 "gideon-egress/env",
@@ -518,19 +535,21 @@ class Registry(unittest.TestCase):
             tuple(member.service_name for member in MODEL_SERVERS),
         )
         self.assertEqual(ARTIFACTS[21].mode, 0o644)
-        self.assertEqual(ARTIFACTS[22].owners, ("searxng",))
+        self.assertEqual(ARTIFACTS[22].owners, (RERANK.service_name,))
         self.assertEqual(ARTIFACTS[22].mode, 0o644)
         self.assertEqual(ARTIFACTS[23].owners, ("searxng",))
-        self.assertTrue(ARTIFACTS[23].secret)
-        self.assertEqual(ARTIFACTS[23].mode, 0o600)
-        self.assertEqual(ARTIFACTS[24].relative_path, "gideon-egress/env")
-        self.assertEqual(ARTIFACTS[24].owners, ("gideon-egress",))
+        self.assertEqual(ARTIFACTS[23].mode, 0o644)
+        self.assertEqual(ARTIFACTS[24].owners, ("searxng",))
         self.assertTrue(ARTIFACTS[24].secret)
         self.assertEqual(ARTIFACTS[24].mode, 0o600)
-        self.assertEqual(ARTIFACTS[25].relative_path, "searxng/logging.json")
-        self.assertEqual(ARTIFACTS[25].owners, ("searxng",))
-        self.assertFalse(ARTIFACTS[25].secret)
-        self.assertEqual(ARTIFACTS[25].mode, 0o644)
+        self.assertEqual(ARTIFACTS[25].relative_path, "gideon-egress/env")
+        self.assertEqual(ARTIFACTS[25].owners, ("gideon-egress",))
+        self.assertTrue(ARTIFACTS[25].secret)
+        self.assertEqual(ARTIFACTS[25].mode, 0o600)
+        self.assertEqual(ARTIFACTS[26].relative_path, "searxng/logging.json")
+        self.assertEqual(ARTIFACTS[26].owners, ("searxng",))
+        self.assertFalse(ARTIFACTS[26].secret)
+        self.assertEqual(ARTIFACTS[26].mode, 0o644)
         self.assertEqual(ARTIFACTS[-1].owners, ("dcgm-exporter",))
         self.assertEqual(ARTIFACTS[-1].mode, 0o644)
         self.assertTrue(
@@ -803,6 +822,35 @@ class Compose(unittest.TestCase):
                 "Remove or rename the row in models.lock, then re-run render."
             )
         )
+
+    def test_reranker_pin_requires_a_memory_row_on_every_host(self) -> None:
+        base = inputs()
+        profile = replace(
+            base.profile,
+            memory=tuple(row for row in base.profile.memory if row.service != RERANK.service_name),
+        )
+        for no_gpu in (False, True):
+            with self.subTest(no_gpu=no_gpu):
+                with self.assertRaises(ValueError) as caught:
+                    ComposeArtifact().emit(replace(base, profile=profile, no_gpu=no_gpu))
+                refusal = str(caught.exception)
+                self.assertIn(f"has no memory row for service '{RERANK.service_name}'", refusal)
+                self.assertIn(f"Add memory.{RERANK.service_name}.gb to models.lock", refusal)
+
+    def test_trial_memory_table_refuses_a_row_for_an_unpinned_reranker(self) -> None:
+        base = trial_inputs()
+        document = yaml.safe_load(ComposeArtifact().emit(base))
+        self.assertNotIn(RERANK.service_name, document["services"])
+        reference_row = inputs().profile.memory_row(RERANK.service_name)
+        assert reference_row is not None
+        profile = replace(base.profile, memory=(*base.profile.memory, replace(reference_row, role=None)))
+        for no_gpu in (False, True):
+            with self.subTest(no_gpu=no_gpu):
+                with self.assertRaises(ValueError) as caught:
+                    ComposeArtifact().emit(replace(base, profile=profile, no_gpu=no_gpu))
+                refusal = str(caught.exception)
+                self.assertIn(f"profile {profile.name} pins no model for the roles of '{RERANK.service_name}'", refusal)
+                self.assertIn(f"Remove memory.{RERANK.service_name} from models.lock", refusal)
 
 
 class Engine(unittest.TestCase):
@@ -1335,7 +1383,7 @@ class Core(unittest.TestCase):
         )
         self.assertEqual(
             [artifact.name for artifact in ARTIFACTS if not artifact.applies(no_gpu)],
-            ["grafana-gpu", "grafana-eval", "api-instruction", "model-servers-route-guard", "gideon-egress-env", "gideon-eval-nightly-service", "gideon-eval-nightly-timer", "gideon-archive-push-service", "gideon-archive-push-timer", "dcgm-counters"],
+            ["grafana-gpu", "grafana-eval", "api-instruction", "model-servers-route-guard", "model-servers-score-template", "gideon-egress-env", "gideon-eval-nightly-service", "gideon-eval-nightly-timer", "gideon-archive-push-service", "gideon-archive-push-timer", "dcgm-counters"],
         )
         build_box = inputs(build_box=True)
         self.assertEqual(
@@ -1664,6 +1712,7 @@ class Core(unittest.TestCase):
                 "open-webui/manifest.yaml",
                 "gideon-api/instruction.txt",
                 "model-servers/gideon_route_guard.py",
+                SCORE_TEMPLATE_PATH,
                 "searxng/settings.yml",
                 "searxng/env",
                 "searxng/logging.json",
@@ -2152,7 +2201,7 @@ class RenderCommand(unittest.TestCase):
             self.assertNotIn(_GENERATED_SECRET_PLACEHOLDER, value)
 
     def test_diff_previews_a_new_compose_secret_entry(self) -> None:
-        """A new secret entry names its mounter beside the changed carrier."""
+        """A new secret entry names its mounters beside the changed carrier."""
 
         host = DirHost(checkout_files())
         self.assertEqual(render(host)[0], 0)
@@ -2166,12 +2215,12 @@ class RenderCommand(unittest.TestCase):
 
         self.assertEqual((code, err), (0, ""))
         lines = out.splitlines()
-        row = "Services apply would recreate: qdrant, open-webui"
+        row = "Services apply would recreate: qdrant, open-webui, gideon-api"
         self.assertIn(row, lines)
         self.assertEqual(lines[lines.index(row) + 1], "  changed rendered files: open-webui")
         self.assertEqual(
             lines[lines.index(row) + 2],
-            "  changed compose secrets (qdrant_read_only_api_key): qdrant",
+            "  changed compose secrets (qdrant_read_only_api_key): qdrant, gideon-api",
         )
         self.assertEqual(
             lines[-2],

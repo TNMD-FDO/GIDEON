@@ -287,14 +287,16 @@
     "extraction-366": "pass",
     "extraction-367": "pass"
   },
-  "corpus_lockfile": null,
+  "corpus_lockfile": "corpus-2026-10-21",
   "eval_set_version": "eval-v1",
-  "format": 1,
+  "format": 2,
+  "generation_id": "caselaw__corpus-2026-10-21__qwen3-embedding-8b-1024-bf16",
   "hardware_profile": "2x96v-256d",
   "list": "invented",
-  "product_version": "0.3.46",
+  "product_version": "0.4.0",
   "repeats": 1,
-  "set_digest": "aa98b0e7d878b58461a5a322712713f537eef3736daca62cc3204f5e604fb907",
+  "set_digest": "b9fccc0286db35ba6d647459ad9ca79d5bb0208ff3fc140ab5cb24792cbc43ec",
   "slice": "smoke",
-  "tag": "v0.3.46"
+  "tag": "v0.4.0",
+  "verdict": "pass"
 }

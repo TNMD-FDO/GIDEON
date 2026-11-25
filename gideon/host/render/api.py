@@ -9,7 +9,8 @@ The API Compose block reads three forwarded header names: the email for the
 source word, the chat id for both rows, and the user id for the search turn row.
 It is the one rendered artifact that reads forwarded header names.
 General's instruction reaches the container as a rendered file at a fixed
-mount, the one non-secret file beside its secret mounts.
+mount. The sibling uses the shared environment names to route requests
+through its relays.
 """
 
 from typing import Final
@@ -19,6 +20,14 @@ from gideon.host.render.engine import ENGINE_PORT
 API_SERVICE_NAME: Final[str] = "gideon-api"
 API_IMAGE_NAME: Final[str] = "gideon"
 API_SECRET_NAME: Final[str] = "gideon_api_key"
+TURN_READER_ROLE: Final[str] = "gideon_ro_turn"
+TURN_READER_SECRET_NAME: Final[str] = "postgres_gideon_ro_turn_password"
+API_CORPUS_DATABASE_HOST_ENV: Final[str] = "GIDEON_API_CORPUS_DB_HOST"
+API_CORPUS_PASSWORD_FILE_ENV: Final[str] = "GIDEON_API_CORPUS_PASSWORD_FILE"
+API_ENGINE_URL_ENV: Final[str] = "GIDEON_ENGINE_URL"
+API_EMBED_URL_ENV: Final[str] = "GIDEON_API_EMBED_URL"
+API_RERANK_URL_ENV: Final[str] = "GIDEON_API_RERANK_URL"
+API_RERANK_KEY_FILE_ENV: Final[str] = "GIDEON_API_RERANK_KEY_FILE"
 API_JOB_NAME: Final[str] = "api"
 API_HEALTH_PATH: Final[str] = "/health"
 API_USER_NAME_HEADER: Final[str] = "X-OpenWebUI-User-Name"

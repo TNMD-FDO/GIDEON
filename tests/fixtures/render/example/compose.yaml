@@ -197,7 +197,7 @@ services:
     entrypoint:
       - "sh"
       - "-c"
-      - "set -eu; if [ ! -s /run/secrets/opensearch_password ]; then echo \"OpenSearch password file is missing or empty: /run/secrets/opensearch_password\" >&2; exit 1; fi; GIDEON_OPENSEARCH_PASSWORD=$(cat /run/secrets/opensearch_password); export GIDEON_OPENSEARCH_PASSWORD; if [ ! -s /run/secrets/opensearch_metrics_password ]; then echo \"OpenSearch metrics password file is missing or empty: /run/secrets/opensearch_metrics_password\" >&2; exit 1; fi; GIDEON_OPENSEARCH_METRICS_PASSWORD=$(cat /run/secrets/opensearch_metrics_password); export GIDEON_OPENSEARCH_METRICS_PASSWORD; exec ./opensearch-docker-entrypoint.sh \"$@\""
+      - "set -eu; if [ ! -s /run/secrets/opensearch_password ]; then echo \"OpenSearch password file is missing or empty: /run/secrets/opensearch_password\" >&2; exit 1; fi; GIDEON_OPENSEARCH_PASSWORD=$(cat /run/secrets/opensearch_password); export GIDEON_OPENSEARCH_PASSWORD; if [ ! -s /run/secrets/opensearch_metrics_password ]; then echo \"OpenSearch metrics password file is missing or empty: /run/secrets/opensearch_metrics_password\" >&2; exit 1; fi; GIDEON_OPENSEARCH_METRICS_PASSWORD=$(cat /run/secrets/opensearch_metrics_password); export GIDEON_OPENSEARCH_METRICS_PASSWORD; if [ ! -s /run/secrets/opensearch_turn_password ]; then echo \"OpenSearch turn reader password file is missing or empty: /run/secrets/opensearch_turn_password\" >&2; exit 1; fi; GIDEON_OPENSEARCH_TURN_PASSWORD=$(cat /run/secrets/opensearch_turn_password); export GIDEON_OPENSEARCH_TURN_PASSWORD; exec ./opensearch-docker-entrypoint.sh \"$@\""
       - "opensearch"
     command:
       - "opensearch"
@@ -209,6 +209,7 @@ services:
     secrets:
       - "opensearch_password"
       - "opensearch_metrics_password"
+      - "opensearch_turn_password"
       - "opensearch_transport_key"
       - "opensearch_transport_cert"
     group_add:
@@ -552,6 +553,71 @@ services:
       - "gideon"
       - "internal"
     mem_limit: 16000000000
+  gideon-rerank-2:
+    image: "ghcr.io/tnmd-fdo/vllm-openai@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e"
+    restart: "unless-stopped"
+    environment:
+      HF_HUB_OFFLINE: "1"
+      HF_HOME: "/data/models"
+      VLLM_NO_USAGE_STATS: "1"
+      DO_NOT_TRACK: "1"
+      TZ: "America/Chicago"
+      PYTHONPATH: "/etc/gideon/model-servers"
+    entrypoint:
+      - "sh"
+      - "-c"
+      - "set -eu; if [ ! -s /run/secrets/rerank_2_api_key ]; then echo \"reranker API key file is missing or empty: /run/secrets/rerank_2_api_key\" >&2; exit 1; fi; VLLM_API_KEY=$(cat /run/secrets/rerank_2_api_key); export VLLM_API_KEY; exec vllm serve \"$@\""
+      - "gideon-rerank-2"
+    command:
+      - "Qwen/Qwen3-Reranker-4B"
+      - "--revision"
+      - "22e683669bc0f0bd69640a1354a6d0aebcfeede5"
+      - "--served-model-name"
+      - "gideon-rerank-2"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--disable-access-log-for-endpoints"
+      - "/health,/metrics"
+      - "--middleware"
+      - "gideon_route_guard.RouteGuard"
+      - "--runner"
+      - "pooling"
+      - "--convert"
+      - "classify"
+      - "--dtype"
+      - "bfloat16"
+      - "--max-model-len"
+      - "8192"
+      - "--no-enable-chunked-prefill"
+      - "--gpu-memory-utilization"
+      - "0.1667"
+      - "--kv-cache-memory-bytes"
+      - "4831838208"
+      - "--hf-overrides"
+      - "{\"architectures\": [\"Qwen3ForSequenceClassification\"], \"classifier_from_token\": [\"no\", \"yes\"], \"is_original_qwen3_reranker\": true}"
+      - "--chat-template"
+      - "/etc/gideon/model-servers/qwen3_reranker.jinja"
+    devices:
+      - "nvidia.com/gpu=GPU-22222222-2222-2222-2222-222222222222"
+    volumes:
+      - "/data/models:/data/models:ro"
+      - "/etc/gideon/rendered/model-servers/gideon_route_guard.py:/etc/gideon/model-servers/gideon_route_guard.py:ro"
+      - "/etc/gideon/rendered/model-servers/qwen3_reranker.jinja:/etc/gideon/model-servers/qwen3_reranker.jinja:ro"
+    secrets:
+      - "rerank_2_api_key"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "curl --silent --fail http://127.0.0.1:8000/health"
+      interval: "30s"
+      timeout: "10s"
+      retries: 3
+      start_period: "600s"
+    networks:
+      - "gideon"
+    mem_limit: 9000000000
   gideon-api:
     image: "ghcr.io/tnmd-fdo/gideon@sha256:591c1d032ee6bb03c122c93f11f46897f6169e547c9da14f8f22d634dbbaee89"
     restart: "unless-stopped"
@@ -567,6 +633,26 @@ services:
       GIDEON_USER_HEADER: "X-OpenWebUI-User-Id"
       GIDEON_MODEL_ID: "gideon-general"
       GIDEON_ENGINE_MODEL: "gideon-generator"
+      GIDEON_API_DB_HOST: "postgres"
+      GIDEON_API_DB_PORT: "5432"
+      GIDEON_API_DB_NAME: "gideon"
+      GIDEON_API_DB_ROLE: "gideon_ro_turn"
+      GIDEON_API_PASSWORD_FILE: "/run/secrets/postgres_gideon_ro_turn_password"
+      GIDEON_API_CORPUS_DB_HOST: "postgres"
+      GIDEON_API_CORPUS_DB_PORT: "5432"
+      GIDEON_API_CORPUS_DB_NAME: "gideon"
+      GIDEON_API_CORPUS_DB_ROLE: "gideon_ro_turn"
+      GIDEON_API_CORPUS_PASSWORD_FILE: "/run/secrets/postgres_gideon_ro_turn_password"
+      GIDEON_API_CAS_ROOT: "/data/bulk/cas"
+      GIDEON_API_QDRANT_URL: "http://qdrant:6333"
+      GIDEON_API_QDRANT_KEY_FILE: "/run/secrets/qdrant_read_only_api_key"
+      GIDEON_API_EMBED_URL: "http://gideon-embed:8000"
+      GIDEON_API_EMBED_KEY_FILE: "/run/secrets/embed_api_key"
+      GIDEON_API_OPENSEARCH_URL: "http://opensearch:9200"
+      GIDEON_API_OPENSEARCH_USER: "turn"
+      GIDEON_API_OPENSEARCH_PASSWORD_FILE: "/run/secrets/opensearch_turn_password"
+      GIDEON_API_RERANK_URL: "http://gideon-rerank-2:8000"
+      GIDEON_API_RERANK_KEY_FILE: "/run/secrets/rerank_2_api_key"
       TZ: "America/Chicago"
     command:
       - "python"
@@ -576,12 +662,18 @@ services:
     volumes:
       - "/opt/gideon/gideon:/opt/gideon-src/gideon:ro"
       - "/etc/gideon/rendered/gideon-api/instruction.txt:/etc/gideon/instruction.txt:ro"
+      - "/data/bulk/cas:/data/bulk/cas:ro"
     group_add:
       - "4242"
     secrets:
       - "engine_api_key"
       - "gideon_api_key"
       - "postgres_gideon_audit_password"
+      - "postgres_gideon_ro_turn_password"
+      - "qdrant_read_only_api_key"
+      - "embed_api_key"
+      - "opensearch_turn_password"
+      - "rerank_2_api_key"
     labels:
       org.gideon.api-sources-digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
     healthcheck:
@@ -811,6 +903,8 @@ secrets:
     file: "/etc/gideon/secrets/qdrant_read_only_api_key"
   opensearch_password:
     file: "/etc/gideon/secrets/opensearch_password"
+  opensearch_turn_password:
+    file: "/etc/gideon/secrets/opensearch_turn_password"
   opensearch_transport_key:
     file: "/etc/gideon/secrets/opensearch_transport_key"
   opensearch_transport_cert:
@@ -821,9 +915,13 @@ secrets:
     file: "/etc/gideon/secrets/engine_api_key"
   embed_api_key:
     file: "/etc/gideon/secrets/embed_api_key"
+  rerank_2_api_key:
+    file: "/etc/gideon/secrets/rerank_2_api_key"
   gideon_api_key:
     file: "/etc/gideon/secrets/gideon_api_key"
   postgres_gideon_audit_password:
     file: "/etc/gideon/secrets/postgres_gideon_audit_password"
+  postgres_gideon_ro_turn_password:
+    file: "/etc/gideon/secrets/postgres_gideon_ro_turn_password"
   postgres_gideon_worker_password:
     file: "/etc/gideon/secrets/postgres_gideon_worker_password"

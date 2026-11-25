@@ -307,10 +307,10 @@
   "generation_id": null,
   "hardware_profile": "2x96v-256d",
   "list": "sample",
-  "product_version": "0.3.194",
+  "product_version": "0.4.0",
   "repeats": 1,
-  "set_digest": "fd4c13fe9ad6aaeb25289b7645bd1e7fe877d0a80ad65094c10c496b6d6c4601",
+  "set_digest": "b9fccc0286db35ba6d647459ad9ca79d5bb0208ff3fc140ab5cb24792cbc43ec",
   "slice": "segmenter-300",
-  "tag": "v0.3.194",
+  "tag": "v0.4.0",
   "verdict": "pass"
 }

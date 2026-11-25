@@ -8,13 +8,14 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, cast
 
 import uvicorn
 
 from gideon import guardrail
 from gideon.api.app import create_app
-from gideon.api.settings import Settings
+from gideon.api.settings import RecordCoordinates, Settings
 
 API_KEY = "fixture-api-key"
 ENGINE_KEY = "fixture-engine-key"
@@ -304,6 +305,9 @@ class ApiRelaySockets(unittest.TestCase):
         self.stub_thread.start()
 
         self.service_started = _state_event(self.stub_state, "service_started")
+        record = RecordCoordinates(
+            "fixture-postgres", 5432, "fixture-db", "fixture-reader", Path("/fixture/reader-password"),
+        )
         settings = Settings(
             f"http://127.0.0.1:{self.stub_port}/v1",
             ENGINE_KEY,
@@ -316,6 +320,16 @@ class ApiRelaySockets(unittest.TestCase):
             INSTRUCTION,
             MODEL_ID,
             ENGINE_MODEL,
+            record=record,
+            corpus_record=record,
+            cas_root=Path("/fixture/cas"),
+            qdrant_url="http://fixture-vector:7001",
+            qdrant_key_file=Path("/fixture/qdrant-key"),
+            embed_url="http://fixture-embedding:7002",
+            embed_key_file=Path("/fixture/embed-key"),
+            opensearch_url="http://fixture-lexical:7003",
+            opensearch_user="fixture-lexical-reader",
+            opensearch_password_file=Path("/fixture/lexical-password"),
         )
         self.service_server = StartedServer(
             uvicorn.Config(

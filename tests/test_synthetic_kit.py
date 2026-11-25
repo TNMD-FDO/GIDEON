@@ -29,6 +29,7 @@ from test_preflight import FakeHost
 from test_segmenter_kit import DraftHost
 
 from gideon.evaluation import evalset, record, sampling, synthetic
+from gideon.evaluation.window import refusal_text, window_judgement
 from gideon.host import backuplock, courts, engine, site, weights, worker
 from gideon.host.index import buildreport
 from gideon.host.index import sample as indexsample
@@ -59,6 +60,9 @@ PASSAGE = (
 )
 RENDERED = "/tmp/fictitious-production"
 NOW = datetime(2099, 1, 4, tzinfo=UTC)
+OFFICE_HOURS = datetime(2099, 1, 5, 18, tzinfo=UTC)
+SITE_ZONE = "Etc/UTC"
+WINDOW_ROW = f"window: {window_judgement(NOW, SITE_ZONE).description}\n"
 BATCH_SEED = 17
 
 
@@ -605,6 +609,7 @@ def _run(host: SyntheticHost, root: Path, out: Path, *, count: int | None = 2,
          stdout: io.StringIO | None = None,
          court_result: courts.CourtMapLoadResult | None = None,
          window: int = 1, batch_seed: int = BATCH_SEED,
+         instant: datetime = NOW, force: bool = False,
          ) -> tuple[int, str, str]:
     output, errors = io.StringIO() if stdout is None else stdout, io.StringIO()
     set_root = root / "eval-v9"
@@ -614,7 +619,11 @@ def _run(host: SyntheticHost, root: Path, out: Path, *, count: int | None = 2,
         args.extend(("--count", str(count)))
     if generation is not None:
         args.extend(("--generation", generation))
-    config = cast(site.SiteConfig, SimpleNamespace(hardware_profile="fixture-profile"))
+    if force:
+        args.append("--force")
+    config = cast(site.SiteConfig, SimpleNamespace(
+        hardware_profile="fixture-profile", office=site.Office("Fictitious office", "Fixture", SITE_ZONE),
+    ))
     engine_target = engine.EngineTarget("fixture-profile", "fixture-model", 100_000) if target is None else target
     weights_root = root / "fictitious-weights"
 
@@ -644,7 +653,7 @@ def _run(host: SyntheticHost, root: Path, out: Path, *, count: int | None = 2,
         code = draft.main(
             args, host=cast(draft.DraftHost, host), root=root / "checkout", rendered_dir=RENDERED,
             models_root=weights_root,
-            clock=lambda: NOW, sleep=lambda _seconds: None,
+            clock=lambda: instant, sleep=lambda _seconds: None,
             stdout=output, stderr=errors,
         )
     return code, output.getvalue(), errors.getvalue()
@@ -652,6 +661,38 @@ def _run(host: SyntheticHost, root: Path, out: Path, *, count: int | None = 2,
 
 class Draft(unittest.TestCase):
     """The draft keeps code-retraced cases, releasing the lock on every path."""
+
+    def test_office_hours_refuse_under_engine_and_release_the_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            host = SyntheticHost(1)
+            out = root / "draft"
+            code, output, errors = _run(host, root, out, count=1, instant=OFFICE_HOURS)
+
+            judgement = window_judgement(OFFICE_HOURS, SITE_ZONE)
+            self.assertFalse(judgement.inside)
+            detail, fix = refusal_text(judgement)
+            self.assertEqual((code, output, errors), (1, "", f"engine: refused — {detail}. Fix: {fix}\n"))
+            self.assertFalse(out.exists())
+            self.assertEqual((host.calls, host.bodies), ([], []))
+            self.assertEqual([path for path, _ in host.claimed], [backuplock.ENGINE_LOCK.path])
+            self.assertEqual(host.released, [backuplock.ENGINE_LOCK.path])
+
+    def test_admitted_drafts_print_one_window_row_first(self) -> None:
+        daytime = window_judgement(OFFICE_HOURS, SITE_ZONE)
+        for instant, force, row in (
+            (NOW, False, WINDOW_ROW),
+            (OFFICE_HOURS, True, f"window: {daytime.description}, forced\n"),
+        ):
+            with self.subTest(force=force), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                host = SyntheticHost(1)
+                code, output, errors = _run(host, root, root / "draft", count=1, instant=instant, force=force)
+                self.assertEqual((code, errors), (0, ""), output)
+                lines = output.splitlines(keepends=True)
+                self.assertEqual(lines[0], row)
+                self.assertEqual([line for line in lines if line.startswith("window:")], [row])
+                self.assertTrue(host.bodies)
 
     def assert_private_absent(self, text: str) -> None:
         for private in (QUESTION, ANSWER, CLOSED, REASON, PASSAGE, CASE_NAME):
@@ -997,7 +1038,7 @@ class Draft(unittest.TestCase):
                 else:
                     host.documents[0][key] = value
                 code, output, errors = _run(host, root, root / "draft", count=1)
-                self.assertEqual((code, output), (1, ""))
+                self.assertEqual((code, output), (1, WINDOW_ROW))
                 self.assertIn("facts: refused", errors)
                 self.assertIn("Fix:", errors)
                 self.assertEqual((host.fetched, host.bodies), ([], []))
@@ -1412,13 +1453,13 @@ class Draft(unittest.TestCase):
             self.assertEqual((result[0], result[2]), (0, ""), result[1])
             self.assertIn("summary: accepted 1, admitted unread 0, rejected 0, closed-book-answerable 0", result[1])
 
-    def test_pre_run_refusals_have_fixes_no_rows_and_no_engine_calls(self) -> None:
-        scenarios = (
-            "root", "set", "category", "inside", "nonempty", "holder", "no-gpu", "site", "engine",
+    def test_pre_run_refusals_have_fixes_and_no_engine_calls(self) -> None:
+        before_window = ("root", "set", "category", "inside", "nonempty", "holder", "no-gpu", "site", "engine")
+        after_window = (
             "no-generation", "generation-name", "generation-exit", "generation-unavailable", "generation-json",
             "manifest-exit", "manifest-row", "source-id", "facts-exit", "facts-unavailable", "facts-json", "facts-row", "case-name-type",
         )
-        for scenario in scenarios:
+        for scenario in (*before_window, *after_window):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 host = SyntheticHost()
@@ -1474,7 +1515,7 @@ class Draft(unittest.TestCase):
                 elif scenario == "case-name-type":
                     host.documents[0]["case_name"] = {"invalid": CASE_NAME}
                 code, output, errors = _run(host, root, out, category=category, generation=generation, site_result=site_result, target=target)
-                self.assertEqual((code, output), (1, ""))
+                self.assertEqual((code, output), (1, "" if scenario in before_window else WINDOW_ROW))
                 self.assertIn(": refused —", errors)
                 self.assertIn("Fix:", errors)
                 self.assertEqual(host.bodies, [])
@@ -2088,7 +2129,7 @@ class PairDraft(unittest.TestCase):
                 else:
                     generation = indexsample.sample_name(host.generations[0].gen_id)
                 code, output, errors = _run(host, root, root / "draft", category="trap", count=1, generation=generation)
-                self.assertEqual((code, output), (1, ""))
+                self.assertEqual((code, output), (1, WINDOW_ROW))
                 self.assertIn("generation: refused", errors)
                 self.assertIn("Fix:", errors)
                 self.assertIn("--generation", errors)
@@ -2208,7 +2249,7 @@ class TreatmentDraft(unittest.TestCase):
                     host.generations = [replace(live, state="retired", retired_at=live.promoted_at)]
                     name = live.gen_id
                 code, output, errors = _run(host, root, root / "draft", category="treatment", count=1, generation=name)
-                self.assertEqual((code, output), (1, ""))
+                self.assertEqual((code, output), (1, WINDOW_ROW))
                 self.assertIn("generation: refused", errors)
                 self.assertIn("production", errors)
                 self.assertIn("index promote" if name is None else "--generation", errors)
@@ -2272,7 +2313,7 @@ class TreatmentDraft(unittest.TestCase):
                 else:
                     host.responses["generations"] = REASON
                 code, output, errors = _run(host, root, root / "draft", category="treatment", count=1)
-                self.assertEqual((code, output), (1, ""))
+                self.assertEqual((code, output), (1, WINDOW_ROW))
                 self.assertIn("generation: refused", errors)
                 self.assertIn("Fix:", errors)
                 self.assertIn("production caselaw generation", errors)

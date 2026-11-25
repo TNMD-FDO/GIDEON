@@ -15,7 +15,6 @@ from gideon.evaluation import evalset, segmenter_draft, segmenter_labels
 from gideon.host.render.worker import SECTION_TYPES
 from tools.segmenter import manifest
 
-_HEX: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 # The number leads the line; whatever an editor did to the text after it is ignored.
 _PARAGRAPH_LINE: Final[re.Pattern[str]] = re.compile(r"([0-9]{4,})(?:\s(.*))?")
 
@@ -57,7 +56,7 @@ def _manifest_problem() -> IntakeError:
 
 
 def _hex(value: object) -> bool:
-    return isinstance(value, str) and _HEX.fullmatch(value) is not None
+    return isinstance(value, str) and evalset.SHA256_PATTERN.fullmatch(value) is not None
 
 
 def _load_manifest(path: Path) -> Manifest:

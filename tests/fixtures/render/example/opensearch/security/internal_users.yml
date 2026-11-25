@@ -8,3 +8,6 @@ gideon:
 metrics:
   hash: "${envbc.GIDEON_OPENSEARCH_METRICS_PASSWORD}"
   reserved: true
+turn:
+  hash: "${envbc.GIDEON_OPENSEARCH_TURN_PASSWORD}"
+  reserved: true

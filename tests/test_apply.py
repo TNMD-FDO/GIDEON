@@ -18,6 +18,7 @@ from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
 import yaml  # type: ignore[import-untyped]
+from derivedstores_fake import opensearch_authinfo_result
 from test_announcements import window_query_argv
 from test_imagestore import image_listing
 from test_render import artifact_source_files, declared_source_files, inputs
@@ -34,6 +35,7 @@ from gideon.host import (
     owui,
     pgbackrest,
     report,
+    secrets,
     stack,
     weights,
 )
@@ -73,6 +75,10 @@ from gideon.host.render.engine import (
     INTEGRATION_NETWORK_NAME,
 )
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
+from gideon.host.render.opensearch import (
+    OPENSEARCH_SERVICE_NAME,
+    OPENSEARCH_TURN_SECRET_NAME,
+)
 from gideon.host.render.owui import BANNER_TIMESTAMP, BANNERS_ROUTE, GENERAL_MODEL_ID
 from gideon.host.render.services import all_service_names, store_services
 from gideon.host.site import SiteConfig, load_site
@@ -116,9 +122,9 @@ PROJECT_READ = network_ps_argv(network_name(NETWORK_NAME))
 INTEGRATION_STOP = tuple(compose_argv(RENDERED, "stop", ENGINE_SERVICE_NAME))
 PROJECT_MEMBERS = (
     "caddy", "prometheus", "node-exporter", "grafana", "postgres", "qdrant",
-    "opensearch", "open-webui", "gideon-generator", "gideon-embed", "gideon-api",
-    "gideon-egress", "searxng", "dcgm-exporter", "postgres-exporter", "cadvisor",
-    "blackbox-exporter",
+    "opensearch", "open-webui", "gideon-generator", "gideon-embed", "gideon-rerank-2",
+    "gideon-api", "gideon-egress", "searxng", "dcgm-exporter", "postgres-exporter",
+    "cadvisor", "blackbox-exporter",
 )
 PROJECT_STOP = tuple(compose_argv(RENDERED, "stop", *PROJECT_MEMBERS))
 PSQL_POSTGRES_QUERY = tuple(exec_argv(RENDERED, "postgres", "psql", "-U", "postgres", "-d", "postgres", "-tA", "-f", "-"))
@@ -441,6 +447,7 @@ class ApplyHost:
         self.lock_log: list[tuple[str, str]] = []
         self.frontend = FakeFrontend()
         self.grafana = FakeGrafanaClient()
+        self.turn_reader_authorized = True
 
     def run(self, argv: Command, *, check: bool = False, input: str | None = None, cwd: PathLike | None = None, env: Mapping[str, str] | None = None, timeout: float | None = None, passthrough: bool = False) -> subprocess.CompletedProcess[str]:
         del check, cwd
@@ -457,6 +464,10 @@ class ApplyHost:
         outcome = self.commands.get(command)
         if isinstance(outcome, list):
             return outcome.pop(0) if len(outcome) > 1 else outcome[0]
+        if outcome is None:
+            outcome = opensearch_authinfo_result(
+                command, input, RENDERED, authorized=self.turn_reader_authorized,
+            )
         if outcome is None:
             return subprocess.CompletedProcess(list(command), 127, "", "")
         return outcome
@@ -1246,6 +1257,9 @@ class CommandAnnouncements(unittest.TestCase):
         )
         for recreated, stopped, initial_read, expected in (
             (("caddy",), {}, done(PS, stdout=running_rows()), ("caddy",)),
+            (("qdrant",), {}, None, ("qdrant",)),
+            (("opensearch",), {}, None, ("opensearch",)),
+            (("gideon-embed",), {}, None, ("gideon-embed",)),
             ((), {"open-webui": "exited"}, None, ("open-webui",)),
             (("caddy", "grafana"), {"caddy": "exited", "open-webui": "exited"}, None, ("caddy", "open-webui")),
             (("grafana",), {"grafana": "exited"}, None, ()),
@@ -1848,6 +1862,24 @@ class Refusals(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("verify: refuse", out)
         self.assertIn("does not match", out)
+
+    def test_turn_reader_refusal_stops_verify_before_ingress_and_record(self) -> None:
+        host = ApplyHost(healthy_commands(), base_files())
+        host.turn_reader_authorized = False
+        authinfo = tuple(exec_argv(RENDERED, OPENSEARCH_SERVICE_NAME, "curl", "-s", "-S", "-K", "-"))
+        with patch.object(apply_module.tls, "probe_ingress") as probe:
+            code, out, err = apply(host)
+
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn("verify: refuse — the lexical store's turn reader cannot sign in", out)
+        self.assertIn("docs/runbooks/backup-restore.md §8", out)
+        self.assertNotIn("Unauthorized", out)
+        password = host.files[str(secrets.secret_path(OPENSEARCH_TURN_SECRET_NAME))].strip()
+        self.assertNotIn(password, out + err)
+        self.assertEqual(argv_calls(host).count(authinfo), 1)
+        self.assertLess(argv_calls(host).index(UP), argv_calls(host).index(authinfo))
+        probe.assert_not_called()
+        self.assertNotIn(f"{RENDERED}/applied.yaml", host.files)
 
     def test_corrupt_applied_manifest_refuses(self) -> None:
         files = base_files()
@@ -2478,7 +2510,7 @@ class NewStages(unittest.TestCase):
         host = ApplyHost(commands, base_files())
         code, out, _ = apply(host)
         self.assertEqual(code, 0, out)
-        self.assertIn("stores: ok — created roles: openwebui, gideon, gideon_audit, gideon_ro_metrics, gideon_eval, gideon_worker; created databases: openwebui, gideon; applied migrations: 0001_audit_log", out)
+        self.assertIn("stores: ok — created roles: openwebui, gideon, gideon_audit, gideon_ro_metrics, gideon_eval, gideon_worker, gideon_ro_turn; created databases: openwebui, gideon; applied migrations: 0001_audit_log", out)
 
     def test_store_tier_wait_uses_the_release_bound(self) -> None:
         rows = [json.loads(line) for line in running_rows().splitlines()]

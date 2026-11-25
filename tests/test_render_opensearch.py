@@ -44,6 +44,10 @@ from gideon.host.render.opensearch import (
     OPENSEARCH_SETTINGS_PATH,
     OPENSEARCH_SNAPSHOTS_MOUNT,
     OPENSEARCH_SNAPSHOTS_ROOT,
+    OPENSEARCH_TURN_PASSWORD_VARIABLE,
+    OPENSEARCH_TURN_ROLE,
+    OPENSEARCH_TURN_SECRET_NAME,
+    OPENSEARCH_TURN_USER,
     OPENSEARCH_USER,
     opensearch_health_url,
     opensearch_heap_mib,
@@ -52,6 +56,7 @@ from gideon.host.render.opensearch import (
 from gideon.host.render.prometheus import PrometheusConfigArtifact
 from gideon.host.render.services.opensearch import OpensearchService, opensearch_service
 from gideon.host.render.services.prometheus import PrometheusService
+from gideon.host.render.worker import COLLECTION_NAMES
 
 HOSTS = (inputs(EXAMPLE), inputs(SECOND), inputs(EXAMPLE, no_gpu=True))
 SECURITY_FILES = (
@@ -113,6 +118,7 @@ class Block(unittest.TestCase):
             secret_values = {
                 OPENSEARCH_PASSWORD_SECRET_NAME: "fictitious-opensearch-password",
                 OPENSEARCH_METRICS_SECRET_NAME: "fictitious-metrics-password",
+                OPENSEARCH_TURN_SECRET_NAME: "fictitious-turn-password",
                 OPENSEARCH_KEY_SECRET_NAME: PAIR_KEY_TEXT,
                 OPENSEARCH_CERT_SECRET_NAME: PAIR_CERT_TEXT,
             }
@@ -166,6 +172,7 @@ class Block(unittest.TestCase):
                     [
                         OPENSEARCH_PASSWORD_SECRET_NAME,
                         OPENSEARCH_METRICS_SECRET_NAME,
+                        OPENSEARCH_TURN_SECRET_NAME,
                         OPENSEARCH_KEY_SECRET_NAME,
                         OPENSEARCH_CERT_SECRET_NAME,
                     ],
@@ -220,7 +227,8 @@ class Wrapper(unittest.TestCase):
             script.write_text(
                 "#!/bin/sh\n"
                 f"printf '%s\\n' \"${{{OPENSEARCH_PASSWORD_VARIABLE}}}\" "
-                f"\"${{{OPENSEARCH_METRICS_PASSWORD_VARIABLE}}}\"\n"
+                f"\"${{{OPENSEARCH_METRICS_PASSWORD_VARIABLE}}}\" "
+                f"\"${{{OPENSEARCH_TURN_PASSWORD_VARIABLE}}}\"\n"
             )
             script.chmod(0o700)
             rendered_script = entrypoint[2]
@@ -237,33 +245,33 @@ class Wrapper(unittest.TestCase):
                 text=True,
             )
 
-    def test_missing_and_empty_either_password_refuse_before_server(self) -> None:
-        main = OPENSEARCH_PASSWORD_SECRET_NAME
-        metrics = OPENSEARCH_METRICS_SECRET_NAME
-        for name, files in (
-            (main, {main: None, metrics: "fixture-metrics\n"}),
-            (main, {main: "", metrics: "fixture-metrics\n"}),
-            (metrics, {main: "fixture-main\n", metrics: None}),
-            (metrics, {main: "fixture-main\n", metrics: ""}),
-            (main, {main: None, metrics: None}),
-        ):
-            with self.subTest(secret=name, files=files):
-                result = self.run_rendered_entrypoint(files)
-                self.assertEqual(result.returncode, 1)
-                self.assertEqual(result.stdout, "")
-                self.assertEqual(len(result.stderr.splitlines()), 1)
-                self.assertIn(name, result.stderr)
-                self.assertIn("missing or empty", result.stderr)
+    def test_missing_and_empty_passwords_refuse_before_server(self) -> None:
+        files = {
+            OPENSEARCH_PASSWORD_SECRET_NAME: "fixture-main\n",
+            OPENSEARCH_METRICS_SECRET_NAME: "fixture-metrics\n",
+            OPENSEARCH_TURN_SECRET_NAME: "fixture-turn\n",
+        }
+        for name in files:
+            for value in (None, ""):
+                with self.subTest(secret=name, value=value):
+                    result = self.run_rendered_entrypoint({**files, name: value})
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(len(result.stderr.splitlines()), 1)
+                    self.assertIn(name, result.stderr)
+                    self.assertIn("missing or empty", result.stderr)
 
-    def test_both_passwords_reach_server_in_dotless_variables(self) -> None:
+    def test_all_passwords_reach_server_in_dotless_variables(self) -> None:
         self.assertNotIn(".", OPENSEARCH_PASSWORD_VARIABLE)
         self.assertNotIn(".", OPENSEARCH_METRICS_PASSWORD_VARIABLE)
+        self.assertNotIn(".", OPENSEARCH_TURN_PASSWORD_VARIABLE)
         result = self.run_rendered_entrypoint({
             OPENSEARCH_PASSWORD_SECRET_NAME: "fixture-main\n",
             OPENSEARCH_METRICS_SECRET_NAME: "fixture-metrics\n",
+            OPENSEARCH_TURN_SECRET_NAME: "fixture-turn\n",
         })
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["fixture-main", "fixture-metrics"])
+        self.assertEqual(result.stdout.splitlines(), ["fixture-main", "fixture-metrics", "fixture-turn"])
 
 
 class Heap(unittest.TestCase):
@@ -304,9 +312,9 @@ class Files(unittest.TestCase):
                     render_all(rendered_inputs).by_path[PATHS[0]].content
                 )
                 self.assertEqual(settings, expected)
+                self.assertFalse(any("restapi" in key for key in settings))
                 for absent in (
                     "plugins.security.disabled",
-                    "plugins.security.restapi.roles_enabled",
                     "plugins.security.audit.type",
                     "plugins.security.nodes_dn",
                     "plugins.security.authcz.admin_dn",
@@ -337,7 +345,7 @@ class Files(unittest.TestCase):
                         document["_meta"], {"type": kind, "config_version": 2}
                     )
 
-    def test_security_documents_restrict_both_users_and_the_metrics_role(self) -> None:
+    def test_security_documents_restrict_the_three_users_and_reader_roles(self) -> None:
         for rendered_inputs in HOSTS:
             with self.subTest(
                 site=rendered_inputs.site.hostname, no_gpu=rendered_inputs.no_gpu
@@ -350,7 +358,9 @@ class Files(unittest.TestCase):
                     for name in SECURITY_FILES
                 }
                 user = documents["internal_users"]
-                self.assertEqual(set(user), {"_meta", OPENSEARCH_USER, OPENSEARCH_METRICS_USER})
+                self.assertEqual(
+                    set(user), {"_meta", OPENSEARCH_USER, OPENSEARCH_METRICS_USER, OPENSEARCH_TURN_USER},
+                )
                 self.assertEqual(
                     user[OPENSEARCH_USER],
                     {
@@ -362,6 +372,13 @@ class Files(unittest.TestCase):
                     user[OPENSEARCH_METRICS_USER],
                     {
                         "hash": f"${{envbc.{OPENSEARCH_METRICS_PASSWORD_VARIABLE}}}",
+                        "reserved": True,
+                    },
+                )
+                self.assertEqual(
+                    user[OPENSEARCH_TURN_USER],
+                    {
+                        "hash": f"${{envbc.{OPENSEARCH_TURN_PASSWORD_VARIABLE}}}",
                         "reserved": True,
                     },
                 )
@@ -380,11 +397,15 @@ class Files(unittest.TestCase):
                     {"users": [OPENSEARCH_METRICS_USER]},
                 )
                 self.assertEqual(
+                    documents["roles_mapping"][OPENSEARCH_TURN_ROLE],
+                    {"users": [OPENSEARCH_TURN_USER]},
+                )
+                self.assertEqual(
                     set(documents["roles_mapping"]),
-                    {"_meta", "all_access", OPENSEARCH_METRICS_ROLE},
+                    {"_meta", "all_access", OPENSEARCH_METRICS_ROLE, OPENSEARCH_TURN_ROLE},
                 )
                 role = documents["roles"][OPENSEARCH_METRICS_ROLE]
-                self.assertEqual(set(documents["roles"]), {"_meta", OPENSEARCH_METRICS_ROLE})
+                self.assertEqual(set(documents["roles"]), {"_meta", OPENSEARCH_METRICS_ROLE, OPENSEARCH_TURN_ROLE})
                 self.assertEqual(
                     role,
                     {
@@ -409,6 +430,28 @@ class Files(unittest.TestCase):
                 for action in actions:
                     for forbidden in ("read", "search", "write", "cluster:monitor/state"):
                         self.assertNotIn(forbidden, action)
+                self.assertEqual(
+                    documents["roles"][OPENSEARCH_TURN_ROLE],
+                    {
+                        "reserved": True,
+                        "cluster_permissions": [
+                            "indices:data/read/mget",
+                            "indices:data/read/msearch",
+                            "indices:data/read/scroll",
+                            "indices:data/read/scroll/clear",
+                        ],
+                        "index_permissions": [{
+                            "index_patterns": [f"{name}__*" for name in COLLECTION_NAMES],
+                            "allowed_actions": [
+                                "indices:data/read/search*",
+                                "indices:data/read/get*",
+                                "indices:data/read/mget*",
+                                "indices:data/read/point_in_time/create",
+                                "indices:data/read/point_in_time/delete",
+                            ],
+                        }],
+                    },
+                )
                 for name in ("action_groups", "tenants"):
                     self.assertEqual(set(documents[name]), {"_meta"})
                 for text in (files[path].content for path in PATHS):

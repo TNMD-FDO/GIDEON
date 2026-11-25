@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final, Literal
 
-from gideon.evaluation import judge, judgments
+from gideon.evaluation import judge, judgments, sampling
 from gideon.evaluation.sampling import (  # noqa: F401 - kept bound here for readers that load these names from this module
     DEFAULT_SEED,
     THINKING_SAMPLING,
@@ -174,30 +174,6 @@ def _passages_slot(passages: Sequence[tuple[str, str]]) -> str:
     )
 
 
-def _request_body(
-    served_model_name: str, prompt: judge.JudgePrompt, *, question: str, passages: str, count: int, seed: int,
-) -> Mapping[str, object]:
-    shown = _schema({"type": "integer", "enum": list(range(1, count + 1))})
-    return {
-        "model": served_model_name,
-        "messages": [
-            {"role": "system", "content": prompt.system},
-            {"role": "user", "content": prompt.user_template.format(
-                question=question, passages=passages, count=count,
-            )},
-        ],
-        "max_tokens": DRAFT_MAX_TOKENS,
-        **THINKING_SAMPLING,
-        "seed": seed,
-        "stream": False,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {"name": prompt.schema_name, "schema": shown},
-        },
-        "chat_template_kwargs": {"enable_thinking": True},
-    }
-
-
 def _parse(
     reply: engine.EngineReply, schema: Mapping[str, object], count: int, elapsed_seconds: float,
 ) -> Drafted | DraftFailure:
@@ -251,9 +227,13 @@ def draft(
     """Draft from the supplied (caption, text) pairs in their shown order."""
 
     prompt = PROMPTS[PROMPT_ID]
-    body = _request_body(
-        served_model_name, prompt, question=question, passages=_passages_slot(passages), count=len(passages),
-        seed=seed,
+    count = len(passages)
+    body = sampling.chat_request(
+        served_model_name, system_text=prompt.system,
+        user_text=prompt.user_template.format(question=question, passages=_passages_slot(passages), count=count),
+        max_tokens=DRAFT_MAX_TOKENS, schema_name=prompt.schema_name,
+        schema=_schema({"type": "integer", "enum": list(range(1, count + 1))}),
+        enable_thinking=True, sampling_fields={**THINKING_SAMPLING, "seed": seed},
     )
     start = monotonic()
     reply = engine.call_model_server(

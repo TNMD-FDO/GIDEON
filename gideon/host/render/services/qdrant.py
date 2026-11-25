@@ -51,6 +51,7 @@ class QdrantService(ServiceDefinition):
     name = QDRANT_SERVICE_NAME
     swap = False
     store = True
+    turn_path = True
 
     def block(
         self, inputs: RenderInputs, target: RegistryTarget

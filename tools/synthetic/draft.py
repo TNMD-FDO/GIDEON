@@ -46,10 +46,7 @@ from gideon.host import (
     backuplock,
     cas,
     courts,
-    engine,
-    nogpu,
     report,
-    site,
     stack,
     staging,
     weights,
@@ -82,7 +79,6 @@ DEFAULT_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 RENDERED_DIR: Final[Path] = Path("/etc/gideon/rendered")
 SITE_PATH: Final[Path] = Path("/etc/gideon/site.yaml")
 _SOURCE_ID: Final[re.Pattern[str]] = re.compile(r"([A-Za-z0-9._/-]+):opinion:([1-9][0-9]*)")
-_SHA256: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _COURT: Final[re.Pattern[str]] = re.compile(r"[a-z0-9]+")
 # The near-miss categories whose question asks a court the record holds no opinion of.
 _ASKED_COURT_CATEGORIES: Final[tuple[str, ...]] = ("unanswerable",)
@@ -384,7 +380,7 @@ def _positive(value: object) -> bool:
 
 
 def _hash(value: object) -> bool:
-    return isinstance(value, str) and _SHA256.fullmatch(value) is not None
+    return isinstance(value, str) and evalset.SHA256_PATTERN.fullmatch(value) is not None
 
 
 def _span(start: object, end: object) -> bool:
@@ -462,9 +458,9 @@ def _facts(io: DraftHost, rendered_dir: PathLike, rows: Sequence[tuple[str, str,
         if (
             type(opinion_id) is not int or opinion_id not in requested or opinion_id in facts
             or not isinstance(source, str) or indexsample.source_id(source, opinion_id) != requested[opinion_id]
-            or not isinstance(doc_id, str) or _SHA256.fullmatch(doc_id) is None
+            or not isinstance(doc_id, str) or evalset.SHA256_PATTERN.fullmatch(doc_id) is None
             or status not in ("processing", "ready", "failed", "withdrawn")
-            or (sha256 is not None and (not isinstance(sha256, str) or _SHA256.fullmatch(sha256) is None))
+            or (sha256 is not None and (not isinstance(sha256, str) or evalset.SHA256_PATTERN.fullmatch(sha256) is None))
             or (status == "ready" and sha256 is None)
             or not isinstance(court, str) or _COURT.fullmatch(court) is None
             or not evalset.valid_iso_date(decided)
@@ -1128,7 +1124,7 @@ def _sheet(ordinal: int, document: synthetic.DrawDocument, facts: OpinionFacts,
 def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: str,
          count: int | None, seed: int, generation: str | None, rendered_dir: PathLike,
          site_path: PathLike, models_path: PathLike, models_root: PathLike, now: Callable[[], datetime],
-         sleep: Callable[[float], None], stdout: TextIO) -> None:
+         force: bool, sleep: Callable[[float], None], stdout: TextIO) -> None:
     if io.geteuid() != 0:
         raise DraftError("set", "root privileges are required", "Run sudo python3 -B -m tools.synthetic.draft with the same flags, then retry.")
     loaded_result = evalset.load_set(set_root)
@@ -1151,23 +1147,19 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
     if claim.refusal is not None:
         raise DraftError("lock", claim.refusal.detail, claim.refusal.fix)
     try:
-        if nogpu.is_no_gpu_host(io):
-            raise DraftError("engine", "the no-GPU marker refuses the draft", "Run the draft on the GPU box, then retry.")
-        site_result = site.load_site(Path(site_path), host=io)
-        if site_result.errors or site_result.config is None:
-            fix = site_result.errors[0].fix if site_result.errors else "Restore the site file, then retry."
-            raise DraftError("engine", "site file cannot be loaded", fix)
-        target = engine.resolve_engine_target(
-            io, rendered_dir, hardware_profile=site_result.config.hardware_profile,
-            models_path=models_path, sleep=sleep,
+        checked = sampling.check_target(
+            io, rendered_dir, site_path, models_path,
+            tool="the draft", work="the draft", instant=now(), force=force, sleep=sleep,
         )
-        if isinstance(target, report.Problem):
-            raise DraftError("engine", target.problem, target.fix)
+        if isinstance(checked, report.Problem):
+            raise DraftError("engine", checked.problem, checked.fix)
+        target = checked.target
         held = sampling.hold_running(
             io, rendered_dir, models_path, target.profile_name, seed, models_root=models_root,
         )
         if isinstance(held, report.Problem):
             raise DraftError("engine", held.problem, held.fix)
+        print(f"window: {checked.window_detail}", file=stdout, flush=True)
         retry_seed = sampling.next_seed(held.seed)
         treatment_rows: tuple[Mapping[str, object], ...] = ()
         pair_rows: tuple[Pair, ...] = ()
@@ -1629,6 +1621,7 @@ def _parser(errors: TextIO) -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--set", dest="set_root", type=Path)
     parser.add_argument("--generation", help="treatment and trap: a built/live production caselaw generation (default: live); other categories: the sibling's sample generation")
+    parser.add_argument("--force", action="store_true", help="start the draft outside the quiet window")
     return parser
 
 
@@ -1658,7 +1651,7 @@ def main(argv: Sequence[str] | None = None, *, host: DraftHost | None = None,
             rendered_dir=rendered_dir, site_path=site_path,
             models_path=checkout / "models.lock" if models_path is None else models_path,
             models_root=models_root,
-            now=(lambda: datetime.now(UTC)) if clock is None else clock, sleep=sleep, stdout=output,
+            now=(lambda: datetime.now(UTC)) if clock is None else clock, force=args.force, sleep=sleep, stdout=output,
         )
     except DraftError as error:
         print(f"{error.stage}: refused — {error.problem}. Fix: {error.fix}", file=errors)

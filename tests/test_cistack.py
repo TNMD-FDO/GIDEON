@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
+import yaml  # type: ignore[import-untyped]
+from derivedstores_fake import opensearch_authinfo_result
 from test_render import artifact_source_files
 from test_render_ci import inputs
 
@@ -43,10 +45,12 @@ from gideon.host.render.engine import (
     EMBED_SECRET_NAME,
     ENGINE_SECRET_NAME,
     INTEGRATION_NETWORK_NAME,
+    RERANK_SECRET_NAME,
 )
 from gideon.host.render.opensearch import (
     OPENSEARCH_GID,
     OPENSEARCH_SERVICE_NAME,
+    OPENSEARCH_TURN_SECRET_NAME,
     OPENSEARCH_UID,
 )
 from gideon.host.render.searxng import SEARXNG_SECRET_NAME
@@ -84,6 +88,7 @@ class FakeHost:
         self.network_containers: dict[str, dict[str, object]] = {}
         self.job_id: int | None = None
         self.job_returncode = 0
+        self.turn_reader_authorized = True
         self.job_read_locks: list[bool] = []
         self.engine_lock_reads: list[tuple[str, bool]] = []
         self.failing_programs: set[str] = set()
@@ -98,6 +103,7 @@ class FakeHost:
         self.read_errors: dict[str, OSError] = {}
         self.directories: set[str] = {CI_ROOT, CI_SECRETS_DIR, cistack_run.backuplock.LOCK_DIR}
         self.commands: list[tuple[str, ...]] = []
+        self.inputs: list[tuple[tuple[str, ...], str | None]] = []
         self.locks: dict[str, str] = {}
         self.lock_events: list[tuple[str, str]] = []
         self.writes: list[tuple[str, int]] = []
@@ -126,6 +132,7 @@ class FakeHost:
         del check, cwd, env, timeout, passthrough
         command = tuple(argv)
         self.commands.append(command)
+        self.inputs.append((command, input))
         self.engine_lock_reads.append(
             (command[0], cistack_run.backuplock.ENGINE_LOCK.path in self.locks)
         )
@@ -163,6 +170,11 @@ class FakeHost:
             self.remove(command[2])
         if command[:2] == ("getent", "group"):
             return completed(command, stdout="gideon:x:1001:\n")
+        authinfo = opensearch_authinfo_result(
+            command, input, CI_ROOT, authorized=self.turn_reader_authorized,
+        )
+        if authinfo is not None:
+            return authinfo
         return completed(command)
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
@@ -1021,12 +1033,23 @@ class Stages(unittest.TestCase):
                 self.assertEqual(command[3], CI_ROOT)
                 self.assertEqual(command[5], f"{CI_ROOT}/compose.yaml")
 
+        sibling = ci_stack()
+        password = "fictitious-sibling-turn-password"
+        host.files[str(sibling.secrets_dir / OPENSEARCH_TURN_SECRET_NAME)] = password + "\n"
         client = type("Frontend", (), {"ready": lambda self: True})()
-        with patch.object(cistack_run.apply, "wait_for_services", return_value=(True, "", "")):
+        with (
+            patch.object(cistack_run.secrets, "SECRETS_DIR", sibling.secrets_dir),
+            patch.object(cistack_run.apply, "wait_for_services", return_value=(True, "", "")),
+        ):
             result = cistack_run._verify_stage(
-                ci_stack(), host, client_factory=lambda **_: cast(owui.Client, client), sleep=lambda _: None
+                sibling, host, client_factory=lambda **_: cast(owui.Client, client), sleep=lambda _: None
             )
         self.assertTrue(result.ok)
+        authinfo = tuple(
+            host_stack.exec_argv(CI_ROOT, OPENSEARCH_SERVICE_NAME, "curl", "-s", "-S", "-K", "-")
+        )
+        self.assertEqual(host.commands.count(authinfo), 1)
+        self.assertIn(password, dict(host.inputs)[authinfo] or "")
         self.assertIn(
             tuple(
                 host_stack.exec_argv(
@@ -1041,6 +1064,31 @@ class Stages(unittest.TestCase):
         )
         self.assertNotIn("/etc/gideon/rendered", " ".join(" ".join(command) for command in host.commands))
         self.assertNotIn("/data/backup-staging", " ".join(" ".join(command) for command in host.commands))
+
+    def test_turn_reader_refusal_names_the_sibling_rebuild_commands(self) -> None:
+        host = FakeHost()
+        host.turn_reader_authorized = False
+        sibling = ci_stack()
+        password = "fictitious-sibling-turn-password"
+        host.files[str(sibling.secrets_dir / OPENSEARCH_TURN_SECRET_NAME)] = password + "\n"
+
+        def unexpected_frontend() -> owui.Client:
+            self.fail("frontend readiness ran after the reader refusal")
+
+        with patch.object(cistack_run.secrets, "SECRETS_DIR", sibling.secrets_dir):
+            result = cistack_run._verify_stage(
+                sibling, host, client_factory=unexpected_frontend, sleep=lambda _: None,
+            )
+
+        self.assertEqual((result.name, result.ok), ("verify", False))
+        self.assertEqual(result.detail, "the lexical store's turn reader cannot sign in")
+        self.assertEqual(
+            result.fix,
+            "Run sudo python3 -m tools.cistack down --wipe, then sudo python3 -m tools.cistack up. "
+            f"Run {cistack_run.command('index build caselaw --sample')}, then "
+            f"{cistack_run.command('index promote <generation>')} with the generation the build names.",
+        )
+        self.assertNotIn(password, repr(result))
 
 
 class DownAndSecrets(unittest.TestCase):
@@ -1182,8 +1230,24 @@ class DownAndSecrets(unittest.TestCase):
     def test_sibling_mints_lexical_store_secrets_and_skips_unused_keys(self) -> None:
         self.assertEqual(
             set(CI_SKIPPED_SECRETS),
-            {ENGINE_SECRET_NAME, EMBED_SECRET_NAME, "grafana_admin_password", SEARXNG_SECRET_NAME},
+            {
+                ENGINE_SECRET_NAME, EMBED_SECRET_NAME, RERANK_SECRET_NAME,
+                "grafana_admin_password", SEARXNG_SECRET_NAME,
+            },
         )
+
+    def test_written_sibling_secret_set_omits_the_reranker_key(self) -> None:
+        host = FakeHost()
+        result = cistack_run._render_stage(ci_stack(), host, inputs())
+
+        self.assertTrue(result.ok, result.detail)
+        document = yaml.safe_load(host.files[f"{CI_ROOT}/compose.yaml"])
+        mounted = {name for service in document["services"].values() for name in service.get("secrets", ())}
+        self.assertEqual(set(document["secrets"]), mounted)
+        self.assertNotIn(RERANK_SECRET_NAME, mounted)
+        for name in (ENGINE_SECRET_NAME, EMBED_SECRET_NAME):
+            with self.subTest(secret=name):
+                self.assertEqual(document["secrets"][name], {"file": f"/etc/gideon/secrets/{name}"})
 
     def test_selector_precedes_every_render_secret_read(self) -> None:
         host = FakeHost()

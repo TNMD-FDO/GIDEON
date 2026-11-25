@@ -8,11 +8,17 @@ from dataclasses import replace
 from pathlib import Path
 
 import yaml  # type: ignore[import-untyped]
-from test_render import EXAMPLE, ROOT, SECOND, inputs
+from test_render import EXAMPLE, FIXTURE_CASES, ROOT, SECOND, inputs, trial_inputs
 
 from gideon.host import gpus, weights
 from gideon.host.images import parse_registry, reference
 from gideon.host.models import GIGABYTE, load_models_lock
+from gideon.host.render import render_all
+from gideon.host.render.api import (
+    API_RERANK_KEY_FILE_ENV,
+    API_RERANK_URL_ENV,
+    API_SERVICE_NAME,
+)
 from gideon.host.render.compose import ComposeArtifact, service_blocks
 from gideon.host.render.egress import INTERNAL_NETWORK_NAME
 from gideon.host.render.engine import (
@@ -20,16 +26,18 @@ from gideon.host.render.engine import (
     GENERATOR,
     INTEGRATION_NETWORK_NAME,
     MODEL_SERVERS,
+    RERANK,
     metrics_target,
     model_server,
 )
 from gideon.host.render.facts import HostFacts
-from gideon.host.render.prometheus import PrometheusConfigArtifact
+from gideon.host.render.prometheus import DCGM_JOB_NAME, PrometheusConfigArtifact
 from gideon.host.render.routeguard import (
     ROUTE_GUARD_MOUNT_DIR,
     route_guard_import_path,
     route_guard_mount,
 )
+from gideon.host.render.scoretemplate import SCORE_TEMPLATE_MOUNT, SCORE_TEMPLATE_PATH
 from gideon.host.render.services import image_pin
 from gideon.host.render.services.model_server import (
     ENGINE_ACCESS_LOG_EXCLUDED_PATHS,
@@ -37,6 +45,7 @@ from gideon.host.render.services.model_server import (
     model_command,
     model_service,
 )
+from gideon.host.render.yamlout import dump_fragment
 
 
 class Family(unittest.TestCase):
@@ -71,6 +80,115 @@ class Family(unittest.TestCase):
         self.assertIsNone(model_server("absent-role"))
 
 
+class RerankRender(unittest.TestCase):
+    def test_the_family_has_three_members_in_serving_order(self) -> None:
+        self.assertEqual(MODEL_SERVERS, (GENERATOR, EMBED, RERANK))
+
+    def test_reranker_block_follows_the_reference_pin_on_gpu_hosts(self) -> None:
+        for host, site, no_gpu, build_box in FIXTURE_CASES:
+            with self.subTest(host=host):
+                base = inputs(site, no_gpu=no_gpu, build_box=build_box)
+                compose = yaml.safe_load(ComposeArtifact().emit(base))
+                services = compose["services"]
+                if no_gpu:
+                    self.assertNotIn(RERANK.service_name, services)
+                    self.assertNotIn(RERANK.secret_name, compose["secrets"])
+                    continue
+
+                pin = base.profile.model(RERANK.role)
+                assert pin is not None
+                target = parse_registry(base.site.registry)
+                assert target is not None
+                vllm = image_pin(base, "vllm-openai")
+                block = services[RERANK.service_name]
+                self.assertEqual(block["image"], reference(target, vllm))
+                device = f"nvidia.com/gpu={base.facts.gpu_uuids[1]}"
+                self.assertEqual(block["devices"], [device])
+                self.assertNotIn("ports", block)
+                self.assertEqual(block["networks"], ["gideon"])
+                self.assertEqual(
+                    block["volumes"],
+                    [
+                        f"{weights.MODELS_ROOT}:{pin.serve.env['HF_HOME']}:ro",
+                        route_guard_mount(),
+                        SCORE_TEMPLATE_MOUNT,
+                    ],
+                )
+                self.assertEqual(block["secrets"], [RERANK.secret_name])
+                self.assertEqual(block["healthcheck"]["start_period"], f"{RERANK.ready_seconds}s")
+                command = block["command"]
+                self.assertEqual(
+                    command[:5],
+                    [pin.repo, "--revision", pin.revision, "--served-model-name", pin.serve.served_name],
+                )
+                self.assertEqual(command[command.index("--port") + 1], str(RERANK.port))
+                flags: list[str] = []
+                for name, value in pin.serve.flags.items():
+                    flags.append(f"--{name}")
+                    if value is not True:
+                        flags.append(str(value))
+                self.assertEqual(command[-len(flags):], flags)
+                overrides = pin.serve.flags["hf-overrides"]
+                self.assertEqual(command.count("--hf-overrides"), 1)
+                self.assertEqual(command[command.index("--hf-overrides") + 1], overrides)
+                target_path = block["volumes"][-1].split(":")[1]
+                self.assertEqual(command[command.index("--chat-template") + 1], target_path)
+
+    def test_trial_renders_the_required_servers_without_reranker_resources(self) -> None:
+        rendered = render_all(trial_inputs())
+        compose = yaml.safe_load(rendered.by_path["compose.yaml"].content)
+        services = compose["services"]
+        for member in (GENERATOR, EMBED):
+            self.assertIn(member.service_name, services)
+        self.assertNotIn(RERANK.service_name, services)
+        self.assertNotIn(RERANK.secret_name, compose["secrets"])
+        self.assertNotIn(SCORE_TEMPLATE_PATH, rendered.by_path)
+        environment = services[API_SERVICE_NAME]["environment"]
+        self.assertNotIn(API_RERANK_URL_ENV, environment)
+        self.assertNotIn(API_RERANK_KEY_FILE_ENV, environment)
+        jobs = yaml.safe_load(rendered.by_path["prometheus/prometheus.yml"].content)["scrape_configs"]
+        self.assertNotIn(RERANK.job_name, [job["job_name"] for job in jobs])
+
+    def test_optional_reranker_leaves_the_required_blocks_byte_for_byte(self) -> None:
+        for site in (EXAMPLE, SECOND):
+            with self.subTest(site=site.name):
+                base = inputs(site)
+                profile = base.profile
+                without_reranker = replace(
+                    profile,
+                    models=tuple(pin for pin in profile.models if pin.role != RERANK.role),
+                    memory=tuple(row for row in profile.memory if row.service != RERANK.service_name),
+                )
+                with_blocks = service_blocks(base)
+                without_blocks = service_blocks(replace(base, profile=without_reranker))
+                self.assertNotIn(RERANK.service_name, without_blocks)
+                for member in (GENERATOR, EMBED):
+                    before = without_blocks[member.service_name]
+                    after = with_blocks[member.service_name]
+                    assert isinstance(before, Mapping) and isinstance(after, Mapping)
+                    self.assertEqual(dump_fragment(after).encode(), dump_fragment(before).encode())
+
+    def test_scrapes_follow_rendered_model_server_order(self) -> None:
+        for base in (inputs(), inputs(SECOND), inputs(no_gpu=True), trial_inputs()):
+            with self.subTest(profile=base.profile.name, no_gpu=base.no_gpu, site=base.site.hostname):
+                rendered = render_all(base)
+                services = yaml.safe_load(rendered.by_path["compose.yaml"].content)["services"]
+                jobs = yaml.safe_load(rendered.by_path["prometheus/prometheus.yml"].content)["scrape_configs"]
+                members = {member.service_name: member for member in MODEL_SERVERS}
+                expected = [
+                    {"job_name": member.job_name, "static_configs": [{"targets": [metrics_target(member)]}]}
+                    for name in services if (member := members.get(name)) is not None
+                ]
+                model_jobs = {member.job_name for member in MODEL_SERVERS}
+                self.assertEqual([job for job in jobs if job["job_name"] in model_jobs], expected)
+                names = [job["job_name"] for job in jobs]
+                if base.no_gpu:
+                    self.assertNotIn(DCGM_JOB_NAME, names)
+                else:
+                    start = names.index(DCGM_JOB_NAME) + 1
+                    self.assertEqual(jobs[start:start + len(expected)], expected)
+
+
 class EmbedRender(unittest.TestCase):
     def test_trial_profile_shares_position_zero_with_its_flags_and_memory(self) -> None:
         loaded = load_models_lock(ROOT / "models.lock")
@@ -86,7 +204,7 @@ class EmbedRender(unittest.TestCase):
         )
         self.assertEqual(len(rendered_inputs.facts.gpu_uuids), 2)
         blocks = service_blocks(rendered_inputs)
-        for member in MODEL_SERVERS:
+        for member in (GENERATOR, EMBED):
             with self.subTest(role=member.role):
                 pin = profile.model(member.role)
                 row = profile.memory_row(member.service_name)
@@ -241,7 +359,7 @@ class EmbedRender(unittest.TestCase):
                 assert isinstance(volumes, list)
                 assert isinstance(environment, Mapping)
                 assert isinstance(command, list)
-                self.assertEqual(len(volumes), 2)
+                self.assertEqual(len(volumes), 3 if member is RERANK else 2)
                 self.assertEqual(volumes[1], route_guard_mount())
                 self.assertEqual(environment["PYTHONPATH"], ROUTE_GUARD_MOUNT_DIR)
                 self.assertNotIn("VLLM_API_KEY", environment)

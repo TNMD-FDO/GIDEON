@@ -17,6 +17,7 @@ from gideon.host import (
     announcesync,
     backuplock,
     cotenants,
+    derivedstores,
     egress,
     grafana,
     imagestore,
@@ -1034,6 +1035,10 @@ def _verify_stage(
             return StageResult(
                 "verify", False, detail, _logs_fix(rendered_dir, service)
             )
+
+    reader = derivedstores.verify_opensearch_turn_reader(io, rendered_dir)
+    if reader is not None:
+        return StageResult("verify", False, reader.problem, reader.fix)
 
     try:
         probe = tls.probe_ingress(io, context.inputs.site.hostname, sleep=sleep)

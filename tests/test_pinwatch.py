@@ -1540,6 +1540,7 @@ class PinContracts(unittest.TestCase):
                 "host.acceptance_vm_image",
                 "models.generator",
                 "models.embed",
+                "models.rerank-2",
                 "models.1x32v-120d.generator",
                 "models.1x32v-120d.embed",
                 "skills.matt-pocock",

@@ -13,6 +13,7 @@ from unittest.mock import patch
 from gideon.host import report
 from gideon.host import secrets as secrets_module
 from gideon.host.render.command import _SMTP_PASSWORD_NAME
+from gideon.host.render.opensearch import OPENSEARCH_TURN_SECRET_NAME
 from gideon.host.render.proxy import PROXY_AUTH_NAME
 from gideon.host.secrets import (
     ROTATABLE_NAMES,
@@ -196,14 +197,17 @@ class Registry(unittest.TestCase):
                 "postgres_gideon_ro_metrics_password",
                 "postgres_gideon_eval_password",
                 "postgres_gideon_worker_password",
+                "postgres_gideon_ro_turn_password",
                 "engine_api_key",
                 "embed_api_key",
+                "rerank_2_api_key",
                 "gideon_api_key",
                 "searxng_secret_key",
                 "qdrant_api_key",
                 "qdrant_read_only_api_key",
                 "opensearch_password",
                 "opensearch_metrics_password",
+                OPENSEARCH_TURN_SECRET_NAME,
             ],
         )
         self.assertEqual(MINTED_KIND, ["gideon_admin_api_key", "gideon_eval_api_key"])
@@ -250,7 +254,10 @@ class Registry(unittest.TestCase):
         qdrant_reader = next(secret for secret in SECRET_REGISTRY if secret.name == "qdrant_read_only_api_key")
         self.assertEqual(qdrant_reader.kind, "password")
         self.assertFalse(qdrant_reader.print_once)
-        self.assertEqual(qdrant_reader.consumer, "the vector store's read-only key carried by Open WebUI")
+        self.assertEqual(qdrant_reader.consumer, "the vector store's read-only key for Open WebUI and gideon-api")
+        lexical_reader = next(secret for secret in SECRET_REGISTRY if secret.name == OPENSEARCH_TURN_SECRET_NAME)
+        self.assertFalse(lexical_reader.print_once)
+        self.assertEqual(lexical_reader.consumer, "the lexical store's turn reader, mounted by gideon-api")
         audit = next(
             secret
             for secret in SECRET_REGISTRY
@@ -277,8 +284,10 @@ class Registry(unittest.TestCase):
                 "postgres_gideon_ro_metrics_password": "role",
                 "postgres_gideon_eval_password": "role",
                 "postgres_gideon_worker_password": "role",
+                "postgres_gideon_ro_turn_password": "role",
                 "engine_api_key": "rewrite",
                 "embed_api_key": "rewrite",
+                "rerank_2_api_key": "rewrite",
                 "gideon_api_key": "rewrite",
                 "searxng_secret_key": "rewrite",
                 "qdrant_api_key": "rewrite",
@@ -287,6 +296,7 @@ class Registry(unittest.TestCase):
                 "opensearch_transport_key": "rewrite",
                 "opensearch_transport_cert": "rewrite",
                 "opensearch_metrics_password": "rewrite",
+                OPENSEARCH_TURN_SECRET_NAME: "rewrite",
                 "gideon_admin_api_key": "remint",
                 "gideon_eval_api_key": "remint",
             },
@@ -297,6 +307,7 @@ class Registry(unittest.TestCase):
                 "grafana_admin_password",
                 "engine_api_key",
                 "embed_api_key",
+                "rerank_2_api_key",
                 "gideon_api_key",
                 "webui_secret_key",
                 "searxng_secret_key",
@@ -306,6 +317,7 @@ class Registry(unittest.TestCase):
                 "opensearch_transport_key",
                 "opensearch_transport_cert",
                 "opensearch_metrics_password",
+                OPENSEARCH_TURN_SECRET_NAME,
                 "gideon_admin_api_key",
                 "gideon_eval_api_key",
             },
@@ -437,7 +449,9 @@ class Ensure(unittest.TestCase):
                 if secret.kind != "minted" and secret.name != "webui_secret_key"
             ),
         )
-        self.assertEqual(result.created[-3:], (*PAIR_NAMES, "opensearch_metrics_password"))
+        self.assertEqual(
+            result.created[-4:], (*PAIR_NAMES, "opensearch_metrics_password", OPENSEARCH_TURN_SECRET_NAME),
+        )
         self.assertEqual(host.files[f"{SECRETS_DIR}/webui_secret_key"], "keep-me\n")
         for name in PASSWORD_KIND:
             if name == "webui_secret_key":

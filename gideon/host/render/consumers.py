@@ -33,7 +33,7 @@ def secret_consumers(inputs: RenderInputs) -> Mapping[str, SecretConsumers]:
             continue
         for name in artifact.secret_names(inputs):
             carried.setdefault(name, [])
-            for owner in artifact.owners:
+            for owner in artifact.rendered_owners(inputs):
                 if owner not in carried[name]:
                     carried[name].append(owner)
 

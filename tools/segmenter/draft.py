@@ -3,7 +3,6 @@
 import argparse
 import hashlib
 import json
-import re
 import subprocess
 import sys
 import time
@@ -14,8 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, Protocol, TextIO, cast
 
-from gideon.evaluation import evalset, record, segmenter_draft
-from gideon.host import backuplock, cas, engine, nogpu, report, site, stack
+from gideon.evaluation import evalset, record, sampling, segmenter_draft
+from gideon.host import backuplock, cas, report, stack
 from gideon.host.render.worker import SECTION_TYPES
 from gideon.host.report import Problem
 from gideon.host.sysio import BytesHost, LockingHost, PathLike, RealHost
@@ -25,7 +24,6 @@ from tools.synthetic.manifest import original_link
 DEFAULT_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 RENDERED_DIR: Final[Path] = Path("/etc/gideon/rendered")
 SITE_PATH: Final[Path] = Path("/etc/gideon/site.yaml")
-_SHA256: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 DOCUMENTS_SQL: Final[str] = """SELECT COALESCE(jsonb_agg(jsonb_build_object(
     'opinion_id', o.opinion_id,
     'doc_id', d.doc_id,
@@ -137,9 +135,9 @@ def _documents(io: DraftHost, rendered_dir: PathLike, opinion_ids: Sequence[int]
         )
         if (
             type(opinion_id) is not int or opinion_id not in requested or opinion_id in documents
-            or not isinstance(doc_id, str) or _SHA256.fullmatch(doc_id) is None
+            or not isinstance(doc_id, str) or evalset.SHA256_PATTERN.fullmatch(doc_id) is None
             or source not in evalset.SEGMENTER_TEXT_SOURCES
-            or not isinstance(sha256, str) or _SHA256.fullmatch(sha256) is None
+            or not isinstance(sha256, str) or evalset.SHA256_PATTERN.fullmatch(sha256) is None
             or not isinstance(cites, list) or not all(isinstance(cite, str) for cite in cites)
         ):
             raise DraftError("resolve", "record reply has invalid document facts", fix)
@@ -201,7 +199,7 @@ def _full(paragraphs: Sequence[str]) -> bytes:
 
 def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path,
          requested: Sequence[str], rendered_dir: PathLike, site_path: PathLike,
-         models_path: PathLike, now: Callable[[], datetime], sleep: Callable[[float], None],
+         models_path: PathLike, now: Callable[[], datetime], force: bool, sleep: Callable[[float], None],
          stdout: TextIO) -> None:
     if io.geteuid() != 0:
         raise DraftError("set", "root privileges are required", "Run the draft command with sudo, then retry.")
@@ -217,18 +215,14 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path,
     if claim.refusal is not None:
         raise DraftError("lock", claim.refusal.detail, claim.refusal.fix)
     try:
-        if nogpu.is_no_gpu_host(io):
-            raise DraftError("engine", "the no-GPU marker refuses the draft", "Run the draft on the GPU box, then retry.")
-        site_result = site.load_site(Path(site_path), host=io)
-        if site_result.errors or site_result.config is None:
-            fix = site_result.errors[0].fix if site_result.errors else "Restore the site file, then retry."
-            raise DraftError("engine", "site file cannot be loaded", fix)
-        target = engine.resolve_engine_target(
-            io, rendered_dir, hardware_profile=site_result.config.hardware_profile,
-            models_path=models_path, sleep=sleep,
+        checked = sampling.check_target(
+            io, rendered_dir, site_path, models_path,
+            tool="the draft", work="the draft", instant=now(), force=force, sleep=sleep,
         )
-        if isinstance(target, Problem):
-            raise DraftError("engine", target.problem, target.fix)
+        if isinstance(checked, Problem):
+            raise DraftError("engine", checked.problem, checked.fix)
+        print(f"window: {checked.window_detail}", file=stdout)
+        target = checked.target
         opinion_ids = tuple(cast(int, loaded.cases_by_id[case_id]["opinion_id"]) for case_id in case_ids)
         documents = _documents(io, rendered_dir, opinion_ids)
         prompt = segmenter_draft.PROMPTS["segmenter-label@1"]
@@ -316,6 +310,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--set", dest="set_root", type=Path)
     parser.add_argument("--case", action="append", default=[])
+    parser.add_argument("--force", action="store_true", help="start the draft outside the quiet window")
     return parser
 
 
@@ -341,7 +336,7 @@ def main(argv: Sequence[str] | None = None, *, host: DraftHost | None = None,
             out=args.out, requested=args.case, rendered_dir=rendered_dir,
             site_path=site_path, models_path=checkout / "models.lock" if models_path is None else models_path,
             now=(lambda: datetime.now(UTC)) if clock is None else clock,
-            sleep=sleep, stdout=output,
+            force=args.force, sleep=sleep, stdout=output,
         )
     except DraftError as error:
         print(f"{error.stage}: refused — {error.problem}. Fix: {error.fix}", file=errors)

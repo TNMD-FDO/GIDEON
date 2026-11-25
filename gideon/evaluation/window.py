@@ -32,6 +32,21 @@ class WindowJudgement:
     end: datetime
 
 
+def refusal_text(judgement: WindowJudgement, suffix: str = "") -> tuple[str, str]:
+    """Return the quiet-window refusal detail and fix."""
+
+    return (
+        f"outside the quiet window: {judgement.description}{suffix}",
+        f"Next opening is {judgement.next_opening.isoformat()}{suffix}; add --force for an announced window.",
+    )
+
+
+def passing_detail(judgement: WindowJudgement, force: bool) -> str:
+    """Describe a passing start, including whether force was requested."""
+
+    return judgement.description + (", forced" if force else "")
+
+
 class WindowOverrun(Exception):
     """Signal that a run reached its deadline so its caller can record partial work."""
 

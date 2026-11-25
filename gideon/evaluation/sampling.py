@@ -1,14 +1,18 @@
-"""Hold seeded thinking-mode sampling to the generator snapshot and derive retry sets from held sets."""
+"""Judge the quiet window, check the generator target and pin, hold seeded sampling, and build chat requests."""
 
 from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Final
 
-from gideon.host import models, report, stack, weights
+from gideon.evaluation import window
+from gideon.host import engine, models, nogpu, report, site, stack, weights
 from gideon.host.render.engine import GENERATOR
 from gideon.host.sysio import Host, PathLike
 
@@ -45,6 +49,30 @@ class HeldSet:
         """Derive a held set with the next seed since the snapshot check is seed-independent."""
 
         return HeldSet(next_seed(self.seed))
+
+
+def chat_request(
+    served_model_name: str, *, system_text: str, user_text: str, max_tokens: int,
+    schema_name: str, schema: Mapping[str, object], enable_thinking: bool,
+    sampling_fields: Mapping[str, object] | None = None,
+) -> Mapping[str, object]:
+    """Build a non-streaming chat request with a JSON schema and optional sampling fields."""
+
+    return {
+        "model": served_model_name,
+        "messages": [
+            {"role": "system", "content": system_text},
+            {"role": "user", "content": user_text},
+        ],
+        "max_tokens": max_tokens,
+        **({"temperature": 0} if sampling_fields is None else sampling_fields),
+        "stream": False,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": schema_name, "schema": schema},
+        },
+        "chat_template_kwargs": {"enable_thinking": enable_thinking},
+    }
 
 
 def sampling_differences(config: Mapping[str, object]) -> tuple[str, ...]:
@@ -100,6 +128,42 @@ def pin_fix(tool: str) -> str:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class CheckedTarget:
+    """The resolved generator target and the passing window detail."""
+
+    target: engine.EngineTarget
+    window_detail: str
+
+
+def check_target(
+    io: Host, rendered_dir: PathLike, site_path: PathLike, models_path: PathLike,
+    *, tool: str, work: str, instant: datetime, force: bool, sleep: Callable[[float], None] = time.sleep,
+) -> CheckedTarget | report.Problem:
+    """Check the host mode, site, and quiet window before resolving the generator target."""
+
+    if nogpu.is_no_gpu_host(io):
+        return report.Problem(f"the no-GPU marker refuses {work}", f"Run {tool} on the GPU box, then retry.")
+    site_result = site.load_site(Path(site_path), host=io)
+    if site_result.errors or site_result.config is None:
+        fix = site_result.errors[0].fix if site_result.errors else "Restore the site file, then retry."
+        return report.Problem("the site file cannot be loaded", fix)
+    judgement = window.window_judgement(instant, site_result.config.office.timezone)
+    if not judgement.inside and not force:
+        return report.Problem(*window.refusal_text(judgement))
+    try:
+        target = engine.resolve_engine_target(
+            io, rendered_dir, hardware_profile=site_result.config.hardware_profile,
+            models_path=models_path, sleep=sleep,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return report.Problem("the generator target check could not run", pin_fix(tool))
+    if isinstance(target, report.Problem):
+        # The resolver's problem can quote a failed child's output, so only its fix is kept.
+        return report.Problem("the generator target is unavailable", target.fix)
+    return CheckedTarget(target, window.passing_detail(judgement, force))
+
+
 def _engine_command(io: Host, argv: Sequence[str], label: str, fix: str) -> str | report.Problem:
     try:
         result = io.run(argv)
@@ -142,13 +206,12 @@ def running_pin(io: Host, rendered_dir: PathLike, fix: str) -> tuple[str, str] |
     return command[0], command[2]
 
 
-def hold_running(
-    io: Host, rendered_dir: PathLike, models_path: PathLike, profile_name: str, seed: int,
-    *, models_root: PathLike = weights.MODELS_ROOT,
-) -> HeldSet | report.Problem:
-    """Match the running pin to the selected profile and hold it under the caller's engine lock."""
+def check_pin(
+    io: Host, rendered_dir: PathLike, models_path: PathLike, profile_name: str, *, tool: str = "this command",
+) -> tuple[str, str] | report.Problem:
+    """Return the running pin if it matches the selected profile's generator pin."""
 
-    fix = pin_fix("this command")
+    fix = pin_fix(tool)
     running = running_pin(io, rendered_dir, fix)
     if isinstance(running, report.Problem):
         return running
@@ -159,4 +222,16 @@ def hold_running(
         return report.Problem("the generator pin cannot be read", "Restore the selected profile's generator pin, then retry.")
     if running != (pin.repo, pin.revision):
         return report.Problem("the running generator repository or revision differs from the checkout's pin", fix)
+    return running
+
+
+def hold_running(
+    io: Host, rendered_dir: PathLike, models_path: PathLike, profile_name: str, seed: int,
+    *, models_root: PathLike = weights.MODELS_ROOT,
+) -> HeldSet | report.Problem:
+    """Match the running pin to the selected profile and hold it under the caller's engine lock."""
+
+    running = check_pin(io, rendered_dir, models_path, profile_name)
+    if isinstance(running, report.Problem):
+        return running
     return hold(io, *running, seed, models_root=models_root)

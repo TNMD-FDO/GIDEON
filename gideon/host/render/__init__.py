@@ -36,6 +36,7 @@ class Artifact:
 
     ``template_paths`` name files under ``compose/``; ``source_paths`` name
     checkout-relative release files read into ``RenderInputs.templates``.
+    ``owners`` lists the services that may own the artifact across profiles.
     """
 
     name: str = ""
@@ -54,6 +55,12 @@ class Artifact:
 
     def emit(self, inputs: RenderInputs) -> str:
         raise NotImplementedError
+
+    def rendered_owners(self, inputs: RenderInputs) -> tuple[str, ...]:
+        """Return the owners of this file for the current render."""
+
+        del inputs
+        return self.owners
 
     def secret_names(self, inputs: RenderInputs) -> tuple[str, ...]:
         """Secret names this artifact's ``emit`` reads from ``inputs.secrets``."""
@@ -149,7 +156,7 @@ def render_all(inputs: RenderInputs) -> RenderedSet:
             relative_path=artifact.relative_path,
             content=artifact.emit(inputs),
             mode=artifact.mode,
-            owners=artifact.owners,
+            owners=artifact.rendered_owners(inputs),
             secret=artifact.secret,
         )
         for artifact in ARTIFACTS
@@ -198,6 +205,7 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         PrometheusConfigArtifact,
     )
     from gideon.host.render.routeguard import RouteGuardArtifact
+    from gideon.host.render.scoretemplate import ScoreTemplateArtifact
     from gideon.host.render.searxng import (
         SearxngEnvArtifact,
         SearxngLoggingArtifact,
@@ -249,6 +257,7 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         ApplyManifestArtifact(),
         ApiInstructionArtifact(),
         RouteGuardArtifact(),
+        ScoreTemplateArtifact(),
         SearxngSettingsArtifact(),
         SearxngEnvArtifact(),
         EgressEnvArtifact(),

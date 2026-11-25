@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 
-from gideon.evaluation import judge
+from gideon.evaluation import judge, sampling
 from gideon.host import engine, enginesample
 from gideon.host.render.engine import GENERATOR
 from gideon.host.render.worker import SECTION_TYPES
@@ -152,29 +152,6 @@ def _paragraph_lines(text: str, table: ParagraphTable, first: int, last: int) ->
     return "\n".join(lines)
 
 
-def _request_body(
-    served_model_name: str, prompt: judge.JudgePrompt, *, paragraphs: str, running_type: str
-) -> Mapping[str, object]:
-    return {
-        "model": served_model_name,
-        "messages": [
-            {"role": "system", "content": prompt.system},
-            {"role": "user", "content": prompt.user_template.format(
-                running_type=running_type, paragraphs=paragraphs,
-            )},
-        ],
-        "max_tokens": DRAFT_MAX_TOKENS,
-        "temperature": 0,
-        "stream": False,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {"name": prompt.schema_name, "schema": prompt.schema},
-        },
-        # exempt: a person checks the draft; reasoning would spend its answer reserve.
-        "chat_template_kwargs": {"enable_thinking": False},
-    }
-
-
 def _parse(content: str, count: int) -> tuple[Transition, ...] | judge.Failure:
     try:
         document = json.loads(content)
@@ -225,14 +202,17 @@ def draft(
         )
 
     for first, last in _windows(text, table):
+        paragraphs = _paragraph_lines(text, table, first, last)
+        body = sampling.chat_request(
+            served_model_name, system_text=prompt.system,
+            user_text=prompt.user_template.format(running_type=running_type, paragraphs=paragraphs),
+            max_tokens=DRAFT_MAX_TOKENS, schema_name=prompt.schema_name, schema=prompt.schema,
+            # exempt: a person checks the draft; reasoning would spend its answer reserve.
+            enable_thinking=False,
+        )
         reply = engine.call_model_server(
             io, rendered_dir, GENERATOR, path="/v1/chat/completions",
-            body=_request_body(
-                served_model_name, prompt,
-                paragraphs=_paragraph_lines(text, table, first, last),
-                running_type=running_type,
-            ),
-            max_time=DRAFT_TIMEOUT_SECONDS,
+            body=body, max_time=DRAFT_TIMEOUT_SECONDS,
         )
         attempted += 1
         content, finish_reason, used_prompt, used_completion = engine.completion_values(reply)

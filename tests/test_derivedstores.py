@@ -8,6 +8,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from derivedstores_fake import OPENSEARCH_AUTHINFO_PATH
+
 from gideon.host import derivedstores, report, secrets, stack
 from gideon.host.render.opensearch import (
     OPENSEARCH_PASSWORD_SECRET_NAME,
@@ -15,6 +17,8 @@ from gideon.host.render.opensearch import (
     OPENSEARCH_SERVICE_NAME,
     OPENSEARCH_SNAPSHOTS_MOUNT,
     OPENSEARCH_SNAPSHOTS_ROOT,
+    OPENSEARCH_TURN_SECRET_NAME,
+    OPENSEARCH_TURN_USER,
 )
 from gideon.host.render.qdrant import (
     QDRANT_SECRET_NAME,
@@ -28,6 +32,7 @@ Q_ROOT = "/data/fast/qdrant-snapshots"
 NOW = datetime(2026, 10, 11, 12, 34, 56, tzinfo=UTC)
 Q_KEY = "fictitious-qdrant-key"
 OS_PASSWORD = 'fictitious\\"password'
+TURN_PASSWORD = "fictitious-turn-reader-password"
 
 
 def q_reply(data: object, status: int = 200, *, length: int | None = None) -> str:
@@ -63,6 +68,7 @@ class FakeHost:
                 os.fspath(
                     secrets.secret_path(OPENSEARCH_PASSWORD_SECRET_NAME)
                 ): OS_PASSWORD + "\n",
+                os.fspath(secrets.secret_path(OPENSEARCH_TURN_SECRET_NAME)): TURN_PASSWORD + "\n",
             }
             if secrets_present
             else {}
@@ -448,6 +454,8 @@ class Clients(unittest.TestCase):
         os_cases = (
             ('{"snapshots":[]}', "status trailer"),
             ("not-json\ngideon-status:200\n", "not JSON"),
+            ("Unauthorized\ngideon-status:401\n", "not JSON"),
+            ("OpenSearch Security not initialized.\ngideon-status:503\n", "not JSON"),
             (
                 os_reply(
                     {
@@ -531,6 +539,76 @@ class Clients(unittest.TestCase):
         self.assertIn("last [redacted]", reply.problem)
         self.assertNotIn("first", reply.problem)
         self.assertNotIn(Q_KEY, repr(reply))
+
+
+class TurnReaderSignIn(unittest.TestCase):
+    def test_sign_in_checks_the_reader_with_its_password_on_stdin(self) -> None:
+        host = FakeHost([
+            os_step("GET", OPENSEARCH_AUTHINFO_PATH, {"user_name": OPENSEARCH_TURN_USER})
+        ])
+        self.assertIsNone(derivedstores.verify_opensearch_turn_reader(host, RENDERED))
+        self.assertEqual(host.reads, [str(secrets.secret_path(OPENSEARCH_TURN_SECRET_NAME))])
+        argv, request, _ = host.calls[0]
+        self.assertEqual(
+            argv,
+            tuple(stack.exec_argv(RENDERED, OPENSEARCH_SERVICE_NAME, "curl", "-s", "-S", "-K", "-")),
+        )
+        self.assertNotIn(TURN_PASSWORD, repr(argv))
+        assert request is not None
+        self.assertIn(f'user = "{OPENSEARCH_TURN_USER}:{TURN_PASSWORD}"\n', request)
+        self.assertNotIn("data =", request)
+        self.assertEqual(len(host.calls), 1)
+
+    def test_plain_text_401_has_the_reseed_fix(self) -> None:
+        host = FakeHost([
+            Step(OPENSEARCH_SERVICE_NAME, "GET", OPENSEARCH_AUTHINFO_PATH,
+                 "Unauthorized\ngideon-status:401\n"),
+        ])
+        result = derivedstores.verify_opensearch_turn_reader(host, RENDERED)
+        assert isinstance(result, report.Problem)
+        self.assertEqual(result.problem, "the lexical store's turn reader cannot sign in")
+        self.assertIn("docs/runbooks/backup-restore.md §8", result.fix)
+        self.assertNotIn(TURN_PASSWORD, repr(result))
+
+    def test_other_statuses_use_the_logs_fix_without_decoding_the_body(self) -> None:
+        for status, body in (
+            (503, "OpenSearch Security not initialized."),
+            (403, TURN_PASSWORD),
+            (500, '{"error":{"type":"repository_verification_exception"}}'),
+        ):
+            with self.subTest(status=status):
+                host = FakeHost([Step(
+                    OPENSEARCH_SERVICE_NAME, "GET", OPENSEARCH_AUTHINFO_PATH,
+                    f"{body}\ngideon-status:{status}\n",
+                )])
+                result = derivedstores.verify_opensearch_turn_reader(host, RENDERED)
+                self.assertEqual(result, report.Problem(
+                    f"opensearch GET {OPENSEARCH_AUTHINFO_PATH} returned HTTP {status}",
+                    stack.logs_fix(RENDERED, OPENSEARCH_SERVICE_NAME),
+                ))
+
+    def test_200_requires_json_and_a_successful_child(self) -> None:
+        for body, returncode, stderr, words in (
+            ("Unauthorized", 0, "", "not JSON"),
+            ("{}", 7, f"fixture failure: {TURN_PASSWORD}", "failed (exit 7)"),
+        ):
+            with self.subTest(returncode=returncode):
+                host = FakeHost([Step(
+                    OPENSEARCH_SERVICE_NAME, "GET", OPENSEARCH_AUTHINFO_PATH,
+                    f"{body}\ngideon-status:200\n", returncode, stderr,
+                )])
+                result = derivedstores.verify_opensearch_turn_reader(host, RENDERED)
+                assert isinstance(result, report.Problem)
+                self.assertIn(words, result.problem)
+                self.assertEqual(result.fix, stack.logs_fix(RENDERED, OPENSEARCH_SERVICE_NAME))
+                self.assertNotIn(TURN_PASSWORD, repr(result))
+
+    def test_missing_reader_secret_refuses_before_the_request(self) -> None:
+        host = FakeHost([], secrets_present=False)
+        result = derivedstores.verify_opensearch_turn_reader(host, RENDERED)
+        assert isinstance(result, report.Problem)
+        self.assertIn(str(secrets.secret_path(OPENSEARCH_TURN_SECRET_NAME)), result.problem)
+        self.assertEqual(host.calls, [])
 
 
 class SnapshotAll(unittest.TestCase):

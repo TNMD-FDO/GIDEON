@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Final, Literal, TypeGuard, cast
 
 from gideon.evaluation.evalset import JUDGMENT_ID_PATTERN, Finding
+from gideon.evaluation.evalset import SHA256_PATTERN as _SHA256_PATTERN
 
 JUDGMENTS_PATH: Final[Path] = Path("judgments", "judgments.jsonl")
 JUDGMENT_KEYS: Final[tuple[str, ...]] = (
@@ -25,7 +26,6 @@ ATTORNEY_ROLE_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?:CHU-attorney|TRAD-attorney)-[1-9][0-9]*"
 )
 SOURCE_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._:/-]+")
-_SHA256_PATTERN: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _ASSESSMENTS: Final[frozenset[str]] = frozenset({"primary", "second"})
 JUDGMENT_LINE_FIX: Final[str] = "Correct the judgments JSONL line, then retry."
 _FILE_FIX: Final[str] = "Restore the judgments JSONL file, then retry."

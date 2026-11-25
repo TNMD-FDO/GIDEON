@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from gideon.api.app import create_app
-from gideon.api.settings import Settings, load_settings
+from gideon.api.settings import RecordCoordinates, Settings, load_settings
 
 API_KEY = "fixture-api-key"
 ENGINE_KEY = "fixture-engine-key"
@@ -21,6 +21,17 @@ EVAL_IDENTITY = "eval@example.invalid"
 INSTRUCTION = "Fictitious General instruction."
 MODEL_ID = "fixture-general"
 ENGINE_MODEL = "fixture-model"
+READER_PASSWORD = "fixture-reader-password"
+CORPUS_READER_PASSWORD = "fixture-corpus-reader-password"
+QDRANT_KEY = "fixture-vector-key"
+EMBED_KEY = "fixture-embedding-key"
+OPENSEARCH_PASSWORD = "fixture-lexical-password"
+QDRANT_URL = "http://fixture-vector:7001"
+EMBED_URL = "http://fixture-embedding:7002/"
+OPENSEARCH_URL = "http://fixture-lexical:7003"
+RECORD = RecordCoordinates(
+    "fixture-postgres", 5432, "fixture-db", "fixture-reader", Path("/fixture/reader-password"),
+)
 
 
 def response_body(response: httpx.Response) -> dict[str, Any]:
@@ -43,13 +54,46 @@ class ApiService(unittest.TestCase):
             INSTRUCTION,
             MODEL_ID,
             ENGINE_MODEL,
+            record=RECORD,
+            corpus_record=RECORD,
+            cas_root=Path("/fixture/cas"),
+            qdrant_url=QDRANT_URL,
+            qdrant_key_file=Path("/fixture/qdrant-key"),
+            embed_url=EMBED_URL,
+            embed_key_file=Path("/fixture/embed-key"),
+            opensearch_url=OPENSEARCH_URL,
+            opensearch_user="fixture-lexical-reader",
+            opensearch_password_file=Path("/fixture/lexical-password"),
         )
 
     def loaded_settings_environment(self, root: Path) -> dict[str, str]:
         (root / "engine-key").write_text(ENGINE_KEY, encoding="utf-8")
         (root / "api-key").write_text(API_KEY, encoding="utf-8")
         (root / "instruction.txt").write_text(f" \n{INSTRUCTION}\n ", encoding="utf-8")
+        (root / "reader-password").write_text(READER_PASSWORD, encoding="utf-8")
+        (root / "corpus-reader-password").write_text(CORPUS_READER_PASSWORD, encoding="utf-8")
+        (root / "qdrant-key").write_text(QDRANT_KEY, encoding="utf-8")
+        (root / "embed-key").write_text(EMBED_KEY, encoding="utf-8")
+        (root / "lexical-password").write_text(OPENSEARCH_PASSWORD, encoding="utf-8")
         return {
+            "GIDEON_API_DB_HOST": "fixture-postgres",
+            "GIDEON_API_DB_PORT": "5432",
+            "GIDEON_API_DB_NAME": "fixture-db",
+            "GIDEON_API_DB_ROLE": "fixture-reader",
+            "GIDEON_API_PASSWORD_FILE": str(root / "reader-password"),
+            "GIDEON_API_CORPUS_DB_HOST": "fixture-record-relay",
+            "GIDEON_API_CORPUS_DB_PORT": "5433",
+            "GIDEON_API_CORPUS_DB_NAME": "fixture-corpus-db",
+            "GIDEON_API_CORPUS_DB_ROLE": "fixture-corpus-reader",
+            "GIDEON_API_CORPUS_PASSWORD_FILE": str(root / "corpus-reader-password"),
+            "GIDEON_API_CAS_ROOT": str(root / "cas"),
+            "GIDEON_API_QDRANT_URL": QDRANT_URL,
+            "GIDEON_API_QDRANT_KEY_FILE": str(root / "qdrant-key"),
+            "GIDEON_API_EMBED_URL": EMBED_URL,
+            "GIDEON_API_EMBED_KEY_FILE": str(root / "embed-key"),
+            "GIDEON_API_OPENSEARCH_URL": OPENSEARCH_URL,
+            "GIDEON_API_OPENSEARCH_USER": "fixture-lexical-reader",
+            "GIDEON_API_OPENSEARCH_PASSWORD_FILE": str(root / "lexical-password"),
             "GIDEON_ENGINE_URL": ENGINE_URL,
             "GIDEON_ENGINE_API_KEY_FILE": str(root / "engine-key"),
             "GIDEON_API_KEY_FILE": str(root / "api-key"),
@@ -233,21 +277,10 @@ class ApiService(unittest.TestCase):
     def test_missing_or_empty_key_file_refuses_without_the_value(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            common = self.loaded_settings_environment(root)
             missing = root / "missing-key"
             empty = root / "empty-key"
             empty.write_text("\n", encoding="utf-8")
-            common = {
-                "GIDEON_ENGINE_URL": ENGINE_URL,
-                "GIDEON_ENGINE_API_KEY_FILE": str(root / "engine-key"),
-                "GIDEON_API_PORT": "8000",
-                "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
-                "GIDEON_CHAT_HEADER": CHAT_HEADER,
-                "GIDEON_USER_HEADER": USER_HEADER,
-                "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
-                "GIDEON_MODEL_ID": MODEL_ID,
-                "GIDEON_ENGINE_MODEL": ENGINE_MODEL,
-            }
-            (root / "engine-key").write_text(ENGINE_KEY, encoding="utf-8")
             for path in (missing, empty):
                 with self.subTest(path=path):
                     environment = {**common, "GIDEON_API_KEY_FILE": str(path)}
@@ -267,7 +300,126 @@ class ApiService(unittest.TestCase):
         self.assertEqual(settings.model_id, MODEL_ID)
         self.assertEqual(settings.engine_model, ENGINE_MODEL)
 
-    def test_loaded_settings_repr_and_str_withhold_both_keys(self) -> None:
+    def test_reranker_settings_accept_both_or_neither(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = self.loaded_settings_environment(root)
+            without_reranker = load_settings(base)
+            self.assertIsNone(without_reranker.rerank_url)
+            self.assertIsNone(without_reranker.rerank_key_file)
+
+            url = "http://fictitious-reranker:7003"
+            key_file = root / "reranker-key"
+            key_file.write_text("fictitious-reranker-key\n", encoding="utf-8")
+            with_reranker = load_settings({
+                **base,
+                "GIDEON_API_RERANK_URL": url,
+                "GIDEON_API_RERANK_KEY_FILE": str(key_file),
+            })
+            self.assertEqual(with_reranker.rerank_url, url)
+            self.assertEqual(with_reranker.rerank_key_file, key_file)
+
+    def test_reranker_settings_refuse_a_partial_pair_by_missing_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = self.loaded_settings_environment(root)
+            key_file = root / "reranker-key"
+            key_file.write_text("fictitious-reranker-key\n", encoding="utf-8")
+            for supplied, missing in (
+                ({"GIDEON_API_RERANK_URL": "http://fictitious-reranker:7003"}, "GIDEON_API_RERANK_KEY_FILE"),
+                ({"GIDEON_API_RERANK_KEY_FILE": str(key_file)}, "GIDEON_API_RERANK_URL"),
+            ):
+                with self.subTest(missing=missing), self.assertRaisesRegex(
+                    ValueError, f"Environment variable {missing} is missing"
+                ):
+                    load_settings({**base, **supplied})
+
+    def test_reranker_settings_validate_the_url_and_key_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = self.loaded_settings_environment(root)
+            key_file = root / "reranker-key"
+            key_file.write_text("fictitious-reranker-key\n", encoding="utf-8")
+            pair = {
+                "GIDEON_API_RERANK_URL": "http://fictitious-reranker:7003/v1",
+                "GIDEON_API_RERANK_KEY_FILE": str(key_file),
+            }
+            with self.assertRaisesRegex(ValueError, "GIDEON_API_RERANK_URL must be an HTTP URL"):
+                load_settings({**base, **pair})
+            key_file.unlink()
+            pair["GIDEON_API_RERANK_URL"] = "http://fictitious-reranker:7003"
+            with self.assertRaises(ValueError) as caught:
+                load_settings({**base, **pair})
+            self.assertIn(f"Secret file {key_file} is missing or empty", str(caught.exception))
+
+    def test_record_and_store_settings_refuse_missing_or_empty_variables(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            environment = self.loaded_settings_environment(Path(directory))
+            for variable in (
+                "GIDEON_API_DB_HOST",
+                "GIDEON_API_DB_PORT",
+                "GIDEON_API_DB_NAME",
+                "GIDEON_API_DB_ROLE",
+                "GIDEON_API_PASSWORD_FILE",
+                "GIDEON_API_CORPUS_DB_HOST",
+                "GIDEON_API_CORPUS_DB_PORT",
+                "GIDEON_API_CORPUS_DB_NAME",
+                "GIDEON_API_CORPUS_DB_ROLE",
+                "GIDEON_API_CORPUS_PASSWORD_FILE",
+                "GIDEON_API_CAS_ROOT",
+                "GIDEON_API_QDRANT_URL",
+                "GIDEON_API_QDRANT_KEY_FILE",
+                "GIDEON_API_EMBED_URL",
+                "GIDEON_API_EMBED_KEY_FILE",
+                "GIDEON_API_OPENSEARCH_URL",
+                "GIDEON_API_OPENSEARCH_USER",
+                "GIDEON_API_OPENSEARCH_PASSWORD_FILE",
+            ):
+                missing = {name: value for name, value in environment.items() if name != variable}
+                for case, values in (("missing", missing), ("empty", {**environment, variable: ""})):
+                    with self.subTest(variable=variable, case=case), self.assertRaisesRegex(
+                        ValueError, f"Environment variable {variable} is missing or empty",
+                    ):
+                        load_settings(values)
+
+    def test_record_and_store_secret_files_refuse_missing_or_empty_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = self.loaded_settings_environment(root)
+            empty = root / "empty-secret"
+            empty.write_text(" \n\t", encoding="utf-8")
+            for variable in (
+                "GIDEON_API_PASSWORD_FILE",
+                "GIDEON_API_CORPUS_PASSWORD_FILE",
+                "GIDEON_API_QDRANT_KEY_FILE",
+                "GIDEON_API_EMBED_KEY_FILE",
+                "GIDEON_API_OPENSEARCH_PASSWORD_FILE",
+            ):
+                value = Path(environment[variable]).read_text(encoding="utf-8")
+                for path in (root / "missing-secret", empty):
+                    with self.subTest(variable=variable, path=path):
+                        with self.assertRaisesRegex(ValueError, f"Secret file {path} is missing or empty") as context:
+                            load_settings({**environment, variable: str(path)})
+                        self.assertNotIn(value, str(context.exception))
+
+    def test_store_urls_require_http_with_a_port_and_no_api_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            environment = self.loaded_settings_environment(Path(directory))
+            for variable in ("GIDEON_API_QDRANT_URL", "GIDEON_API_EMBED_URL", "GIDEON_API_OPENSEARCH_URL"):
+                for url in ("https://fixture-server:7001", "http://fixture-server", "http://fixture-server:7001/v1"):
+                    with self.subTest(variable=variable, url=url), self.assertRaisesRegex(
+                        ValueError, f"Environment variable {variable} must be an HTTP URL",
+                    ):
+                        load_settings({**environment, variable: url})
+
+    def test_cas_root_must_be_absolute(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            environment = self.loaded_settings_environment(Path(directory))
+            environment["GIDEON_API_CAS_ROOT"] = "relative/cas"
+            with self.assertRaisesRegex(ValueError, "GIDEON_API_CAS_ROOT must be an absolute path"):
+                load_settings(environment)
+
+    def test_loaded_settings_repr_and_str_withhold_keys_and_passwords(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             environment = self.loaded_settings_environment(Path(directory))
             settings = load_settings(environment)
@@ -275,30 +427,21 @@ class ApiService(unittest.TestCase):
         settings_repr = repr(settings)
         settings_str = str(settings)
         for text in (settings_repr, settings_str):
-            self.assertNotIn(ENGINE_KEY, text)
-            self.assertNotIn(API_KEY, text)
+            for value in (
+                ENGINE_KEY, API_KEY, QDRANT_KEY, EMBED_KEY,
+                READER_PASSWORD, CORPUS_READER_PASSWORD, OPENSEARCH_PASSWORD,
+            ):
+                self.assertNotIn(value, text)
         self.assertIn(f"port={environment['GIDEON_API_PORT']}", settings_repr)
         self.assertIn(MODEL_ID, settings_repr)
 
     def test_instruction_file_refuses_missing_variable_missing_file_and_empty_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "engine-key").write_text(ENGINE_KEY, encoding="utf-8")
-            (root / "api-key").write_text(API_KEY, encoding="utf-8")
             empty = root / "empty-instruction"
             empty.write_text(" \n\t", encoding="utf-8")
-            environment = {
-                "GIDEON_ENGINE_URL": ENGINE_URL,
-                "GIDEON_ENGINE_API_KEY_FILE": str(root / "engine-key"),
-                "GIDEON_API_KEY_FILE": str(root / "api-key"),
-                "GIDEON_API_PORT": "8000",
-                "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
-                "GIDEON_CHAT_HEADER": CHAT_HEADER,
-                "GIDEON_USER_HEADER": USER_HEADER,
-                "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
-                "GIDEON_MODEL_ID": MODEL_ID,
-                "GIDEON_ENGINE_MODEL": ENGINE_MODEL,
-            }
+            environment = self.loaded_settings_environment(root)
+            del environment["GIDEON_INSTRUCTION_FILE"]
             with self.assertRaisesRegex(ValueError, "GIDEON_INSTRUCTION_FILE"):
                 load_settings(environment)
             for path in (root / "missing-instruction", empty):
@@ -309,23 +452,7 @@ class ApiService(unittest.TestCase):
 
     def test_missing_or_empty_source_settings_refuse(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "engine-key").write_text(ENGINE_KEY, encoding="utf-8")
-            (root / "api-key").write_text(API_KEY, encoding="utf-8")
-            (root / "instruction.txt").write_text(INSTRUCTION, encoding="utf-8")
-            common = {
-                "GIDEON_ENGINE_URL": ENGINE_URL,
-                "GIDEON_ENGINE_API_KEY_FILE": str(root / "engine-key"),
-                "GIDEON_API_KEY_FILE": str(root / "api-key"),
-                "GIDEON_API_PORT": "8000",
-                "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
-                "GIDEON_CHAT_HEADER": CHAT_HEADER,
-                "GIDEON_USER_HEADER": USER_HEADER,
-                "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
-                "GIDEON_MODEL_ID": MODEL_ID,
-                "GIDEON_ENGINE_MODEL": ENGINE_MODEL,
-                "GIDEON_INSTRUCTION_FILE": str(root / "instruction.txt"),
-            }
+            common = self.loaded_settings_environment(Path(directory))
             for variable in (
                 "GIDEON_SOURCE_HEADER",
                 "GIDEON_CHAT_HEADER",

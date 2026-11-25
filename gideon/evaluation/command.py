@@ -1149,16 +1149,10 @@ def _prepare_on_box(
             if engine_call_count is None
             else f"; {engine_call_count} engine calls exceed the any-hour allowance of {run.SMOKE_TURNS}"
         )
-        # The weekend judgement's description already says which window it missed.
-        detail = (
-            judgement.description
-            if request.mode.pairs
-            else f"outside the quiet window: {judgement.description}"
-        ) + over
-        fix = (
-            f"Next opening is {judgement.next_opening.isoformat()}{over}; "
-            "add --force for an announced window."
-        )
+        detail, fix = window.refusal_text(judgement, suffix=over)
+        if request.mode.pairs:
+            # The weekend judgement's description already says which window it missed.
+            detail = judgement.description + over
         print_stage(
             StageResult(
                 "preconditions",
@@ -1321,7 +1315,7 @@ def _prepare_on_box(
     prompt_detail = f"prompt {prompt_id or 'none'}"
     if judge_retry is not None:
         prompt_detail += f", judge retry seed {judge_retry.seed}"
-    window_detail = judgement.description + (", forced" if request.force else "")
+    window_detail = window.passing_detail(judgement, request.force)
     writer = (
         "set supplied, so no writer probe"
         if request.supplied_set

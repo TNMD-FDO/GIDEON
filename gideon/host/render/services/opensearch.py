@@ -22,6 +22,8 @@ from gideon.host.render.opensearch import (
     OPENSEARCH_SETTINGS_PATH,
     OPENSEARCH_SNAPSHOTS_MOUNT,
     OPENSEARCH_SNAPSHOTS_ROOT,
+    OPENSEARCH_TURN_PASSWORD_VARIABLE,
+    OPENSEARCH_TURN_SECRET_NAME,
     opensearch_health_url,
     opensearch_heap_mib,
 )
@@ -102,6 +104,11 @@ def opensearch_service(
                     OPENSEARCH_METRICS_PASSWORD_VARIABLE,
                     "OpenSearch metrics password",
                 ),
+                MountedSecret(
+                    f"/run/secrets/{OPENSEARCH_TURN_SECRET_NAME}",
+                    OPENSEARCH_TURN_PASSWORD_VARIABLE,
+                    "OpenSearch turn reader password",
+                ),
             ),
             "./opensearch-docker-entrypoint.sh",
             OPENSEARCH_SERVICE_NAME,
@@ -118,6 +125,7 @@ def opensearch_service(
         "secrets": [
             OPENSEARCH_PASSWORD_SECRET_NAME,
             OPENSEARCH_METRICS_SECRET_NAME,
+            OPENSEARCH_TURN_SECRET_NAME,
             OPENSEARCH_KEY_SECRET_NAME,
             OPENSEARCH_CERT_SECRET_NAME,
         ],
@@ -134,6 +142,7 @@ class OpensearchService(ServiceDefinition):
     name = OPENSEARCH_SERVICE_NAME
     swap = False
     store = True
+    turn_path = True
 
     def block(
         self, inputs: RenderInputs, target: RegistryTarget

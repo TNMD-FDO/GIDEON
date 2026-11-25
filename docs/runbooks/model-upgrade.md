@@ -8,6 +8,8 @@ This sequence applies to the `generator` role when the pin watch finds that a mo
 
 The supporting model `embed` has arrived too, and a proposal for it that moves any weight file's digest is a new embedding space, not a routine merge: the vectors already stored were made by the old weights, so it takes a new space id in `models.lock` and a new index generation built from it. The `embed` proposal's checks stay red until a person moves the id and the `embedding_space` block's `revision` together on the branch, recording that the new space has been judged.
 
+The reranker `rerank-2` is the third watched model. A proposal for it moves no stored vector, since the reranker scores passages at each turn and stores nothing, so it needs no new space or generation. It does move the scores a Legal answer's passages are ordered by, and with them the floor below which the answer abstains, so the floor's tuning is read again before the merge.
+
 The pull request changes the revision and its verified `files` record. The box changes only when an operator applies that tree or upgrades to its tag. Apply is the command that brings the running stack in line with the site file and verifies it.
 
 On a no-GPU host this proof cannot run: `engine verify` reports `engine: ok — skipped — no-GPU host`.

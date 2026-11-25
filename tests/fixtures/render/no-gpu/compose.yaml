@@ -197,7 +197,7 @@ services:
     entrypoint:
       - "sh"
       - "-c"
-      - "set -eu; if [ ! -s /run/secrets/opensearch_password ]; then echo \"OpenSearch password file is missing or empty: /run/secrets/opensearch_password\" >&2; exit 1; fi; GIDEON_OPENSEARCH_PASSWORD=$(cat /run/secrets/opensearch_password); export GIDEON_OPENSEARCH_PASSWORD; if [ ! -s /run/secrets/opensearch_metrics_password ]; then echo \"OpenSearch metrics password file is missing or empty: /run/secrets/opensearch_metrics_password\" >&2; exit 1; fi; GIDEON_OPENSEARCH_METRICS_PASSWORD=$(cat /run/secrets/opensearch_metrics_password); export GIDEON_OPENSEARCH_METRICS_PASSWORD; exec ./opensearch-docker-entrypoint.sh \"$@\""
+      - "set -eu; if [ ! -s /run/secrets/opensearch_password ]; then echo \"OpenSearch password file is missing or empty: /run/secrets/opensearch_password\" >&2; exit 1; fi; GIDEON_OPENSEARCH_PASSWORD=$(cat /run/secrets/opensearch_password); export GIDEON_OPENSEARCH_PASSWORD; if [ ! -s /run/secrets/opensearch_metrics_password ]; then echo \"OpenSearch metrics password file is missing or empty: /run/secrets/opensearch_metrics_password\" >&2; exit 1; fi; GIDEON_OPENSEARCH_METRICS_PASSWORD=$(cat /run/secrets/opensearch_metrics_password); export GIDEON_OPENSEARCH_METRICS_PASSWORD; if [ ! -s /run/secrets/opensearch_turn_password ]; then echo \"OpenSearch turn reader password file is missing or empty: /run/secrets/opensearch_turn_password\" >&2; exit 1; fi; GIDEON_OPENSEARCH_TURN_PASSWORD=$(cat /run/secrets/opensearch_turn_password); export GIDEON_OPENSEARCH_TURN_PASSWORD; exec ./opensearch-docker-entrypoint.sh \"$@\""
       - "opensearch"
     command:
       - "opensearch"
@@ -209,6 +209,7 @@ services:
     secrets:
       - "opensearch_password"
       - "opensearch_metrics_password"
+      - "opensearch_turn_password"
       - "opensearch_transport_key"
       - "opensearch_transport_cert"
     group_add:
@@ -607,6 +608,8 @@ secrets:
     file: "/etc/gideon/secrets/qdrant_read_only_api_key"
   opensearch_password:
     file: "/etc/gideon/secrets/opensearch_password"
+  opensearch_turn_password:
+    file: "/etc/gideon/secrets/opensearch_turn_password"
   opensearch_transport_key:
     file: "/etc/gideon/secrets/opensearch_transport_key"
   opensearch_transport_cert:

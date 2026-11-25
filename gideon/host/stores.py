@@ -56,6 +56,7 @@ ROLE_SPECS: Final[tuple[RoleSpec, ...]] = (
     RoleSpec("gideon_ro_metrics", "postgres_gideon_ro_metrics_password", ("pg_monitor",)),
     RoleSpec("gideon_eval", "postgres_gideon_eval_password"),
     RoleSpec("gideon_worker", "postgres_gideon_worker_password"),
+    RoleSpec("gideon_ro_turn", "postgres_gideon_ro_turn_password"),
 )
 DATABASE_SPECS: Final[tuple[DatabaseSpec, ...]] = (
     DatabaseSpec("openwebui", "openwebui"),

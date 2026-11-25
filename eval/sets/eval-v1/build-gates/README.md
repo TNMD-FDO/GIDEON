@@ -279,9 +279,14 @@ sudo python3 -B -m tools.segmenter.draw <stage-root> --seed <seed> --out <sample
 python3 -m tools.segmenter.draw --write <sample-file> --reviewer <role-id> --on <date>
 sudo .venv/bin/python -B -m tools.segmenter.draw <stage-root> --seed <seed> --out <successor-file> --retire <case-id> [--retire <case-id> ...]
 python3 -m tools.segmenter.draw --write <successor-file> --reviewer <role-id> --on <date>
-sudo python3 -B -m tools.segmenter.draft --out <sheets-dir>
+sudo python3 -B -m tools.segmenter.draft --out <sheets-dir> [--force]
 python3 -m tools.segmenter.intake <manifest> <sheets-dir> --signer <role-id> --on <date> [--case <id> ...]
 ```
+
+The draft judges the quiet window at its `engine` stage, after it claims the
+engine lock, and prints a `window:` row when the start passes. Started outside
+the window, it refuses with `outside the quiet window` and the next opening.
+`--force` starts it in an announced window.
 
 ## The pin and the rule
 

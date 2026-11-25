@@ -1,4 +1,4 @@
-"""Snapshot, recovery, and count clients for the two derived stores."""
+"""Snapshot, recovery, count, and sign-in clients for the derived stores."""
 
 import json
 import re
@@ -18,6 +18,8 @@ from gideon.host.render.opensearch import (
     OPENSEARCH_SERVICE_NAME,
     OPENSEARCH_SNAPSHOTS_MOUNT,
     OPENSEARCH_SNAPSHOTS_ROOT,
+    OPENSEARCH_TURN_SECRET_NAME,
+    OPENSEARCH_TURN_USER,
     OPENSEARCH_USER,
 )
 from gideon.host.render.qdrant import (
@@ -208,7 +210,7 @@ def _parse_qdrant_reply(raw: str, rendered_dir: PathLike) -> _Reply | report.Pro
 
 
 def _parse_opensearch_reply(
-    raw: str, rendered_dir: PathLike
+    raw: str, rendered_dir: PathLike, *, decode_error_body: bool
 ) -> _Reply | report.Problem:
     match = _CURL_TRAILER.search(raw)
     if match is None:
@@ -217,13 +219,16 @@ def _parse_opensearch_reply(
             OPENSEARCH_SERVICE_NAME,
             "opensearch reply has no status trailer",
         )
+    status = int(match.group(1))
+    if status != 200 and not decode_error_body:
+        return _Reply(status, None)
     try:
         data: object = json.loads(raw[: match.start()])
     except ValueError:
         return _problem(
             rendered_dir, OPENSEARCH_SERVICE_NAME, "opensearch reply is not JSON"
         )
-    return _Reply(int(match.group(1)), data)
+    return _Reply(status, data)
 
 
 def _run_request(
@@ -236,7 +241,7 @@ def _run_request(
     request: str,
     credential: str,
     bound: int,
-) -> _Reply | report.Problem:
+) -> str | report.Problem:
     call = f"{store} {method} {path}"
     try:
         result = io.run(
@@ -255,11 +260,7 @@ def _run_request(
         if diagnostic:
             detail += f": {diagnostic}"
         return _problem(rendered_dir, store, detail)
-    return (
-        _parse_qdrant_reply(result.stdout, rendered_dir)
-        if store == QDRANT_SERVICE_NAME
-        else _parse_opensearch_reply(result.stdout, rendered_dir)
-    )
+    return result.stdout
 
 
 def qdrant_request(
@@ -292,9 +293,12 @@ def qdrant_request(
         _QDRANT_TCP_LABEL,
         str(QDRANT_REST_PORT),
     )
-    reply = _run_request(
+    raw = _run_request(
         io, rendered_dir, QDRANT_SERVICE_NAME, method, path, argv, request, key, bound
     )
+    if isinstance(raw, report.Problem):
+        return raw
+    reply = _parse_qdrant_reply(raw, rendered_dir)
     if isinstance(reply, report.Problem):
         return reply
     if reply.status not in accepted_statuses:
@@ -319,12 +323,14 @@ def opensearch_request(
     method: str,
     path: str,
     *,
+    user: str = OPENSEARCH_USER,
     body: object | None = None,
     bound: int = STORE_LIST_WAIT_SECONDS,
     accepted_statuses: frozenset[int] = frozenset({200}),
+    decode_error_body: bool = True,
 ) -> _Reply | report.Problem:
     lines = [
-        f"user = {_curl_quoted(f'{OPENSEARCH_USER}:{password}')}",
+        f"user = {_curl_quoted(f'{user}:{password}')}",
         f"url = {_curl_quoted(f'http://127.0.0.1:{OPENSEARCH_REST_PORT}{path}')}",
         f"request = {_curl_quoted(method)}",
         f"max-time = {bound}",
@@ -337,7 +343,7 @@ def opensearch_request(
     argv = stack.exec_argv(
         rendered_dir, OPENSEARCH_SERVICE_NAME, "curl", "-s", "-S", "-K", "-"
     )
-    reply = _run_request(
+    raw = _run_request(
         io,
         rendered_dir,
         OPENSEARCH_SERVICE_NAME,
@@ -348,6 +354,9 @@ def opensearch_request(
         password,
         bound,
     )
+    if isinstance(raw, report.Problem):
+        return raw
+    reply = _parse_opensearch_reply(raw, rendered_dir, decode_error_body=decode_error_body)
     if isinstance(reply, report.Problem):
         return reply
     if reply.status not in accepted_statuses:
@@ -363,6 +372,30 @@ def opensearch_request(
             )
         return _problem(rendered_dir, OPENSEARCH_SERVICE_NAME, detail)
     return reply
+
+
+def verify_opensearch_turn_reader(
+    io: Host,
+    rendered_dir: PathLike,
+    *,
+    unauthorized_fix: str = "Follow docs/runbooks/backup-restore.md §8 to reseed the lexical store, then retry.",
+) -> report.Problem | None:
+    """Check that the lexical store accepts the turn reader's credential."""
+
+    password = store_secret(io, OPENSEARCH_TURN_SECRET_NAME)
+    if isinstance(password, report.Problem):
+        return password
+    reply = opensearch_request(
+        io, rendered_dir, password, "GET", "/_plugins/_security/authinfo",
+        user=OPENSEARCH_TURN_USER,
+        accepted_statuses=frozenset({200, 401}),
+        decode_error_body=False,
+    )
+    if isinstance(reply, report.Problem):
+        return reply
+    if reply.status == 401:
+        return report.Problem("the lexical store's turn reader cannot sign in", unauthorized_fix)
+    return None
 
 
 def opensearch_document_count(

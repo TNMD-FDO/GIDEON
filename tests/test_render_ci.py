@@ -25,12 +25,20 @@ from gideon.host.models import (
 )
 from gideon.host.render import RenderInputs, worker
 from gideon.host.render.api import (
+    API_CORPUS_DATABASE_HOST_ENV,
+    API_CORPUS_PASSWORD_FILE_ENV,
+    API_EMBED_URL_ENV,
+    API_ENGINE_URL_ENV,
     API_INSTRUCTION_MOUNT,
     API_INSTRUCTION_PATH,
     API_MOUNT_TARGET,
+    API_RERANK_KEY_FILE_ENV,
+    API_RERANK_URL_ENV,
     API_SERVICE_NAME,
+    TURN_READER_SECRET_NAME,
 )
 from gideon.host.render.ci import (
+    CI_API_CORPUS_SECRET_NAME,
     CI_BASE_URL,
     CI_CORPUS_SECRET_NAME,
     CI_INSTRUCTION_DIGEST_LABEL,
@@ -67,6 +75,7 @@ from gideon.host.render.compose import (
     memory_limit_bytes,
     mounted_secret_names,
     network_name,
+    service_blocks,
     service_names,
 )
 from gideon.host.render.engine import (
@@ -76,6 +85,7 @@ from gideon.host.render.engine import (
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
     INTEGRATION_NETWORK_NAME,
+    RERANK_SECRET_NAME,
 )
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.opensearch import (
@@ -88,6 +98,7 @@ from gideon.host.render.opensearch import (
     OPENSEARCH_SERVICE_NAME,
     OPENSEARCH_SETTINGS_PATH,
     OPENSEARCH_SNAPSHOTS_ROOT,
+    OPENSEARCH_TURN_SECRET_NAME,
     opensearch_heap_mib,
 )
 from gideon.host.render.owui import (
@@ -101,6 +112,7 @@ from gideon.host.render.qdrant import (
     QDRANT_STORAGE_MOUNT,
 )
 from gideon.host.render.services import declared_sources, image_pin
+from gideon.host.render.services.api import api_service
 from gideon.host.render.services.open_webui import OpenWebuiService
 from gideon.host.render.services.opensearch import OpensearchService
 from gideon.host.render.services.postgres import (
@@ -299,6 +311,7 @@ class Compose(unittest.TestCase):
             [
                 OPENSEARCH_PASSWORD_SECRET_NAME,
                 OPENSEARCH_METRICS_SECRET_NAME,
+                OPENSEARCH_TURN_SECRET_NAME,
                 OPENSEARCH_KEY_SECRET_NAME,
                 OPENSEARCH_CERT_SECRET_NAME,
             ],
@@ -492,6 +505,7 @@ class Compose(unittest.TestCase):
             [
                 f"{render_inputs.checkout}/gideon:{API_MOUNT_TARGET}:ro",
                 f"{CI_ROOT}/{API_INSTRUCTION_PATH}:{API_INSTRUCTION_MOUNT}:ro",
+                f"{CAS_ROOT}:{CAS_ROOT}:ro",
             ],
         )
         self.assertEqual(
@@ -520,6 +534,10 @@ class Compose(unittest.TestCase):
                     self.assertTrue(str(volume).endswith(":ro"))
 
         secrets = mapping(document["secrets"])
+        self.assertEqual(
+            secrets[TURN_READER_SECRET_NAME],
+            {"file": f"{CI_SECRETS_DIR}/{TURN_READER_SECRET_NAME}"},
+        )
         for value in secrets.values():
             secret = mapping(value)
             path = str(secret["file"])
@@ -529,9 +547,27 @@ class Compose(unittest.TestCase):
                 path.startswith(f"{CI_ROOT}/")
                 or path in {
                     f"/etc/gideon/secrets/{name}"
-                    for name in (ENGINE_SECRET_NAME, EMBED_SECRET_NAME, METRICS_SECRET_NAME)
+                    for name in (ENGINE_SECRET_NAME, EMBED_SECRET_NAME, METRICS_SECRET_NAME, TURN_READER_SECRET_NAME)
                 }
             )
+
+    def test_sibling_api_omits_reranker_settings_and_the_key_mount(self) -> None:
+        base = inputs()
+        production = service_blocks(base)
+        sibling = ci_compose_document(base)
+        sibling_services = mapping(sibling["services"])
+        production_api = mapping(production[API_SERVICE_NAME])
+        api = mapping(sibling_services[API_SERVICE_NAME])
+        for name in (API_RERANK_URL_ENV, API_RERANK_KEY_FILE_ENV):
+            with self.subTest(variable=name):
+                self.assertIn(name, mapping(production_api["environment"]))
+                self.assertNotIn(name, mapping(api["environment"]))
+        production_secrets = production_api["secrets"]
+        sibling_secrets = api["secrets"]
+        assert isinstance(production_secrets, list) and isinstance(sibling_secrets, list)
+        self.assertIn(RERANK_SECRET_NAME, production_secrets)
+        self.assertNotIn(RERANK_SECRET_NAME, sibling_secrets)
+        self.assertNotIn(RERANK_SECRET_NAME, mapping(sibling["secrets"]))
 
     def test_relay_is_the_only_integration_network_joiner_and_api_uses_it(self) -> None:
         render_inputs = inputs()
@@ -567,9 +603,31 @@ class Compose(unittest.TestCase):
         assert generator is not None
         self.assertEqual(environment["GIDEON_MODEL_ID"], GENERAL_MODEL_ID)
         self.assertEqual(environment["GIDEON_ENGINE_MODEL"], generator.serve.served_name)
+        target = parse_registry(render_inputs.site.registry)
+        assert target is not None
+        definition = api_service(render_inputs, target)
         self.assertEqual(
-            environment["GIDEON_ENGINE_URL"],
-            f"http://{RELAY_SERVICE_NAME}:{ENGINE_PORT}/v1",
+            environment,
+            {
+                **{
+                    name: value for name, value in mapping(definition["environment"]).items()
+                    if name not in (API_RERANK_URL_ENV, API_RERANK_KEY_FILE_ENV)
+                },
+                API_ENGINE_URL_ENV: f"http://{RELAY_SERVICE_NAME}:{ENGINE_PORT}/v1",
+                API_CORPUS_DATABASE_HOST_ENV: RECORD_RELAY_SERVICE_NAME,
+                API_CORPUS_PASSWORD_FILE_ENV: f"/run/secrets/{CI_API_CORPUS_SECRET_NAME}",
+                API_EMBED_URL_ENV: f"http://{EMBED_RELAY_SERVICE_NAME}:{EMBED.port}",
+            },
+        )
+        original_secrets = definition["secrets"]
+        assert isinstance(original_secrets, list)
+        self.assertIn(OPENSEARCH_TURN_SECRET_NAME, original_secrets)
+        self.assertEqual(
+            api["secrets"],
+            [
+                *(name for name in original_secrets if name != RERANK_SECRET_NAME),
+                CI_API_CORPUS_SECRET_NAME,
+            ],
         )
         self.assertEqual(
             relay["environment"],
@@ -660,6 +718,7 @@ class Compose(unittest.TestCase):
             ENGINE_SECRET_NAME: ENGINE_SECRET_NAME,
             EMBED_SECRET_NAME: EMBED_SECRET_NAME,
             CI_CORPUS_SECRET_NAME: METRICS_SECRET_NAME,
+            CI_API_CORPUS_SECRET_NAME: TURN_READER_SECRET_NAME,
         }
         self.assertEqual(
             document["secrets"],
@@ -675,21 +734,26 @@ class Compose(unittest.TestCase):
             },
         )
         self.assertIn(ENGINE_SECRET_NAME, names)
+        self.assertIn(OPENSEARCH_TURN_SECRET_NAME, names)
 
-    def test_sibling_mints_its_own_metrics_password(self) -> None:
+    def test_sibling_mints_its_own_metrics_and_turn_reader_passwords(self) -> None:
         original = current_directory()
         try:
             select_directory(Path(CI_SECRETS_DIR))
             host = FakeHost(dirs={CI_SECRETS_DIR})
             result = ensure_generated(host, skip=CI_SKIPPED_SECRETS)
             self.assertTrue(result.ok, result.problem)
-            self.assertIn(OPENSEARCH_METRICS_SECRET_NAME, result.created)
-            self.assertIn(f"{CI_SECRETS_DIR}/{OPENSEARCH_METRICS_SECRET_NAME}", host.files)
+            for local in (
+                OPENSEARCH_METRICS_SECRET_NAME, OPENSEARCH_TURN_SECRET_NAME, TURN_READER_SECRET_NAME,
+            ):
+                self.assertIn(local, result.created)
+                self.assertIn(f"{CI_SECRETS_DIR}/{local}", host.files)
             for shared in (ENGINE_SECRET_NAME, EMBED_SECRET_NAME):
                 self.assertIn(shared, CI_SKIPPED_SECRETS)
                 self.assertNotIn(shared, result.created)
                 self.assertNotIn(f"{CI_SECRETS_DIR}/{shared}", host.files)
             self.assertNotIn(CI_CORPUS_SECRET_NAME, result.created)
+            self.assertNotIn(CI_API_CORPUS_SECRET_NAME, result.created)
         finally:
             select_directory(original)
 

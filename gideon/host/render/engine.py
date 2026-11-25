@@ -5,6 +5,7 @@ member per model role of the lock, the generator first. A member holds its
 service name (the stable alias), container port, secret name, scrape job name,
 slow-start allowance, and the words its clients use for the server.
 It also says whether the member joins the integration and internal networks.
+A profile may omit an optional member by leaving its role out of the lock.
 Its served name and GPU are its pin's, the served name held equal to the
 service name by a test. The generator's identity is shared by its Compose
 definition (``render/services/generator.py``), the frontend's connection
@@ -34,10 +35,21 @@ EMBED_PORT: Final = 8000
 # exempt: a starting bound no register measures
 EMBED_READY_SECONDS: Final = 300
 
+RERANK_SERVICE_NAME: Final = "gideon-rerank-2"
+RERANK_SECRET_NAME: Final = "rerank_2_api_key"
+RERANK_JOB_NAME: Final = "rerank-2"
+RERANK_PORT: Final = 8000
+# The smallest whole multiple of 300 seconds at least four times the slower of
+# two measured starts on the reference box: a fresh container healthy after
+# 86.6 s, and the same container after its weights were evicted from the page
+# cache after 29.0 s (its compile cache kept). A slower start re-derives it.
+# exempt: a starting bound no register measures
+RERANK_READY_SECONDS: Final = 600
+
 
 @dataclass(frozen=True, slots=True)
 class ModelServerMember:
-    """One model role's identity, startup allowance, and network joins."""
+    """One model role's identity, startup allowance, networks, and render options."""
 
     role: str
     service_name: str
@@ -48,6 +60,8 @@ class ModelServerMember:
     words: str
     joins_integration_network: bool
     joins_internal_network: bool
+    optional: bool = False
+    score_template: bool = False
 
     @property
     def key_file_words(self) -> str:
@@ -78,7 +92,20 @@ EMBED: Final = ModelServerMember(
     False,
     True,
 )
-MODEL_SERVERS: Final = (GENERATOR, EMBED)
+RERANK: Final = ModelServerMember(
+    "rerank-2",
+    RERANK_SERVICE_NAME,
+    RERANK_PORT,
+    RERANK_SECRET_NAME,
+    RERANK_JOB_NAME,
+    RERANK_READY_SECONDS,
+    "reranker",
+    joins_integration_network=False,
+    joins_internal_network=False,
+    optional=True,
+    score_template=True,
+)
+MODEL_SERVERS: Final = (GENERATOR, EMBED, RERANK)
 
 
 def model_server(role: str) -> ModelServerMember | None:

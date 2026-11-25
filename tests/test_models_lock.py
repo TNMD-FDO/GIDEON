@@ -432,7 +432,7 @@ class CommittedLock(unittest.TestCase):
         self.assertEqual(profile.memory_row("gideon-generator"), MemoryRow("gideon-generator", 32, "generator"))
         self.assertIsNone(profile.memory_row("missing-service"))
         self.assertEqual(profile.chunk_guards, ChunkGuards(90, 60, 1200))
-        self.assertEqual({pin.role for pin in profile.models}, {"generator", "embed"})
+        self.assertEqual({pin.role for pin in profile.models}, {"generator", "embed", "rerank-2"})
         model = profile.model("generator")
         self.assertIsNotNone(model)
         assert model is not None
@@ -518,7 +518,10 @@ class CommittedLock(unittest.TestCase):
         self.assertEqual(profile.memory_row("gideon-embed"), MemoryRow("gideon-embed", 3, "embed"))
         reference = result.lock.profile(result.lock.reference)
         assert reference is not None
-        self.assertEqual([row.service for row in profile.memory], [row.service for row in reference.memory])
+        self.assertEqual(
+            [row.service for row in profile.memory],
+            [row.service for row in reference.memory if row.service != "gideon-rerank-2"],
+        )
         self.assertEqual({pin.role for pin in profile.models}, {"generator", "embed"})
         generator = profile.model("generator")
         embed = profile.model("embed")
@@ -574,6 +577,73 @@ class CommittedLock(unittest.TestCase):
         self.assertEqual(space.id, "qwen3-embedding-0-6b-1024-bf16")
         self.assertEqual(space.dimensions, 1024)
         self.assertEqual(space.role, "embed")
+
+    def test_reference_reranker_baseline_and_memory_fit_its_pin(self) -> None:
+        result = load_models_lock(LOCK)
+        self.assertTrue(result.ok, render_errors(result.errors))
+        assert result.lock is not None
+        profile = result.lock.profile(result.lock.reference)
+        assert profile is not None
+        reranker = profile.model("rerank-2")
+        assert reranker is not None
+        self.assertIsNotNone(HF_REPO.fullmatch(reranker.repo))
+        self.assertIsNotNone(REVISION.fullmatch(reranker.revision))
+        self.assertTrue(reranker.files)
+        for file in reranker.files:
+            with self.subTest(file=file.path):
+                self.assertIsNotNone(FILE_PATH.fullmatch(file.path))
+                self.assertIsNotNone(DIGEST.fullmatch(file.sha256))
+                self.assertGreaterEqual(file.size, 0)
+
+        baseline = reranker.serve
+        self.assertEqual(set(baseline.env), {"HF_HOME", "HF_HUB_OFFLINE"})
+        self.assertEqual(baseline.env["HF_HUB_OFFLINE"], "1")
+        flags = baseline.flags
+        self.assertEqual(set(flags), {
+            "runner", "convert", "dtype", "hf-overrides", "chat-template", "max-model-len",
+            "no-enable-chunked-prefill", "gpu-memory-utilization", "kv-cache-memory-bytes",
+        })
+        self.assertEqual(flags["runner"], "pooling")
+        self.assertEqual(flags["convert"], "classify")
+        self.assertEqual(flags["dtype"], "bfloat16")
+        self.assertIs(flags["no-enable-chunked-prefill"], True)
+        overrides_text = flags["hf-overrides"]
+        assert isinstance(overrides_text, str)
+        overrides = json.loads(overrides_text)
+        self.assertEqual(set(overrides), {
+            "architectures", "classifier_from_token", "is_original_qwen3_reranker",
+        })
+        self.assertIs(overrides["is_original_qwen3_reranker"], True)
+
+        # Read the model's cache geometry from the lock's documented byte basis.
+        comment = LOCK.read_text().split(f"\n      {reranker.role}:\n", 1)[1].split("\n        serve:", 1)[0]
+        basis = re.search(r"([\d,]+) bytes per token for this model", comment)
+        assert basis is not None
+        bytes_per_token = int(basis[1].replace(",", ""))
+        window = flags["max-model-len"]
+        bound = flags["kv-cache-memory-bytes"]
+        assert type(window) is int and type(bound) is int
+        windows, remainder = divmod(bound, window * bytes_per_token)
+        self.assertGreater(windows, 0)
+        self.assertEqual(remainder, 0)
+        card_bytes = profile.requires.gpu.vram_gb * GIGABYTE
+        self.assertLess(bound, Fraction(str(flags["gpu-memory-utilization"])) * card_bytes)
+        row = profile.memory_row(baseline.served_name)
+        assert row is not None
+        self.assertEqual(row.role, reranker.role)
+
+    def test_only_the_reference_pins_the_reranker(self) -> None:
+        result = load_models_lock(LOCK)
+        self.assertTrue(result.ok, render_errors(result.errors))
+        assert result.lock is not None
+        reference = result.lock.profile(result.lock.reference)
+        trial = result.lock.profile("1x32v-120d")
+        assert reference is not None and trial is not None
+        self.assertEqual(tuple(pin.role for pin in reference.models), ("generator", "embed", "rerank-2"))
+        self.assertEqual(tuple(pin.role for pin in trial.models), ("generator", "embed"))
+        reranker = reference.model("rerank-2")
+        assert reranker is not None
+        self.assertIsNone(trial.memory_row(reranker.serve.served_name))
 
     def test_committed_embedding_space_matches_its_model_flags(self) -> None:
         result = load_models_lock(LOCK)

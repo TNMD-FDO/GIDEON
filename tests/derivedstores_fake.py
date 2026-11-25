@@ -1,4 +1,4 @@
-"""Derived-store replies for in-process backup and restore command fakes."""
+"""Derived-store replies for in-process command fakes."""
 
 import json
 import os
@@ -10,13 +10,42 @@ from gideon.host import secrets, stack
 from gideon.host.render.opensearch import (
     OPENSEARCH_PASSWORD_SECRET_NAME,
     OPENSEARCH_REPOSITORY,
+    OPENSEARCH_REST_PORT,
     OPENSEARCH_SERVICE_NAME,
+    OPENSEARCH_TURN_USER,
 )
 from gideon.host.render.qdrant import (
     QDRANT_SECRET_NAME,
     QDRANT_SERVICE_NAME,
     QDRANT_SNAPSHOTS_ROOT,
 )
+from gideon.host.sysio import PathLike
+
+OPENSEARCH_AUTHINFO_PATH = "/_plugins/_security/authinfo"
+
+
+def opensearch_authinfo_result(
+    command: Sequence[str], request: str | None, rendered_dir: PathLike, *,
+    authorized: bool = True,
+) -> subprocess.CompletedProcess[str] | None:
+    """Answer the turn reader's authenticated request inside the named project."""
+
+    argv = stack.exec_argv(
+        rendered_dir, OPENSEARCH_SERVICE_NAME, "curl", "-s", "-S", "-K", "-"
+    )
+    if tuple(command) != tuple(argv) or request is None:
+        return None
+    base_url = f"http://127.0.0.1:{OPENSEARCH_REST_PORT}"
+    options = dict(line.split(" = ", 1) for line in request.splitlines())
+    if (
+        json.loads(options["request"]) != "GET"
+        or json.loads(options["url"]) != base_url + OPENSEARCH_AUTHINFO_PATH
+    ):
+        return None
+    assert json.loads(options["user"]).startswith(f"{OPENSEARCH_TURN_USER}:")
+    status = 200 if authorized else 401
+    body = json.dumps({"user_name": OPENSEARCH_TURN_USER}) if authorized else "Unauthorized"
+    return subprocess.CompletedProcess(argv, 0, f"{body}\ngideon-status:{status}\n", "")
 
 
 def empty_store_secrets() -> Mapping[str, str]:

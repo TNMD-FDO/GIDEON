@@ -23,6 +23,7 @@ SECRETS = {
     "/etc/gideon/secrets/postgres_gideon_ro_metrics_password": "metrics-pw\n",
     "/etc/gideon/secrets/postgres_gideon_eval_password": "eval-pw\n",
     "/etc/gideon/secrets/postgres_gideon_worker_password": "worker-pw\n",
+    "/etc/gideon/secrets/postgres_gideon_ro_turn_password": "fixture-turn-reader-pw\n",
 }
 MIGRATIONS = {
     f"{ROOT}/migrations/0001_audit_log.sql": (ROOT / "migrations/0001_audit_log.sql").read_text(),
@@ -50,6 +51,7 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0029_documents_illegible.sql": (ROOT / "migrations/0029_documents_illegible.sql").read_text(),
     f"{ROOT}/migrations/0030_generation_gold.sql": (ROOT / "migrations/0030_generation_gold.sql").read_text(),
     f"{ROOT}/migrations/0032_chunk_embeddings_header.sql": (ROOT / "migrations/0032_chunk_embeddings_header.sql").read_text(),
+    f"{ROOT}/migrations/0033_turn_reader.sql": (ROOT / "migrations/0033_turn_reader.sql").read_text(),
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -157,7 +159,10 @@ class Converge(unittest.TestCase):
         host = FakeHost(server, {**SECRETS, **MIGRATIONS})
         report = converge(host, RENDERED, root=ROOT)
         self.assertTrue(report.ok, report.problem)
-        self.assertEqual(report.created_roles, ("openwebui", "gideon", "gideon_audit", "gideon_ro_metrics", "gideon_eval", "gideon_worker"))
+        self.assertEqual(
+            report.created_roles,
+            ("openwebui", "gideon", "gideon_audit", "gideon_ro_metrics", "gideon_eval", "gideon_worker", "gideon_ro_turn"),
+        )
         self.assertEqual(report.created_databases, ("openwebui", "gideon"))
         self.assertEqual(
             report.applied_migrations,
@@ -187,13 +192,14 @@ class Converge(unittest.TestCase):
                 "0029_documents_illegible",
                 "0030_generation_gold",
                 "0032_chunk_embeddings_header",
+                "0033_turn_reader",
             ),
         )
 
         argvs = [call[0] for call in host.calls]
         self.assertEqual(argvs[0], psql("postgres", "postgres", *QUERY))
         role_statements = [call for call in host.calls if call[1] and "CREATE ROLE" in call[1]]
-        self.assertEqual([call[0] for call in role_statements], [psql("postgres", "postgres", *STATEMENT)] * 6)
+        self.assertEqual([call[0] for call in role_statements], [psql("postgres", "postgres", *STATEMENT)] * 7)
         gideon_sql = role_statements[1][1] or ""
         self.assertIn("\\set pw 'gid''eon-pw'\n", gideon_sql)
         self.assertIn("CREATE ROLE gideon LOGIN PASSWORD :'pw';", gideon_sql)
@@ -205,6 +211,7 @@ class Converge(unittest.TestCase):
             self.assertNotIn("metrics-pw", joined)
             self.assertNotIn("eval-pw", joined)
             self.assertNotIn("worker-pw", joined)
+            self.assertNotIn("fixture-turn-reader-pw", joined)
         database_statements = [call[1] for call in host.calls if call[1] and "CREATE DATABASE" in call[1]]
         self.assertEqual(database_statements, ["CREATE DATABASE openwebui OWNER openwebui;\n", "CREATE DATABASE gideon OWNER gideon;\n"])
         # Every migration-side call runs as gideon in gideon; the version row rides in the same transaction.
@@ -246,7 +253,7 @@ class Converge(unittest.TestCase):
 
     def test_existing_role_password_is_never_altered(self) -> None:
         server = FreshServer()
-        server.roles.extend(("gideon", "gideon_ro_metrics", "gideon_eval", "gideon_worker"))
+        server.roles.extend(("gideon", "gideon_ro_metrics", "gideon_eval", "gideon_worker", "gideon_ro_turn"))
         host = FakeHost(server, {**SECRETS, **MIGRATIONS})
         report = converge(host, RENDERED, root=ROOT)
         self.assertTrue(report.ok, report.problem)
@@ -364,6 +371,7 @@ class Converge(unittest.TestCase):
                 "0029_documents_illegible",
                 "0030_generation_gold",
                 "0032_chunk_embeddings_header",
+                "0033_turn_reader",
             ),
         )
 
@@ -801,4 +809,16 @@ class Migration0032(unittest.TestCase):
             f"DEFAULT '{header.BARE_HEADER_HASH}' CHECK (header_hash ~ '^[0-9a-f]{{64}}$'); "
             "ALTER TABLE chunk_embeddings DROP CONSTRAINT chunk_embeddings_pkey; "
             "ALTER TABLE chunk_embeddings ADD PRIMARY KEY (content_hash, header_hash, embedding_space);",
+        )
+
+
+class Migration0033(unittest.TestCase):
+    def test_turn_reader_receives_only_schema_usage_and_the_six_table_reads(self) -> None:
+        text = MIGRATIONS[f"{ROOT}/migrations/0033_turn_reader.sql"]
+        sql = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("--"))
+        self.assertEqual(
+            " ".join(sql.split()),
+            "GRANT USAGE ON SCHEMA public TO gideon_ro_turn; "
+            "GRANT SELECT ON TABLE index_generations, documents, opinions, anchors, citations, "
+            "cluster_treatment TO gideon_ro_turn;",
         )

@@ -6,7 +6,15 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
-from test_render import ROOT, SECOND, DirHost, checkout_files, inputs, render
+from test_render import (
+    ROOT,
+    SECOND,
+    DirHost,
+    checkout_files,
+    inputs,
+    render,
+    trial_inputs,
+)
 
 from gideon.host.render import ARTIFACTS, render_all
 from gideon.host.render.command import (
@@ -16,7 +24,7 @@ from gideon.host.render.command import (
     recreate_judgment,
 )
 from gideon.host.render.compose import service_names
-from gideon.host.render.engine import MODEL_SERVERS
+from gideon.host.render.engine import EMBED, GENERATOR, MODEL_SERVERS
 from gideon.host.render.routeguard import (
     ROUTE_GUARD_CLASS,
     ROUTE_GUARD_MODULE,
@@ -50,6 +58,12 @@ class ArtifactContract(unittest.TestCase):
                 self.assertEqual(rendered.owners, artifact.owners)
                 self.assertEqual(rendered.mode, artifact.mode)
         self.assertNotIn(ROUTE_GUARD_RENDERED_PATH, render_all(inputs(no_gpu=True)).by_path)
+
+    def test_trial_guard_is_owned_only_by_its_two_rendered_servers(self) -> None:
+        trial = trial_inputs()
+        rendered = render_all(trial).by_path[ROUTE_GUARD_RENDERED_PATH]
+        self.assertEqual(rendered.owners, (GENERATOR.service_name, EMBED.service_name))
+        self.assertEqual(rendered.content.encode(), (ROOT / ROUTE_GUARD_SOURCE).read_bytes())
 
     def test_mount_import_and_key_match_the_running_wrapper(self) -> None:
         module, class_name = route_guard_import_path().split(".")

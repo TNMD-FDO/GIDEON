@@ -21,12 +21,16 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
-from gideon.evaluation import evalset, record, segmenter_draft, segmenter_labels
+from gideon.evaluation import evalset, record, segmenter_draft, segmenter_labels, window
 from gideon.host import backuplock, cas, engine, nogpu, site
 from gideon.host.report import Problem
 from gideon.host.sysio import PathLike
 from gideon.worker import opiniontext, staging
 from tools.segmenter import draft, draw, intake, manifest
+
+DRAFT_ZONE = "Etc/UTC"
+DRAFT_NOW = datetime(2026, 10, 8, tzinfo=UTC)
+OFFICE_HOURS = DRAFT_NOW.replace(hour=12)
 
 
 def _csv(path: Path, header: tuple[str, ...], rows: list[tuple[str, ...]]) -> None:
@@ -1215,7 +1219,8 @@ def _engine_reply(*, finish: str = "stop") -> engine.EngineReply:
 
 def _run_draft(host: DraftHost, set_root: Path, out: Path, *, cases: tuple[str, ...] = (),
                target: engine.EngineTarget | Problem | None = None,
-               finish: str = "stop", site_state: site.SiteLoadResult | None = None
+               finish: str = "stop", site_state: site.SiteLoadResult | None = None,
+               instant: datetime = DRAFT_NOW, force: bool = False,
                ) -> tuple[int, str, str, list[Mapping[str, object]]]:
     output, errors = io.StringIO(), io.StringIO()
     bodies: list[Mapping[str, object]] = []
@@ -1226,11 +1231,15 @@ def _run_draft(host: DraftHost, set_root: Path, out: Path, *, cases: tuple[str, 
         bodies.append(body)
         return _engine_reply(finish=finish)
 
-    config = cast(site.SiteConfig, SimpleNamespace(hardware_profile="fixture-profile"))
+    config = cast(site.SiteConfig, SimpleNamespace(
+        hardware_profile="fixture-profile", office=site.Office("Fictitious office", "Fixture", DRAFT_ZONE),
+    ))
     selected_target = target if target is not None else engine.EngineTarget("fixture-profile", "fixture-model", 262_144)
     args = ["--out", str(out), "--set", str(set_root)]
     for case_id in cases:
         args.extend(("--case", case_id))
+    if force:
+        args.append("--force")
     with (
         patch.object(site, "load_site", return_value=site_state if site_state is not None else site.SiteLoadResult(config=config)),
         patch.object(engine, "resolve_engine_target", return_value=selected_target),
@@ -1240,7 +1249,7 @@ def _run_draft(host: DraftHost, set_root: Path, out: Path, *, cases: tuple[str, 
             args, host=cast(draft.DraftHost, host), root=set_root.parent / "checkout",
             rendered_dir="/tmp/fictitious-render", site_path="/etc/gideon/site.yaml",
             models_path=set_root.parent / "checkout/models.lock",
-            clock=lambda: datetime(2026, 10, 8, tzinfo=UTC), sleep=lambda _seconds: None,
+            clock=lambda: instant, sleep=lambda _seconds: None,
             stdout=output, stderr=errors,
         )
     return code, output.getvalue(), errors.getvalue(), bodies
@@ -1248,6 +1257,38 @@ def _run_draft(host: DraftHost, set_root: Path, out: Path, *, cases: tuple[str, 
 
 class DraftTool(unittest.TestCase):
     """The on-box draft uses one lock, read, store, and fake generator."""
+
+    def test_office_hours_refuse_under_engine_and_release_the_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            set_root, _sheets, _manifest, text = _intake_fixture(root)
+            host = DraftHost(text)
+            out = root / "refused"
+            code, output, errors, bodies = _run_draft(host, set_root, out, instant=OFFICE_HOURS)
+
+            judgement = window.window_judgement(OFFICE_HOURS, DRAFT_ZONE)
+            self.assertFalse(judgement.inside)
+            detail, fix = window.refusal_text(judgement)
+            self.assertEqual((code, output, errors), (1, "", f"engine: refused — {detail}. Fix: {fix}\n"))
+            self.assertFalse(out.exists())
+            self.assertEqual(bodies, [])
+            self.assertEqual(host.calls, [])
+            self.assertEqual([path for path, _ in host.claimed], [backuplock.ENGINE_LOCK.path])
+            self.assertEqual(host.released, [backuplock.ENGINE_LOCK.path])
+
+    def test_forced_office_hours_print_one_forced_window_row_first(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            set_root, _sheets, _manifest, text = _intake_fixture(root)
+            code, output, errors, bodies = _run_draft(
+                DraftHost(text), set_root, root / "forced", instant=OFFICE_HOURS, force=True,
+            )
+            self.assertEqual((code, errors), (0, ""), output)
+            judgement = window.window_judgement(OFFICE_HOURS, DRAFT_ZONE)
+            lines = output.splitlines()
+            self.assertEqual(lines[0], f"window: {judgement.description}, forced")
+            self.assertEqual(sum(line.startswith("window:") for line in lines), 1)
+            self.assertTrue(bodies)
 
     def test_round_trip_to_checked_labels(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1257,6 +1298,10 @@ class DraftTool(unittest.TestCase):
             out = root / "drafted"
             code, output, errors, bodies = _run_draft(host, set_root, out)
             self.assertEqual((code, errors), (0, ""), output)
+            judgement = window.window_judgement(DRAFT_NOW, DRAFT_ZONE)
+            lines = output.splitlines()
+            self.assertEqual(lines[0], f"window: {judgement.description}")
+            self.assertEqual(sum(line.startswith("window:") for line in lines), 1)
             self.assertEqual(len(bodies), 2)
             self.assertTrue(all(body["model"] == "fixture-model" for body in bodies))
             self.assertEqual(host.claimed[0][0], backuplock.ENGINE_LOCK.path)
@@ -1357,7 +1402,7 @@ class DraftTool(unittest.TestCase):
                     if scenario == "root":
                         host.root = False
                     elif scenario == "holder":
-                        host.holder = backuplock.Record("other command", 999999, datetime(2026, 10, 8, tzinfo=UTC)).to_json()
+                        host.holder = backuplock.Record("other command", 999999, DRAFT_NOW).to_json()
                     elif scenario == "no-gpu":
                         host.no_gpu = True
                     elif scenario == "site":

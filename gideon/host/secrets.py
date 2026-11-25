@@ -113,12 +113,14 @@ SECRET_REGISTRY: Final[tuple[GeneratedSecret, ...]] = (
     GeneratedSecret("postgres_gideon_ro_metrics_password", "password", False, "metrics reader database role", "role"),
     GeneratedSecret("postgres_gideon_eval_password", "password", False, "eval-run writer database role", "role"),
     GeneratedSecret("postgres_gideon_worker_password", "password", False, "queue worker database role", "role"),
+    GeneratedSecret("postgres_gideon_ro_turn_password", "password", False, "turn's record reader database role", "role"),
     GeneratedSecret("engine_api_key", "password", False, "the engine's API key (gideon-generator)", "rewrite"),
     GeneratedSecret("embed_api_key", "password", False, "the embedding server's API key (gideon-embed)", "rewrite"),
+    GeneratedSecret("rerank_2_api_key", "password", False, "the reranker's API key (gideon-rerank-2)", "rewrite"),
     GeneratedSecret("gideon_api_key", "password", False, "the gideon-api connection key carried by Open WebUI", "rewrite"),
     GeneratedSecret("searxng_secret_key", "password", False, "SearXNG's signing key", "rewrite"),
     GeneratedSecret("qdrant_api_key", "password", False, "the vector store's API key (qdrant)", "rewrite"),
-    GeneratedSecret("qdrant_read_only_api_key", "password", False, "the vector store's read-only key carried by Open WebUI", "rewrite"),
+    GeneratedSecret("qdrant_read_only_api_key", "password", False, "the vector store's read-only key for Open WebUI and gideon-api", "rewrite"),
     GeneratedSecret("opensearch_password", "password", False, "the opensearch service's internal user", "rewrite"),
     GeneratedSecret("opensearch_transport_key", "key", False, "the opensearch service's transport key", "rewrite"),
     GeneratedSecret(
@@ -129,6 +131,10 @@ SECRET_REGISTRY: Final[tuple[GeneratedSecret, ...]] = (
     GeneratedSecret(
         "opensearch_metrics_password", "password", False,
         "the opensearch service's metrics reader, mounted by prometheus", "rewrite",
+    ),
+    GeneratedSecret(
+        "opensearch_turn_password", "password", False,
+        "the lexical store's turn reader, mounted by gideon-api", "rewrite",
     ),
     GeneratedSecret("gideon_admin_api_key", "minted", False, "apply and reconcile", "remint"),
     GeneratedSecret("gideon_eval_api_key", "minted", False, "evaluation identity", "remint"),

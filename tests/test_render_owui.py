@@ -22,7 +22,12 @@ from gideon.host.models import (
     select_profile,
 )
 from gideon.host.render import ARTIFACTS, RenderInputs, render_all
-from gideon.host.render.api import API_INSTRUCTION_PATH, API_SERVICE_NAME, api_base_url
+from gideon.host.render.api import (
+    API_INSTRUCTION_PATH,
+    API_SERVICE_NAME,
+    TURN_READER_SECRET_NAME,
+    api_base_url,
+)
 from gideon.host.render.compose import NETWORK_NAME, STORE_SERVICES, service_names
 from gideon.host.render.drill import (
     DRILL_PORT,
@@ -32,7 +37,10 @@ from gideon.host.render.drill import (
 )
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.render.facts import HostFacts
-from gideon.host.render.opensearch import OPENSEARCH_METRICS_SECRET_NAME
+from gideon.host.render.opensearch import (
+    OPENSEARCH_METRICS_SECRET_NAME,
+    OPENSEARCH_TURN_SECRET_NAME,
+)
 from gideon.host.render.owui import (
     ALLOWED_ENDPOINTS,
     AUDIT_EXCLUDED_PATHS,
@@ -967,13 +975,16 @@ class ComposeShape(unittest.TestCase):
                 "postgres_gideon_ro_metrics_password",
                 "postgres_gideon_audit_password",
                 "postgres_gideon_worker_password",
+                TURN_READER_SECRET_NAME,
                 "engine_api_key",
                 "embed_api_key",
+                "rerank_2_api_key",
                 "gideon_api_key",
                 "qdrant_api_key",
                 "qdrant_read_only_api_key",
                 "opensearch_password",
                 OPENSEARCH_METRICS_SECRET_NAME,
+                OPENSEARCH_TURN_SECRET_NAME,
                 "opensearch_transport_key",
                 "opensearch_transport_cert",
             },

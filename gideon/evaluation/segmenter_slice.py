@@ -5,7 +5,6 @@ sibling's holding no documents.
 """
 
 import json
-import re
 import subprocess
 import time
 from collections import Counter
@@ -15,7 +14,12 @@ from html.parser import HTMLParser
 from typing import Final, Protocol, cast
 
 from gideon.evaluation import bound, record, segmenter_leg
-from gideon.evaluation.evalset import SEGMENTER_TEXT_SOURCES, LoadedSet, select_cases
+from gideon.evaluation.evalset import (
+    SEGMENTER_TEXT_SOURCES,
+    SHA256_PATTERN,
+    LoadedSet,
+    select_cases,
+)
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
 from gideon.host import cas, report, stack
 from gideon.host.render.worker import PIPELINE_VERSION, SECTION_TYPED_BY, SECTION_TYPES
@@ -34,7 +38,6 @@ PROBLEMS: Final[frozenset[str]] = frozenset({
     "record-unreachable", "not-ingested", "original-missing", "text-moved", "record-stale",
     "locator-count-differs",
 }) | segmenter_leg.PROBLEMS
-_SHA256: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 DOCUMENTS_SQL: Final[str] = """SELECT COALESCE(jsonb_agg(jsonb_build_object(
     'opinion_id', o.opinion_id,
     'doc_id', d.doc_id,
@@ -237,7 +240,7 @@ def _record_fix(context: RunContext) -> str:
 
 
 def _valid_hash(value: object) -> bool:
-    return isinstance(value, str) and _SHA256.fullmatch(value) is not None
+    return isinstance(value, str) and SHA256_PATTERN.fullmatch(value) is not None
 
 
 def _decode_document(value: object) -> RecordDocument | None:

@@ -92,6 +92,7 @@ The checks the blackbox exporter makes show two tiles each: `ingress`, `frontend
 | `dcgm` | NVIDIA's DCGM exporter, which reports the graphics cards: everything on the GPU board's first two rows. A GPU host only. | `Target down` |
 | `engine` | The engine, the model server that writes every answer. A GPU host only. | `Engine down` |
 | `embed` | The embedding server, which turns text into the vectors search runs on. A GPU host only. | `Target down` |
+| `rerank-2` | The reranker, which orders a Legal answer's passages by relevance; a profile that pins none draws no tile. A GPU host only. | `Target down` |
 | `caddy` | Caddy, the web server every browser reaches first; this tile says it is running, not that the way in works. | `Target down` |
 | `ingress`, `ingress probe` | The way in. The test asks Caddy for the site over HTTPS under the box's own hostname, as a browser does, and passes only when the site answers with a certificate the office CA signed. The same test reads the certificate's days left. Caddy can be running while this fails, on an expired certificate for one. | `Ingress probe failing` |
 | `frontend`, `frontend probe` | The chat frontend, the page users type into. The test asks the frontend directly, on the box's private network, whether it is healthy. | `Frontend probe failing` |

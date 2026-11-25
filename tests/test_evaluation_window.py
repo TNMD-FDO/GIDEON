@@ -39,6 +39,27 @@ def _next_weekday(day: date) -> date:
     return candidate
 
 
+class WindowText(unittest.TestCase):
+    def test_refusal_pair_appends_the_suffix_to_both_strings(self) -> None:
+        opening = _opening(_monday())
+        judgement = window.WindowJudgement(False, "fictitious office hours", opening, _morning(_monday()))
+        for suffix in ("", "; fictitious engine-call clause"):
+            with self.subTest(suffix=suffix):
+                self.assertEqual(window.refusal_text(judgement, suffix), (
+                    f"outside the quiet window: {judgement.description}{suffix}",
+                    f"Next opening is {opening.isoformat()}{suffix}; add --force for an announced window.",
+                ))
+        self.assertEqual(window.refusal_text(judgement), window.refusal_text(judgement, ""))
+
+    def test_passing_detail_appends_forced_whenever_the_flag_is_set(self) -> None:
+        monday = _monday()
+        for clock in (_morning(monday), _opening(monday)):
+            with self.subTest(clock=clock):
+                judgement = window.window_judgement(clock, ZONE)
+                self.assertEqual(window.passing_detail(judgement, False), judgement.description)
+                self.assertEqual(window.passing_detail(judgement, True), f"{judgement.description}, forced")
+
+
 class QuietWindow(unittest.TestCase):
     """The window's boundaries and calendar transitions are deterministic."""
 

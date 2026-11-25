@@ -13,9 +13,14 @@ from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock
 from gideon.host.models import HardwareProfile, load_models_lock, select_profile
 from gideon.host.render import RenderInputs
+from gideon.host.render.api import API_SERVICE_NAME, TURN_READER_SECRET_NAME
 from gideon.host.render.consumers import SecretConsumers, consumers_of, secret_consumers
 from gideon.host.render.egress import EGRESS_SERVICE_NAME
 from gideon.host.render.facts import HostFacts
+from gideon.host.render.opensearch import (
+    OPENSEARCH_SERVICE_NAME,
+    OPENSEARCH_TURN_SECRET_NAME,
+)
 from gideon.host.render.owui import OwuiEnvArtifact
 from gideon.host.render.searxng import SearxngEnvArtifact
 from gideon.host.render.services import declared_sources
@@ -94,7 +99,6 @@ class ConsumerMap(unittest.TestCase):
         no_gpu = secret_consumers(inputs(no_gpu=True))
 
         self.assertEqual(gpu["engine_api_key"], SecretConsumers(("gideon-generator", "gideon-api"), ()))
-        self.assertEqual(gpu["embed_api_key"], SecretConsumers(("gideon-embed", WORKER_SERVICE_NAME), ()))
         self.assertEqual(gpu["gideon_api_key"], SecretConsumers(("gideon-api",), ("open-webui",)))
         for consumers in (gpu, second, no_gpu):
             self.assertEqual(
@@ -109,6 +113,24 @@ class ConsumerMap(unittest.TestCase):
             gpu["postgres_gideon_audit_password"],
             SecretConsumers(("gideon-api",), ()),
         )
+        for consumers in (gpu, second):
+            self.assertEqual(
+                consumers[OPENSEARCH_TURN_SECRET_NAME],
+                SecretConsumers((OPENSEARCH_SERVICE_NAME, API_SERVICE_NAME), ()),
+            )
+            self.assertEqual(consumers[TURN_READER_SECRET_NAME], SecretConsumers((API_SERVICE_NAME,), ()))
+            self.assertEqual(
+                consumers["embed_api_key"],
+                SecretConsumers(("gideon-embed", API_SERVICE_NAME, WORKER_SERVICE_NAME), ()),
+            )
+            self.assertEqual(
+                consumers["qdrant_read_only_api_key"],
+                SecretConsumers(("qdrant", API_SERVICE_NAME), ("open-webui",)),
+            )
+        self.assertNotIn(TURN_READER_SECRET_NAME, no_gpu)
+        self.assertEqual(
+            no_gpu[OPENSEARCH_TURN_SECRET_NAME], SecretConsumers((OPENSEARCH_SERVICE_NAME,), ()),
+        )
         self.assertEqual(gpu["postgres_gideon_ro_metrics_password"], SecretConsumers(("grafana", "postgres-exporter"), ()))
         self.assertEqual(consumers_of(inputs(), "postgres_gideon_eval_password"), SecretConsumers((), ()))
         self.assertEqual(gpu["tls_key"], SecretConsumers(("caddy",), ()))
@@ -116,11 +138,7 @@ class ConsumerMap(unittest.TestCase):
         self.assertEqual(gpu["searxng_secret_key"], SecretConsumers((), ("searxng",)))
         for consumers in (gpu, second, no_gpu):
             self.assertEqual(consumers["qdrant_api_key"], SecretConsumers(("qdrant", WORKER_SERVICE_NAME), ()))
-        for consumers in (gpu, second, no_gpu):
-            self.assertEqual(
-                consumers["qdrant_read_only_api_key"],
-                SecretConsumers(("qdrant",), ("open-webui",)),
-            )
+        self.assertEqual(no_gpu["qdrant_read_only_api_key"], SecretConsumers(("qdrant",), ("open-webui",)))
         self.assertEqual(consumers_of(inputs(), "gideon_admin_api_key"), SecretConsumers((), ()))
         self.assertEqual(consumers_of(inputs(), "gideon_eval_api_key"), SecretConsumers((), ()))
 

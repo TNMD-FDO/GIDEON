@@ -11,7 +11,17 @@ from gideon.host.cas import ROOT as CAS_ROOT
 from gideon.host.images import RegistryTarget, parse_registry, reference
 from gideon.host.models import GIGABYTE
 from gideon.host.render import RenderInputs
-from gideon.host.render.api import API_SECRET_NAME, API_SERVICE_NAME
+from gideon.host.render.api import (
+    API_CORPUS_DATABASE_HOST_ENV,
+    API_CORPUS_PASSWORD_FILE_ENV,
+    API_EMBED_URL_ENV,
+    API_ENGINE_URL_ENV,
+    API_RERANK_KEY_FILE_ENV,
+    API_RERANK_URL_ENV,
+    API_SECRET_NAME,
+    API_SERVICE_NAME,
+    TURN_READER_SECRET_NAME,
+)
 from gideon.host.render.compose import (
     INTERNAL_NETWORK_NAME,
     NETWORK_NAME,
@@ -29,6 +39,7 @@ from gideon.host.render.engine import (
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
     INTEGRATION_NETWORK_NAME,
+    RERANK_SECRET_NAME,
 )
 from gideon.host.render.opensearch import (
     OPENSEARCH_DATA_MOUNT,
@@ -78,6 +89,7 @@ CI_ROOT: Final[str] = "/data/ci"
 CI_WORK_ROOT: Final[str] = f"{CI_ROOT}/work"
 CI_SECRETS_DIR: Final[str] = f"{CI_ROOT}/secrets"
 CI_CORPUS_SECRET_NAME: Final[str] = "postgres_corpus_password"
+CI_API_CORPUS_SECRET_NAME: Final[str] = "postgres_turn_corpus_password"
 CI_PORT: Final[int] = 18100
 CI_BASE_URL: Final[str] = f"http://127.0.0.1:{CI_PORT}"
 RELAY_SERVICE_NAME: Final[str] = "engine-relay"
@@ -141,11 +153,13 @@ CI_SECRET_NAMES: Final[tuple[str, ...]] = (
     QDRANT_READ_ONLY_SECRET_NAME,
 )
 # The sibling mints its own lexical-store password and transport pair. It skips
-# the two model-server keys (production's keys are mounted by path),
-# Grafana's password, and SearXNG's key; the last two have no sibling consumer.
+# the two model-server keys it mounts from production by path, the reranker's
+# key, since its API reads no reranker, Grafana's password, and SearXNG's key;
+# the last three have no sibling consumer.
 CI_SKIPPED_SECRETS: Final[tuple[str, ...]] = (
     ENGINE_SECRET_NAME,
     EMBED_SECRET_NAME,
+    RERANK_SECRET_NAME,
     "grafana_admin_password",
     SEARXNG_SECRET_NAME,
 )
@@ -173,6 +187,7 @@ def _ci_secret_file(name: str) -> str:
         ENGINE_SECRET_NAME: ENGINE_SECRET_NAME,
         EMBED_SECRET_NAME: EMBED_SECRET_NAME,
         CI_CORPUS_SECRET_NAME: METRICS_SECRET_NAME,
+        CI_API_CORPUS_SECRET_NAME: TURN_READER_SECRET_NAME,
     }
     if name in shared:
         return f"/etc/gideon/secrets/{shared[name]}"
@@ -261,6 +276,7 @@ def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
         f"{CI_OPENSEARCH_RENDERED_DIR}/security:{OPENSEARCH_SECURITY_PATH}:ro",
     ]
 
+    embed_relay_url = f"http://{EMBED_RELAY_SERVICE_NAME}:{EMBED.port}"
     api = dict(api_service(inputs, target, rendered_root=CI_ROOT))
     api_labels = api["labels"]
     assert isinstance(api_labels, Mapping)
@@ -272,10 +288,24 @@ def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
     }
     api_environment = api["environment"]
     assert isinstance(api_environment, Mapping)
+    # The sibling has no relay to the reranker, so its API starts with
+    # the rerank stage off and needs no reranker key.
     api["environment"] = {
-        **api_environment,
-        "GIDEON_ENGINE_URL": _relay_base_url(),
+        **{
+            name: value for name, value in api_environment.items()
+            if name not in (API_RERANK_URL_ENV, API_RERANK_KEY_FILE_ENV)
+        },
+        API_ENGINE_URL_ENV: _relay_base_url(),
+        API_CORPUS_DATABASE_HOST_ENV: RECORD_RELAY_SERVICE_NAME,
+        API_CORPUS_PASSWORD_FILE_ENV: f"/run/secrets/{CI_API_CORPUS_SECRET_NAME}",
+        API_EMBED_URL_ENV: embed_relay_url,
     }
+    api_secrets = api["secrets"]
+    assert isinstance(api_secrets, list)
+    api["secrets"] = [
+        *(name for name in api_secrets if name != RERANK_SECRET_NAME),
+        CI_API_CORPUS_SECRET_NAME,
+    ]
     api["depends_on"] = {
         "postgres": {"condition": "service_healthy"},
         RELAY_SERVICE_NAME: {"condition": "service_started"},
@@ -299,7 +329,7 @@ def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
         CORPUS_DATABASE_NAME_ENV: WORKER_DATABASE_NAME,
         CORPUS_DATABASE_ROLE_ENV: METRICS_ROLE,
         CORPUS_PASSWORD_FILE_ENV: f"/run/secrets/{CI_CORPUS_SECRET_NAME}",
-        EMBED_URL_ENV: f"http://{EMBED_RELAY_SERVICE_NAME}:{EMBED.port}",
+        EMBED_URL_ENV: embed_relay_url,
     }
     worker_secrets = worker["secrets"]
     assert isinstance(worker_secrets, list)

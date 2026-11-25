@@ -2971,8 +2971,12 @@ class GpuMemory(unittest.TestCase):
         budgets = self.budgets()
         at_budget = self.run_check(self.host(free=budgets))
         self.assertEqual(at_budget.severity, Severity.PASS, at_budget.detail)
-        for position, budget in budgets.items():
-            self.assertIn(f"{budget} MiB", at_budget.detail)
+        # A card carrying several servers names each server's budget; the card refuses below their sum.
+        for model in self.PROFILE.models:
+            fraction = Fraction(str(model.serve.flags[GPU_MEMORY_FLAG]))
+            mib = _ceil_div(self.TOTAL_MIB * fraction.numerator, fraction.denominator)
+            self.assertIn(f"{model.role} {mib} MiB", at_budget.detail)
+        for position in budgets:
             short = dict(budgets)
             short[position] -= 1
             report = self.run_check(self.host(free=short))

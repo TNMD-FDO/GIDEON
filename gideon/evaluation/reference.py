@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, cast
 
-from gideon.evaluation.evalset import SHAPE_REGISTRY, Finding
+from gideon.evaluation.evalset import SHA256_PATTERN, SHAPE_REGISTRY, Finding
 from gideon.host.render.worker import GENERATION_PATTERN
 from gideon.host.sysio import Host, PathLike, RealHost
 
@@ -75,7 +75,6 @@ _HEADER_FIELDS: Final[tuple[str, ...]] = tuple(
 _CASE_ID_PATTERNS: Final[tuple[re.Pattern[str], ...]] = tuple(
     spec.id_pattern for spec in SHAPE_REGISTRY.values()
 )
-_SHA256: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _REFERENCE_FIX: Final[str] = "Restore the reference file from the release checkout, then retry."
 SLICE_REPAIR_FIX: Final[str] = (
     "Restore every reference file for the slice from the release checkout, or remove them "
@@ -285,7 +284,7 @@ def _parse_file(
         findings.append(Finding(relative, None, 0, "repeats must be a positive integer", _REFERENCE_FIX))
 
     digest_value = document.get("set_digest")
-    if isinstance(digest_value, str) and _SHA256.fullmatch(digest_value) is not None:
+    if isinstance(digest_value, str) and SHA256_PATTERN.fullmatch(digest_value) is not None:
         set_digest = digest_value
     else:
         set_digest = ""

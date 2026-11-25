@@ -39,7 +39,12 @@ class RouteGuardArtifact(Artifact):
     def applies(self, inputs: RenderInputs) -> bool:
         """Emit the guard where model servers run."""
 
-        return not inputs.no_gpu
+        return bool(self.rendered_owners(inputs))
+
+    def rendered_owners(self, inputs: RenderInputs) -> tuple[str, ...]:
+        from gideon.host.render.services.model_server import model_server_members
+
+        return tuple(member.service_name for member in model_server_members(inputs))
 
     def emit(self, inputs: RenderInputs) -> str:
         """Emit the declared module text verbatim."""

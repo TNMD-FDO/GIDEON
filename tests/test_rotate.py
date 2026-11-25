@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
+from derivedstores_fake import opensearch_authinfo_result
 from test_announcements import window_query_argv
 from test_apply import lock_stat, lock_table
 from test_render import artifact_source_files, declared_source_files, inputs
@@ -45,15 +46,17 @@ from gideon.host.render import ARTIFACTS, RenderInputs
 from gideon.host.render.api import API_SERVICE_NAME
 from gideon.host.render.command import run_render
 from gideon.host.render.compose import service_blocks
-from gideon.host.render.engine import EMBED_SERVICE_NAME, ENGINE_SERVICE_NAME
+from gideon.host.render.engine import EMBED_SERVICE_NAME, ENGINE_SERVICE_NAME, RERANK
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.render.opensearch import (
     OPENSEARCH_METRICS_SECRET_NAME,
     OPENSEARCH_SERVICE_NAME,
+    OPENSEARCH_TURN_SECRET_NAME,
 )
 from gideon.host.render.owui import BANNERS_ROUTE
 from gideon.host.render.services import all_service_names, store_services
 from gideon.host.render.services.prometheus import PrometheusService
+from gideon.host.render.worker import WORKER_SERVICE_NAME
 from gideon.host.secrets import SECRET_REGISTRY, SECRETS_DIR
 from gideon.host.site import SiteConfig, load_site
 from gideon.host.stack import compose_argv, exec_argv, logs_fix
@@ -519,6 +522,8 @@ class ApplyHost:
         if isinstance(outcome, list):
             return outcome.pop(0) if len(outcome) > 1 else outcome[0]
         if outcome is None:
+            outcome = opensearch_authinfo_result(command, input, RENDERED)
+        if outcome is None:
             return subprocess.CompletedProcess(list(command), 127, "", "")
         return outcome
 
@@ -857,7 +862,31 @@ class RealStack(unittest.TestCase):
 
 
 class EngineRotation(RealStack):
-    def test_embedding_key_rewrites_and_recreates_embedding_server_and_worker(self) -> None:
+    def test_reranker_key_rewrites_and_recreates_exactly_its_two_mounters(self) -> None:
+        host = self.applied_host()
+        path = f"{SECRETS_DIR}/{RERANK.secret_name}"
+        old_value = host.files[path].strip()
+        baseline_calls = len(host.calls)
+        before_manifest = yaml.safe_load(host.files[f"{RENDERED}/applied.yaml"])
+
+        code, out, err = run_rotate(host, RERANK.secret_name)
+
+        self.assertEqual((code, err), (0, ""), out)
+        new_value = host.files[path].strip()
+        self.assertTrue(new_value)
+        self.assertNotEqual(new_value, old_value)
+        self.assertEqual(host.write_modes[path], 0o440)
+        self.assertIn((path, 0, 4242), host.chown_calls)
+        calls = argv_calls(host)[baseline_calls:]
+        self.assertEqual(
+            [call for call in calls if "--force-recreate" in call],
+            [force_recreate(RERANK.service_name), force_recreate(API_SERVICE_NAME)],
+        )
+        after_manifest = yaml.safe_load(host.files[f"{RENDERED}/applied.yaml"])
+        self.assertEqual(after_manifest["services"], before_manifest["services"])
+        assert_no_secret_text(self, out + err, (old_value, new_value))
+
+    def test_embedding_key_rewrites_and_recreates_its_three_mounters_in_order(self) -> None:
         host = self.applied_host()
         path = f"{SECRETS_DIR}/embed_api_key"
         old_value = host.files[path].strip()
@@ -872,11 +901,10 @@ class EngineRotation(RealStack):
         self.assertEqual(host.write_modes[path], 0o440)
         self.assertIn((path, 0, 4242), host.chown_calls)
         calls = argv_calls(host)[baseline_calls:]
-        self.assertEqual(calls.count(force_recreate(EMBED_SERVICE_NAME)), 1)
-        self.assertEqual(calls.count(force_recreate("gideon-worker")), 1)
-        self.assertEqual(calls.count(force_recreate(ENGINE_SERVICE_NAME)), 0)
-        self.assertEqual(calls.count(force_recreate(API_SERVICE_NAME)), 0)
-        self.assertEqual(calls.count(force_recreate("open-webui")), 0)
+        self.assertEqual(
+            [call for call in calls if "--force-recreate" in call],
+            [force_recreate(name) for name in (EMBED_SERVICE_NAME, API_SERVICE_NAME, WORKER_SERVICE_NAME)],
+        )
         self.assertEqual(
             yaml.safe_load(host.files[f"{RENDERED}/applied.yaml"])["services"][EMBED_SERVICE_NAME],
             before_manifest["services"][EMBED_SERVICE_NAME],
@@ -1592,7 +1620,7 @@ class PartialRotation(RealStack):
 
 
 class OtherRotations(RealStack):
-    def test_qdrant_read_only_key_rotation_recreates_qdrant_once(self) -> None:
+    def test_qdrant_read_only_key_rotation_recreates_store_and_api_before_frontend(self) -> None:
         host = self.applied_host()
         path = f"{SECRETS_DIR}/qdrant_read_only_api_key"
         env_path = f"{RENDERED}/open-webui/env"
@@ -1608,13 +1636,9 @@ class OtherRotations(RealStack):
         calls = argv_calls(host)[baseline:]
         self.assertEqual(
             [call for call in calls if "--force-recreate" in call],
-            [force_recreate("qdrant"), force_recreate("open-webui")],
+            [force_recreate("qdrant"), force_recreate(API_SERVICE_NAME), force_recreate("open-webui")],
         )
-        self.assertLess(
-            calls.index(force_recreate("qdrant")),
-            calls.index(force_recreate("open-webui")),
-        )
-        self.assertIn("recreated qdrant: mount qdrant_read_only_api_key", out)
+        self.assertIn("recreated qdrant, gideon-api: mount qdrant_read_only_api_key", out)
         self.assertIn("start: ok — recreated open-webui: changed rendered files", out)
         self.assertIn(f"QDRANT_API_KEY={new_value}\n", host.files[env_path])
         self.assertGreater(len(host.writes), baseline_writes)
@@ -1647,37 +1671,49 @@ class OtherRotations(RealStack):
         self.assertIn("recreated opensearch, gideon-worker: mount opensearch_password", out)
         assert_no_secret_text(self, out + err, (host.files[path].strip(),))
 
-    def test_opensearch_metrics_password_rotation_recreates_its_two_mounters(self) -> None:
-        host = self.applied_host()
-        path = f"{SECRETS_DIR}/{OPENSEARCH_METRICS_SECRET_NAME}"
-        old_value = host.files[path]
-        baseline = len(host.calls)
-        baseline_inputs = len(host.inputs)
+    def test_opensearch_reader_password_rotations_recreate_each_mounter_once(self) -> None:
+        for name, reader in (
+            (OPENSEARCH_METRICS_SECRET_NAME, PrometheusService.name),
+            (OPENSEARCH_TURN_SECRET_NAME, API_SERVICE_NAME),
+        ):
+            with self.subTest(secret=name):
+                host = self.applied_host()
+                path = f"{SECRETS_DIR}/{name}"
+                old_value = host.files[path]
+                baseline = len(host.calls)
+                baseline_inputs = len(host.inputs)
 
-        code, out, err = run_rotate(host, OPENSEARCH_METRICS_SECRET_NAME)
+                code, out, err = run_rotate(host, name)
 
-        self.assertEqual((code, err), (0, ""), out)
-        new_value = host.files[path].strip()
-        self.assertNotEqual(new_value, old_value.strip())
-        # Prometheus reads the file at each scrape, so the two recreates'
-        # order is the consumer map's and carries no meaning; each runs once.
-        recreates = [call for call in argv_calls(host)[baseline:] if "--force-recreate" in call]
-        self.assertCountEqual(
-            recreates,
-            [force_recreate(OPENSEARCH_SERVICE_NAME), force_recreate(PrometheusService.name)],
-        )
-        self.assertIn(f": mount {OPENSEARCH_METRICS_SECRET_NAME}", out)
-        for file_path, contents in host.files.items():
-            if new_value in contents:
-                self.assertEqual(file_path, path)
-        for command, environment in host.calls[baseline:]:
-            self.assertNotIn(new_value, command)
-            if environment is not None:
-                self.assertNotIn(new_value, environment.values())
-        for command, input_text in host.inputs[baseline_inputs:]:
-            self.assertNotIn(new_value, command)
-            self.assertNotIn(new_value, input_text or "")
-        assert_no_secret_text(self, out + err, (new_value,))
+                self.assertEqual((code, err), (0, ""), out)
+                new_value = host.files[path].strip()
+                self.assertNotEqual(new_value, old_value.strip())
+                recreates = [call for call in argv_calls(host)[baseline:] if "--force-recreate" in call]
+                self.assertCountEqual(
+                    recreates,
+                    [force_recreate(OPENSEARCH_SERVICE_NAME), force_recreate(reader)],
+                )
+                self.assertIn(f": mount {name}", out)
+                for file_path, contents in host.files.items():
+                    if new_value in contents:
+                        self.assertEqual(file_path, path)
+                for command, environment in host.calls[baseline:]:
+                    self.assertNotIn(new_value, command)
+                    if environment is not None:
+                        self.assertNotIn(new_value, environment.values())
+                authinfo_inputs = []
+                for command, input_text in host.inputs[baseline_inputs:]:
+                    self.assertNotIn(new_value, command)
+                    if opensearch_authinfo_result(command, input_text, RENDERED) is not None:
+                        authinfo_inputs.append(input_text)
+                    else:
+                        self.assertNotIn(new_value, input_text or "")
+                self.assertEqual(len(authinfo_inputs), 1)
+                if name == OPENSEARCH_TURN_SECRET_NAME:
+                    self.assertIn(new_value, authinfo_inputs[0] or "")
+                else:
+                    self.assertNotIn(new_value, authinfo_inputs[0] or "")
+                assert_no_secret_text(self, out + err, (new_value,))
 
     def test_opensearch_key_rotation_reissues_certificate_and_recreates_once(self) -> None:
         host = self.applied_host()

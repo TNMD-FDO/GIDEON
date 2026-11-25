@@ -320,8 +320,14 @@ On the server, run the assessor from a checkout with the grading kit. Give it
 one or more pool files and an empty output directory, all outside the checkout.
 
 ```text
-sudo python3 -B -m tools.judgments.assess <pool file> … --out <dir> [--prior <dir>] [--seed <int>]
+sudo python3 -B -m tools.judgments.assess <pool file> … --out <dir> [--prior <dir>] [--seed <int>] [--force]
 ```
+
+The assessor judges the quiet window at its `engine` stage, after the `lock:`
+row, and prints a `window:` row when the start passes. Started outside the
+window, it refuses with `outside the quiet window` and the next opening.
+`--force` starts it in an announced window, and a retry command it prints then
+carries `--force`.
 
 The output directory holds `journal.jsonl` with the grades and reasons, readable
 by its owner alone, `assessments.jsonl` with the grades and coordinates, and

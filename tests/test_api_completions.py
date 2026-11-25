@@ -23,7 +23,7 @@ from gideon import guardrail
 from gideon.api import judged, progress, searchturn, stamp
 from gideon.api.app import create_app
 from gideon.api.relay import UPSTREAM_ERROR
-from gideon.api.settings import Settings
+from gideon.api.settings import RecordCoordinates, Settings
 from gideon.api.sse import DONE_EVENT
 from gideon.api.upstream import (
     UPSTREAM_COMPLETION_READ_TIMEOUT_SECONDS,
@@ -531,6 +531,9 @@ class ApiCompletions(unittest.TestCase):
     chat_header: str = API_CHAT_HEADER
 
     def settings(self) -> Settings:
+        record = RecordCoordinates(
+            "fixture-postgres", 5432, "fixture-db", "fixture-reader", Path("/fixture/reader-password"),
+        )
         return Settings(
             ENGINE_URL,
             ENGINE_KEY,
@@ -543,6 +546,16 @@ class ApiCompletions(unittest.TestCase):
             INSTRUCTION,
             MODEL_ID,
             ENGINE_MODEL,
+            record=record,
+            corpus_record=record,
+            cas_root=Path("/fixture/cas"),
+            qdrant_url="http://fixture-vector:7001",
+            qdrant_key_file=Path("/fixture/qdrant-key"),
+            embed_url="http://fixture-embedding:7002",
+            embed_key_file=Path("/fixture/embed-key"),
+            opensearch_url="http://fixture-lexical:7003",
+            opensearch_user="fixture-lexical-reader",
+            opensearch_password_file=Path("/fixture/lexical-password"),
         )
 
     def request(

@@ -55,7 +55,7 @@ profiles:
       dram_gb: 256
       data_volume_gb: 4000
     # The memory table gives Compose mem_limit starting values in decimal
-    # gigabytes, one row per Compose service the stack knows on any host — a
+    # gigabytes, one row per Compose service the profile can render — a
     # service the site turns off or the no-GPU marker removes still has its
     # row — and E9 corrects every row from measured RSS. Render emits each
     # value as an exact byte count, never a suffix (Compose reads a
@@ -80,9 +80,11 @@ profiles:
     # counts the page cache a container is first to touch and its weights are
     # about 31 GB of file pages. The embedding server's 16 is a ruled
     # starting value on the same basis: its weights are about 15.1 GB of file
-    # pages, and E9 corrects the row from its measured cold start. The egress
-    # service's 1 GB is the reserve rule's floor, held until its working set
-    # is first read after a transfer through it. A row's
+    # pages, and E9 corrects the row from its measured cold start. The
+    # reranker's 9 GB follows the same rule: the smallest whole gigabyte
+    # above its roughly 8.06 GB of file pages. The egress service's 1 GB is
+    # the reserve rule's floor, held until its working set is first read after
+    # a transfer through it. A row's
     # `role` names the model the service loads, which is the subject of the
     # size-change rule. Every scalar is a value-only patch for the pin watch.
     memory:
@@ -108,6 +110,9 @@ profiles:
       gideon-embed:
         gb: 16
         role: embed
+      gideon-rerank-2:
+        gb: 9
+        role: rerank-2
       searxng:
         gb: 1
       dcgm-exporter:
@@ -586,12 +591,119 @@ profiles:
           vocab.json:
             sha256: sha256:ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910
             size: 2776833
+      rerank-2:
+        repo: Qwen/Qwen3-Reranker-4B
+        revision: "22e683669bc0f0bd69640a1354a6d0aebcfeede5"
+        gpu: 1
+        # The reranker scores a query against each passage, under the
+        # generator's and the embedder's conventions. runner, convert, and
+        # dtype: stated, since the engine would otherwise resolve them from the
+        # architecture override below. hf-overrides, one JSON string passed as
+        # one argument: the classification architecture, the two tokens whose
+        # head difference is the score, and the flag that marks the original
+        # weights; the three only work together, and without them the
+        # repository loads as a text generator. chat-template: GIDEON's score
+        # template, rendered verbatim and mounted read-only at this path. The
+        # engine applies a template only when one is named; without it the
+        # server scores the query and the passage joined with nothing between
+        # them, answering 200 with wrong scores, and a path that does not exist
+        # stops the start. A request names the instruction; none means the
+        # model card's default sentence.
+        # max-model-len: the embedder's window, eight times the chunker's
+        # largest chunk, so a whole chunk with the query, the instruction, and
+        # the template's wrapper always fits. The tokenizer appends no token,
+        # so a pair of exactly the window passes and one token more is a 400
+        # for the whole request, never a truncation.
+        # no-enable-chunked-prefill: the conservative setting. A wrong-score
+        # race under chunked prefill was fixed for the engine's older model
+        # runner alone and is unread on the one a pooling model uses here.
+        # gpu-memory-utilization: the per-process budget a start is judged
+        # against, of the card's total as the process reports it; 0.1667
+        # reads as 16 GB of a 96 GB card in the convention that reads the
+        # embedder's 0.25 as 24. A start refuses when less than the budget is
+        # free on the card. It is preflight's budget and the card's line, and
+        # it holds nothing after the start.
+        # kv-cache-memory-bytes: E6's byte bound, a whole number of 8,192-token
+        # windows at the engine's 147,456 bytes per token for this model,
+        # sized so the hold's high-water mark over a first batched request of
+        # forty pairs and two more sits at least a gigabyte under the line,
+        # each count read on its own fresh start. On the reference box four
+        # windows held 14,588 MiB at that mark, 1,730 MiB under the line,
+        # short of the window and gigabyte a fifth would need.
+        # Not set, by decision: pooler-config, the scheduler numbers, and
+        # kv-cache-dtype, engine defaults until the turn's throughput is read.
+        serve:
+          served_name: gideon-rerank-2
+          env:
+            HF_HUB_OFFLINE: "1"
+            HF_HOME: /data/models
+          flags:
+            runner: pooling
+            convert: classify
+            dtype: bfloat16
+            max-model-len: 8192
+            no-enable-chunked-prefill: true
+            gpu-memory-utilization: 0.1667
+            kv-cache-memory-bytes: 4831838208
+            hf-overrides: '{"architectures": ["Qwen3ForSequenceClassification"], "classifier_from_token": ["no", "yes"], "is_original_qwen3_reranker": true}'
+            chat-template: /etc/gideon/model-servers/qwen3_reranker.jinja
+        files:
+          1_LogitScore/config.json:
+            sha256: sha256:73e3156450564d8a98b7e47bcf5aace0f29600828b51937da545571e84db3ff3
+            size: 57
+          README.md:
+            sha256: sha256:b7cf82b30d5e38cd1a02ca7cfd60c26c0e3664cb31b2c4b661550a93c9281bee
+            size: 14707
+          chat_template.jinja:
+            sha256: sha256:6f682162495ec5b39fd9005c01b6aa2a74669379fe967039f1e2cbbe8752369d
+            size: 741
+          config.json:
+            sha256: sha256:38bff5eac700032a185745e4076eccad7aa453473cafc2a27de412cdb7b79e19
+            size: 727
+          config_sentence_transformers.json:
+            sha256: sha256:6a153d6696f78fd588c1c728967f0b773ea869d3c6028f151ce71ebe49140762
+            size: 325
+          generation_config.json:
+            sha256: sha256:81051cd3f6e77013827148d0b8a6ead93f8ac390d5ab805f849199f0af6a08db
+            size: 214
+          merges.txt:
+            sha256: sha256:8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5
+            size: 1671853
+          model-00001-of-00002.safetensors:
+            sha256: sha256:cf2e87cbf71fa628961532232e04dd6c19702a0a057f5e2aff95ea1aca4fd488
+            size: 4058781760
+          model-00002-of-00002.safetensors:
+            sha256: sha256:78946d22b7f6456ea7a5358dbdf3982de36c5bac1f166a5fd58e18e31db8048a
+            size: 3984833200
+          model.safetensors.index.json:
+            sha256: sha256:18a783f197360068da36d2ff9ecffce0121542a87598fd1fef3079ead1c3cc08
+            size: 32819
+          modules.json:
+            sha256: sha256:6f13b6b4a89e577b591b2077bca40c67c26541a6740a8809267cb474f90806a9
+            size: 280
+          sentence_bert_config.json:
+            sha256: sha256:3234ebd224d492cbe8d55d5ec80a3f408451c4db3005bafb64fe1c51c763e01e
+            size: 362
+          special_tokens_map.json:
+            sha256: sha256:76862e765266b85aa9459767e33cbaf13970f327a0e88d1c65846c2ddd3a1ecd
+            size: 613
+          tokenizer.json:
+            sha256: sha256:aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4
+            size: 11422654
+          tokenizer_config.json:
+            sha256: sha256:253153d0738ceb4c668d2eff957714dd2bea0b56de772a9fdccd96cbf517e6a0
+            size: 9706
+          vocab.json:
+            sha256: sha256:ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910
+            size: 2776833
   # The trial profile admits one NVIDIA RTX PRO 4500 Blackwell or NVIDIA
   # GeForce RTX 5090 shared by the generator and embedder. The GeForce RTX
   # 5090's driver and CDI behaviour are unread. The figures are derived
   # starting values, evaluated on the owned card's capped split. Host-memory
   # and footprint proofs and acceptance on an admitted card are owed before
-  # an install is offered.
+  # an install is offered. It pins no reranker, since its one card holds
+  # the generator and the embedder alone, so it renders no reranker and its
+  # turn runs with the rerank stage off.
   1x32v-120d:
     # Minimums in decimal gigabytes. The host-memory and data-volume floors
     # are proxies derived from recorded SCOTUS counts and tranche footprints.

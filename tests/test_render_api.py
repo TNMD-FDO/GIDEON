@@ -1,14 +1,18 @@
 """The API service, probes, alert, and service-source digest contracts."""
 
 import hashlib
+import tempfile
 import unittest
+from collections import UserDict
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
-from test_render import DirHost, checkout_files, inputs
+from test_render import DirHost, checkout_files, inputs, trial_inputs
 
+from gideon.api.settings import load_settings
+from gideon.host.cas import ROOT as CAS_ROOT
 from gideon.host.images import parse_registry
 from gideon.host.render import RenderInputs, render_all
 from gideon.host.render.api import (
@@ -18,11 +22,15 @@ from gideon.host.render.api import (
     API_INSTRUCTION_PATH,
     API_JOB_NAME,
     API_MOUNT_TARGET,
+    API_RERANK_KEY_FILE_ENV,
+    API_RERANK_URL_ENV,
     API_SECRET_NAME,
     API_SERVICE_NAME,
     API_SOURCE_HEADER,
     API_USER_EMAIL_HEADER,
     API_USER_ID_HEADER,
+    TURN_READER_ROLE,
+    TURN_READER_SECRET_NAME,
 )
 from gideon.host.render.command import (
     AppliedManifest,
@@ -32,17 +40,36 @@ from gideon.host.render.command import (
 )
 from gideon.host.render.compose import service_names
 from gideon.host.render.engine import (
+    EMBED,
     EMBED_SERVICE_NAME,
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
+    RERANK,
+)
+from gideon.host.render.opensearch import (
+    OPENSEARCH_TURN_SECRET_NAME,
+    OPENSEARCH_TURN_USER,
+    opensearch_rest_url,
 )
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_MODEL_ID
+from gideon.host.render.qdrant import QDRANT_READ_ONLY_SECRET_NAME, qdrant_rest_url
 from gideon.host.render.services.api import api_service
 from gideon.host.render.services.generator import engine_service
+from gideon.host.stores import ROLE_SPECS, RoleSpec
 from gideon.host.sysio import PathLike
 
 ROOT = Path(__file__).resolve().parent.parent
 OTHER_DIGEST = "sha256:" + "1" * 64
+
+
+class RecordingEnvironment(UserDict[str, str]):
+    def __init__(self, values: dict[str, str]) -> None:
+        super().__init__(values)
+        self.reads: set[str] = set()
+
+    def __getitem__(self, name: str) -> str:
+        self.reads.add(name)
+        return super().__getitem__(name)
 
 
 def applied_record(rendered_inputs: RenderInputs) -> AppliedManifest:
@@ -59,6 +86,9 @@ def applied_record(rendered_inputs: RenderInputs) -> AppliedManifest:
 
 
 class ApiRender(unittest.TestCase):
+    def test_turn_reader_role_matches_the_store(self) -> None:
+        self.assertIn(RoleSpec(TURN_READER_ROLE, TURN_READER_SECRET_NAME), ROLE_SPECS)
+
     def test_service_secret_probe_and_rule_follow_the_gpu_marker(self) -> None:
         gpu = inputs()
         gpu_rendered = render_all(gpu)
@@ -69,7 +99,16 @@ class ApiRender(unittest.TestCase):
         self.assertIn(API_SECRET_NAME, gpu_document["secrets"])
         self.assertEqual(
             api["secrets"],
-            [ENGINE_SECRET_NAME, API_SECRET_NAME, "postgres_gideon_audit_password"],
+            [
+                ENGINE_SECRET_NAME,
+                API_SECRET_NAME,
+                "postgres_gideon_audit_password",
+                TURN_READER_SECRET_NAME,
+                QDRANT_READ_ONLY_SECRET_NAME,
+                EMBED.secret_name,
+                OPENSEARCH_TURN_SECRET_NAME,
+                RERANK.secret_name,
+            ],
         )
         self.assertEqual(api["environment"]["GIDEON_SOURCE_HEADER"], API_SOURCE_HEADER)
         self.assertEqual(api["environment"]["GIDEON_CHAT_HEADER"], API_CHAT_HEADER)
@@ -90,6 +129,7 @@ class ApiRender(unittest.TestCase):
             [
                 f"{gpu.checkout}/gideon:{API_MOUNT_TARGET}:ro",
                 f"/etc/gideon/rendered/{API_INSTRUCTION_PATH}:{API_INSTRUCTION_MOUNT}:ro",
+                f"{CAS_ROOT}:{CAS_ROOT}:ro",
             ],
         )
         self.assertEqual(
@@ -137,6 +177,56 @@ class ApiRender(unittest.TestCase):
             },
         )
 
+    def test_reranker_settings_and_mount_follow_the_selected_profile(self) -> None:
+        reference = yaml.safe_load(render_all(inputs()).by_path["compose.yaml"].content)
+        trial = yaml.safe_load(render_all(trial_inputs()).by_path["compose.yaml"].content)
+        reference_api = reference["services"][API_SERVICE_NAME]
+        trial_api = trial["services"][API_SERVICE_NAME]
+        self.assertEqual(
+            reference_api["environment"][API_RERANK_URL_ENV], f"http://{RERANK.service_name}:{RERANK.port}"
+        )
+        self.assertEqual(
+            reference_api["environment"][API_RERANK_KEY_FILE_ENV], f"/run/secrets/{RERANK.secret_name}"
+        )
+        self.assertIn(RERANK.secret_name, reference_api["secrets"])
+        self.assertIn(RERANK.secret_name, reference["secrets"])
+        self.assertNotIn(API_RERANK_URL_ENV, trial_api["environment"])
+        self.assertNotIn(API_RERANK_KEY_FILE_ENV, trial_api["environment"])
+        self.assertNotIn(RERANK.secret_name, trial_api["secrets"])
+        self.assertNotIn(RERANK.secret_name, trial["secrets"])
+
+    def test_rendered_api_settings_and_loader_reads_match(self) -> None:
+        rendered = render_all(inputs())
+        document = yaml.safe_load(rendered.by_path["compose.yaml"].content)
+        values: dict[str, str] = document["services"][API_SERVICE_NAME]["environment"]
+        del values["TZ"]  # The container uses TZ independently of the settings loader.
+        self.assertEqual(values["GIDEON_API_QDRANT_KEY_FILE"], f"/run/secrets/{QDRANT_READ_ONLY_SECRET_NAME}")
+        self.assertEqual(values["GIDEON_API_EMBED_KEY_FILE"], f"/run/secrets/{EMBED.secret_name}")
+        self.assertEqual(
+            values["GIDEON_API_OPENSEARCH_PASSWORD_FILE"],
+            f"/run/secrets/{OPENSEARCH_TURN_SECRET_NAME}",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for name, value in values.items():
+                if name.endswith("_FILE"):
+                    path = Path(directory) / Path(value).name
+                    path.write_text("fictitious mount contents\n", encoding="utf-8")
+                    values[name] = str(path)
+            environment = RecordingEnvironment(values)
+            settings = load_settings(environment)
+
+        self.assertEqual(environment.reads, set(values))
+        self.assertEqual(settings.cas_root, CAS_ROOT)
+        self.assertEqual(settings.qdrant_url, qdrant_rest_url())
+        self.assertEqual(settings.qdrant_key_file, Path(values["GIDEON_API_QDRANT_KEY_FILE"]))
+        self.assertEqual(settings.embed_url, f"http://{EMBED.service_name}:{EMBED.port}")
+        self.assertEqual(settings.embed_key_file, Path(values["GIDEON_API_EMBED_KEY_FILE"]))
+        self.assertEqual(settings.opensearch_url, opensearch_rest_url())
+        self.assertEqual(settings.opensearch_user, OPENSEARCH_TURN_USER)
+        self.assertEqual(
+            settings.opensearch_password_file, Path(values["GIDEON_API_OPENSEARCH_PASSWORD_FILE"]),
+        )
+
     def test_empty_checkout_and_digest_refuse(self) -> None:
         base = inputs()
         registry = parse_registry(base.site.registry)
@@ -158,6 +248,7 @@ class ApiRender(unittest.TestCase):
             [
                 f"{base.checkout}/gideon:{API_MOUNT_TARGET}:ro",
                 f"/tmp/fixture-rendered/{API_INSTRUCTION_PATH}:{API_INSTRUCTION_MOUNT}:ro",
+                f"{CAS_ROOT}:{CAS_ROOT}:ro",
             ],
         )
 
@@ -230,6 +321,21 @@ class ApiRender(unittest.TestCase):
                 applied,
                 service_names(original),
                 compose_digests(original),
+            )
+        self.assertEqual(judgment.services, (API_SERVICE_NAME,))
+        self.assertEqual(judgment.block, (API_SERVICE_NAME,))
+        self.assertEqual(judgment.files, ())
+        self.assertEqual(judgment.top_level, ())
+
+    def test_moving_reader_url_recreates_only_the_api_service_block(self) -> None:
+        original = inputs()
+        applied = applied_record(original)
+        with patch(
+            "gideon.host.render.services.api.opensearch_rest_url",
+            return_value="http://fixture-lexical:7003",
+        ):
+            judgment = recreate_judgment(
+                render_all(original), applied, service_names(original), compose_digests(original),
             )
         self.assertEqual(judgment.services, (API_SERVICE_NAME,))
         self.assertEqual(judgment.block, (API_SERVICE_NAME,))

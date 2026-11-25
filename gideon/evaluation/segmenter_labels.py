@@ -1,7 +1,6 @@
 """Validate the human-checked section labels for segmenter eval cases."""
 
 import json
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +9,7 @@ from typing import Final, cast
 from gideon.evaluation.evalset import (
     ROLE_PATTERN,
     SEGMENTER_ID_PATTERN,
+    SHA256_PATTERN,
     Finding,
     valid_iso_date,
 )
@@ -22,7 +22,6 @@ SECTION_KEYS: Final[tuple[str, ...]] = ("start", "end", "type")
 SIGNED_KEYS: Final[tuple[str, ...]] = ("by", "on")
 LABEL_LINE_FIX: Final[str] = "Correct the segmenter labels JSONL line, then retry."
 _FILE_FIX: Final[str] = "Restore the segmenter labels JSONL file, then retry."
-_SHA256: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +125,7 @@ def validate_line(
         if tuple(text) != TEXT_KEYS:
             add("text keys or order")
         sha256 = text.get("sha256")
-        if not isinstance(sha256, str) or _SHA256.fullmatch(sha256) is None:
+        if not isinstance(sha256, str) or SHA256_PATTERN.fullmatch(sha256) is None:
             add("text.sha256")
         raw_length = text.get("length")
         if not isinstance(raw_length, int) or isinstance(raw_length, bool) or raw_length <= 0:

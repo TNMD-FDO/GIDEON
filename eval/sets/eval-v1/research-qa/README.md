@@ -808,7 +808,7 @@ dropped whole, with no row, discard, or figures, so rows and ordinals match a
 serial walk that never evaluates it.
 
 ```text
-sudo python3 -B -m tools.synthetic.draft --category <category> [--count <n>] --seed <int> --out <batch-dir> [--set <root>] [--generation <name>]
+sudo python3 -B -m tools.synthetic.draft --category <category> [--count <n>] --seed <int> --out <batch-dir> [--set <root>] [--generation <name>] [--force]
 python3 -m tools.synthetic.intake <batch-dir>/manifest.json --template
 python3 -m tools.synthetic.intake <batch-dir>/manifest.json <batch-dir>/marks.txt [--set <root>] --dry-run
 python3 -m tools.synthetic.intake <batch-dir>/manifest.json <batch-dir>/marks.txt [--set <root>]
@@ -825,6 +825,10 @@ The draft stops when that many
 cases are kept or the draw order is exhausted, reporting a shortfall. Its set
 defaults to `eval/sets/eval-v1` in the checkout. Intake uses the manifest's set
 root unless `--set` supplies another root of the same version.
+The draft judges the quiet window at its `engine` stage, after it claims the
+engine lock, and prints a `window:` row when the start passes. Started outside
+the window, it refuses with `outside the quiet window` and the next opening;
+`--force` starts it in an announced window.
 
 | Step | What the CSA does |
 |---|---|
@@ -1322,7 +1326,9 @@ root or another account. This example uses an invented directory.
 The default is every active unsigned case and the live production caselaw
 generation. Repeat `--case <id>` to select cases. Use `--generation <name>` to
 select a built or live production caselaw generation. Use `--seed <int>` to
-choose the generator's sampling seed. The default seed is `0`.
+choose the generator's sampling seed. The default seed is `0`. Use `--force`
+to start outside the quiet window in an announced window; a retry command the
+draft prints then carries `--force`.
 
 The stage rows appear on stdout in this order.
 
@@ -1330,12 +1336,13 @@ The stage rows appear on stdout in this order.
 2. `candidates` finds each case's active judgment query by seed and ranks its primary grade-2 or grade-3 passages, highest grade first.
 3. `out` checks the destination. The check runs again under the lock before any write.
 4. `lock` claims the engine lock, released when the command ends.
-5. `engine` checks the running generator against the checkout's pin and checks the sampling settings against the running snapshot's `generation_config.json`. It compares `min_p` when the snapshot lists it. The row prints the model identifier, `temperature`, `top_p`, `top_k`, `min_p`, and the seed.
-6. `generation` checks each candidate against the manifest and counts `absent` sources and `hash-changed` candidates.
-7. `facts` reads the record for the remaining sources and builds their captions.
-8. `prior` counts drafts carried for wanted cases with the same prompt, model, and generation.
-9. `draft` writes `drafts.jsonl` with the carried lines, or empty, before asking the generator. It checks the offsets in rank order, shows up to twelve valid passages per case, and rewrites the file atomically after each draft.
-10. `write` writes the content-free `summary.json` and prints the counts, engine figures, and the drafts file's line count and SHA-256.
+5. `window` prints the quiet window's judgement of the start, with `forced` when `--force` was given. The engine stage judges it, so a start outside the window refuses under `engine`.
+6. `engine` checks the running generator against the checkout's pin and checks the sampling settings against the running snapshot's `generation_config.json`. It compares `min_p` when the snapshot lists it. The row prints the model identifier, `temperature`, `top_p`, `top_k`, `min_p`, and the seed.
+7. `generation` checks each candidate against the manifest and counts `absent` sources and `hash-changed` candidates.
+8. `facts` reads the record for the remaining sources and builds their captions.
+9. `prior` counts drafts carried for wanted cases with the same prompt, model, and generation.
+10. `draft` writes `drafts.jsonl` with the carried lines, or empty, before asking the generator. It checks the offsets in rank order, shows up to twelve valid passages per case, and rewrites the file atomically after each draft.
+11. `write` writes the content-free `summary.json` and prints the counts, engine figures, and the drafts file's line count and SHA-256.
 
 Keep both files outside the checkout. The drafts file holds answers and
 passage text and has mode `0600`. In `summary.json`, `sampling` follows
@@ -1383,6 +1390,7 @@ Refusals go to stderr and exit 1 in the form
 | `lock` | `the engine lock is held by pid <pid>` | Wait for it to finish — `ps -p <pid>` says whether it still runs — then retry. |
 | `lock` | `the engine lock cannot be claimed` | Wait for the running evaluation to finish, then retry. If taking the lock failed, the fix is `Repair access to the engine lock, then retry.` |
 | `engine` | `the no-GPU marker refuses drafting` | Run the draft on the GPU box, then retry. |
+| `engine` | `outside the quiet window: <judgement>` | `Next opening is <instant>; add --force for an announced window.` |
 | `engine` | `the site file cannot be loaded` or `the generator target is unavailable` | Follow the printed site or engine fix. If there is no site finding, the fix is `Restore the site file, then retry.` |
 | `engine` | `the generator pin cannot be read` | Restore the selected profile's generator pin, then retry. |
 | `engine` | `the generator target check could not run`, `generator container <lookup or inspection> could not run`, `generator container <lookup or inspection> exited N`, `expected one running generator container`, `the running generator command cannot be read`, `the running generator command has no usable repository and revision`, or `the running generator repository or revision differs from the checkout's pin` | Run `sudo python3 -m gideon apply` from the checkout holding the intended model pin, or run the draft from the checkout the box runs. |

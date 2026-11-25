@@ -19,7 +19,6 @@ from tools.segmenter.intake import IntakeError
 from tools.segmenter.manifest import write_atomic
 from tools.synthetic import manifest
 
-_HEX: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _MARK_LINE: Final[re.Pattern[str]] = re.compile(r"([0-9]+)\s+(accept|reject|correct)(?=\s|$)(.*)")
 _CORRECTION_PAIRS: Final[re.Pattern[str]] = re.compile(r"[a-z]+=[^\s=|]*(?: [a-z]+=[^\s=|]*){0,2}")
 _CORRECTION_FIX: Final[str] = (
@@ -78,7 +77,7 @@ class Marks:
 
 
 def _hex(value: object) -> bool:
-    return isinstance(value, str) and _HEX.fullmatch(value) is not None
+    return isinstance(value, str) and evalset.SHA256_PATTERN.fullmatch(value) is not None
 
 
 def _manifest_problem(rule: str = "shape") -> IntakeError:

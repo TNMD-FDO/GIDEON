@@ -5,12 +5,13 @@ from typing import Final
 
 from gideon.host import gpus, weights
 from gideon.host.images import RegistryTarget, parse_registry, reference
-from gideon.host.models import ModelPin
+from gideon.host.models import HardwareProfile, ModelPin
 from gideon.host.render import RenderInputs
 from gideon.host.render.egress import INTERNAL_NETWORK_NAME
 from gideon.host.render.engine import (
     GENERATOR,
     INTEGRATION_NETWORK_NAME,
+    MODEL_SERVERS,
     ModelServerMember,
 )
 from gideon.host.render.routeguard import (
@@ -18,6 +19,7 @@ from gideon.host.render.routeguard import (
     route_guard_import_path,
     route_guard_mount,
 )
+from gideon.host.render.scoretemplate import SCORE_TEMPLATE_MOUNT
 from gideon.host.render.services import (
     MountedSecret,
     ServiceDefinition,
@@ -45,6 +47,20 @@ ENGINE_ACCESS_LOG_EXCLUDED_PATHS: Final[tuple[str, ...]] = (
     ENGINE_HEALTH_PATH,
     "/metrics",
 )
+
+
+def _member_renderable(profile: HardwareProfile, member: ModelServerMember) -> bool:
+    return not member.optional or profile.model(member.role) is not None
+
+
+def model_server_members(inputs: RenderInputs) -> tuple[ModelServerMember, ...]:
+    """Return the profile's model-server members on this host, in family order."""
+
+    if inputs.no_gpu:
+        return ()
+    return tuple(
+        member for member in MODEL_SERVERS if _member_renderable(inputs.profile, member)
+    )
 
 
 def model_healthcheck(member: ModelServerMember) -> Mapping[str, object]:
@@ -155,6 +171,9 @@ def model_service(
         networks.append(INTEGRATION_NETWORK_NAME)
     if member.joins_internal_network:
         networks.append(INTERNAL_NETWORK_NAME)
+    volumes = [f"{weights.MODELS_ROOT}:{hf_home}:ro", route_guard_mount()]
+    if member.score_template:
+        volumes.append(SCORE_TEMPLATE_MOUNT)
     return {
         "image": reference(target, image_pin(inputs, "vllm-openai")),
         "restart": "unless-stopped",
@@ -164,7 +183,7 @@ def model_service(
         ),
         "command": model_command(model, member),
         "devices": [f"nvidia.com/gpu={inputs.facts.gpu_uuids[model.gpu]}"],
-        "volumes": [f"{weights.MODELS_ROOT}:{hf_home}:ro", route_guard_mount()],
+        "volumes": volumes,
         "secrets": [member.secret_name],
         "healthcheck": dict(model_healthcheck(member)),
         "networks": networks,
@@ -180,7 +199,10 @@ class ModelServerService(ServiceDefinition):
         self.slow_start_seconds = member.ready_seconds
 
     def applies(self, inputs: RenderInputs) -> bool:
-        return not inputs.no_gpu
+        return self.member in model_server_members(inputs)
+
+    def renderable(self, profile: HardwareProfile) -> bool:
+        return _member_renderable(profile, self.member)
 
     def block(
         self, inputs: RenderInputs, target: RegistryTarget

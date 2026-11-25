@@ -2,8 +2,8 @@
 release: "fixture"
 inputs:
   site_sha256: "13541215f4769fd486db56ad34afeb167fd60cce1af8b9b058a28413cfa396a2"
-  host_lock_sha256: "56b34abc306f9fbaf92b8b48f9beaa6a942c481573f06c6edc8d9b890b69d1bd"
-  models_lock_sha256: "028c6b4a7c170cc88deedd30ae89027f0a9f2f4421413e7fbf24fe4b1bfa8068"
+  host_lock_sha256: "99baf749923f5eaa8253f40a5435ff6ed66e9a4a43e828d65c6b9571c15ce24f"
+  models_lock_sha256: "9579dcddec1e1d0755c7e921a7ee1aea8aa0f4713b996df25fbfb0e68c4f73d8"
   egress_sha256: "e22abee0f29547aedd38bb2ca9ca9f0d2cd3dc4b28c9d6df72ae4fad53d0d3af"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
@@ -15,11 +15,11 @@ inputs:
   build_box: true
 files:
   compose.yaml:
-    sha256: "a9b2e02c8d1b20132f6280f05329956882466a21970120656eb754006084e3e6"
+    sha256: "a940b28661f7a05f928ecdbe95fb622649e1facb56ff1ad5868302bb2d7b2f80"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
-    sha256: "14378e588838b371d0ffbe0384e0b79cd45c5b12cf1184c7903f121bf8553d3f"
+    sha256: "f9fe7006dd0366d7c41596f3afef5b65f84479c7bfbea372cc33296c832c380d"
     mode: "0644"
     owners:
       - "prometheus"
@@ -123,6 +123,12 @@ files:
     owners:
       - "gideon-generator"
       - "gideon-embed"
+      - "gideon-rerank-2"
+  "model-servers/qwen3_reranker.jinja":
+    sha256: "794ba44124e7a5ca61e34acb788344d06e13c900773f29b0ab27540e2e685a3c"
+    mode: "0644"
+    owners:
+      - "gideon-rerank-2"
   "searxng/settings.yml":
     sha256: "624972a709f4facb06cf8e183d498749d35a8b1ce1b646931239c4173f594ea3"
     mode: "0644"
@@ -149,17 +155,17 @@ files:
     owners:
       - "opensearch"
   "opensearch/security/internal_users.yml":
-    sha256: "ed3ca6d06a9d9211aad9a180b2f6dc6f570d209c79f6a95c6ac6c2e13a77f434"
+    sha256: "611ff98234b14f1e8d54bc4002d09b00508b980bd4b01fb1055b18f5f8f094f9"
     mode: "0644"
     owners:
       - "opensearch"
   "opensearch/security/roles_mapping.yml":
-    sha256: "1819e1f0df25f1ad1854c9c26b7ff42fd9d2fac8b82ac8ed02fb528475d64a0a"
+    sha256: "c6c8e9a5adb89e4234fb7ac8eff283d6c5302c2b9500ebb485c500245938d68b"
     mode: "0644"
     owners:
       - "opensearch"
   "opensearch/security/roles.yml":
-    sha256: "cf3de09aa3f280348267b883b6845440739ac8ada6c97da9ef90927c97926a82"
+    sha256: "6de3a528a3ab2d520deb01e99050da38b650e7d0248adb99d749e8a57c42ddd9"
     mode: "0644"
     owners:
       - "opensearch"
@@ -265,11 +271,12 @@ services:
   grafana: "d960c1ceaa6a77defd2669c758bfc3e67f1be3b94a959adf04daaa72985c0cb2"
   postgres: "22a8e8b30a6d9eaabbee5c36f326b8860b0a06ee3d5ee1d6c95d9aca13fb059f"
   qdrant: "30030653744c6091cd90a6481d358924b2c1eb8e76f86d54f1f6c1d633b61b83"
-  opensearch: "5e566c66fd1232f7aa18d184184fd5680bc9be63896810da914b763f9c387742"
+  opensearch: "f8289290eadf7d85e98819a09d6bf39c4ae88538639c381f463ba1f212733a87"
   open-webui: "f88eb45cf0e11080dfb94d23261581ac5cb2a37d12de4d6054d93476dca49895"
   gideon-generator: "5568bee6e672194e56c419842484b9039c037e7902e04191e944c23e7d55fd1e"
   gideon-embed: "9d97e4fac9021e9e397b98608972b30f723bd6bed9a75828002f02d1b3bb2979"
-  gideon-api: "e0df6d9b49ad47f718ab5b41bfa7d95265798e400425745556002d9ce0ea98a5"
+  gideon-rerank-2: "d5f943278918cbd98728d2211b1812313a8e89ef611f2e88d37d45d1a0e51c5d"
+  gideon-api: "54943815ddf2f188f498634cc4071d01bcfd8c735f5d615312c3742d1dfe5304"
   gideon-worker: "01a50e5fb2088fdf111a7982ea30fc0582be559a4263ad2314187ee582d026f3"
   gideon-egress: "d961fa13530a157ee903e72d7e505dc032d5fa0e658054b6e698cbf11d35bae8"
   searxng: "a4f26a7f67d7b3093a5544861716df0768127e22091bf4c84c7b2bccb99644bf"
@@ -277,7 +284,7 @@ services:
   postgres-exporter: "71024e25f248a0a94b2ea92c4f48813f8b4f95e3d17d41522f300fa9f1407291"
   cadvisor: "6e4def0c2cc0e80a5357574ad6a8e81286c1f29140a78422632c6e860d14d83e"
   blackbox-exporter: "6a9e5f772574462e4ca56c265d56cc298a58bfedcafed60bd16d3ac3caf2f2fe"
-top_level: "b29fc820675d577bb5e7d8db11e9269e18e9ffbd29027648520589dad4df38c6"
+top_level: "ae82f1d5714974b2886e0385db9800f31103d87aa4bbbaca47f16bc5b7822f8f"
 top_level_parts:
   static: "9d8f1896c9ac3c179131b112cf67afcceeee7672c19635149ea32c986c4dcb6a"
   secrets:
@@ -316,11 +323,17 @@ top_level_parts:
       sha256: "759aa71ff9c8b4c635fdfeedd268d42f56dada1c1ad4ed9f0a6ff5d5a5f60665"
       mounts:
         - "qdrant"
+        - "gideon-api"
     opensearch_password:
       sha256: "da45d7dad49988d789346923aa2c20ae72406e8861979cbc7ad6a9fbe41a35d6"
       mounts:
         - "opensearch"
         - "gideon-worker"
+    opensearch_turn_password:
+      sha256: "f62126ad5e5d2285d9786bde3e0a30993b648682b849260e1713350cec934ece"
+      mounts:
+        - "opensearch"
+        - "gideon-api"
     opensearch_transport_key:
       sha256: "93e5d65205b136354e07af07cafa33348d1f90ee6ad52a048f2aba8508267c1a"
       mounts:
@@ -342,13 +355,23 @@ top_level_parts:
       sha256: "8403adda24d578a06322a2c9aa7b8553cc621d89b00cc47e620d5b94f7f9cf40"
       mounts:
         - "gideon-embed"
+        - "gideon-api"
         - "gideon-worker"
+    rerank_2_api_key:
+      sha256: "c3a76d282022e68e3b10036f67a6e4b05abd04e6f3d35c49607597930b68099e"
+      mounts:
+        - "gideon-rerank-2"
+        - "gideon-api"
     gideon_api_key:
       sha256: "b1f5f536032e9f7587130ee2adafafabe82444e7e53b3d3421a2440dcc3382c7"
       mounts:
         - "gideon-api"
     postgres_gideon_audit_password:
       sha256: "7c04d633f705cafaa051c26b01ee3b2bffd595ff1ff778172fe54343fdcb9ecb"
+      mounts:
+        - "gideon-api"
+    postgres_gideon_ro_turn_password:
+      sha256: "4c81ea9023cbe44ef39900ca5bca93776b5bf40754127c82bb150bd867a12f8c"
       mounts:
         - "gideon-api"
     postgres_gideon_worker_password:

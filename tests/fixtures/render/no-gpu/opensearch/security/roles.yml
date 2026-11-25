@@ -15,3 +15,19 @@ metrics:
         - "*"
       allowed_actions:
         - "indices:monitor/stats*"
+turn:
+  reserved: true
+  cluster_permissions:
+    - "indices:data/read/mget"
+    - "indices:data/read/msearch"
+    - "indices:data/read/scroll"
+    - "indices:data/read/scroll/clear"
+  index_permissions:
+    - index_patterns:
+        - "caselaw__*"
+      allowed_actions:
+        - "indices:data/read/search*"
+        - "indices:data/read/get*"
+        - "indices:data/read/mget*"
+        - "indices:data/read/point_in_time/create"
+        - "indices:data/read/point_in_time/delete"

@@ -13,7 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import yaml  # type: ignore[import-untyped]
-from test_render import render_templates
+from test_render import render_templates, trial_inputs
 
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import load_image_lock
@@ -32,7 +32,7 @@ from gideon.host.render.compose import (
     service_names,
 )
 from gideon.host.render.egress import EGRESS_SERVICE_NAME
-from gideon.host.render.engine import ENGINE_SERVICE_NAME, MODEL_SERVERS
+from gideon.host.render.engine import EMBED, ENGINE_SERVICE_NAME, MODEL_SERVERS
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.grafana import PUBLIC_REPOSITORY_URL
 from gideon.host.render.searxng import (
@@ -331,6 +331,12 @@ class Service(unittest.TestCase):
         self.assertNotIn(SEARXNG_SERVICE_NAME, service_names(inputs(SECOND, no_gpu=True)))
         for base in (inputs(), inputs(no_gpu=True), inputs(SECOND)):
             self.assertEqual(len(service_images(base)), len(service_names(base)))
+
+    def test_trial_service_order_keeps_the_api_after_the_last_model_server(self) -> None:
+        trial = service_names(trial_inputs())
+        self.assertEqual(trial.index(API_SERVICE_NAME), trial.index(EMBED.service_name) + 1)
+        self.assertEqual(trial.index(WORKER_SERVICE_NAME), trial.index(API_SERVICE_NAME) + 1)
+        self.assertEqual(trial.index(SEARXNG_SERVICE_NAME), trial.index(EGRESS_SERVICE_NAME) + 1)
 
     def test_the_block_runs_the_image_as_shipped_on_the_network_alone(self) -> None:
         base = inputs()

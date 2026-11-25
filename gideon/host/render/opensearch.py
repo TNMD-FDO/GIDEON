@@ -1,14 +1,14 @@
 """OpenSearch identity and the settings and security files it reads at start.
 
-The service, probe, and disk layout share these release facts without
-importing one another. The security documents contain a password placeholder,
-not a password; the node resolves it from its environment on each start.
+The service, probe, and disk layout share these release facts. The node
+resolves the security documents' password placeholders from its environment.
 """
 
 from collections.abc import Mapping
 from typing import Final
 
 from gideon.host.render import Artifact, RenderInputs
+from gideon.host.render.worker import COLLECTION_NAMES
 from gideon.host.render.yamlout import dump
 
 OPENSEARCH_SERVICE_NAME: Final = "opensearch"
@@ -50,6 +50,26 @@ OPENSEARCH_METRICS_CLUSTER_PERMISSIONS: Final = (
 )
 OPENSEARCH_METRICS_INDEX_PATTERN: Final = "*"
 OPENSEARCH_METRICS_INDEX_PERMISSIONS: Final = ("indices:monitor/stats*",)
+OPENSEARCH_TURN_USER: Final = "turn"
+OPENSEARCH_TURN_ROLE: Final = "turn"
+OPENSEARCH_TURN_SECRET_NAME: Final = "opensearch_turn_password"
+OPENSEARCH_TURN_PASSWORD_VARIABLE: Final = "GIDEON_OPENSEARCH_TURN_PASSWORD"
+# Writes, index administration, dot-named indices, and cluster reads are
+# outside this role's scope. Widening it requires wiping and reseeding each
+# started store.
+OPENSEARCH_TURN_CLUSTER_PERMISSIONS: Final = (
+    "indices:data/read/mget",
+    "indices:data/read/msearch",
+    "indices:data/read/scroll",
+    "indices:data/read/scroll/clear",
+)
+OPENSEARCH_TURN_INDEX_PERMISSIONS: Final = (
+    "indices:data/read/search*",
+    "indices:data/read/get*",
+    "indices:data/read/mget*",
+    "indices:data/read/point_in_time/create",
+    "indices:data/read/point_in_time/delete",
+)
 # exempt: 1024 MiB is the acceptance machine's floor, not a tuned heap value.
 OPENSEARCH_NO_GPU_HEAP_MIB: Final = 1024
 # exempt: 31 GiB (31744 MiB) is the JVM compressed-pointer ceiling;
@@ -74,6 +94,18 @@ def opensearch_metrics_target() -> str:
     """Return the plugin's Compose-network host and port."""
 
     return f"{OPENSEARCH_SERVICE_NAME}:{OPENSEARCH_REST_PORT}"
+
+
+def opensearch_rest_url() -> str:
+    """Return the store's HTTP address on the Compose network."""
+
+    return f"http://{OPENSEARCH_SERVICE_NAME}:{OPENSEARCH_REST_PORT}"
+
+
+def opensearch_turn_index_patterns() -> list[str]:
+    """Return the generation index pattern for each registered collection."""
+
+    return [f"{name}__*" for name in COLLECTION_NAMES]
 
 
 def opensearch_settings_document() -> Mapping[str, object]:
@@ -155,6 +187,10 @@ def opensearch_internal_users_document() -> Mapping[str, object]:
             "hash": f"${{envbc.{OPENSEARCH_METRICS_PASSWORD_VARIABLE}}}",
             "reserved": True,
         },
+        OPENSEARCH_TURN_USER: {
+            "hash": f"${{envbc.{OPENSEARCH_TURN_PASSWORD_VARIABLE}}}",
+            "reserved": True,
+        },
     }
 
 
@@ -165,6 +201,31 @@ def opensearch_roles_mapping_document() -> Mapping[str, object]:
         **_meta_document("rolesmapping"),
         "all_access": {"users": [OPENSEARCH_USER]},
         OPENSEARCH_METRICS_ROLE: {"users": [OPENSEARCH_METRICS_USER]},
+        OPENSEARCH_TURN_ROLE: {"users": [OPENSEARCH_TURN_USER]},
+    }
+
+
+def opensearch_roles_document() -> Mapping[str, object]:
+    """Define the metrics and generation-index readers' reserved roles."""
+
+    return {
+        **_meta_document("roles"),
+        OPENSEARCH_METRICS_ROLE: {
+            "reserved": True,
+            "cluster_permissions": list(OPENSEARCH_METRICS_CLUSTER_PERMISSIONS),
+            "index_permissions": [{
+                "index_patterns": [OPENSEARCH_METRICS_INDEX_PATTERN],
+                "allowed_actions": list(OPENSEARCH_METRICS_INDEX_PERMISSIONS),
+            }],
+        },
+        OPENSEARCH_TURN_ROLE: {
+            "reserved": True,
+            "cluster_permissions": list(OPENSEARCH_TURN_CLUSTER_PERMISSIONS),
+            "index_permissions": [{
+                "index_patterns": opensearch_turn_index_patterns(),
+                "allowed_actions": list(OPENSEARCH_TURN_INDEX_PERMISSIONS),
+            }],
+        },
     }
 
 
@@ -206,7 +267,7 @@ class OpensearchInternalUsersArtifact(_OpensearchArtifact):
 
 
 class OpensearchRolesMappingArtifact(_OpensearchArtifact):
-    """The data-plane and metrics user-to-role mappings."""
+    """The internal users' role mappings."""
 
     name = "opensearch-roles-mapping"
     relative_path = "opensearch/security/roles_mapping.yml"
@@ -217,24 +278,14 @@ class OpensearchRolesMappingArtifact(_OpensearchArtifact):
 
 
 class OpensearchRolesArtifact(_OpensearchArtifact):
-    """The metrics reader's restricted role beside the built-in roles."""
+    """The restricted reader roles beside the built-in roles."""
 
     name = "opensearch-roles"
     relative_path = "opensearch/security/roles.yml"
 
     def emit(self, inputs: RenderInputs) -> str:
         del inputs
-        return dump({
-            **_meta_document("roles"),
-            OPENSEARCH_METRICS_ROLE: {
-                "reserved": True,
-                "cluster_permissions": list(OPENSEARCH_METRICS_CLUSTER_PERMISSIONS),
-                "index_permissions": [{
-                    "index_patterns": [OPENSEARCH_METRICS_INDEX_PATTERN],
-                    "allowed_actions": list(OPENSEARCH_METRICS_INDEX_PERMISSIONS),
-                }],
-            },
-        })
+        return dump(opensearch_roles_document())
 
 
 class OpensearchActionGroupsArtifact(_OpensearchArtifact):

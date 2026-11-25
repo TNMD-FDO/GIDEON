@@ -69,6 +69,7 @@ _VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(r"eval-v[0-9]+")
 _EXTRACTION_ID: Final[re.Pattern[str]] = re.compile(r"extraction-[0-9]{3}")
 _VARIANT_AXIS: Final[re.Pattern[str]] = re.compile(r"[a-z]+(?:-[a-z]+)*@[1-9][0-9]*")
 JUDGMENT_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"judgments-[0-9]{3,}")
+SHA256_PATTERN: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _TRIPLE_ID: Final[re.Pattern[str]] = re.compile(r"judge-[0-9]{3}")
 _HARVEST_ID: Final[re.Pattern[str]] = re.compile(r"HARV-[0-9]{3}")
 _HARVEST_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[0-9a-f]+")
@@ -1110,7 +1111,7 @@ def _validate_synthetic_fields(
         for key in ("citation_id", "signal_id"):
             if key in spec.gold_keys_for():
                 value = entry.get(key)
-                if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
                     findings.append(Finding(file, case_id, line, f"{rule}.{key}", _CASE_FIX))
         if "pattern_set" in spec.gold_keys_for():
             pattern_set = entry.get("pattern_set")

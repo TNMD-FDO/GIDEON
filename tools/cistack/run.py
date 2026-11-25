@@ -16,6 +16,7 @@ from gideon.evaluation import command as evaluation_command
 from gideon.host import (
     apply,
     backuplock,
+    derivedstores,
     nogpu,
     owui,
     render,
@@ -616,6 +617,17 @@ def _verify_stage(
     )
     if not ready:
         return StageResult("verify", False, detail, stack.logs_fix(ci_stack.project_dir, service))
+    reader = derivedstores.verify_opensearch_turn_reader(
+        io,
+        ci_stack.project_dir,
+        unauthorized_fix=(
+            "Run sudo python3 -m tools.cistack down --wipe, then sudo python3 -m tools.cistack up. "
+            f"Run {command('index build caselaw --sample')}, then "
+            f"{command('index promote <generation>')} with the generation the build names."
+        ),
+    )
+    if reader is not None:
+        return StageResult("verify", False, reader.problem, reader.fix)
     try:
         frontend_ready = client_factory().ready()
     except (owui.OwuiError, OSError, subprocess.SubprocessError) as exc:
