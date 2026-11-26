@@ -1,0 +1,15 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "fixture-embed",
+      "object": "model",
+      "created": 0,
+      "owned_by": "fixture-owner",
+      "root": "fixture-owner/fixture-embed",
+      "parent": null,
+      "max_model_len": 128,
+      "permission": []
+    }
+  ]
+}

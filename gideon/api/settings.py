@@ -46,6 +46,10 @@ class Settings:
     opensearch_url: str
     opensearch_user: str
     opensearch_password_file: Path
+    embed_model: str
+    embed_repository: str
+    embed_space: str
+    embed_dimensions: int
     rerank_url: str | None = None
     rerank_key_file: Path | None = None
 
@@ -67,12 +71,16 @@ def _read_file(path: Path, kind: str) -> str:
     return value
 
 
-def _tcp_port(environ: Mapping[str, str], name: str) -> int:
-    port_text = _required_environment(environ, name)
+def _integer_environment(environ: Mapping[str, str], name: str) -> int:
+    value = _required_environment(environ, name)
     try:
-        port = int(port_text)
+        return int(value)
     except ValueError as exc:
         raise ValueError(f"Environment variable {name} must be an integer.") from exc
+
+
+def _tcp_port(environ: Mapping[str, str], name: str) -> int:
+    port = _integer_environment(environ, name)
     if not 1 <= port <= 65_535:
         raise ValueError(f"Environment variable {name} must be a valid TCP port.")
     return port
@@ -119,6 +127,10 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     cas_root = Path(_required_environment(values, "GIDEON_API_CAS_ROOT"))
     if not cas_root.is_absolute():
         raise ValueError("Environment variable GIDEON_API_CAS_ROOT must be an absolute path.")
+    dimensions_name = "GIDEON_API_EMBED_DIMENSIONS"
+    embed_dimensions = _integer_environment(values, dimensions_name)
+    if embed_dimensions <= 0:
+        raise ValueError(f"Environment variable {dimensions_name} must be positive.")
     rerank_url = None
     rerank_key_file = None
     if _RERANK_URL_ENV in values or _RERANK_KEY_FILE_ENV in values:
@@ -152,6 +164,10 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         opensearch_url=_http_url(values, "GIDEON_API_OPENSEARCH_URL"),
         opensearch_user=_required_environment(values, "GIDEON_API_OPENSEARCH_USER"),
         opensearch_password_file=_secret_file(values, "GIDEON_API_OPENSEARCH_PASSWORD_FILE"),
+        embed_model=_required_environment(values, "GIDEON_API_EMBED_MODEL"),
+        embed_repository=_required_environment(values, "GIDEON_API_EMBED_REPOSITORY"),
+        embed_space=_required_environment(values, "GIDEON_API_EMBED_SPACE"),
+        embed_dimensions=embed_dimensions,
         rerank_url=rerank_url,
         rerank_key_file=rerank_key_file,
     )

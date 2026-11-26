@@ -91,9 +91,9 @@ def _candidate(
     if isinstance(promoted, Problem):
         return promoted
     current = serving.select_serving(promoted, row.collection)
-    if isinstance(current, Problem):
+    if isinstance(current, serving.AmbiguousGeneration):
         return Problem(
-            current.problem,
+            f"collection {current.collection} has multiple live generations",
             f"Run {stack.logs_fix(rendered_dir, 'postgres')}, "
             f"then run {report.command(command_path)} again.",
         )

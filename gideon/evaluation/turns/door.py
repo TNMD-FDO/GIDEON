@@ -1,4 +1,4 @@
-"""Call General through the API service door.
+"""Send requests through the API service door and handle General completions.
 
 The client source is read once from this package and executed inside
 ``gideon-api`` with the mounted API key.  The client receives one JSON request
@@ -36,7 +36,7 @@ from typing import Final
 from urllib.parse import quote
 
 from gideon.evaluation.turns import session
-from gideon.evaluation.turns.doorclient import KEY_FILE_EXIT_CODE
+from gideon.evaluation.turns.doorclient import FAILURE_EXIT_CODE, KEY_FILE_EXIT_CODE
 from gideon.host import report, stack
 from gideon.host.engine import RUN_TIMEOUT_MARGIN_SECONDS
 from gideon.host.render.api import (
@@ -206,8 +206,10 @@ def _failure_reply(
     )
 
 
-def _parse_envelope(stdout: str, rendered_dir: PathLike) -> DoorReply:
-    """Parse the client's line-delimited envelope without retaining failures' bodies."""
+def _parse_envelope(
+    stdout: str, rendered_dir: PathLike, *, returncode: int, keep_failure_detail: bool,
+) -> DoorReply:
+    """Parse the client's envelope, requiring a failure record on a failure exit."""
 
     lines = [line for line in stdout.splitlines() if line.strip()]
     if not lines:
@@ -269,13 +271,13 @@ def _parse_envelope(stdout: str, rendered_dir: PathLike) -> DoorReply:
     if terminal_kind == "failure":
         return _failure_reply(rendered_dir, terminal, status)
     seconds = _finite_number(terminal.get("seconds"))
-    if terminal_kind != "elapsed" or seconds is None:
+    if returncode != 0 or terminal_kind != "elapsed" or seconds is None:
         return _invalid_envelope(rendered_dir)
     if status != 200:
         return DoorReply(
             status,
             media_type,
-            "",
+            (body_text or "") if keep_failure_detail else "",
             (),
             False,
             seconds,
@@ -294,19 +296,20 @@ def _parse_envelope(stdout: str, rendered_dir: PathLike) -> DoorReply:
     return reply
 
 
-def _run(
+def request(
     io: Host,
     rendered_dir: PathLike,
     *,
     url: str,
     body: Mapping[str, object] | None,
     max_time: float,
+    keep_failure_detail: bool = False,
 ) -> DoorReply:
-    """Run the copied client in the API container and parse its envelope."""
+    """Send one keyed API request with optional HTTP body and client failure detail."""
 
     try:
         source = _client_source()
-        request = json.dumps({"headers": identity_headers(), "body": body})
+        request_text = json.dumps({"headers": identity_headers(), "body": body})
     except (OSError, UnicodeError, TypeError, ValueError):
         return _empty_reply(_problem(rendered_dir, "door client source or request is unavailable"))
 
@@ -326,7 +329,7 @@ def _run(
     try:
         result = io.run(
             argv,
-            input=request,
+            input=request_text,
             timeout=max_time + RUN_TIMEOUT_MARGIN_SECONDS,
         )
     except subprocess.TimeoutExpired:
@@ -335,7 +338,9 @@ def _run(
         )
     except OSError:
         return _empty_reply(_problem(rendered_dir, "door request failed: OSError"))
-    if result.returncode != 0:
+    if result.returncode != 0 and not (
+        keep_failure_detail and result.returncode == FAILURE_EXIT_CODE
+    ):
         return _empty_reply(
             _problem(
                 rendered_dir,
@@ -343,7 +348,10 @@ def _run(
                 key=result.returncode == KEY_FILE_EXIT_CODE,
             )
         )
-    return _parse_envelope(result.stdout, rendered_dir)
+    return _parse_envelope(
+        result.stdout, rendered_dir,
+        returncode=result.returncode, keep_failure_detail=keep_failure_detail,
+    )
 
 
 def _completion_message(body_text: str) -> Mapping[str, object] | None:
@@ -377,7 +385,7 @@ def complete(
 ) -> DoorReply:
     """Send one tagged prompt through the door and validate whole replies."""
 
-    reply = _run(
+    reply = request(
         io,
         rendered_dir,
         url=f"{api_base_url()}{_COMPLETIONS_PATH}",
@@ -470,7 +478,7 @@ def probe(
 ) -> ProbeResult:
     """Probe the models route through the door and require the requested model."""
 
-    reply = _run(
+    reply = request(
         io,
         rendered_dir,
         url=f"{api_base_url()}{_MODELS_PATH}",

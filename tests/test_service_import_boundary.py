@@ -7,19 +7,26 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from gideon import guardrail
+from gideon.host.index.generations import COLLECTIONS
 from gideon.host.render.api import API_SERVICE_NAME
 from gideon.host.render.services import declared_sources
 from gideon.host.render.worker import WORKER_SERVICE_NAME
+from gideon.turn.generation import TURN_COLLECTION
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PARENT_INITIALIZER = REPO_ROOT / "gideon/__init__.py"
+FILE_SOURCE_PARENTS = (
+    REPO_ROOT / "gideon/host/__init__.py",
+    REPO_ROOT / "gideon/host/index/__init__.py",
+)
 ALLOWED_DEPENDENCIES = frozenset(
     {"starlette", "uvicorn", "httpx", "anyio", "procrastinate", "lxml", "eyecite", "tiktoken",
      guardrail.TRIP_DRIVER_MODULE}
 )
 # The adapter imports a library the image carries and the dev venv does not, so
 # its callers import it where it is used and refuse by name when it is missing.
-DEFERRED_MODULES = frozenset({"gideon.casecite.adapter"})
+_CASE_ADAPTER = "gideon.casecite.adapter"
+DEFERRED_MODULES = frozenset({_CASE_ADAPTER})
 _FIX = (
     "Keep service imports at module level and limited to the standard library, "
     "the image dependencies, or the service's declared sources."
@@ -122,6 +129,10 @@ def _internal_import_error(
             f"`{dotted}` is outside the service's declared sources or is a bare "
             "gideon package name.",
         )
+    if dotted == _CASE_ADAPTER and path.relative_to(REPO_ROOT).parts[:2] in (
+        ("gideon", "turn"), ("gideon", "api"),
+    ) and (module_level or module_name(path) != "gideon.turn.objects"):
+        return _error(path, node, f"`{dotted}` must be deferred in gideon/turn/objects.py.")
     if not module_level and dotted not in DEFERRED_MODULES:
         return _error(path, node, f"`{dotted}` is a deferred import inside gideon.")
     return None
@@ -134,21 +145,21 @@ def import_violations(path: Path, source: str, modules: frozenset[str]) -> list[
     problems: list[str] = []
     for node, module_level in _imports(tree):
         if isinstance(node, ast.Import):
-            targets = [(alias.name, alias.name) for alias in node.names]
+            targets = [alias.name for alias in node.names]
         else:
             base = _relative_base(node, path)
-            targets = [(base, base)] if base else []
+            targets = [base] if base else []
             if base == "gideon" and node.level:
                 problems.append(_error(path, node, "a relative import reaches the bare gideon package."))
                 continue
             if base == "gideon" and node.level == 0:
-                targets = [
-                    (f"{base}.{alias.name}", f"{base}.{alias.name}")
-                    for alias in node.names
-                ]
+                targets = [f"{base}.{alias.name}" for alias in node.names]
             elif base.startswith("gideon"):
-                targets = [(base, base)]
-        for dotted, display in targets:
+                targets = []
+                for alias in node.names:
+                    name = f"{base}.{alias.name}"
+                    targets.append(name if name in DEFERRED_MODULES else base)
+        for dotted in dict.fromkeys(targets):
             top = dotted.partition(".")[0]
             if top != "gideon":
                 if top not in sys.stdlib_module_names and top not in ALLOWED_DEPENDENCIES:
@@ -156,7 +167,7 @@ def import_violations(path: Path, source: str, modules: frozenset[str]) -> list[
                         _error(
                             path,
                             node,
-                            f"`{display}` is neither stdlib nor an allowed image dependency.",
+                            f"`{dotted}` is neither stdlib nor an allowed image dependency.",
                         )
                     )
                 continue
@@ -166,17 +177,12 @@ def import_violations(path: Path, source: str, modules: frozenset[str]) -> list[
     return problems
 
 
-def initializer_violations(path: Path, source: str) -> list[str]:
+def initializer_violations(path: Path, source: str, *, version_required: bool = True) -> list[str]:
     """Return violations of the inert parent-package initializer contract."""
 
     tree = ast.parse(source, filename=str(path))
     body = list(tree.body)
-    valid_docstring = bool(
-        body
-        and isinstance(body[0], ast.Expr)
-        and isinstance(body[0].value, ast.Constant)
-        and isinstance(body[0].value.value, str)
-    )
+    valid_docstring = ast.get_docstring(tree) is not None
     valid_version = bool(
         len(body) == 2
         and isinstance(body[1], ast.Assign)
@@ -186,13 +192,13 @@ def initializer_violations(path: Path, source: str) -> list[str]:
         and isinstance(body[1].value, ast.Constant)
         and isinstance(body[1].value.value, str)
     )
-    if valid_docstring and valid_version:
+    if valid_docstring and (valid_version if version_required else len(body) == 1):
         return []
+    expected = "a module docstring and one string __version__ assignment" if version_required else "a module docstring"
     line = body[-1].lineno if body else 1
     return [
-        f"{path.relative_to(REPO_ROOT)}:{line}: gideon/__init__.py must contain only "
-        "a module docstring and one string __version__ assignment. Fix: remove "
-        "the added statement from the parent initializer."
+        f"{path.relative_to(REPO_ROOT)}:{line}: The initializer must contain only {expected}. "
+        "Fix: keep only those statements in the parent initializer."
     ]
 
 
@@ -212,7 +218,37 @@ class ServiceImportBoundary(unittest.TestCase):
             initializer_violations(PARENT_INITIALIZER, PARENT_INITIALIZER.read_text()), []
         )
 
+    def test_file_source_parents_contain_only_a_docstring(self) -> None:
+        for path in FILE_SOURCE_PARENTS:
+            with self.subTest(path=path):
+                self.assertEqual(initializer_violations(path, path.read_text(), version_required=False), [])
+
+    def test_turn_collection_is_registered(self) -> None:
+        self.assertIn(TURN_COLLECTION, {collection.name for collection in COLLECTIONS})
+
+    def test_shared_turn_modules_only_use_standard_library_dependencies(self) -> None:
+        for relative in (
+            "gideon/turn/__init__.py", "gideon/turn/instruction.py", "gideon/turn/config.py",
+            "gideon/turn/fusion.py", "gideon/turn/states.py", "gideon/host/index/serving.py",
+            "gideon/api/errors.py", "gideon/turn/events.py", "gideon/turn/prompt.py",
+            "gideon/turn/generator.py",
+        ):
+            path = REPO_ROOT / relative
+            with self.subTest(path=relative):
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                for node, _ in _imports(tree):
+                    names = (
+                        [alias.name for alias in node.names] if isinstance(node, ast.Import)
+                        else [_relative_base(node, path)]
+                    )
+                    for name in names:
+                        # States uses the shared error builder, whose imports are checked here too.
+                        if relative == "gideon/turn/states.py" and name == "gideon.api.errors":
+                            continue
+                        self.assertIn(name.partition(".")[0], sys.stdlib_module_names, _location(path, node))
+
     def test_only_the_image_only_adapter_may_be_imported_where_used(self) -> None:
+        self.assertEqual(DEFERRED_MODULES, {"gideon.casecite.adapter"})
         path = REPO_ROOT / "gideon/worker/caselaw.py"
         modules = declared_modules(declared_sources()[WORKER_SERVICE_NAME])
         allowed = "def deferred() -> None:\n    from gideon.casecite.adapter import find_citations\n"
@@ -221,6 +257,29 @@ class ServiceImportBoundary(unittest.TestCase):
         errors = import_violations(path, refused, modules)
         self.assertEqual(len(errors), 1)
         self.assertIn("deferred import", errors[0])
+
+    def test_api_and_turn_defer_the_case_adapter_only_in_objects(self) -> None:
+        sources = declared_sources()[API_SERVICE_NAME]
+        self.assertTrue({"gideon/extraction", "gideon/casecite"} <= set(sources))
+        modules = declared_modules(sources)
+        loader = REPO_ROOT / "gideon/turn/objects.py"
+        for statement in (
+            "from gideon.casecite.adapter import extract_indexed_case_cites",
+            "from gideon.casecite import adapter",
+            "from ..casecite import adapter",
+            "import gideon.casecite.adapter",
+        ):
+            with self.subTest(statement=statement):
+                deferred = f"def load() -> None:\n    {statement}\n"
+                self.assertEqual(import_violations(loader, deferred, modules), [])
+                for path, source in (
+                    (loader, statement),
+                    (REPO_ROOT / "gideon/turn/endpoint.py", deferred),
+                    (REPO_ROOT / "gideon/api/app.py", deferred),
+                ):
+                    with self.subTest(path=path):
+                        error, = import_violations(path, source, modules)
+                        self.assertIn("must be deferred in gideon/turn/objects.py", error)
 
     def test_unlisted_import_at_module_and_function_scope_is_rejected(self) -> None:
         path = REPO_ROOT / "gideon/api/app.py"
@@ -272,11 +331,13 @@ class ServiceImportBoundary(unittest.TestCase):
         self.assertIn("service's declared sources", errors[0])
 
     def test_parent_initializer_rejects_an_added_statement(self) -> None:
-        source = PARENT_INITIALIZER.read_text() + "\nanswer = 1\n"
-        errors = initializer_violations(PARENT_INITIALIZER, source)
-        self.assertTrue(errors)
-        self.assertIn("initializer", errors[0])
-        self.assertIn("Fix:", errors[0])
+        for path in (PARENT_INITIALIZER, *FILE_SOURCE_PARENTS):
+            with self.subTest(path=path):
+                source = path.read_text() + "\nanswer = 1\n"
+                errors = initializer_violations(path, source, version_required=path == PARENT_INITIALIZER)
+                self.assertTrue(errors)
+                self.assertIn("initializer", errors[0])
+                self.assertIn("Fix:", errors[0])
 
 
 if __name__ == "__main__":

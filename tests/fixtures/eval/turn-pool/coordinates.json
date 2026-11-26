@@ -1,0 +1,969 @@
+{
+ "chunks": [
+  {
+   "char_end": 11601,
+   "char_start": 9433,
+   "chunk_id": "04afeb29cf30eb0dc8ffea83770465e40a5cab7911e5b18dc6f3649e10ab7633",
+   "doc_id": "fe9413a13e92ed6c6acf02e0921ea996a25029cfab327e3a2e5d64ff800a77b9"
+  },
+  {
+   "char_end": 17696,
+   "char_start": 16114,
+   "chunk_id": "06e9a1c5ae527a2eebba1f72eab084d110a0727844badeefdee13a0918ded761",
+   "doc_id": "6f3196f5ca23c019e8e31935e74491646f7847ad01dc3251971c89350064d154"
+  },
+  {
+   "char_end": 8150,
+   "char_start": 6612,
+   "chunk_id": "089e00b51e0c4fd17e47066da4717f60318442bac0d3f5b605a35c13f1937158",
+   "doc_id": "7d2ac51507435c116ed97978e63ffef85721e3e30756dd5cbd8576498d61c4b4"
+  },
+  {
+   "char_end": 68470,
+   "char_start": 66910,
+   "chunk_id": "0a4df51ff1b7e374ba379d8ca026dcf9528553ce7e9e3c22f81ed8ea98e3ffe6",
+   "doc_id": "03b1c3205fb2e279ed7a5a56140486ba3cab438a439731a3dea91e7e62a4e3c5"
+  },
+  {
+   "char_end": 14299,
+   "char_start": 12714,
+   "chunk_id": "0b8409a347c197702787f059ff4ed6ec7a87d3610eda36651c30403d83489cca",
+   "doc_id": "1f9dd0335d113053839e621ec5adc5515a683d94eec6f9c4293b902a832e34bc"
+  },
+  {
+   "char_end": 86347,
+   "char_start": 84382,
+   "chunk_id": "0d6c7d4ad44b21f0104c4389a91e44dd1fb864882207123ea631a7a8d5d18f04",
+   "doc_id": "68076a8c8900af91af87354340c23d744361e94e07c7fa095f6888cf11a32e40"
+  },
+  {
+   "char_end": 28053,
+   "char_start": 27138,
+   "chunk_id": "10a8bf1a6708a0a1051eb5b60245b7dd78449978529ad09917f46bc7a1a96111",
+   "doc_id": "349415d6258aca52e0634caa31cc4d820ff30e4757b338e0e0e27ffb768c3ab6"
+  },
+  {
+   "char_end": 5875,
+   "char_start": 4061,
+   "chunk_id": "11ccd3408c0e3a954feca0bb2c7c027c2affe038c2a781fd957515b6fe3aa006",
+   "doc_id": "187be5236bdbdd6c629ca4c09b7f3ee1d6cc23e8582dab1812a79d5ce77d45a5"
+  },
+  {
+   "char_end": 22062,
+   "char_start": 21027,
+   "chunk_id": "195047aa71ca8b88e88d26d182d78045aa640baba2752b49a49b710d62029668",
+   "doc_id": "719053be8e1ae27aff2cfb140583bc367a9e2f799b383df161ab7c16b7d22491"
+  },
+  {
+   "char_end": 9978,
+   "char_start": 8215,
+   "chunk_id": "1f9d1c04e21dd060923c661c637cef4df530882e960897ab8607a63655436e31",
+   "doc_id": "f419d233fca83efcb0478bd1b2e12caf95bc8fb92f10e70744884bde14a3379d"
+  },
+  {
+   "char_end": 4653,
+   "char_start": 3045,
+   "chunk_id": "20dc465f2b2be32378e5725cd19a9d35548b841f4f7363e9ddaa47529d4ecc45",
+   "doc_id": "dd1d60a20a4745d201e2b50cfb9a8f3ac43b2ab56021fe8bb4e0a21072d70c93"
+  },
+  {
+   "char_end": 6100,
+   "char_start": 4320,
+   "chunk_id": "224a2fe67314ce501258fa5f0989b3ae69f9e8c60822182b0407d8c058556c62",
+   "doc_id": "8cb1c889597b540a377e66c3078eeab56dd7b1fe2b6ab8cd3c2460ca3df43831"
+  },
+  {
+   "char_end": 18373,
+   "char_start": 16527,
+   "chunk_id": "29976d5abf8c7d96dacc00287532bffecdf23a7518d7782bdee4e708dd85511d",
+   "doc_id": "7ceb079fecef786bcce29e220cf36530e4f2136ee016de7c60b5f51d9ccf0acc"
+  },
+  {
+   "char_end": 15634,
+   "char_start": 14173,
+   "chunk_id": "2b18a9d8de12bc40e800d075a4aff08d2bfa81cfe5ba6f499d59224174c0dee2",
+   "doc_id": "47fe7f9a953dc38cf3e4f7edf74c210e5f836ae1507245b2845ba6386efb7c44"
+  },
+  {
+   "char_end": 12660,
+   "char_start": 10840,
+   "chunk_id": "2cf5a053b670540fb7fa51628b50efba3e77cf72fedaa81f1d1bcf56e00c8829",
+   "doc_id": "c6171986ed6136ac817a632388f1af8aed29027252b6c6379259f470ebe732a8"
+  },
+  {
+   "char_end": 5380,
+   "char_start": 3851,
+   "chunk_id": "2eb235a196803f76edfe8a81afeb2b715833d8edf41097e2d0d1597d3b134e3f",
+   "doc_id": "e9c87b477ece89c1a513356052501b91556132bf1953ab15ca8f807d7b0530ec"
+  },
+  {
+   "char_end": 18834,
+   "char_start": 16617,
+   "chunk_id": "2f0edc4deb7532df0e43c6c060131861b4abe6e5f254fad2ea3fe00bbaf2d410",
+   "doc_id": "d336fb24ccddf02a842757cd3f32dee26e53bbf3973d389ede5b7f8de2f48043"
+  },
+  {
+   "char_end": 26702,
+   "char_start": 25493,
+   "chunk_id": "31be16ba4038d5c366fb76af0c0b669d3921abd996da21c7789462441b20bd53",
+   "doc_id": "cd68c6747e8aab1747242eeef874f4f59bdb279c0f9c943828e08610cca7d026"
+  },
+  {
+   "char_end": 10250,
+   "char_start": 8368,
+   "chunk_id": "31d3948870720b9abc8828b60a4e02b6ce3e30d2d777540fd7293d4f9b53b26c",
+   "doc_id": "9fe422a77128e1940378779a96ed4f920b8a6ec83922d170a9377d70988a2c80"
+  },
+  {
+   "char_end": 34456,
+   "char_start": 33637,
+   "chunk_id": "34c6e7a333deac99e08fa837f8e8e0e51d27e4fecfdc63c49f961a8c63718f0d",
+   "doc_id": "5013190710c222b0f73af0b4b53ee0871a590ddd81898783f5ea4e4f3f03970a"
+  },
+  {
+   "char_end": 14005,
+   "char_start": 12469,
+   "chunk_id": "3683dc580302f4b10421b328a57a315ae7d0624d09588b8731a6c2a315e79deb",
+   "doc_id": "d5bc6a57ad46896a6626822578a864cd1471bf474d70a71224318fb627b8bd23"
+  },
+  {
+   "char_end": 9617,
+   "char_start": 7834,
+   "chunk_id": "37a72dfbbf5b5e8dece23b2e2535589287944122c249285bbf52229856470118",
+   "doc_id": "73039dfba1d2eab2e450ce314adaaafab1fd23cc59684a60c7bb340e0e3c8bfc"
+  },
+  {
+   "char_end": 80902,
+   "char_start": 79802,
+   "chunk_id": "38ce9e3209038f8b4c841e58d78839444c7267ba116bd303ed1b851ce21028c0",
+   "doc_id": "42cef5f7bc4d71beab7ff81ce048a4f76c5624e222c8cd3460173ddee25b1d72"
+  },
+  {
+   "char_end": 11503,
+   "char_start": 9828,
+   "chunk_id": "3b44ff0bb522056963b8af55177f829a7a1c342c349917e5015f288f502b1e48",
+   "doc_id": "aa238e5524c61c137000320a51469ebbbf8a79d934364ca7f74ec82ad6abe336"
+  },
+  {
+   "char_end": 8913,
+   "char_start": 7137,
+   "chunk_id": "3df6fff8ace15c5f8563c03777bd6ccf2ca9d9c56e9a5df70a70f8dd78011e65",
+   "doc_id": "e9c87b477ece89c1a513356052501b91556132bf1953ab15ca8f807d7b0530ec"
+  },
+  {
+   "char_end": 16310,
+   "char_start": 15456,
+   "chunk_id": "3e6c06592dbfb4f37cf23651127327a81a1b0624c69ce300e8497ab2ae9896b9",
+   "doc_id": "f419d233fca83efcb0478bd1b2e12caf95bc8fb92f10e70744884bde14a3379d"
+  },
+  {
+   "char_end": 7191,
+   "char_start": 4691,
+   "chunk_id": "417370e8945f39444598a2a0208eaddd2dcc5a531ebc9c09136c1cd9c2adae69",
+   "doc_id": "e7a2106c99b3fbbd272e2fc5e714f3fd152f89d4fc0cb9100c014fa9a4acffad"
+  },
+  {
+   "char_end": 31174,
+   "char_start": 29858,
+   "chunk_id": "42e3d0dc971372e860a3d1d21810c3f562274e0f1aaad71659abcdf47984777a",
+   "doc_id": "e9b77c76ac87aa80a8f8334e5f94237b62fa12ad96b9e62d91cef29d3138a3d9"
+  },
+  {
+   "char_end": 12851,
+   "char_start": 10895,
+   "chunk_id": "4879009def31fad53db71b8bdfe50c757483aace301fda3461c97a1b80d88987",
+   "doc_id": "8b421195f95c1f26f2067e6f8a665a6791384b44e2c3bf3d65e6d733e136305d"
+  },
+  {
+   "char_end": 15664,
+   "char_start": 13659,
+   "chunk_id": "49007f43afa1d110933c0e9c121b4b44922272698ca7ace3b5f65c8b246591d4",
+   "doc_id": "18a79cd023ff2722ac1f6f32c340c712afb5ce8a92776987b1268d08530b947c"
+  },
+  {
+   "char_end": 14602,
+   "char_start": 12610,
+   "chunk_id": "49a23c3df5aee46eecbae532506a2088c92bd6e450f45f3ac1623151cf219a21",
+   "doc_id": "6705e54aae63c791327711e4946e302b27bd3d07b647c428473aebfca6d2de00"
+  },
+  {
+   "char_end": 16914,
+   "char_start": 16061,
+   "chunk_id": "4bcea96f8fa08ae2e78a975bb365086c194344a5d791ce6c55a286e21a1e588d",
+   "doc_id": "6896379ffd3fa87453f795e7fe6d64524672aaed593e52424377004883e8e3c2"
+  },
+  {
+   "char_end": 32961,
+   "char_start": 31044,
+   "chunk_id": "4c81ce668f6a62296e5bc402e961a92e929be90f8ef802f2fbb0791c4096d168",
+   "doc_id": "6a55e1e65b64aecd4b777dd2e14ac849718ac782b267947d36a55e99abd822a6"
+  },
+  {
+   "char_end": 11882,
+   "char_start": 10055,
+   "chunk_id": "4d29b099138bab8d3c3ec38d3cc66b2dbb84898b93a93d306092b80b7e10a228",
+   "doc_id": "51628795b246a7bfa6cc0826e4082de1d807150163703e9bf673cab685d3c331"
+  },
+  {
+   "char_end": 16092,
+   "char_start": 14626,
+   "chunk_id": "52e6eaa8b14a4a5bf71505f4a73556e553bbe52ea21b0ca342f2b35cfdc3b014",
+   "doc_id": "db0762f0b8c9dbde675f69921e1e08a66dc3ff0e3b72f6e9d837c587f35e3ff5"
+  },
+  {
+   "char_end": 15887,
+   "char_start": 14647,
+   "chunk_id": "5406c8898a7e0c095b818fb770cf9414b54f28dbfcc3baa3e5ba8f4d0150e57e",
+   "doc_id": "c47b1be13d299dbc6545766f259ad51819a18d66e3f508f9a186e12031b405fc"
+  },
+  {
+   "char_end": 31101,
+   "char_start": 28996,
+   "chunk_id": "5608f5349ddb9198de17c0845c700771548a0aca8cca6362f46dd178881a70da",
+   "doc_id": "20b515087d9a4b303d37632a0c6de73285817efc25cb0022f41503ab670d2898"
+  },
+  {
+   "char_end": 9605,
+   "char_start": 7431,
+   "chunk_id": "583b3985b4a573e61cf3bdada3d9d55d225e9b2f6761db6785b2b8ab990f2b2e",
+   "doc_id": "87fef2f28418d682a45e0c44a58fabbc4a98af1e3fd2b854978d11948e75eca1"
+  },
+  {
+   "char_end": 2338,
+   "char_start": 0,
+   "chunk_id": "5a16d0968e473be0d0d69cdab12003451e35f6598593f0c8b9fdfc443b102054",
+   "doc_id": "dd1d60a20a4745d201e2b50cfb9a8f3ac43b2ab56021fe8bb4e0a21072d70c93"
+  },
+  {
+   "char_end": 27210,
+   "char_start": 25036,
+   "chunk_id": "62b1d6bef519458edc0a5296796a97953f5696a386a490e22d28bc8e26858cf3",
+   "doc_id": "1e0bd877b0417dafc6f1ca5337ec2a5752eba5a4895e70d5b774a48b91fc5196"
+  },
+  {
+   "char_end": 30575,
+   "char_start": 29259,
+   "chunk_id": "64a994e51d372f60c7e544c2f6fa2cfe3a5f0ad839ec9d74788c5ce163679eb8",
+   "doc_id": "e9111b9fb9e3e355354d49cf46155a2963632cf93cb7b28036c6ebbbfa711de3"
+  },
+  {
+   "char_end": 6964,
+   "char_start": 5910,
+   "chunk_id": "6b4ecd9a6bd346f898e310fac2d63b5bd2b1968d93659a6524f6cf5bef6b665f",
+   "doc_id": "a89fcaa6bf204b2cb9f72848c90b47d6f3c875bdc45b70716c4d77d2945103bd"
+  },
+  {
+   "char_end": 25504,
+   "char_start": 25218,
+   "chunk_id": "6d6049a59bb1a278506c1d1fec144ffc0f26a50c89b7455c08ce70588e09e18a",
+   "doc_id": "8109c799a2804532a9336516ca6ae2584287d37602f0ff5ffaf5a81c146faebb"
+  },
+  {
+   "char_end": 16389,
+   "char_start": 15009,
+   "chunk_id": "6d9360d5c745f0efaeb9db9ef41eaeaf592840969378eedd12b43a6a538cb7e4",
+   "doc_id": "ccc33d38ceb2056c1658e8adbcc14585f5a270c542aae1e36e91b615741abb8a"
+  },
+  {
+   "char_end": 33651,
+   "char_start": 33236,
+   "chunk_id": "6e301d7e04d0f8b0f87ba9fa9cdcc2a8403603e6dd503ab9dff28f1cdd4a4545",
+   "doc_id": "17672dcd3f8e56e1644f6bc8875923515411d304a7126c1b1d17e90d96ea37a8"
+  },
+  {
+   "char_end": 9506,
+   "char_start": 7075,
+   "chunk_id": "6f688c654094b620ba5b1360c38421c3daafebd0fa3180469d3d31307d9715d1",
+   "doc_id": "7337bfb2e84d7057302ae95b7ac9c2017bcce313f4f967c727ad4644734091c0"
+  },
+  {
+   "char_end": 7715,
+   "char_start": 6183,
+   "chunk_id": "77685d252a317caa9d0379966d9c352a40b6ff31fdca33626ea258a60bbead2b",
+   "doc_id": "8d1d9df966ddca6df3e4947f3387807c2848f25eb2564a66f6f47b4e39da3a57"
+  },
+  {
+   "char_end": 83745,
+   "char_start": 83455,
+   "chunk_id": "789507d00c3d356ab0f9f55e4d15cae330c8ae4fd5d49c591f8146576c29e8d3",
+   "doc_id": "85d5663f213b6eb4d9b1298ba6a2e10af86c023e43891144f4e271da837b45e9"
+  },
+  {
+   "char_end": 42106,
+   "char_start": 40486,
+   "chunk_id": "7e33f6ac53d14270aa0fe21a4582283ebe4d5d813603158fdef8259a4562714d",
+   "doc_id": "22bd9c4d002a5982ddb6bdf9ed4372e5ba9d62667242edd6d08571e763cb8331"
+  },
+  {
+   "char_end": 4575,
+   "char_start": 2179,
+   "chunk_id": "830a0c873aaf360d3ba8b5f8be8af65ac246201e800b7c534a88be75168470c1",
+   "doc_id": "00f4f1cdf9cc1c4df064d8af31d63b2c3b18b0446f6a9acda0bbf4953f62a2cc"
+  },
+  {
+   "char_end": 5607,
+   "char_start": 3735,
+   "chunk_id": "832be764cd5cd6338cd9dc4f73cb4a65b231408c42d461ae0146a9dca67217ce",
+   "doc_id": "ff1afd7ce6fb8287bc2eb8496c06c92a467a7b909cb9440830b419e999a2a9d9"
+  },
+  {
+   "char_end": 17297,
+   "char_start": 15664,
+   "chunk_id": "88ca7e3c23c97bc5542d3321806ba4bab26e252069c82f1319b3e005314679e3",
+   "doc_id": "18a79cd023ff2722ac1f6f32c340c712afb5ce8a92776987b1268d08530b947c"
+  },
+  {
+   "char_end": 22869,
+   "char_start": 20670,
+   "chunk_id": "90227747800630fa5f49787aa48c9ea253ec700954472e24712593fd1c736d5c",
+   "doc_id": "88ee177bcc6cdd7e204edd6f89d79056723f947dd3d240487e097a28a3a0c0df"
+  },
+  {
+   "char_end": 21445,
+   "char_start": 20870,
+   "chunk_id": "95f76d5d89d77cb3b7693e0bc365b62d0ab178c7bb782de824f3454371d82335",
+   "doc_id": "8d0e334671e05638826bdd0db8b65cdf38c7d46e3d74f5142a9899d5ef46fc19"
+  },
+  {
+   "char_end": 15778,
+   "char_start": 13757,
+   "chunk_id": "96130cd4a35b19312b66a52425e5ad5c74c14fc527b17cec72bfd6e168b375b2",
+   "doc_id": "9e1fe005c45df3d0c862082e4d096e0b3d795fc44480a92939fd0bb529f2ce2f"
+  },
+  {
+   "char_end": 33626,
+   "char_start": 32250,
+   "chunk_id": "963683219b80acffc48eefa36650d0679a7d41c39e40924c913ce4be9a269956",
+   "doc_id": "8d0e334671e05638826bdd0db8b65cdf38c7d46e3d74f5142a9899d5ef46fc19"
+  },
+  {
+   "char_end": 23119,
+   "char_start": 20863,
+   "chunk_id": "9be1597774d3b11aab8f4c808a51977ac245e3c9906891fc1a9cf459efad09a6",
+   "doc_id": "a88c93e0163dd6cea865a8feb66d8af5a2c8e8bc32d5c47c4579a9c093742561"
+  },
+  {
+   "char_end": 34485,
+   "char_start": 32687,
+   "chunk_id": "9ce79f02375fca7896a2b040588198a5d2a98d12b8bcf6248b1b337072b40bb8",
+   "doc_id": "d85e43bbe432b561cc692d9f35b15147c7ef7e6c2c5bfd6634d4d7321ab88e0a"
+  },
+  {
+   "char_end": 19191,
+   "char_start": 17084,
+   "chunk_id": "a3e9e0cfc217065503702181973fdf282280ff0d812978cafa1b245353d07c07",
+   "doc_id": "5013190710c222b0f73af0b4b53ee0871a590ddd81898783f5ea4e4f3f03970a"
+  },
+  {
+   "char_end": 3536,
+   "char_start": 1301,
+   "chunk_id": "a7a8e058de084f134297ea7fa4da3fb94fdd09fe1f330223d1a2399c51965997",
+   "doc_id": "ccae767ad9c454d0618b5f20d1df9b3ac2bd92424370918e425957f8c2833ac5"
+  },
+  {
+   "char_end": 6063,
+   "char_start": 5400,
+   "chunk_id": "a9a03b1d02c52368db36f44cbdff2467a7fec22dfa8ec716b3b630958de99df0",
+   "doc_id": "fe1e064ea635b724a56e01027614fd9d8db2aa9ab790957ab3538ef265d699b8"
+  },
+  {
+   "char_end": 6488,
+   "char_start": 4192,
+   "chunk_id": "a9ef61dc2f57317e60a5a951e7abf1c412634e9e3300fed6c0a7ba8a9c91f5de",
+   "doc_id": "e6b7f11f65f24b60f7878afd702438fbd3dcafcfdf1ce24973ab8ea9d712c8b9"
+  },
+  {
+   "char_end": 6853,
+   "char_start": 5179,
+   "chunk_id": "ae89704b3f4cb03939bdc5b263d81dd2697db6da9c62e9705ac5cb57e5fe0cb1",
+   "doc_id": "5cfb3b5134a408c3277e2f97a256d8fb1e12c328f1073f7f6976e62aa2014702"
+  },
+  {
+   "char_end": 6825,
+   "char_start": 5892,
+   "chunk_id": "b3f4c60a8570e03e261f61727de9170bc7d896a41eb46861cf0fd86c39a12a85",
+   "doc_id": "4649dabf58cca3b7e5dc2c2612c4e933679391a971e54bffe18b2983980c1bcc"
+  },
+  {
+   "char_end": 21308,
+   "char_start": 19369,
+   "chunk_id": "b5a248cf186063c6c17a358e88679aad7bfa416bea977d013298c178ee2994cf",
+   "doc_id": "b63f937b7bf9d1db5705432cc08cdc5bc86a945df8f315597e1b18e72cae2668"
+  },
+  {
+   "char_end": 6878,
+   "char_start": 4848,
+   "chunk_id": "b6065244c4e377bfdc212de8d311b17d759bd3cdc53bfc3b37c0ba2645db6d2d",
+   "doc_id": "886bfca98ab6b4e47cfe5d2bb0e05a66a285996c76e1f908558279eb112338c6"
+  },
+  {
+   "char_end": 11818,
+   "char_start": 10832,
+   "chunk_id": "b74e235dbd35d21096cf7e2a0dd7124259938524f839ce16222e3aa1effcb99b",
+   "doc_id": "a7460bb044688853a5623b8b32cb0cfe2e2592e37970bc65b5dfddfe4770ec5e"
+  },
+  {
+   "char_end": 9594,
+   "char_start": 7715,
+   "chunk_id": "b77c7bfa269f5b519552f0b80af0d5b37d6f70223587fdaaac39bba4e207ab99",
+   "doc_id": "8d1d9df966ddca6df3e4947f3387807c2848f25eb2564a66f6f47b4e39da3a57"
+  },
+  {
+   "char_end": 31127,
+   "char_start": 29984,
+   "chunk_id": "b8e40af50cf24eb0825d75e359ec3e2f6f0c331bdfd599fc9455ffd09ba8e529",
+   "doc_id": "f2278f2ca823c24f1fd4b8e7d29091864fa6fe71d29134a5ac64c5598f3981a5"
+  },
+  {
+   "char_end": 18748,
+   "char_start": 16899,
+   "chunk_id": "b9b68346bf484706e52024469962a4fde4e886fa81578c07a0cd045698fbf39f",
+   "doc_id": "8d0e334671e05638826bdd0db8b65cdf38c7d46e3d74f5142a9899d5ef46fc19"
+  },
+  {
+   "char_end": 11440,
+   "char_start": 7853,
+   "chunk_id": "bbccc5c205d392fa3df7eab2d03535d66306766853c2947d8dcdeb941cefa19a",
+   "doc_id": "5c2f39b6cae32edc8bd576953388ec63aae1d1dbdc65a3cb2a62e38e65204534"
+  },
+  {
+   "char_end": 23423,
+   "char_start": 21332,
+   "chunk_id": "bda167c727c4941dcec87fe7a4df1ad55198d290bd160e2d94701496319a638f",
+   "doc_id": "532a814fe33113045aaaad68eb32014c855afb5f8102101647a85738a73df1e8"
+  },
+  {
+   "char_end": 49339,
+   "char_start": 47933,
+   "chunk_id": "bfc590ad27525966ac576b6c7092f7d8a87cd92ed7f01e3cc2cb0bb2cac0cd71",
+   "doc_id": "e4eb958c1e8c625a17aaef16d5a12d77b3e17154a377bb58f67d87870b5f78ca"
+  },
+  {
+   "char_end": 30098,
+   "char_start": 28955,
+   "chunk_id": "c0047ae2053bb09f6b29e4aa6e4205f82d1f92b8c424bf2edf076388b47c4ff7",
+   "doc_id": "db7476a513e26408c86edd3a879c89c3517bda3462140730ef3119bd18a467e0"
+  },
+  {
+   "char_end": 5518,
+   "char_start": 3536,
+   "chunk_id": "c96ea0558151482d93509970fb7cc1fd038bf4c55087212cdb1989ba096654f7",
+   "doc_id": "ccae767ad9c454d0618b5f20d1df9b3ac2bd92424370918e425957f8c2833ac5"
+  },
+  {
+   "char_end": 7431,
+   "char_start": 5893,
+   "chunk_id": "cb0b49eba0e8274b491020aa48c2f59e69c43077747524e30190ad790e282fed",
+   "doc_id": "87fef2f28418d682a45e0c44a58fabbc4a98af1e3fd2b854978d11948e75eca1"
+  },
+  {
+   "char_end": 31659,
+   "char_start": 30643,
+   "chunk_id": "cd867155d4d10c92a0fa559654a54b27a7ddbd07c1951a920fd3bd4e481cb6b8",
+   "doc_id": "f38309d8b94a1afa19496284ec49217ce2ddd01c22a53f00431fb524f852b671"
+  },
+  {
+   "char_end": 5940,
+   "char_start": 3873,
+   "chunk_id": "cf374f2c6071d908257212458ee3e89bc22f3cca0d68f1419f52a3711e8034ce",
+   "doc_id": "1a6b324d933f069e45dc1ba2cbd098278ebaffc09b8dcb9eafc29e43e5db5041"
+  },
+  {
+   "char_end": 10999,
+   "char_start": 10039,
+   "chunk_id": "cf5185f54efca4f16485e15578b6bbfadbbbf5126834b3098b3c5177bc888708",
+   "doc_id": "cbc64b2e4e044f4264339dc02e3509d0798f5d57fc6143c1dc117deb22f77858"
+  },
+  {
+   "char_end": 81275,
+   "char_start": 80399,
+   "chunk_id": "cfc026ce7986307f220674a3e5b232e0df3417019545bde9c2ad3c02e8da31c5",
+   "doc_id": "555144ab92734bb7a9d8ff70625b0da766dad345f6f3223a5862f29b0da08f62"
+  },
+  {
+   "char_end": 8017,
+   "char_start": 6221,
+   "chunk_id": "d0d06cc6a7360fd0f9c8723d3d650dcbd0da28ee7f23e486bbc43f6d41591f9e",
+   "doc_id": "8da242a5b4b04143359b4068b938b1ce0525fe8801cc2d0b72f0921c02122336"
+  },
+  {
+   "char_end": 19902,
+   "char_start": 18036,
+   "chunk_id": "d501a47df9d4bc0ccc143f63e91f3649da4092314098b7c3cf01520e8db513d6",
+   "doc_id": "42b3acb30774d0b143b0ec819b28eae05bf34f9096b557e5fa03266483b9c2ee"
+  },
+  {
+   "char_end": 11984,
+   "char_start": 9372,
+   "chunk_id": "d5991aac1c4c23320326b13a9c71104ea1fa12765e8124445d831455ee9e869c",
+   "doc_id": "f4cb61eae07d2ba76ef1bc3a6b8930ca81cb2ff571ce33cf1d0f6928416a685c"
+  },
+  {
+   "char_end": 28964,
+   "char_start": 27541,
+   "chunk_id": "d9b8ff566a39db983351d6313b85d9bea14dcead257717c4a6c099a016ccd497",
+   "doc_id": "6a55e1e65b64aecd4b777dd2e14ac849718ac782b267947d36a55e99abd822a6"
+  },
+  {
+   "char_end": 38583,
+   "char_start": 36347,
+   "chunk_id": "dc081abdf158187f3b0213b1178ce88e4306805ebaac3168d9909c8f0fecacb9",
+   "doc_id": "252905efeff238aaea97ebf6ddd6cdb62a2ccc8c11622c78e7316e6b3e9bd7d8"
+  },
+  {
+   "char_end": 6488,
+   "char_start": 4563,
+   "chunk_id": "dc9c34df494e76a02e600552b84912502056d1d8318e9bc57fe9b84a317b5994",
+   "doc_id": "59603f950bd7356bd0629f696e7c55c64684fc35473d634f54dfc629ccb8d3b1"
+  },
+  {
+   "char_end": 10585,
+   "char_start": 8822,
+   "chunk_id": "ddebe698c1534a46781c7e1769b2391ec711de09f716cb5e230d788f4654372a",
+   "doc_id": "6896379ffd3fa87453f795e7fe6d64524672aaed593e52424377004883e8e3c2"
+  },
+  {
+   "char_end": 12167,
+   "char_start": 11204,
+   "chunk_id": "df25aa805393661528ba5fea89a0392e992a20b62c2f65d6f2b3b7f5c8a89e38",
+   "doc_id": "9411580921239b99ae3922a06356bf2bb28170a17245fdf023415b58592ba67a"
+  },
+  {
+   "char_end": 9493,
+   "char_start": 7655,
+   "chunk_id": "e3110700e5113cfefeb5712e1f7a0afce2465947ff6d9ac9361a953cddd8503f",
+   "doc_id": "84df7f588a84d5bbbea323929a4a2b668dd7cc614ff250828d4f309ff1700fee"
+  },
+  {
+   "char_end": 14800,
+   "char_start": 12969,
+   "chunk_id": "efbc35509a4291e9fa489c109e6fe6d075b6e685fd48e81c43d79ff3d6bac5e8",
+   "doc_id": "c7fe385d98ea563359ce7808c7924ecf225b6c9c7e325711151a35a2999520a2"
+  },
+  {
+   "char_end": 27790,
+   "char_start": 25660,
+   "chunk_id": "f8e2f762bf7695258c5fb18cdea0f81a6e6f303831140fc51585701b5b1a1c26",
+   "doc_id": "2cd47234df12d822be3e8e41b0227c2aada428aec849433419f39453b32a1328"
+  },
+  {
+   "char_end": 4729,
+   "char_start": 2437,
+   "chunk_id": "fe7f6af14cbe138012596f4f6a116e888bce13e918a86bef5565ea6a2d5f0319",
+   "doc_id": "a839a7df053fbc5806ad96f5f270bc49df113829b4f7513ed1ee16bea13ea13a"
+  },
+  {
+   "char_end": 7116,
+   "char_start": 5016,
+   "chunk_id": "ff4e24bd5629d575aa0a3a2786919e800705fb8cfe088ed5020a91081552265d",
+   "doc_id": "8cb12a027891082280663d9040f17cef42d44e46c87f429618fc7ec5587828ae"
+  }
+ ],
+ "manifest": [
+  {
+   "canonical_text_sha256": "005ce7436368f1d05a24f4dadfaf3e6a5101fea78f25f18364b04c5907659005",
+   "doc_id": "00f4f1cdf9cc1c4df064d8af31d63b2c3b18b0446f6a9acda0bbf4953f62a2cc",
+   "source_id": "caselaw:opinion:2980269"
+  },
+  {
+   "canonical_text_sha256": "a475c9b0e5492bfe8b3afe669be9cce6207f4aa5a08775190fb0494b122d8e12",
+   "doc_id": "03b1c3205fb2e279ed7a5a56140486ba3cab438a439731a3dea91e7e62a4e3c5",
+   "source_id": "caselaw:opinion:9489712"
+  },
+  {
+   "canonical_text_sha256": "5818e3e00a5fb314026bdf2b54fd5b7ef4bbc1f00877d4a8ac3555d744a88286",
+   "doc_id": "17672dcd3f8e56e1644f6bc8875923515411d304a7126c1b1d17e90d96ea37a8",
+   "source_id": "caselaw:opinion:6350538"
+  },
+  {
+   "canonical_text_sha256": "a623903ba7da1f047ac62c5cea89760a6aa55dc7382ff922d91b7d2db941e651",
+   "doc_id": "187be5236bdbdd6c629ca4c09b7f3ee1d6cc23e8582dab1812a79d5ce77d45a5",
+   "source_id": "caselaw:opinion:2972630"
+  },
+  {
+   "canonical_text_sha256": "c475004a43b1b5d210e4695d0cc14c33e38ce5ba85ce3c868293e2915a20f861",
+   "doc_id": "18a79cd023ff2722ac1f6f32c340c712afb5ce8a92776987b1268d08530b947c",
+   "source_id": "caselaw:opinion:7126754"
+  },
+  {
+   "canonical_text_sha256": "24f84a9b7e5e5280b5566bdd1e4caeb645b5b7bc65288f34749814f354b8e939",
+   "doc_id": "1a6b324d933f069e45dc1ba2cbd098278ebaffc09b8dcb9eafc29e43e5db5041",
+   "source_id": "caselaw:opinion:801806"
+  },
+  {
+   "canonical_text_sha256": "6b1c77ab5cf30a42cdef1b025962ef321bbc731e8664fe967f1763809d083552",
+   "doc_id": "1e0bd877b0417dafc6f1ca5337ec2a5752eba5a4895e70d5b774a48b91fc5196",
+   "source_id": "caselaw:opinion:110636"
+  },
+  {
+   "canonical_text_sha256": "086cd8b819cb49de2555f29188a188297797d4568ea16b9b4ff121a8d8e06394",
+   "doc_id": "1f9dd0335d113053839e621ec5adc5515a683d94eec6f9c4293b902a832e34bc",
+   "source_id": "caselaw:opinion:9814143"
+  },
+  {
+   "canonical_text_sha256": "3ce5d4f31fed14ba4e84d2059e1adfca4326454f952aea9f538055bd7a3cb29b",
+   "doc_id": "20b515087d9a4b303d37632a0c6de73285817efc25cb0022f41503ab670d2898",
+   "source_id": "caselaw:opinion:2973559"
+  },
+  {
+   "canonical_text_sha256": "5cd0c2d52e39c167920a5a0c554fefc6c4e2a42c51355da3f2c414b02f0dec1b",
+   "doc_id": "22bd9c4d002a5982ddb6bdf9ed4372e5ba9d62667242edd6d08571e763cb8331",
+   "source_id": "caselaw:opinion:9829122"
+  },
+  {
+   "canonical_text_sha256": "e0408bd811fed5229edf5d0fbe400ae5a7e02e46d8cbed1e29c8c818d43a82dd",
+   "doc_id": "252905efeff238aaea97ebf6ddd6cdb62a2ccc8c11622c78e7316e6b3e9bd7d8",
+   "source_id": "caselaw:opinion:612350"
+  },
+  {
+   "canonical_text_sha256": "3f0bf066d0c181417b7950b5d00825b57a6d920aa43f05421f8eae6c03a8768b",
+   "doc_id": "2cd47234df12d822be3e8e41b0227c2aada428aec849433419f39453b32a1328",
+   "source_id": "caselaw:opinion:5132169"
+  },
+  {
+   "canonical_text_sha256": "8c04a4c1842df43686ffc3119469ff3829ca1355ae1ef14dca73df2717bd739e",
+   "doc_id": "349415d6258aca52e0634caa31cc4d820ff30e4757b338e0e0e27ffb768c3ab6",
+   "source_id": "caselaw:opinion:536215"
+  },
+  {
+   "canonical_text_sha256": "b0640e6de3859164c770b5018f2cf353b6e21b9a59b529f498fc29baec5d1766",
+   "doc_id": "42b3acb30774d0b143b0ec819b28eae05bf34f9096b557e5fa03266483b9c2ee",
+   "source_id": "caselaw:opinion:746252"
+  },
+  {
+   "canonical_text_sha256": "a0477e6147b9ca4eca538c1d2ecb653ab90c1fd9c3d4070cae7d676a8400f51d",
+   "doc_id": "42cef5f7bc4d71beab7ff81ce048a4f76c5624e222c8cd3460173ddee25b1d72",
+   "source_id": "caselaw:opinion:9842986"
+  },
+  {
+   "canonical_text_sha256": "50fdd1abb1df8f01c57dcc76ca0bca6dc54c2c14a13a22972580219e336864de",
+   "doc_id": "4649dabf58cca3b7e5dc2c2612c4e933679391a971e54bffe18b2983980c1bcc",
+   "source_id": "caselaw:opinion:9425962"
+  },
+  {
+   "canonical_text_sha256": "c494fd59240d233293c846804083baf57caa9a4a5b51ebd6e9c862ec9313c901",
+   "doc_id": "47fe7f9a953dc38cf3e4f7edf74c210e5f836ae1507245b2845ba6386efb7c44",
+   "source_id": "caselaw:opinion:9491092"
+  },
+  {
+   "canonical_text_sha256": "23a7bb6f4d10c0fdd46192590b501246b9467a20f19cf977c907cb1629219b31",
+   "doc_id": "5013190710c222b0f73af0b4b53ee0871a590ddd81898783f5ea4e4f3f03970a",
+   "source_id": "caselaw:opinion:9352511"
+  },
+  {
+   "canonical_text_sha256": "93e4441c9ebd7b6f5b82f5b6281fe784984cecaf0394b5226dd83d5d8bf795ad",
+   "doc_id": "51628795b246a7bfa6cc0826e4082de1d807150163703e9bf673cab685d3c331",
+   "source_id": "caselaw:opinion:859128"
+  },
+  {
+   "canonical_text_sha256": "eb46e3a17d8089ca1fd3c9fbaa826c8fb2aadeed0f721ce143aa2148b19377d0",
+   "doc_id": "532a814fe33113045aaaad68eb32014c855afb5f8102101647a85738a73df1e8",
+   "source_id": "caselaw:opinion:4264598"
+  },
+  {
+   "canonical_text_sha256": "c4bc50b841703e2f71dfd1b18adb526ed97206833ef5791b84e4b0055821fc9f",
+   "doc_id": "555144ab92734bb7a9d8ff70625b0da766dad345f6f3223a5862f29b0da08f62",
+   "source_id": "caselaw:opinion:567212"
+  },
+  {
+   "canonical_text_sha256": "79222d15433e27f0c7e9663a0f6e191a3613c1bd13dce80e37f8ea0022ce1035",
+   "doc_id": "59603f950bd7356bd0629f696e7c55c64684fc35473d634f54dfc629ccb8d3b1",
+   "source_id": "caselaw:opinion:9813828"
+  },
+  {
+   "canonical_text_sha256": "beb192d4da2b84aea54f5bb419612cd20d0818ca6bc2617ea2c668ee3065eba1",
+   "doc_id": "5c2f39b6cae32edc8bd576953388ec63aae1d1dbdc65a3cb2a62e38e65204534",
+   "source_id": "caselaw:opinion:8425363"
+  },
+  {
+   "canonical_text_sha256": "396cc28f34c2cdb39c13d9bd36f2e68ec39907d9888e6a5a158d8e9aef78f7da",
+   "doc_id": "5cfb3b5134a408c3277e2f97a256d8fb1e12c328f1073f7f6976e62aa2014702",
+   "source_id": "caselaw:opinion:779802"
+  },
+  {
+   "canonical_text_sha256": "1b73db98b20c2809df120822ffb1b2f5b7fdd093ed4428d7a2445fe0c43ddb5f",
+   "doc_id": "6705e54aae63c791327711e4946e302b27bd3d07b647c428473aebfca6d2de00",
+   "source_id": "caselaw:opinion:182313"
+  },
+  {
+   "canonical_text_sha256": "a681d2a24460257a61a135549c2ebe6344a2d28a338f0b55d1a5f3c8e73f5838",
+   "doc_id": "68076a8c8900af91af87354340c23d744361e94e07c7fa095f6888cf11a32e40",
+   "source_id": "caselaw:opinion:175171"
+  },
+  {
+   "canonical_text_sha256": "32bfd87a740ca205d74f903e90d56ea9cbc47df9a22c8107bc5d00571b7e1b9c",
+   "doc_id": "6896379ffd3fa87453f795e7fe6d64524672aaed593e52424377004883e8e3c2",
+   "source_id": "caselaw:opinion:216266"
+  },
+  {
+   "canonical_text_sha256": "52d651da8377cc516606bae2277d27b9ca3f558c249271c270cf7499e3f55fe3",
+   "doc_id": "6a55e1e65b64aecd4b777dd2e14ac849718ac782b267947d36a55e99abd822a6",
+   "source_id": "caselaw:opinion:9424643"
+  },
+  {
+   "canonical_text_sha256": "3ebaa0bcc4df85f75d25900b338f9039de55defd13757d7b1d46b66e8d968af5",
+   "doc_id": "6f3196f5ca23c019e8e31935e74491646f7847ad01dc3251971c89350064d154",
+   "source_id": "caselaw:opinion:2976031"
+  },
+  {
+   "canonical_text_sha256": "1fe19f08ba5923b6308d0f18abe1b0d00158210dd342c75da28c55e1cb4ebfdd",
+   "doc_id": "719053be8e1ae27aff2cfb140583bc367a9e2f799b383df161ab7c16b7d22491",
+   "source_id": "caselaw:opinion:787232"
+  },
+  {
+   "canonical_text_sha256": "dc6e15248f4a10ea9d457932ba1ef73f85e0cb1bd6d7322f6c3e2d32b50beb64",
+   "doc_id": "73039dfba1d2eab2e450ce314adaaafab1fd23cc59684a60c7bb340e0e3c8bfc",
+   "source_id": "caselaw:opinion:10781820"
+  },
+  {
+   "canonical_text_sha256": "8d90e79b1428b4ca67b7306d252cab861ea39dc0c0f69811c6e6617db50d488c",
+   "doc_id": "7337bfb2e84d7057302ae95b7ac9c2017bcce313f4f967c727ad4644734091c0",
+   "source_id": "caselaw:opinion:723183"
+  },
+  {
+   "canonical_text_sha256": "d349bda738fca60e9887bbe0ebae8dae18fe774c8cb428f71ccfcf5bbe54ece4",
+   "doc_id": "7ceb079fecef786bcce29e220cf36530e4f2136ee016de7c60b5f51d9ccf0acc",
+   "source_id": "caselaw:opinion:4706412"
+  },
+  {
+   "canonical_text_sha256": "9e7abd0b0c8d7a5701cbbe518b3929a07d40dd9776415b538c71ab1712dfd942",
+   "doc_id": "7d2ac51507435c116ed97978e63ffef85721e3e30756dd5cbd8576498d61c4b4",
+   "source_id": "caselaw:opinion:111834"
+  },
+  {
+   "canonical_text_sha256": "82caabe56c7a458260708c6fd9c56728f683aef6f2ce200a54a4115978024596",
+   "doc_id": "8109c799a2804532a9336516ca6ae2584287d37602f0ff5ffaf5a81c146faebb",
+   "source_id": "caselaw:opinion:9429958"
+  },
+  {
+   "canonical_text_sha256": "055cbdc5762c96ad73f2c0ee2cef3fc1b1b6ffdc1065ab2bb038911a9b336537",
+   "doc_id": "84df7f588a84d5bbbea323929a4a2b668dd7cc614ff250828d4f309ff1700fee",
+   "source_id": "caselaw:opinion:1209737"
+  },
+  {
+   "canonical_text_sha256": "e55e170a23c46b3c0ef20a4ec51b08c1741762531a9d0c387e1393897fb0b822",
+   "doc_id": "85d5663f213b6eb4d9b1298ba6a2e10af86c023e43891144f4e271da837b45e9",
+   "source_id": "caselaw:opinion:111378"
+  },
+  {
+   "canonical_text_sha256": "088e4b3b4865f51685ae9afb2533fd99f965bac8f4b6f16d824e6d40695d6b42",
+   "doc_id": "87fef2f28418d682a45e0c44a58fabbc4a98af1e3fd2b854978d11948e75eca1",
+   "source_id": "caselaw:opinion:9430865"
+  },
+  {
+   "canonical_text_sha256": "e1b7d760a1a71d22dcfa36574f2e1d4902d81bcaf579f6842a4fc28456ea64fa",
+   "doc_id": "886bfca98ab6b4e47cfe5d2bb0e05a66a285996c76e1f908558279eb112338c6",
+   "source_id": "caselaw:opinion:591756"
+  },
+  {
+   "canonical_text_sha256": "210c4e2f2acd8d4a90fe48a79088cb777696be35bc4cdaa8f9fe92a311ceab4a",
+   "doc_id": "88ee177bcc6cdd7e204edd6f89d79056723f947dd3d240487e097a28a3a0c0df",
+   "source_id": "caselaw:opinion:4310231"
+  },
+  {
+   "canonical_text_sha256": "b761034ffd49fdcc9db0b33df015b17f0218d0cd5db4648311fb34d6eb1fd841",
+   "doc_id": "8b421195f95c1f26f2067e6f8a665a6791384b44e2c3bf3d65e6d733e136305d",
+   "source_id": "caselaw:opinion:487037"
+  },
+  {
+   "canonical_text_sha256": "a2eb06989fa1c33a58b047ace131124ffaeb50613e43a3d1fad2cbe78bbbe708",
+   "doc_id": "8cb12a027891082280663d9040f17cef42d44e46c87f429618fc7ec5587828ae",
+   "source_id": "caselaw:opinion:696811"
+  },
+  {
+   "canonical_text_sha256": "fe7ed7af6700b86c461da645ce526a60c229950fc8f80dafd450a0e2dae7457c",
+   "doc_id": "8cb1c889597b540a377e66c3078eeab56dd7b1fe2b6ab8cd3c2460ca3df43831",
+   "source_id": "caselaw:opinion:2979403"
+  },
+  {
+   "canonical_text_sha256": "87b42d52755bf30698605b6813c3d2bcb1c2539899152ee9875a42a86bd01af3",
+   "doc_id": "8d0e334671e05638826bdd0db8b65cdf38c7d46e3d74f5142a9899d5ef46fc19",
+   "source_id": "caselaw:opinion:731006"
+  },
+  {
+   "canonical_text_sha256": "96c3f42d3edcfa06c3752b0db38c4c3920c7e877991625eda53f15ffbdc6cbab",
+   "doc_id": "8d1d9df966ddca6df3e4947f3387807c2848f25eb2564a66f6f47b4e39da3a57",
+   "source_id": "caselaw:opinion:9432041"
+  },
+  {
+   "canonical_text_sha256": "f7dcc677a4da4c6b2cbdc8265c8297ffb7c7c222799b8df4c675f88760cfbff1",
+   "doc_id": "8da242a5b4b04143359b4068b938b1ce0525fe8801cc2d0b72f0921c02122336",
+   "source_id": "caselaw:opinion:2978317"
+  },
+  {
+   "canonical_text_sha256": "c8b90e6ff3b678d78b4b0b8364ef614f30c9b93f041bd053adfaf0634e666f3e",
+   "doc_id": "9411580921239b99ae3922a06356bf2bb28170a17245fdf023415b58592ba67a",
+   "source_id": "caselaw:opinion:112873"
+  },
+  {
+   "canonical_text_sha256": "16f0760a9b36fbdaece0fdf0170e218da2a95ea6d3ae1210c9c1ee9683ed653d",
+   "doc_id": "9e1fe005c45df3d0c862082e4d096e0b3d795fc44480a92939fd0bb529f2ce2f",
+   "source_id": "caselaw:opinion:598488"
+  },
+  {
+   "canonical_text_sha256": "a3dc9af54c1a685399f89a1ca288da02a0266405104e39e82a3e233881a47f30",
+   "doc_id": "9fe422a77128e1940378779a96ed4f920b8a6ec83922d170a9377d70988a2c80",
+   "source_id": "caselaw:opinion:112448"
+  },
+  {
+   "canonical_text_sha256": "21e9eaa37f53e9c09897f41c80915b9d8c5a5aec06a59845856f35bad54cc932",
+   "doc_id": "a7460bb044688853a5623b8b32cb0cfe2e2592e37970bc65b5dfddfe4770ec5e",
+   "source_id": "caselaw:opinion:218188"
+  },
+  {
+   "canonical_text_sha256": "f03a9c58d2bec3cf09597c8c2f723e96dbef2c606f0ad2f5f72bf113787b3144",
+   "doc_id": "a839a7df053fbc5806ad96f5f270bc49df113829b4f7513ed1ee16bea13ea13a",
+   "source_id": "caselaw:opinion:2976791"
+  },
+  {
+   "canonical_text_sha256": "a31329fc0ae2de6e768831a2c3a665b6a7fc401df7e37cccc72b6352f78049f9",
+   "doc_id": "a88c93e0163dd6cea865a8feb66d8af5a2c8e8bc32d5c47c4579a9c093742561",
+   "source_id": "caselaw:opinion:9352616"
+  },
+  {
+   "canonical_text_sha256": "fcf8ea5ba0cfb6ab68ab884821f82ec879e46c741c7c7716d417068121d75e4b",
+   "doc_id": "a89fcaa6bf204b2cb9f72848c90b47d6f3c875bdc45b70716c4d77d2945103bd",
+   "source_id": "caselaw:opinion:9497246"
+  },
+  {
+   "canonical_text_sha256": "f640d476ab1f86e3a9ec351f8c2dbd2b3038bee7dcd52fc791ca3aabf687ce4b",
+   "doc_id": "aa238e5524c61c137000320a51469ebbbf8a79d934364ca7f74ec82ad6abe336",
+   "source_id": "caselaw:opinion:2972997"
+  },
+  {
+   "canonical_text_sha256": "e4eeb34dce256914b66b86378ad4a70f717c64bf7c996718178916aee0ff8e3a",
+   "doc_id": "b63f937b7bf9d1db5705432cc08cdc5bc86a945df8f315597e1b18e72cae2668",
+   "source_id": "caselaw:opinion:9942715"
+  },
+  {
+   "canonical_text_sha256": "36a4dd1c8a297e64aecaa31324f07d3a21f0eec8a9507a7dffebeb80e88ba33e",
+   "doc_id": "c47b1be13d299dbc6545766f259ad51819a18d66e3f508f9a186e12031b405fc",
+   "source_id": "caselaw:opinion:2974210"
+  },
+  {
+   "canonical_text_sha256": "6737f1c127d898cd8eaeba33a39006b2081cab7afe54809adefaad9630828062",
+   "doc_id": "c6171986ed6136ac817a632388f1af8aed29027252b6c6379259f470ebe732a8",
+   "source_id": "caselaw:opinion:2977684"
+  },
+  {
+   "canonical_text_sha256": "f2a82ce9d253cd617bb7d86bfc30301ef48c15b073a1d0ba97ec8e791089b373",
+   "doc_id": "c7fe385d98ea563359ce7808c7924ecf225b6c9c7e325711151a35a2999520a2",
+   "source_id": "caselaw:opinion:528691"
+  },
+  {
+   "canonical_text_sha256": "363dfdfec6f5aa08781618773a1e8437503b5aea3e4a14bc0aa82f1beffcfc79",
+   "doc_id": "cbc64b2e4e044f4264339dc02e3509d0798f5d57fc6143c1dc117deb22f77858",
+   "source_id": "caselaw:opinion:9432823"
+  },
+  {
+   "canonical_text_sha256": "4cd38b537639494c1515524d416d60f488dc2f24ce5e58e7196b56a5d0c4067e",
+   "doc_id": "ccae767ad9c454d0618b5f20d1df9b3ac2bd92424370918e425957f8c2833ac5",
+   "source_id": "caselaw:opinion:802651"
+  },
+  {
+   "canonical_text_sha256": "8e998063204e29e35bec13fc223d24b2e59964b62daff23d2094f470408c0d92",
+   "doc_id": "ccc33d38ceb2056c1658e8adbcc14585f5a270c542aae1e36e91b615741abb8a",
+   "source_id": "caselaw:opinion:693442"
+  },
+  {
+   "canonical_text_sha256": "923ef00909d0e24d3dc150176b7e3961fe3bbce4845e988c0ce3c62f7dc3e558",
+   "doc_id": "cd68c6747e8aab1747242eeef874f4f59bdb279c0f9c943828e08610cca7d026",
+   "source_id": "caselaw:opinion:3189479"
+  },
+  {
+   "canonical_text_sha256": "903f3536206d08c6efc634d56b852417f7c5d7363813b5ed74629ded19a2ea1c",
+   "doc_id": "d336fb24ccddf02a842757cd3f32dee26e53bbf3973d389ede5b7f8de2f48043",
+   "source_id": "caselaw:opinion:9887212"
+  },
+  {
+   "canonical_text_sha256": "d7b6307d8664f490715f9b131dab39db1dc916358c0b79a5592f5bac53661ca4",
+   "doc_id": "d5bc6a57ad46896a6626822578a864cd1471bf474d70a71224318fb627b8bd23",
+   "source_id": "caselaw:opinion:2977965"
+  },
+  {
+   "canonical_text_sha256": "c0490c522429e2bb7f854ef328d890f847b814be0fb824909ca66ff176785851",
+   "doc_id": "d85e43bbe432b561cc692d9f35b15147c7ef7e6c2c5bfd6634d4d7321ab88e0a",
+   "source_id": "caselaw:opinion:2976192"
+  },
+  {
+   "canonical_text_sha256": "47396468a426e5ebf5816263541909dfa304297dfff654fbc566950c09829a54",
+   "doc_id": "db0762f0b8c9dbde675f69921e1e08a66dc3ff0e3b72f6e9d837c587f35e3ff5",
+   "source_id": "caselaw:opinion:753016"
+  },
+  {
+   "canonical_text_sha256": "7d01282a449d7eaa17c05179cc92636018906da889edaf23f7bd3bd2af6353e3",
+   "doc_id": "db7476a513e26408c86edd3a879c89c3517bda3462140730ef3119bd18a467e0",
+   "source_id": "caselaw:opinion:9845589"
+  },
+  {
+   "canonical_text_sha256": "175c0cc99bfdf3ab70ff259479f8bc4472c1717b598e750e22a1cd316a6764f4",
+   "doc_id": "dd1d60a20a4745d201e2b50cfb9a8f3ac43b2ab56021fe8bb4e0a21072d70c93",
+   "source_id": "caselaw:opinion:9500717"
+  },
+  {
+   "canonical_text_sha256": "fc54e1591315bd51aa53b8c25427f813d3d6baa84fbd5ae5c0bbeb026b823599",
+   "doc_id": "e4eb958c1e8c625a17aaef16d5a12d77b3e17154a377bb58f67d87870b5f78ca",
+   "source_id": "caselaw:opinion:2669294"
+  },
+  {
+   "canonical_text_sha256": "b62cba72e9a3cce094a46b26ebd7f7ccb187f5d82a4ef26d44abf6d04b454580",
+   "doc_id": "e6b7f11f65f24b60f7878afd702438fbd3dcafcfdf1ce24973ab8ea9d712c8b9",
+   "source_id": "caselaw:opinion:9805292"
+  },
+  {
+   "canonical_text_sha256": "338ceb2ff413b466e1b61799ae24f80e349a2af44b19dbcb4ca5090adf5c7d87",
+   "doc_id": "e7a2106c99b3fbbd272e2fc5e714f3fd152f89d4fc0cb9100c014fa9a4acffad",
+   "source_id": "caselaw:opinion:2973659"
+  },
+  {
+   "canonical_text_sha256": "e24537db452cec6b6ca58d608f92a6a273e89ffcab220be39237cb54e6d0383d",
+   "doc_id": "e9111b9fb9e3e355354d49cf46155a2963632cf93cb7b28036c6ebbbfa711de3",
+   "source_id": "caselaw:opinion:9472619"
+  },
+  {
+   "canonical_text_sha256": "002530ed1b6a50e0697cffce80cf9adc7561d627263722eeb0119c1004b5b504",
+   "doc_id": "e9b77c76ac87aa80a8f8334e5f94237b62fa12ad96b9e62d91cef29d3138a3d9",
+   "source_id": "caselaw:opinion:441786"
+  },
+  {
+   "canonical_text_sha256": "8c7512ad8fb02a576b62ec92d96a1e83e73bb7dbd386b8adeb78e25e3e0066bb",
+   "doc_id": "e9c87b477ece89c1a513356052501b91556132bf1953ab15ca8f807d7b0530ec",
+   "source_id": "caselaw:opinion:2978475"
+  },
+  {
+   "canonical_text_sha256": "fdde58bcbe53712e3b7460f5ff5457ba9429e4ee0f459e9733f622da648c109f",
+   "doc_id": "f2278f2ca823c24f1fd4b8e7d29091864fa6fe71d29134a5ac64c5598f3981a5",
+   "source_id": "caselaw:opinion:1262428"
+  },
+  {
+   "canonical_text_sha256": "ca73fd6872253862cdbb06841701656c5e0ad1f0c2a481e53cacf60a544493d4",
+   "doc_id": "f38309d8b94a1afa19496284ec49217ce2ddd01c22a53f00431fb524f852b671",
+   "source_id": "caselaw:opinion:9484575"
+  },
+  {
+   "canonical_text_sha256": "67ccb3ac01cce926a76d17ab928310a212234770f4000828dfdf853b3a126ee5",
+   "doc_id": "f419d233fca83efcb0478bd1b2e12caf95bc8fb92f10e70744884bde14a3379d",
+   "source_id": "caselaw:opinion:9441528"
+  },
+  {
+   "canonical_text_sha256": "29f4cdfd1f5233048c88ee7631522a5961c7ece49c691c4b0ea5c301ab8fe8db",
+   "doc_id": "f4cb61eae07d2ba76ef1bc3a6b8930ca81cb2ff571ce33cf1d0f6928416a685c",
+   "source_id": "caselaw:opinion:365476"
+  },
+  {
+   "canonical_text_sha256": "4ca19ddfa2f2ecda9b63826724cb2a2a2e26cb74d6fc8f41637aa9d03b44dc29",
+   "doc_id": "fe1e064ea635b724a56e01027614fd9d8db2aa9ab790957ab3538ef265d699b8",
+   "source_id": "caselaw:opinion:2980420"
+  },
+  {
+   "canonical_text_sha256": "412f2ddde36d27438fe41aba6eb52d93a087c5c31c0e03d58751bfab2148de71",
+   "doc_id": "fe9413a13e92ed6c6acf02e0921ea996a25029cfab327e3a2e5d64ff800a77b9",
+   "source_id": "caselaw:opinion:9428642"
+  },
+  {
+   "canonical_text_sha256": "c862b20c3f16d676d8ac047e77496d5b3505854f7d0d9b46c59634c523b716e2",
+   "doc_id": "ff1afd7ce6fb8287bc2eb8496c06c92a467a7b909cb9440830b419e999a2a9d9",
+   "source_id": "caselaw:opinion:11401088"
+  }
+ ]
+}

@@ -164,11 +164,16 @@ Append the summary's file line count and SHA-256 as a pair in `PINNED_PREFIXES` 
 
 ### The ranked list
 
-The contract the pool builder writes to, one file per leg — `ranked-dense.jsonl`,
-`ranked-lexical.jsonl`, and `ranked-controlling.jsonl`, each the leg's top fifty —
-and the door this suite is
-scored through until `/turn` with `stop_after: retrieve` arrives (slice 4). It
-mirrors the pool file less everything a packet needed: UTF-8 JSONL kept outside
+`gideon eval run --slice judgments` scores the suite through `/turn` with
+`stop_after: retrieve` by default: each query is sent to the Research service
+as the eval identity and the returned pool is scored on the selected stack's
+live generation. The ranked-list file is the second door, for a ranking the
+turn does not serve — one retrieval leg alone, or a built generation not yet
+promoted — given with `--ranked <file>`.
+
+The pool builder writes the file to this contract, one per leg — `ranked-dense.jsonl`,
+`ranked-lexical.jsonl`, and `ranked-controlling.jsonl`, each the leg's top fifty.
+It mirrors the pool file less everything a packet needed: UTF-8 JSONL kept outside
 the checkout and never committed, one line per query, keys `query_id` and
 `ranked` and no others. Each entry of `ranked` carries `source_id`, `sha256`,
 `start`, and `end` and nothing else — no caption, no text, no score, no

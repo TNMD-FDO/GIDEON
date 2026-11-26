@@ -14,9 +14,14 @@ from test_render import DirHost, checkout_files, inputs, trial_inputs
 from gideon.api.settings import load_settings
 from gideon.host.cas import ROOT as CAS_ROOT
 from gideon.host.images import parse_registry
+from gideon.host.index import header
 from gideon.host.render import RenderInputs, render_all
 from gideon.host.render.api import (
     API_CHAT_HEADER,
+    API_EMBED_DIMENSIONS_ENV,
+    API_EMBED_MODEL_ENV,
+    API_EMBED_REPOSITORY_ENV,
+    API_EMBED_SPACE_ENV,
     API_HEALTH_PATH,
     API_INSTRUCTION_MOUNT,
     API_INSTRUCTION_PATH,
@@ -53,6 +58,7 @@ from gideon.host.render.opensearch import (
 )
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_MODEL_ID
 from gideon.host.render.qdrant import QDRANT_READ_ONLY_SECRET_NAME, qdrant_rest_url
+from gideon.host.render.services import declared_sources
 from gideon.host.render.services.api import api_service
 from gideon.host.render.services.generator import engine_service
 from gideon.host.stores import ROLE_SPECS, RoleSpec
@@ -221,11 +227,31 @@ class ApiRender(unittest.TestCase):
         self.assertEqual(settings.qdrant_key_file, Path(values["GIDEON_API_QDRANT_KEY_FILE"]))
         self.assertEqual(settings.embed_url, f"http://{EMBED.service_name}:{EMBED.port}")
         self.assertEqual(settings.embed_key_file, Path(values["GIDEON_API_EMBED_KEY_FILE"]))
+        self.assertEqual(settings.embed_model, values[API_EMBED_MODEL_ENV])
+        self.assertEqual(settings.embed_repository, values[API_EMBED_REPOSITORY_ENV])
+        self.assertEqual(settings.embed_space, values[API_EMBED_SPACE_ENV])
+        self.assertEqual(settings.embed_dimensions, int(values[API_EMBED_DIMENSIONS_ENV]))
         self.assertEqual(settings.opensearch_url, opensearch_rest_url())
         self.assertEqual(settings.opensearch_user, OPENSEARCH_TURN_USER)
         self.assertEqual(
             settings.opensearch_password_file, Path(values["GIDEON_API_OPENSEARCH_PASSWORD_FILE"]),
         )
+
+    def test_embedding_settings_follow_the_profile_and_release_header(self) -> None:
+        for rendered_inputs in (inputs(), trial_inputs()):
+            pin = rendered_inputs.profile.model(EMBED.role)
+            space = rendered_inputs.profile.embedding_space
+            assert pin is not None and space is not None
+            for header_id in dict.fromkeys((header.RELEASE_HEADER, *header.HEADERS)):
+                with self.subTest(profile=rendered_inputs.profile.name, header=header_id), patch.object(
+                    header, "RELEASE_HEADER", header_id,
+                ):
+                    document = yaml.safe_load(render_all(rendered_inputs).by_path["compose.yaml"].content)
+                    environment = document["services"][API_SERVICE_NAME]["environment"]
+                    self.assertEqual(environment[API_EMBED_MODEL_ENV], pin.serve.served_name)
+                    self.assertEqual(environment[API_EMBED_REPOSITORY_ENV], pin.repo)
+                    self.assertEqual(environment[API_EMBED_SPACE_ENV], header.embedding_space(space.id, header_id))
+                    self.assertEqual(environment[API_EMBED_DIMENSIONS_ENV], str(space.dimensions))
 
     def test_empty_checkout_and_digest_refuse(self) -> None:
         base = inputs()
@@ -426,6 +452,19 @@ class ApiRender(unittest.TestCase):
 
 
 class SourceDigest(unittest.TestCase):
+    def test_turn_extraction_and_serving_sources_move_the_api_digest(self) -> None:
+        paths = (
+            ROOT / "gideon/turn/__init__.py", ROOT / "gideon/extraction/contract.py",
+            ROOT / "gideon/casecite/adapter.py", ROOT / "gideon/host/index/serving.py",
+        )
+        files = {**checkout_files(), **{str(path): path.read_text(encoding="utf-8") for path in paths}}
+        sources = declared_sources()[API_SERVICE_NAME]
+        original = gather_sources_digest(DirHost(files), ROOT, sources)
+        for path in paths:
+            with self.subTest(path=path.relative_to(ROOT)):
+                edited = {**files, str(path): files[str(path)] + "\n# Fictitious source change.\n"}
+                self.assertNotEqual(original, gather_sources_digest(DirHost(edited), ROOT, sources))
+
     def test_collect_is_order_independent_and_ignores_caches_and_outside_files(self) -> None:
         files = {
             str(ROOT / "service" / "a.py"): "a",

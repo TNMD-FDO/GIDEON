@@ -15,6 +15,7 @@ from uuid import uuid4
 import gideon
 from gideon.evaluation import (
     assessments,
+    baselines,
     challenger,
     generation,
     ranked,
@@ -22,6 +23,7 @@ from gideon.evaluation import (
     rankmetrics2,
     record,
     reference,
+    research_door,
     sampling,
     stacks,
     window,
@@ -165,6 +167,7 @@ class _Request:
     paired_problem: Problem | None
     generation_name: object = None
     assessed_path: str | None = None
+    baseline: str | None = None
 
     def retry_command(
         self, *, slice_spec: SliceSpec | None = None, flags: str | None = None,
@@ -174,7 +177,9 @@ class _Request:
             return _challenger_retry(command_flags)
         ranked_flag = (
             " --ranked <file>"
-            if slice_spec is not None and CallSurface.RANKED_FILE in slice_spec.surfaces
+            if slice_spec is not None and CallSurface.RANKED_FILE in slice_spec.run_surfaces(
+                has_ranked=self.ranked_path is not None
+            )
             else ""
         )
         assessed_flag = (
@@ -283,6 +288,7 @@ class _Prepared:
     generation: GenerationAccess | None = None
     assessments: Assessments | None = None
     judge_retry: sampling.HeldSet | None = None
+    turn_overrides: Mapping[str, JSONValue] | None = None
 
 
 @dataclass(slots=True)
@@ -826,15 +832,41 @@ def _flag_problem(
             f"Choose a decision slice ({names}), then run "
             f"{report.command('eval run --slice <name> --decision --against <run id>')} and retry.",
         )
-    if request.force and CallSurface.ENGINE not in slice_spec.surfaces:
+    surfaces = slice_spec.run_surfaces(has_ranked=request.ranked_path is not None)
+    if request.force and CallSurface.ENGINE not in surfaces:
         return Problem(
             f"--force is not valid for slice {slice_name!r}, which does not reach the engine",
             f"Remove --force when running --slice {slice_name}, then retry.",
         )
-    if request.generation_name is not None and CallSurface.STORES not in slice_spec.surfaces:
+    if request.generation_name is not None and CallSurface.STORES not in surfaces:
         return Problem(
             f"--generation is not valid for slice {slice_name!r}, which reads no generation",
             f"Remove --generation when running --slice {slice_name}, then retry.",
+        )
+    return None
+
+
+def _baseline_flag_problem(
+    args: argparse.Namespace, names: tuple[str, ...], flags: str, baseline_flag: str,
+) -> Problem | None:
+    """Validate the baseline against the whole run before a nightly suite can start."""
+
+    retry = "eval run" + "".join(f" --slice {name}" for name in names)
+    if getattr(args, "set", None) is not None:
+        retry += " --set <dir>"
+    if getattr(args, "assessed", None) is not None:
+        retry += " --assessed <file>"
+    for name in names:
+        spec = SLICE_RUNNERS.get(name)
+        if spec is None or CallSurface.RESEARCH not in spec.run_surfaces(has_ranked=False):
+            return Problem(
+                f"--baseline is not valid for slice {name!r}, which does not call /turn",
+                f"Run {report.command(retry + flags)}, then retry.",
+            )
+    if getattr(args, "ranked", None) is not None:
+        return Problem(
+            "--baseline cannot be combined with --ranked",
+            f"Run {report.command(retry + baseline_flag + flags)}, then retry.",
         )
     return None
 
@@ -967,7 +999,7 @@ def _prepare_generation(
 ) -> GenerationAccess | None | StageResult:
     """Resolve the stores surface, or return its one refusing stage row."""
 
-    if CallSurface.STORES not in slice_spec.surfaces:
+    if CallSurface.STORES not in slice_spec.run_surfaces(has_ranked=request.ranked_path is not None):
         return None
     name = cast(str | None, request.generation_name)
     # The resolver's fixes name --generation themselves, so the retry drops the
@@ -1003,6 +1035,33 @@ def _generation_detail(resolved: GenerationAccess | None) -> str:
         "" if resolved is None
         else f", generation {resolved.name} ({resolved.corpus_lockfile}, {resolved.state})"
     )
+
+
+def _prepare_research(
+    request: _Request, seams: _Seams, slice_spec: SliceSpec, resolved: GenerationAccess | None,
+    turn_overrides: Mapping[str, JSONValue] | None,
+) -> str | Problem:
+    """Check the Research door and return the retrieval configuration hash to record."""
+
+    if nogpu.is_no_gpu_host(seams.host):
+        # A host without GPUs runs no gideon-api, so no /turn answers there.
+        return Problem("this host carries the no-GPU marker and serves no /turn", _NO_GPU_FIX)
+    if resolved is not None and resolved.state != "live":
+        promote = report.command(f"index promote {resolved.name}")
+        fix = f"Run {promote}, then retry."
+        if slice_spec.accepts_ranked:
+            request_with_file = replace(request, ranked_path="<file>", baseline=None)
+            flags = request.command_flags
+            if request.baseline is not None:
+                flags = flags.removeprefix(f" --baseline {request.baseline}")
+            retry = report.command(request_with_file.retry_command(slice_spec=slice_spec, flags=flags))
+            fix = f"Run {promote}, then retry, or score a ranked file with {retry}."
+        return Problem(f"generation {resolved.name} is {resolved.state} and /turn requires a live generation", fix)
+    expected_hash = baselines.expected_config_hash(turn_overrides)
+    if isinstance(expected_hash, Problem):
+        return expected_hash
+    problem = research_door.probe(seams.host, request.paths.turns_dir, sibling=request.paths.name == CI_STACK)
+    return expected_hash if problem is None else problem
 
 
 def _on_box_record_facts(
@@ -1045,6 +1104,7 @@ def _prepare_on_box(
     when a required seam is unavailable.
     """
 
+    surfaces = slice_spec.run_surfaces(has_ranked=request.ranked_path is not None)
     if seams.host.geteuid() != 0:
         print_stage(
             StageResult(
@@ -1055,7 +1115,7 @@ def _prepare_on_box(
             )
         )
         return None
-    if CallSurface.ENGINE in slice_spec.surfaces and nogpu.is_no_gpu_host(seams.host):
+    if CallSurface.ENGINE in surfaces and nogpu.is_no_gpu_host(seams.host):
         print_stage(
             StageResult(
                 "preconditions",
@@ -1073,7 +1133,7 @@ def _prepare_on_box(
         return None
     config = site_result.config
     image: ImageAccess | None = None
-    if CallSurface.IMAGE in slice_spec.surfaces:
+    if CallSurface.IMAGE in surfaces:
         resolved_image = _prepare_image(seams, config.registry)
         if isinstance(resolved_image, Problem):
             print_stage(StageResult(
@@ -1081,8 +1141,8 @@ def _prepare_on_box(
             ))
             return None
         image = resolved_image
-    if CallSurface.ENGINE not in slice_spec.surfaces:
-        if request.paths.name == CI_STACK and CallSurface.STORES in slice_spec.surfaces:
+    if CallSurface.ENGINE not in surfaces:
+        if request.paths.name == CI_STACK and CallSurface.STORES in surfaces:
             job_problem = _sibling_index_job_problem(request, seams, slice_spec)
             if job_problem is not None:
                 print_stage(StageResult(
@@ -1093,6 +1153,33 @@ def _prepare_on_box(
         if isinstance(resolved_generation, StageResult):
             print_stage(resolved_generation)
             return None
+        door_detail = ""
+        turn_overrides: Mapping[str, JSONValue] | None = None
+        if CallSurface.RESEARCH in surfaces:
+            if request.baseline is not None:
+                turn_overrides = baselines.BASELINES[request.baseline]
+            expected_hash = _prepare_research(request, seams, slice_spec, resolved_generation, turn_overrides)
+            if isinstance(expected_hash, Problem):
+                print_stage(StageResult("preconditions", False, expected_hash.problem, expected_hash.fix))
+                return None
+            judgments_overrides = overrides.get("judgments", {})
+            assert isinstance(judgments_overrides, Mapping)
+            overrides = {
+                **overrides,
+                "judgments": {
+                    **judgments_overrides,
+                    "definition": rankmetrics2.DEFINITION_ID,
+                    "door": "turn",
+                    "config_hash": expected_hash,
+                    **({} if turn_overrides is None else {
+                        "baseline": request.baseline,
+                        "turn_overrides": dict(turn_overrides),
+                    }),
+                },
+            }
+            door_detail = f", door {research_door.TURN_PATH} probed, baseline {request.baseline or 'shipped'}"
+        elif CallSurface.RANKED_FILE in surfaces:
+            door_detail = ", door ranked-file"
         record_facts = _on_box_record_facts(request, seams, config.hardware_profile)
         if isinstance(record_facts, StageResult):
             print_stage(record_facts)
@@ -1106,7 +1193,7 @@ def _prepare_on_box(
             "preconditions", True,
             f"root, site{', image present' if image is not None else ''}, "
             f"profile {config.hardware_profile}, {writer}"
-            + _generation_detail(resolved_generation), "",
+            + _generation_detail(resolved_generation) + door_detail, "",
         ))
         return _Prepared(
             served_model_name=None,
@@ -1120,6 +1207,7 @@ def _prepare_on_box(
             record=record_facts,
             image=image,
             generation=resolved_generation,
+            turn_overrides=turn_overrides,
         )
     judgement = request.mode.judgement(started, config.office.timezone)
     engine_call_count = (
@@ -1275,7 +1363,7 @@ def _prepare_on_box(
         return None
 
     turns: access.TurnAccess | None = None
-    if CallSurface.TURNS in slice_spec.surfaces:
+    if CallSurface.TURNS in surfaces:
         password = access.read_eval_password(seams.host)
         if isinstance(password, Problem):
             print_stage(StageResult("preconditions", False, password.problem, password.fix))
@@ -1331,7 +1419,7 @@ def _prepare_on_box(
             f"{prompt_detail}, {writer}"
             + (
                 ", eval password read, door probed"
-                if CallSurface.TURNS in slice_spec.surfaces
+                if CallSurface.TURNS in surfaces
                 else ""
             ) + (", image present" if image is not None else "")
             + _generation_detail(resolved_generation),
@@ -1367,17 +1455,20 @@ def _prepare_ranked(
     loaded: LoadedSet,
     overrides: Mapping[str, object],
 ) -> tuple[Mapping[str, tuple[rankmetrics.Coordinates, ...]] | None, Mapping[str, object]] | None:
-    """Read the ranked-list file a slice names, or refuse a missing or stray one.
+    """Read a supplied ranked-list file or refuse it for a slice that cannot use it.
 
     Returns the lists and the run row's overrides, which a read file replaces
     with its digest and the definition id, or None after the refusing row.
     """
 
-    slice_name = cast(str, request.slice_name)
     ranked_path = request.ranked_path
-    if CallSurface.RANKED_FILE in slice_spec.surfaces:
+    if ranked_path is None:
+        return None, overrides
+    slice_name = cast(str, request.slice_name)
+    if slice_spec.accepts_ranked:
         if not isinstance(ranked_path, str) or not ranked_path:
-            retry = report.command(request.retry_command(slice_spec=slice_spec))
+            retry_request = replace(request, ranked_path="<file>")
+            retry = report.command(retry_request.retry_command(slice_spec=slice_spec))
             print_stage(
                 StageResult(
                     "ranked",
@@ -1410,17 +1501,15 @@ def _prepare_ranked(
                 "ranked_sha256": ranked_result.sha256,
             }
         }
-    if ranked_path is not None:
-        print_stage(
-            StageResult(
-                "ranked",
-                False,
-                f"slice {slice_name} does not take --ranked",
-                _ranked_forbidden_fix(slice_name),
-            )
+    print_stage(
+        StageResult(
+            "ranked",
+            False,
+            f"slice {slice_name} does not take --ranked",
+            _ranked_forbidden_fix(slice_name),
         )
-        return None
-    return None, overrides
+    )
+    return None
 
 
 def _prepare_assessed(
@@ -1537,7 +1626,7 @@ def _record(
 
     engine_conditions = (
         seams.conditions(prepared.started, finished)
-        if CallSurface.ENGINE in slice_spec.surfaces
+        if CallSurface.ENGINE in slice_spec.run_surfaces(has_ranked=request.ranked_path is not None)
         else None
     )
     run = record.RunRow(
@@ -1731,6 +1820,7 @@ def _run_body(
         repeats=slice_spec.repeats,
         progress=print,
         ranked=prepared.ranked,
+        turn_overrides=prepared.turn_overrides,
         assessments=prepared.assessments,
         turns=prepared.turns,
         checkout=seams.checkout,
@@ -1912,7 +2002,7 @@ def _challenger_flag_problem(args: argparse.Namespace) -> Problem | None:
         " --force" if getattr(args, "force", False) else ""
     )
     fix = f"Run {report.command(_challenger_retry(flags))}, then retry."
-    for name in ("slice", "set", "ranked", "assessed", "decision", "against"):
+    for name in ("baseline", "slice", "set", "ranked", "assessed", "decision", "against"):
         value = getattr(args, name, None)
         if value is not None and value is not False:
             return Problem(f"--challenger cannot be combined with --{name}", fix)
@@ -2014,12 +2104,20 @@ def run_eval(
     generation_name = getattr(args, "generation", None)
     generation_flag = "" if generation_name is None else f" --generation {generation_name}"
     command_flags += force_flag + generation_flag
+    baseline = getattr(args, "baseline", None)
+    baseline_flag = "" if baseline is None else f" --baseline {baseline}"
+    if baseline is not None:
+        baseline_problem = _baseline_flag_problem(args, names, command_flags, baseline_flag)
+        if baseline_problem is not None:
+            print(refusal(_COMMAND, baseline_problem.problem, baseline_problem.fix), file=sys.stderr)
+            return 1
+        command_flags = baseline_flag + command_flags
     # Judged before the stack resolves, since a ci stack selects its secrets directory.
     suite_problem = _suite_problem(
         names,
         mode,
         command_flags,
-        f"{stack_flag} --kind {NIGHTLY_KIND}{force_flag}{generation_flag}",
+        f"{baseline_flag}{stack_flag} --kind {NIGHTLY_KIND}{force_flag}{generation_flag}",
     )
     if suite_problem is not None:
         print(refusal(_COMMAND, suite_problem.problem, suite_problem.fix), file=sys.stderr)
@@ -2042,6 +2140,7 @@ def run_eval(
         ranked_path=getattr(args, "ranked", None),
         assessed_path=getattr(args, "assessed", None),
         generation_name=generation_name,
+        baseline=baseline,
         set_root=set_root,
         supplied_set=supplied_root is not None,
         command_flags=command_flags,

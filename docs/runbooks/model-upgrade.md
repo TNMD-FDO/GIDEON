@@ -66,7 +66,7 @@ Who: The developer.\
 Command: `sudo python3 -B -m gideon engine verify` from the proposal checkout.\
 Failure: Any refusing row or nonzero exit calls for `docs/runbooks/model-upgrade.md` §12; do not release the new engine to users.
 
-Read every row: `preconditions`, `needle-32k`, `needle-128k`, `needle-256k`, `structured`, `smoke`, each `frontend-<id>` case, `embed-vectors`, `embed-throughput`, and `audit`. The two supporting rows prove the embedding server's pin: its vectors have the lock's width and the batch's throughput is recorded. The command continues after an individual check fails; all rows must be ok, and the command must exit zero. The `audit` row confirms the `engine_verify` event was kept. A no-GPU `skipped` row does not prove a model revision.
+Read every row: `preconditions`, `sequence-cap`, `needle-32k`, `needle-128k`, `needle-256k`, `structured`, `smoke`, each `frontend-<id>` case, `embed-vectors`, `embed-throughput`, `embed-latency`, `rerank-2-triple`, `rerank-2-flags`, `rerank-2-latency`, `rerank-2-throughput`, and `audit`. The three embedding rows prove the embedding server's pin: its vectors have the lock's width, and the batch's throughput and one query's latency are recorded. The four reranker rows prove the reranker's pin: it scores the sample's passage above its distractor, its running flags are the lock's, and one pair's latency and a batch's throughput are recorded. A profile that pins no reranker prints one `rerank-2` row reading `skipped` in their place. The command continues after an individual check fails; all rows must be ok, and the command must exit zero. The `audit` row confirms the `engine_verify` event was kept. A no-GPU `skipped` row does not prove a model revision.
 
 ## 8. The decision run
 

@@ -39,7 +39,7 @@ _EVENT_BREAK = b"\n\n"
 _STREAM_END = b"data: " + DONE_EVENT.encode("utf-8") + _EVENT_BREAK
 
 
-async def _run_with_disconnect(work: Callable[[], Awaitable[None]], receive: Receive) -> bool:
+async def run_with_disconnect(work: Callable[[], Awaitable[None]], receive: Receive) -> bool:
     """Run *work* beside a receive watch and report whether the caller left."""
 
     disconnected = False
@@ -140,7 +140,7 @@ class CompletionRelay:
                 with anyio.CancelScope(shield=True):
                     await upstream.aclose()
 
-        if await _run_with_disconnect(work, receive):
+        if await run_with_disconnect(work, receive):
             # The work was cancelled where it stood; nothing further is sent.
             return
 

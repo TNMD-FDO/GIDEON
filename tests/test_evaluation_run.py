@@ -1952,7 +1952,7 @@ class EngineStackAndLock(unittest.TestCase):
         self.assertNotIn(stacks.CI_ROOT, write_argv)
 
     def test_ci_load_admits_every_registered_slice_before_the_lock(self) -> None:
-        for slice_name, spec in SLICE_RUNNERS.items():
+        for slice_name in SLICE_RUNNERS:
             with self.subTest(slice_name=slice_name):
                 if absent_from_export(SET_ROOT / "slices" / slice_name, ROOT):
                     self.skipTest("in an export this slice's lists are absent, so load refuses it first")
@@ -1963,15 +1963,11 @@ class EngineStackAndLock(unittest.TestCase):
                         **_run_kwargs(host),
                     )
                 self.assertEqual((code, stderr), (1, ""), stdout)
-                refusal = (
-                    f"ranked: refuse — slice {slice_name} requires --ranked"
-                    if CallSurface.RANKED_FILE in spec.surfaces
-                    else "preconditions: refuse — root privileges are required"
-                )
                 rows = stdout.splitlines()
                 self.assertEqual(len(rows), 2, stdout)
                 self.assertTrue(rows[0].startswith("load: ok — "), stdout)
-                self.assertTrue(rows[1].startswith(refusal), stdout)
+                self.assertTrue(rows[1].startswith("preconditions: refuse — root privileges are required"), stdout)
+                self.assertNotIn("--ranked", rows[1])
                 self.assertEqual(host.lock_records, [])
 
     def test_engine_lock_refusal_nested_pass_and_post_lock_refusal(self) -> None:
@@ -2630,17 +2626,21 @@ class SliceRegistry(unittest.TestCase):
             with self.subTest(slice_name=slice_name):
                 self.assertTrue(SLICE_RUNNERS[slice_name].compares_reference)
 
-    def test_only_judgments_names_the_ranked_file_surface(self) -> None:
+    def test_only_judgments_uses_the_ranked_file_surface_when_given_a_file(self) -> None:
         for slice_name, spec in SLICE_RUNNERS.items():
             with self.subTest(slice_name=slice_name):
                 self.assertEqual(
-                    CallSurface.RANKED_FILE in spec.surfaces,
+                    CallSurface.RANKED_FILE in spec.run_surfaces(has_ranked=True),
                     slice_name == "judgments",
                 )
         judgments = SLICE_RUNNERS["judgments"]
         self.assertEqual(
-            judgments.surfaces,
+            judgments.run_surfaces(has_ranked=True),
             frozenset({CallSurface.RANKED_FILE, CallSurface.STORES}),
+        )
+        self.assertEqual(
+            judgments.run_surfaces(has_ranked=False),
+            frozenset({CallSurface.RESEARCH, CallSurface.STORES}),
         )
 
     def test_only_turn_driven_slices_name_the_turns_surface(self) -> None:
@@ -3097,6 +3097,62 @@ class NightlySuites(unittest.TestCase):
         retry = build_parser().parse_args(shlex.split(match.group(1)))
         self.assertIsNone(retry.slice)
         self.assertIsNone(command._challenger_flag_problem(retry))
+
+
+class BaselineFlags(unittest.TestCase):
+    def test_each_incompatible_flag_refuses_before_rows_and_prints_a_parseable_fix(self) -> None:
+        cases = (
+            (
+                ("--slice", "extraction", "--stack", "ci"),
+                "--baseline is not valid for slice 'extraction'",
+                ["extraction"], None, False,
+            ),
+            (
+                ("--slice", "judgments", "--stack", "ci", "--ranked", "/tmp/fictitious-ranked-file"),
+                "--baseline cannot be combined with --ranked",
+                ["judgments"], "off", False,
+            ),
+            (
+                ("--challenger", "--stack", "ci"),
+                "--challenger cannot be combined with --baseline",
+                None, None, True,
+            ),
+        )
+        for flags, detail, names, baseline, challenger_flag in cases:
+            with self.subTest(flags=flags):
+                host = ChallengerHost()
+                with patch.object(command.stacks.secrets, "select_directory") as select_directory:
+                    code, stdout, stderr = _invoke(["eval", "run", "--baseline", "off", *flags], **_run_kwargs(host))
+                self.assertEqual((code, stdout), (1, ""))
+                self.assertIn(detail, stderr)
+                self.assertNotIn("/tmp/fictitious-ranked-file", stderr)
+                select_directory.assert_not_called()
+                self.assertEqual((host.calls, host.reads, host.exists_calls, host.lock_records), ([], [], [], []))
+                match = re.search(r"Fix: Run (?:sudo python3 -m )?gideon (eval run .+), then retry\.", stderr)
+                assert match is not None, stderr
+                retry = build_parser().parse_args(shlex.split(match.group(1)))
+                self.assertEqual((retry.slice, retry.baseline, retry.challenger), (names, baseline, challenger_flag))
+                self.assertEqual(retry.stack, "ci")
+                self.assertIsNone(retry.ranked)
+
+    def test_nightly_checks_every_slice_before_printing_a_suite_row(self) -> None:
+        for names in (("judgments", "extraction"), ("extraction", "judgments")):
+            with self.subTest(names=names):
+                host = ChallengerHost()
+                with patch.object(command.stacks.secrets, "select_directory") as select_directory:
+                    code, stdout, stderr = _invoke([
+                        "eval", "run", "--kind", "nightly", "--stack", "ci",
+                        "--slice", names[0], "--slice", names[1], "--baseline", "off",
+                    ], **_run_kwargs(host))
+                self.assertEqual((code, stdout), (1, ""))
+                self.assertIn("--baseline is not valid for slice 'extraction'", stderr)
+                select_directory.assert_not_called()
+                self.assertEqual((host.calls, host.reads, host.lock_records), ([], [], []))
+                match = re.search(r"Fix: Run (?:sudo python3 -m )?gideon (eval run .+), then retry\.", stderr)
+                assert match is not None, stderr
+                retry = build_parser().parse_args(shlex.split(match.group(1)))
+                self.assertEqual(retry.slice, list(names))
+                self.assertEqual((retry.baseline, retry.kind, retry.stack), (None, "nightly", "ci"))
 
 
 class ChallengerPair(unittest.TestCase):

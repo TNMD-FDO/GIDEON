@@ -457,11 +457,12 @@ class InstallTests(unittest.TestCase):
         )
         self.assertEqual([name for name, _ in runners.calls], NESTED)
 
-    def test_gate_row_counts_observed_checks(self) -> None:
+    def test_gate_row_counts_observed_checks_without_skipped_rows(self) -> None:
         rows = (
             StageResult("preconditions", True, "ready", ""),
             StageResult("needle", True, "checked", ""),
             StageResult("smoke", True, "checked", ""),
+            StageResult("rerank-2", True, "skipped — fixture profile pins no reranker", ""),
             StageResult("audit", True, "recorded", ""),
         )
         code, out, _, _, _ = self.run_install(FakeHost(), FakeRunners(engine_rows=rows))

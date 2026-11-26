@@ -1,14 +1,20 @@
-"""The judgments slice command over a content-free ranked-list fixture."""
+"""The judgments slice over ranked files and recorded Research replies."""
 
 import ast
 import hashlib
+import io
 import json
 import shutil
+import subprocess
 import tempfile
 import unittest
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import replace
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from dataclasses import asdict, replace
+from http import HTTPStatus
 from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
 from test_evaluation_assessments import FIXTURE_MODEL, FIXTURE_PROMPT
 from test_evaluation_record import read_psql_set
@@ -21,9 +27,12 @@ from test_evaluation_run import (
     _run_kwargs,
 )
 from test_golddrop_slice import GoldDropHost, _context
+from test_research_door import envelope, turn_pool_fixture, turn_pool_reply
 
+from gideon.evaluation import baselines, record, research_door
 from gideon.evaluation.assessments import Assessments
-from gideon.evaluation.evalset import SET_ROOT, load_set
+from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set
+from gideon.evaluation.generation import GenerationAccess
 from gideon.evaluation.judgments import Judgment, path_for, serialize
 from gideon.evaluation.judgments_slice import run_judgments
 from gideon.evaluation.rankmetrics import (
@@ -32,10 +41,14 @@ from gideon.evaluation.rankmetrics import (
     RELEVANT_GRADE,
     Coordinates,
 )
+from gideon.evaluation.rankmetrics2 import DEFINITION_ID
 from gideon.evaluation.record import POSTGRES_SERVICE
-from gideon.evaluation.results import CaseResult, JSONValue
+from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
 from gideon.host import report, secrets, stack
-from gideon.host.render.ci import CI_STACK
+from gideon.host.index.sample import sample_name
+from gideon.host.render.api import API_SERVICE_NAME
+from gideon.host.render.ci import CI_ROOT, CI_STACK, PRODUCTION_STACK
+from gideon.turn.states import State, TurnFailure
 
 SENTINEL = "[FICTIONAL TEST ONLY] this question must never enter a stream"
 FIGURE_KEYS = ("ndcg_at_10", "recall_at_50", "hole_at_10")
@@ -233,7 +246,7 @@ class Command(unittest.TestCase):
         self.assertEqual(
             _summary_line(stdout, "judged queries "),
             "judged queries 4 of 5, definition judgments@2, "
-            f"generation {generation['gen_id']} ({generation['corpus_lockfile']})",
+            f"generation {generation['gen_id']} ({generation['corpus_lockfile']}), door ranked-file",
         )
         self.assertIn("ndcg_at_10 mean 0.666667 count 3", stdout)
         self.assertIn("recall_at_50 mean 0.500000 count 2", stdout)
@@ -282,13 +295,13 @@ class Command(unittest.TestCase):
             self.assertEqual(_binding(sql, variable), expected)
             self.assertIn(f":'{variable}'", sql)
         self.assertEqual(
-            json.loads(_binding(sql, "overrides")),
-            {
+            _binding(sql, "overrides"),
+            json.dumps({
                 "judgments": {
-                    "definition": "judgments@2",
+                    "definition": DEFINITION_ID,
                     "ranked_sha256": hashlib.sha256(ranked_bytes).hexdigest(),
                 }
-            },
+            }, sort_keys=True),
         )
         self.assertNotIn(SENTINEL, stdout + stderr + sql)
 
@@ -344,7 +357,7 @@ class Command(unittest.TestCase):
         drop_source, drop_sha, drop_start, drop_end = _coordinate(2)
         legacy_report = (
             "judged queries 2 of 2, definition judgments@2, "
-            f"generation {generation['gen_id']} ({generation['corpus_lockfile']})\n"
+            f"generation {generation['gen_id']} ({generation['corpus_lockfile']}), door ranked-file\n"
             "ndcg_at_10 mean 1.000000 count 1\n"
             "recall_at_50 mean 1.000000 count 1\n"
             f"{hole_line}"
@@ -548,9 +561,11 @@ class Command(unittest.TestCase):
         )
         self.assertEqual(
             _summary_line(stdout, "gate:"),
-            "gate: refuse — one or more judged queries have no ranked list or the file has ranked entries "
-            "the generation does not hold Fix: Add a ranked list for each missing query id in the report, "
-            "or use --generation <name> to score the file against the generation it was drawn from.",
+            "gate: refuse — one or more judged queries had a failed turn, an unresolved pool entry, "
+            "a missing ranked list, or a ranked entry the generation does not hold Fix: Review the reported "
+            "query ids and check the Research service logs for failed turns or unresolved pool entries. "
+            "For a ranked file, add a list for each missing query id or use --generation <name> to score "
+            "against the generation it was drawn from.",
         )
 
     def test_double_graded_passage_uses_primary(self) -> None:
@@ -624,41 +639,20 @@ class Command(unittest.TestCase):
                     self.assertNotIn("run: ok", stdout)
                     self.assertNotIn("record:", stdout)
 
-    def test_missing_stray_and_malformed_ranked_inputs_refuse_without_writing(self) -> None:
+    def test_stray_and_malformed_ranked_inputs_refuse_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             checkout, _ids = _fixture(directory, {1: 2})
             malformed = _write_ranked_bytes(directory, b"not-json\n")
-            cases = (
-                (["eval", "run", "--slice", "judgments"], checkout, "--ranked", False),
-                (
-                    ["eval", "run", "--slice", "judgments", "--ranked", str(malformed)],
-                    checkout,
-                    "ranked file refused",
-                    True,
-                ),
+            host = EvalHost()
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", "judgments", "--ranked", str(malformed)],
+                **_run_kwargs(host, checkout=checkout, court_path=checkout / "courts.yaml"),
             )
-            for argv, case_checkout, expected, malformed_input in cases:
-                with self.subTest(argv=argv):
-                    host = EvalHost()
-                    code, stdout, stderr = _invoke(
-                        argv,
-                        **_run_kwargs(
-                            host,
-                            checkout=case_checkout,
-                            court_path=case_checkout / "courts.yaml",
-                        ),
-                    )
-                    self.assertEqual(code, 1)
-                    self.assertIn(expected, stdout)
-                    self.assertIn("Fix:", stdout)
-                    self.assertEqual(
-                        [call for call in host.calls if call[0][0] == "docker"], []
-                    )
-                    if malformed_input:
-                        self.assertIn("line is not one JSON object", stderr)
-                    else:
-                        retry = report.command("eval run --slice judgments --ranked <file>")
-                        self.assertIn(f"Fix: Run {retry}, then retry.", stdout)
+            self.assertEqual(code, 1)
+            self.assertIn("ranked file refused", stdout)
+            self.assertIn("Fix:", stdout)
+            self.assertIn("line is not one JSON object", stderr)
+            self.assertEqual([call for call in host.calls if call[0][0] == "docker"], [])
 
             host = EvalHost()
             code, stdout, stderr = _invoke(
@@ -769,7 +763,7 @@ class RunnerRefusals(unittest.TestCase):
                     CaseResult(case_id, 1, "fail", {"problem": problem}) for case_id in ids
                 ))
                 self.assertEqual(result.report.splitlines(), [
-                    f"{len(ids)} counted, 0 unsigned excluded",
+                    f"{len(ids)} counted, 0 unsigned excluded, door ranked-file",
                     f"{problem}: {detail}",
                     f"Fix: {fix}",
                     "judgments: fail",
@@ -777,8 +771,348 @@ class RunnerRefusals(unittest.TestCase):
                 self.assertEqual(len(host.calls), reads)
 
 
+class ResearchRunner(unittest.TestCase):
+    """Use the recorded turn and coordinate replies through the runner and command."""
+
+    def setUp(self) -> None:
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        self.checkout, self.ids = _fixture(directory, dict.fromkeys(range(1, 9)))
+        loaded = load_set(self.checkout / SET_ROOT).loaded
+        assert loaded is not None
+        self.reply = turn_pool_reply()
+        self.pool = sorted(self.reply["pool"], key=lambda entry: entry["pool_rank"])
+        self.generation = GenerationAccess(
+            self.reply["generation"]["gen_id"], self.reply["generation"]["lockfiles"][0], "live",
+        )
+        records = turn_pool_fixture("coordinates.json")
+        self.chunks = {row["chunk_id"]: row for row in records["chunks"]}
+        self.documents = {row["doc_id"]: row for row in records["manifest"]}
+        self.ranked: tuple[Coordinates, ...] = tuple(
+            (document["source_id"], document["canonical_text_sha256"], chunk["char_start"], chunk["char_end"])
+            for entry in self.pool
+            for chunk in (self.chunks[entry["chunk_id"]],)
+            for document in (self.documents[chunk["doc_id"]],)
+        )
+        self.loaded = replace(loaded, judgments=tuple(
+            Judgment(case_id, *self.ranked[index], RELEVANT_GRADE, "CHU-attorney-1", "primary")
+            for index, case_id in enumerate(self.ids[:-1])
+        ))
+        self.host = GoldDropHost()
+        self.host.manifest = {row["source_id"]: row["canonical_text_sha256"] for row in self.documents.values()}
+        self.events: list[str] = []
+        self.progress: list[str] = []
+        self.context = replace(
+            _context(self.host), generation=self.generation, progress=self.progress.append,
+            checkpoint=lambda: self.events.append("checkpoint"),
+        )
+
+    @contextmanager
+    def _serve(
+        self, loaded: LoadedSet, context: RunContext,
+        replies: Mapping[str, subprocess.CompletedProcess[str] | subprocess.SubprocessError],
+        *, chunk_exit: int = 0, probe_reply: subprocess.CompletedProcess[str] | None = None,
+    ) -> Iterator[None]:
+        host_run = self.host.run
+
+        def respond(
+            argv: list[str], *, input: str | None = None, **kwargs: Any,
+        ) -> subprocess.CompletedProcess[str]:
+            self.assertNotIn(SENTINEL, repr(argv))
+            if argv[-2].endswith(research_door.TURN_PATH):
+                self.assertIn(str(Path(context.turns_dir) / "compose.yaml"), argv)
+                assert input is not None
+                body = json.loads(input)["body"]
+                question = body["message"]
+                if question == research_door.PROBE_MESSAGE:
+                    assert probe_reply is not None
+                    self.assertEqual(body, {
+                        "message": research_door.PROBE_MESSAGE, "stop_after": "retrieve",
+                        "overrides": {research_door.PROBE_KEY: True},
+                    })
+                    self.events.append("probe")
+                    return probe_reply
+                case_id = question.removeprefix(f"{SENTINEL} ")
+                self.assertEqual(question, loaded.cases_by_id[case_id]["question"])
+                self.assertEqual(body.get("overrides"), context.turn_overrides)
+                self.events.append(case_id)
+                response = replies[case_id]
+                if isinstance(response, subprocess.SubprocessError):
+                    raise response
+                return response
+
+            self.assertNotIn(SENTINEL, input or "")
+            if input is None or not any(table in input for table in ("FROM public.chunks", "FROM public.generation_documents")):
+                return host_run(argv, input=input, **kwargs)
+            batches = [
+                json.loads(read_psql_set(line, "v_ids"))
+                for line in input.splitlines() if line.startswith("\\set v_ids ")
+            ]
+            if not batches:
+                self.assertIn("FROM public.generation_documents", input)
+                self.assertEqual(argv, record.reader_argv(context.turns_dir))
+                self.events.append("scoring manifest")
+                source_ids = json.loads(_binding(input, "v_source_ids"))
+                stdout = "\n".join(json.dumps({
+                    "source_id": source_id, "canonical_text_sha256": self.host.manifest[source_id],
+                }) for source_id in source_ids if source_id in self.host.manifest)
+                return subprocess.CompletedProcess(argv, 0, stdout, SENTINEL)
+            if "FROM public.chunks" in input:
+                self.assertEqual(argv, record.reader_argv(context.production_dir))
+                self.events.append("pool chunks")
+                rows, returncode = self.chunks, chunk_exit
+            else:
+                self.assertIn("FROM public.generation_documents", input)
+                self.assertEqual(argv, record.reader_argv(context.turns_dir))
+                self.events.append("pool manifest")
+                rows, returncode = self.documents, 0
+            stdout = "\n".join(json.dumps(rows[key]) for batch in batches for key in batch if key in rows)
+            return subprocess.CompletedProcess(argv, returncode, stdout, SENTINEL)
+
+        with patch.object(self.host, "run", side_effect=respond):
+            yield
+
+    def _run(
+        self, loaded: LoadedSet, context: RunContext,
+        replies: Mapping[str, subprocess.CompletedProcess[str] | subprocess.SubprocessError],
+        *, chunk_exit: int = 0,
+    ) -> SliceResult:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with self._serve(loaded, context, replies, chunk_exit=chunk_exit), redirect_stdout(stdout), redirect_stderr(stderr):
+            result = run_judgments(loaded, "judgments", context)
+        for index, event in enumerate(self.events):
+            if event in replies:
+                self.assertGreater(index, 0)
+                self.assertEqual(self.events[index - 1], "checkpoint")
+        self.assertNotIn(SENTINEL, stdout.getvalue() + stderr.getvalue() + "\n".join(self.progress))
+        self.assertNotIn(SENTINEL, result.report)
+        for row in result.results:
+            self.assertNotIn(SENTINEL, repr(row))
+            self.assertNotIn(SENTINEL, json.dumps(asdict(row)))
+        return result
+
+    def _command(
+        self, probe_reply: subprocess.CompletedProcess[str],
+        replies: Mapping[str, subprocess.CompletedProcess[str]], *, stack_name: str = PRODUCTION_STACK,
+        baseline: str | None = None,
+    ) -> tuple[int, str, str]:
+        kwargs = _run_kwargs(self.host, checkout=self.checkout, court_path=self.checkout / "courts.yaml")
+        sibling = stack_name == CI_STACK
+        name = sample_name(self.generation.name) if sibling else self.generation.name
+        self.host.generation_output = json.dumps({
+            "gen_id": name, "corpus_lockfile": self.generation.corpus_lockfile, "state": self.generation.state,
+        }) + "\n"
+        context = replace(
+            self.context, production_dir=kwargs["rendered_dir"],
+            turns_dir=CI_ROOT if sibling else kwargs["rendered_dir"],
+            turn_overrides=None if baseline is None else baselines.BASELINES[baseline],
+        )
+        argv = ["eval", "run", "--slice", "judgments", "--stack", stack_name, "--generation", name]
+        if baseline is not None:
+            argv.extend(("--baseline", baseline))
+        with self._serve(self.loaded, context, replies, probe_reply=probe_reply), patch.object(secrets, "select_directory"):
+            return _invoke(argv, **kwargs)
+
+    def test_command_records_research_rows_and_overrides_without_a_ranked_stage(self) -> None:
+        path_for(self.checkout / SET_ROOT).write_text(
+            "".join(serialize(judgment) for judgment in self.loaded.judgments), encoding="utf-8",
+        )
+        refused = TurnFailure(State.OVERRIDE_NOT_ALLOWED, "overrides")
+        probe_reply = envelope(refused.to_body(), refused.status)
+        for baseline in (None, *baselines.BASELINES):
+            with self.subTest(baseline=baseline):
+                self.host.calls.clear()
+                self.events.clear()
+                wire_reply = self.reply
+                additional: dict[str, object] = {}
+                if baseline is not None:
+                    overrides = baselines.BASELINES[baseline]
+                    expected_hash = baselines.expected_config_hash(overrides)
+                    assert isinstance(expected_hash, str)
+                    wire_reply = {**self.reply, "retrieval_config_hash": expected_hash}
+                    additional = {"baseline": baseline, "turn_overrides": dict(overrides)}
+                reply = envelope(wire_reply, HTTPStatus.OK)
+                code, stdout, stderr = self._command(probe_reply, dict.fromkeys(self.ids, reply), baseline=baseline)
+                self.assertEqual((code, stderr), (0, ""), stdout)
+                self.assertEqual(self.events, ["probe", *self.ids, "pool chunks", "pool manifest", "scoring manifest"])
+                self.assertEqual(
+                    [line.split(":", 1)[0] for line in stdout.splitlines() if ": ok — " in line],
+                    ["load", "preconditions", "run", "record", "gate"],
+                )
+                self.assertNotIn("ranked:", stdout)
+                self.assertIn(
+                    f"door {research_door.TURN_PATH} probed, baseline {baseline or 'shipped'}",
+                    _summary_line(stdout, "preconditions: ok"),
+                )
+                self.assertIn(
+                    f"config hash {wire_reply['retrieval_config_hash']}, baseline {baseline or 'shipped'}",
+                    _summary_line(stdout, "judged queries "),
+                )
+                # The turn door takes no engine lock.
+                fake = self.host
+                self.assertEqual(fake.lock_records, [])
+
+                sql = _write_sql(self.host)
+                self.assertEqual(sql.count("INSERT INTO eval_runs"), 1)
+                self.assertEqual(sql.count("INSERT INTO eval_results"), len(self.ids))
+                self.assertEqual(_binding(sql, "generation_id"), self.generation.name)
+                self.assertEqual(_binding(sql, "corpus_lockfile"), self.generation.corpus_lockfile)
+                self.assertEqual(json.loads(_binding(sql, "overrides")), {"judgments": {
+                    "definition": DEFINITION_ID, "door": "turn", "config_hash": wire_reply["retrieval_config_hash"],
+                    **additional,
+                }})
+                for index, case_id in enumerate(self.ids):
+                    self.assertEqual(_binding(sql, f"result_{index}_case_id"), case_id)
+                    self.assertEqual(_binding(sql, f"result_{index}_verdict"), "pass")
+                    self.assertEqual(float(_binding(sql, f"result_{index}_latency_ms")), self.reply["timings_ms"]["total"])
+                    self.assertEqual(_result_metrics(sql, index)["ranked_passages"], len(self.pool))
+                self.assertNotIn(SENTINEL, stdout + stderr + sql)
+
+    def test_command_routes_refused_probes_to_the_sibling_and_prints_their_fixes(self) -> None:
+        for status, fix in (
+            (HTTPStatus.NOT_FOUND, research_door.SIBLING_FIX_COMMAND),
+            (HTTPStatus.UNAUTHORIZED, research_door.SIBLING_FIX_COMMAND),
+            (HTTPStatus.FORBIDDEN, research_door.SIBLING_FIX_COMMAND),
+            (HTTPStatus.INTERNAL_SERVER_ERROR, stack.logs_fix(CI_ROOT, API_SERVICE_NAME)),
+        ):
+            with self.subTest(status=status):
+                self.events.clear()
+                self.host.calls.clear()
+                code, stdout, stderr = self._command(envelope(SENTINEL, status), {}, stack_name=CI_STACK)
+                self.assertEqual((code, stderr), (1, ""), stdout)
+                self.assertEqual(self.events, ["probe"])
+                self.assertEqual([line.split(":", 1)[0] for line in stdout.splitlines()], ["load", "preconditions"])
+                self.assertIn(fix, _summary_line(stdout, "preconditions: refuse"))
+                self.assertNotIn(SENTINEL, stdout)
+                self.assertFalse(any(argv[0] == "git" for argv, _ in self.host.calls))
+
+    def test_turn_and_file_share_figures_and_assessments_in_rank_order(self) -> None:
+        first, second, unsigned = self.ids[:3]
+        loaded = replace(
+            self.loaded, slices={"judgments": (unsigned, second, first)}, unsigned_ids=frozenset({unsigned}),
+        )
+        context = replace(self.context, assessments=Assessments(
+            {first: {self.ranked[0]: RELEVANT_GRADE, self.ranked[1]: 0}}, FIXTURE_PROMPT, FIXTURE_MODEL,
+        ))
+        file_run = self._run(loaded, replace(context, ranked={first: self.ranked, second: ()}), {})
+        self.assertTrue(file_run.verdict, file_run.report)
+        self.assertTrue(file_run.report.splitlines()[0].endswith("door ranked-file"))
+        self.assertTrue(any(row.metrics["ndcg_at_10"] for row in file_run.results))
+        empty = {**self.reply, "pool": []}
+        options: tuple[tuple[str, Mapping[str, JSONValue] | None], ...] = (
+            ("shipped", None), *((word, dict(overrides)) for word, overrides in baselines.BASELINES.items()),
+        )
+        for baseline, overrides in options:
+            with self.subTest(baseline=baseline):
+                self.events.clear()
+                expected_hash = baselines.expected_config_hash(overrides)
+                assert isinstance(expected_hash, str)
+                replies = {
+                    case_id: envelope({**body, "retrieval_config_hash": expected_hash}, HTTPStatus.OK)
+                    for case_id, body in ((first, self.reply), (second, empty))
+                }
+                run = self._run(loaded, replace(context, turn_overrides=overrides), replies)
+                self.assertTrue(run.verdict, run.report)
+                self.assertEqual([event for event in self.events if event != "checkpoint"], [
+                    first, second, "pool chunks", "pool manifest", "scoring manifest",
+                ])
+                self.assertEqual(run.results, tuple(
+                    replace(row, latency_ms=self.reply["timings_ms"]["total"]) for row in file_run.results
+                ))
+                header, *lines = run.report.splitlines()
+                self.assertEqual(header, file_run.report.splitlines()[0].replace(
+                    "door ranked-file", f"door {research_door.TURN_PATH}, config hash {expected_hash}, baseline {baseline}",
+                ))
+                self.assertIn("failed turns: none", lines)
+                self.assertIn("unresolved pools: none", lines)
+                self.assertEqual(
+                    [line for line in lines if line not in ("failed turns: none", "unresolved pools: none")],
+                    file_run.report.splitlines()[1:],
+                )
+
+    def test_turn_refusals_fail_the_named_queries_without_figures(self) -> None:
+        good, failed, cut, invalid, generation, lockfile, config, unresolved = self.ids
+        del self.chunks[self.pool[-1]["chunk_id"]]
+        expected_hash = baselines.expected_config_hash(None)
+        assert isinstance(expected_hash, str)
+        reply = {**self.reply, "retrieval_config_hash": expected_hash}
+        refused = TurnFailure(State.OVERRIDE_INVALID, "overrides")
+        error = refused.to_body()
+        error["error"]["message"] = SENTINEL
+        replies: dict[str, subprocess.CompletedProcess[str] | subprocess.SubprocessError] = {
+            good: envelope({**reply, "pool": self.pool[:-1]}, HTTPStatus.OK),
+            failed: envelope(error, refused.status),
+            cut: subprocess.TimeoutExpired("fixture", research_door.TURN_TIMEOUT_SECONDS, output=SENTINEL),
+            invalid: envelope({**reply, "stage": "generate"}, HTTPStatus.OK),
+            generation: envelope({**reply, "generation": {
+                **reply["generation"], "gen_id": sample_name(self.generation.name),
+            }}, HTTPStatus.OK),
+            lockfile: envelope({**reply, "generation": {
+                **reply["generation"], "lockfiles": ["corpus-2099-01-01"],
+            }}, HTTPStatus.OK),
+            config: envelope({**reply, "retrieval_config_hash": hashlib.sha256(b"Fictitious config").hexdigest()}, HTTPStatus.OK),
+            unresolved: envelope(reply, HTTPStatus.OK),
+        }
+        run = self._run(self.loaded, self.context, replies)
+        self.assertFalse(run.verdict)
+        self.assertEqual(tuple(row.case_id for row in run.results), self.ids)
+        passing, *failures = run.results
+        self.assertEqual(passing.verdict, "pass", run.report)
+        self.assertEqual(passing.latency_ms, self.reply["timings_ms"]["total"])
+        self.assertEqual(tuple(row.metrics["problem"] for row in failures), (
+            "turn-failed", "turn-cut", "turn-reply-invalid", "generation-differs",
+            "generation-differs", "config-differs", "pool-unresolved",
+        ))
+        for row in failures:
+            with self.subTest(case_id=row.case_id):
+                self.assertEqual(row.verdict, "fail")
+                self.assertTrue(all(row.metrics[key] is None for key in FIGURE_KEYS))
+                expected_latency = None if row.case_id in (failed, cut, invalid) else self.reply["timings_ms"]["total"]
+                self.assertEqual(row.latency_ms, expected_latency)
+                if row.case_id == failed:
+                    self.assertEqual(row.metrics["turn_state"], refused.state.value)
+                else:
+                    self.assertNotIn("turn_state", row.metrics)
+        self.assertEqual(_summary_line(run.report, "failed turns:"), f"failed turns: {' '.join(self.ids[1:-1])}")
+        self.assertEqual(_summary_line(run.report, "unresolved pools:"), f"unresolved pools: {unresolved}")
+
+    def test_failed_coordinate_read_fails_every_counted_query_with_its_fix(self) -> None:
+        expected_hash = baselines.expected_config_hash(None)
+        assert isinstance(expected_hash, str)
+        reply = envelope({**self.reply, "retrieval_config_hash": expected_hash}, HTTPStatus.OK)
+        exit_code = 23
+        run = self._run(self.loaded, self.context, dict.fromkeys(self.ids, reply), chunk_exit=exit_code)
+        self.assertFalse(run.verdict)
+        self.assertEqual(run.results, tuple(
+            CaseResult(case_id, 1, "fail", {"problem": "record-unreachable"}, latency_ms=self.reply["timings_ms"]["total"])
+            for case_id in self.ids
+        ))
+        self.assertIn(f"pool chunk read failed (exit {exit_code})", run.report)
+        self.assertIn(stack.logs_fix(self.context.production_dir, POSTGRES_SERVICE), run.report)
+        self.assertEqual([event for event in self.events if event != "checkpoint"], [*self.ids, "pool chunks"])
+
+    def test_a_counted_case_of_another_suite_stops_the_run_before_any_turn(self) -> None:
+        stray = self.ids[2]
+        cases = dict(self.loaded.cases_by_id)
+        cases[stray] = {"id": stray, "suite": "segmenter", "category": "segmenter"}
+        run = self._run(replace(self.loaded, cases_by_id=cases), self.context, {})
+        self.assertFalse(run.verdict)
+        self.assertTrue(all(row.metrics == {"problem": "case-not-judgments"} for row in run.results))
+        self.assertIn(f"counted cases outside the judgments queries: {stray}", run.report)
+        self.assertIn("List only judgments queries in the set's judgments slice", run.report)
+        self.assertEqual([event for event in self.events if event != "checkpoint"], [])
+
+    def test_turn_retry_for_unresolved_generation_names_only_the_applicable_flags(self) -> None:
+        context = replace(self.context, generation=None)
+        run = self._run(self.loaded, context, {})
+        retry = report.command("eval run --slice judgments --generation <name>")
+        self.assertIn(retry, run.report)
+        self.assertNotIn("--ranked", run.report)
+        self.assertTrue(all(row.metrics == {"problem": "generation-unresolved"} for row in run.results))
+        self.assertEqual(self.events, [])
+
+
 class NoText(unittest.TestCase):
-    """The runner modules use ids and coordinates, never case prose fields."""
+    """The Research door is the only consumer of a judgments question."""
 
     def test_new_modules_do_not_subscript_or_get_content_fields(self) -> None:
         forbidden = {"question", "notes", "labels", "text", "caption", "quote"}
@@ -787,9 +1121,22 @@ class NoText(unittest.TestCase):
         ):
             path = EVALUATION / name
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+            question_reads = 0
             for node in ast.walk(tree):
                 if isinstance(node, ast.Subscript):
                     key = node.slice.value if isinstance(node.slice, ast.Constant) else None
+                    if name == "judgments_slice.py" and key == "question":
+                        question_reads += 1
+                        cast_call = parents[node]
+                        assert isinstance(cast_call, ast.Call)
+                        self.assertEqual(ast.unparse(cast_call.func), "cast")
+                        self.assertIs(cast_call.args[1], node)
+                        send_call = parents[cast_call]
+                        assert isinstance(send_call, ast.Call)
+                        self.assertEqual(ast.unparse(send_call.func), "research_door.send")
+                        self.assertIs(send_call.args[2], cast_call)
+                        continue
                     self.assertNotIn(key, forbidden, f"{path}: forbidden subscript {key!r}")
                 if (
                     isinstance(node, ast.Call)
@@ -799,6 +1146,7 @@ class NoText(unittest.TestCase):
                 ):
                     key = node.args[0].value if isinstance(node.args[0], ast.Constant) else None
                     self.assertNotIn(key, forbidden, f"{path}: forbidden get {key!r}")
+            self.assertEqual(question_reads, int(name == "judgments_slice.py"))
 
 
 if __name__ == "__main__":

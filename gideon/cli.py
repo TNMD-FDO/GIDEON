@@ -35,6 +35,9 @@ _ROOT_LINE: Final = (
     "Every command runs as root: sudo asks for the password at most once a sitting,\n"
     "how often being the office's policy."
 )
+# The eval run's named baselines, held equal to the evaluation registry by the CLI
+# surface test, so the parser stays free of evaluation imports.
+BASELINE_CHOICES: Final = ("off",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,7 +498,12 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run.add_argument(
         "--ranked",
         metavar="FILE",
-        help="ranked-list JSONL file for the judgments metrics",
+        help="ranked-list JSONL file to score in place of calling /turn",
+    )
+    eval_run.add_argument(
+        "--baseline",
+        choices=BASELINE_CHOICES,
+        help="run through /turn with each model-driven stage in its off setting",
     )
     eval_run.add_argument(
         "--assessed",
@@ -505,7 +513,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run.add_argument(
         "--generation",
         metavar="NAME",
-        help="index generation a slice reading the stores runs over; default: the stack's live one",
+        help="index generation to score. With /turn, NAME must be the selected stack's live generation",
     )
     eval_run.set_defaults(handler=_run_eval, command_path="eval run")
     eval_reference = eval_sub.add_parser(

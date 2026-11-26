@@ -23,17 +23,28 @@ PATTERN_ID: Final = "eyecite/full-case@1"
 def extract_case_cites(text: str) -> tuple[ExactObject, ...]:
     """Keep full case citations at their verbatim spans, disjoint by start."""
 
-    cites: list[ExactObject] = []
+    return tuple(obj for obj, _ in extract_indexed_case_cites(text))
+
+
+def _reporter_cite(citation: FullCaseCitation) -> str | None:
+    # A full cite lacking any of the three, such as the library's reply
+    # to its own name, states no reporter cite and keys nothing.
+    if all(citation.groups.get(field) for field in ("volume", "reporter", "page")):
+        return str(citation.corrected_citation())
+    return None
+
+
+def extract_indexed_case_cites(text: str) -> tuple[tuple[ExactObject, str | None], ...]:
+    """Return each verbatim full case citation with its indexed spelling."""
+
+    cites: dict[ExactObject, str | None] = {}
     for citation in get_citations(text):
         if not isinstance(citation, FullCaseCitation):
             continue
         start, end = citation.span()
-        cites.append(
-            ExactObject(
-                "case_cite", start, end, text[start:end], pattern_id=PATTERN_ID
-            )
-        )
-    return combine_extractions((), cites)
+        obj = ExactObject("case_cite", start, end, text[start:end], pattern_id=PATTERN_ID)
+        cites.setdefault(obj, _reporter_cite(citation))
+    return tuple((obj, cites[obj]) for obj in combine_extractions((), tuple(cites)))
 
 
 _FORMS: Final[tuple[tuple[type, CiteForm], ...]] = (
@@ -99,13 +110,11 @@ def find_citations(text: str) -> tuple[FoundCitation, ...]:
 
         volume = reporter = page = reporter_cite = None
         if isinstance(full, FullCaseCitation):
-            # A full cite lacking any of the three, such as the library's reply
-            # to its own name, states no reporter cite and keys nothing.
-            if all(full.groups.get(field) for field in ("volume", "reporter", "page")):
+            reporter_cite = _reporter_cite(full)
+            if reporter_cite is not None:
                 volume = str(full.groups["volume"])
                 reporter = str(full.corrected_reporter())
                 page = str(full.corrected_page())
-                reporter_cite = str(full.corrected_citation())
         elif isinstance(citation, ShortCaseCitation):
             # A short form's page is a pin page, so it never reaches the map.
             reporter_cite = str(citation.corrected_citation())

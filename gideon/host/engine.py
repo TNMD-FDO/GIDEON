@@ -31,12 +31,13 @@ from gideon.host import (
     tls,
 )
 from gideon.host import audit as audit_module
-from gideon.host.render.engine import EMBED, GENERATOR, ModelServerMember
+from gideon.host.render.engine import EMBED, GENERATOR, RERANK, ModelServerMember
 from gideon.host.render.owui import (
     EVAL_IDENTITY,
     EVAL_PASSWORD_SECRET,
     GENERAL_MODEL_ID,
 )
+from gideon.host.render.services.model_server import model_flag_arguments
 from gideon.host.report import Problem, StageResult, print_stage
 from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
@@ -78,6 +79,14 @@ TOKENIZE_TIMEOUT_SECONDS: Final[int] = 60
 EMBED_VECTORS_TIMEOUT_SECONDS: Final[int] = 60
 # exempt: acceptance bounds. The embedding throughput request bound.
 EMBED_THROUGHPUT_TIMEOUT_SECONDS: Final[int] = 120
+# exempt: acceptance bounds. The embedding latency request bound.
+EMBED_LATENCY_TIMEOUT_SECONDS: Final[int] = 60
+# exempt: acceptance bounds. The reranker triple request bound.
+RERANK_TRIPLE_TIMEOUT_SECONDS: Final[int] = 60
+# exempt: acceptance bounds. The reranker latency request bound.
+RERANK_LATENCY_TIMEOUT_SECONDS: Final[int] = 60
+# exempt: acceptance bounds. The reranker throughput request bound.
+RERANK_THROUGHPUT_TIMEOUT_SECONDS: Final[int] = 120
 # exempt: acceptance bounds. The unit-vector norm tolerance.
 EMBED_NORM_TOLERANCE: Final[float] = 1e-3
 # exempt: acceptance bounds.  Per-needle request bound.
@@ -185,6 +194,14 @@ class _EmbedTarget:
     space_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class _RerankTarget:
+    """The reranker pin's served name and flags."""
+
+    served_name: str
+    flags: Mapping[str, str | int | float | bool]
+
+
 def _failed(name: str, detail: str, fix: str) -> StageResult:
     return StageResult(name, False, detail, fix)
 
@@ -227,6 +244,16 @@ def _engine_fix(rendered_dir: PathLike, member: ModelServerMember) -> str:
         f"Do not go live on this {member.words}. "
         f"Run {stack.logs_fix(rendered_dir, member.service_name)}, "
         f"revert the driver or {member.words} change, then re-run {verify}."
+    )
+
+
+def _stopped_server_fix(rendered_dir: PathLike, member: ModelServerMember) -> str:
+    apply_command = report.command("apply")
+    verify = report.command("engine verify")
+    return (
+        f"Run {apply_command} (which starts the {member.words} and waits for its health); "
+        f"then read its logs with {stack.logs_fix(rendered_dir, member.service_name)}; "
+        f"then re-run {verify}."
     )
 
 
@@ -391,16 +418,39 @@ def call_model_server(
     return _reply_from_output(result.stdout, rendered_dir, member)
 
 
+def _read_model_argv(io: Host, rendered_dir: PathLike, member: ModelServerMember) -> str | Problem:
+    """Read a model server's NUL-separated PID 1 arguments through Compose."""
+
+    try:
+        result = io.run(
+            stack.exec_argv(rendered_dir, member.service_name, "cat", "/proc/1/cmdline"),
+            timeout=SEQUENCE_CAP_TIMEOUT_SECONDS + RUN_TIMEOUT_MARGIN_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return Problem(f"{member.words} argv read failed: TimeoutExpired", _apply_fix())
+    except OSError:
+        return Problem(f"{member.words} argv read failed: OSError", _apply_fix())
+    if result.returncode != 0:
+        return Problem(f"{member.words} argv read failed: non-zero exit {result.returncode}", _apply_fix())
+    return result.stdout
+
+
+def _last_flag_value(argv: list[str], flag: str) -> tuple[bool, str | None]:
+    """Read the last valued flag, distinguishing a missing flag from a missing value."""
+
+    for index in range(len(argv) - 1, -1, -1):
+        token = argv[index]
+        if token == flag:
+            return True, argv[index + 1] if index + 1 < len(argv) else None
+        if token.startswith(f"{flag}="):
+            return True, token.split("=", 1)[1]
+    return False, None
+
+
 def _max_num_seqs_from_cmdline(cmdline: str) -> int | None:
     """Read the last sequence-cap flag from a NUL-separated process argv."""
 
-    tokens = cmdline.split("\0")
-    value: str | None = None
-    for index, token in enumerate(tokens):
-        if token == "--max-num-seqs":
-            value = tokens[index + 1] if index + 1 < len(tokens) else None
-        elif token.startswith("--max-num-seqs="):
-            value = token.split("=", 1)[1]
+    _, value = _last_flag_value(cmdline.split("\0"), "--max-num-seqs")
     if value is None or re.fullmatch(r"[0-9]+", value) is None:
         return None
     return int(value)
@@ -426,28 +476,10 @@ def _sequence_cap_check(
             "models.lock generator pin has no usable max-num-seqs flag",
             _models_fix(), figures,
         )
-    try:
-        result = io.run(
-            stack.exec_argv(rendered_dir, GENERATOR.service_name, "cat", "/proc/1/cmdline"),
-            timeout=SEQUENCE_CAP_TIMEOUT_SECONDS + RUN_TIMEOUT_MARGIN_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        return CheckOutcome(
-            "sequence-cap", False, f"{GENERATOR.words} argv read failed: TimeoutExpired",
-            _apply_fix(), figures,
-        )
-    except OSError:
-        return CheckOutcome(
-            "sequence-cap", False, f"{GENERATOR.words} argv read failed: OSError",
-            _apply_fix(), figures,
-        )
-    if result.returncode != 0:
-        return CheckOutcome(
-            "sequence-cap", False,
-            f"{GENERATOR.words} argv read failed: non-zero exit {result.returncode}",
-            _apply_fix(), figures,
-        )
-    running_cap = _max_num_seqs_from_cmdline(result.stdout)
+    cmdline = _read_model_argv(io, rendered_dir, GENERATOR)
+    if isinstance(cmdline, Problem):
+        return CheckOutcome("sequence-cap", False, cmdline.problem, cmdline.fix, figures)
+    running_cap = _max_num_seqs_from_cmdline(cmdline)
     figures["running_max_num_seqs"] = running_cap
     if running_cap is None:
         return CheckOutcome(
@@ -498,6 +530,17 @@ def _status_failure(
     if message:
         detail += f": {message}"
     return detail, (_sample_fix() if reply.status == 400 else engine_fix)
+
+
+def _status_only_request_problem(
+    reply: EngineReply, rendered_dir: PathLike, member: ModelServerMember
+) -> Problem | None:
+    """Report a request failure without reading its HTTP error body."""
+
+    if reply.status is not None and reply.status != 200:
+        fix = _sample_fix() if reply.status == 400 else _engine_fix(rendered_dir, member)
+        return Problem(f"{member.words} returned HTTP {reply.status}", fix)
+    return reply.problem
 
 
 def _tokenize(
@@ -1438,15 +1481,224 @@ def _resolve_embed_target(
         attempts=1,
     )
     if not ready:
-        apply_command = report.command("apply")
-        verify = report.command("engine verify")
-        return Problem(
-            detail,
-            f"Run {apply_command} (which starts the embedding server and waits for its health); "
-            f"then read its logs with {stack.logs_fix(rendered_dir, EMBED.service_name)}; "
-            f"then re-run {verify}.",
-        )
+        return Problem(detail, _stopped_server_fix(rendered_dir, EMBED))
     return target
+
+
+def _resolve_rerank_target(
+    io: Host,
+    rendered_dir: PathLike,
+    member: ModelServerMember,
+    *,
+    hardware_profile: str,
+    models_path: PathLike,
+    sleep: Callable[[float], None],
+) -> _RerankTarget | Problem | StageResult:
+    """Resolve a pinned reranker or return the skipped row for an unpinned role."""
+
+    selected = _selected_profile(io, hardware_profile, models_path)
+    if isinstance(selected, Problem):
+        return selected
+    pin = selected.model(member.role)
+    if pin is None:
+        return StageResult(
+            member.role, True, f"skipped — profile {selected.name} pins no {member.role} model", ""
+        )
+
+    rendered = _rendered_has_model_server(io, rendered_dir, member)
+    if rendered is not True:
+        detail = rendered if isinstance(rendered, str) else f"rendered Compose has no {member.words} service"
+        return Problem(detail, _apply_fix())
+
+    ready, detail, _service = apply.wait_for_services(
+        io,
+        rendered_dir,
+        (member.service_name,),
+        sleep,
+        exact=False,
+        require_healthy=True,
+        attempts=1,
+    )
+    if not ready:
+        return Problem(detail, _stopped_server_fix(rendered_dir, member))
+    return _RerankTarget(pin.serve.served_name, pin.serve.flags)
+
+
+def _rerank_triple_figures(*, documents: int | None = None) -> dict[str, object]:
+    """The triple's figures, including the shape of a resolver refusal."""
+
+    return {
+        "http_status": None,
+        "documents": documents,
+        "results": None,
+        "passage_score": None,
+        "distractor_score": None,
+        "margin": None,
+        "prompt_tokens": None,
+        "elapsed_seconds": None,
+    }
+
+
+def _call_reranker(
+    io: Host,
+    rendered_dir: PathLike,
+    member: ModelServerMember,
+    *,
+    section: enginesample.RerankSection,
+    target: _RerankTarget,
+    query: str,
+    documents: list[str],
+    max_time: int,
+) -> EngineReply:
+    return call_model_server(
+        io,
+        rendered_dir,
+        member,
+        path="/v1/rerank",
+        body={
+            "model": target.served_name,
+            "query": query,
+            "documents": documents,
+            "instruction": section.instruction,
+        },
+        max_time=max_time,
+    )
+
+
+def _rerank_triple_check(
+    io: Host,
+    rendered_dir: PathLike,
+    member: ModelServerMember,
+    *,
+    section: enginesample.RerankSection,
+    target: _RerankTarget,
+) -> CheckOutcome:
+    """Check that the passage outscores the distractor at its request index."""
+
+    name = f"{member.role}-triple"
+    case = section.triple
+    documents = [case.distractor, case.passage]
+    figures = _rerank_triple_figures(documents=len(documents))
+    reply = _call_reranker(
+        io, rendered_dir, member, section=section, target=target, query=case.query, documents=documents,
+        max_time=RERANK_TRIPLE_TIMEOUT_SECONDS,
+    )
+    figures.update(http_status=reply.status, elapsed_seconds=reply.elapsed)
+    problem = _status_only_request_problem(reply, rendered_dir, member)
+    if problem is not None:
+        return CheckOutcome(name, False, problem.problem, problem.fix, figures)
+    server_fix = _engine_fix(rendered_dir, member)
+
+    usage = reply.json.get("usage") if isinstance(reply.json, Mapping) else None
+    tokens = usage.get("prompt_tokens") if isinstance(usage, Mapping) else None
+    if type(tokens) is int and tokens > 0:
+        figures["prompt_tokens"] = tokens
+    results = reply.json.get("results") if isinstance(reply.json, Mapping) else None
+    if not isinstance(results, list):
+        detail = f"{member.words} response results is not a list"
+        return CheckOutcome(name, False, detail, server_fix, figures)
+    figures["results"] = len(results)
+    if len(results) != len(documents):
+        detail = f"{member.words} returned {len(results)} results for {len(documents)} documents"
+        return CheckOutcome(name, False, detail, server_fix, figures)
+
+    scores: dict[int, int | float] = {}
+    for result in results:
+        index = result.get("index") if isinstance(result, Mapping) else None
+        score = result.get("relevance_score") if isinstance(result, Mapping) else None
+        if type(index) is not int:
+            detail = f"{member.words} result has no integer index"
+            return CheckOutcome(name, False, detail, server_fix, figures)
+        if not (type(score) is int or (type(score) is float and math.isfinite(score))):
+            detail = f"{member.words} result has no numeric relevance_score"
+            return CheckOutcome(name, False, detail, server_fix, figures)
+        scores[index] = score
+    if scores.keys() != set(range(len(documents))):
+        detail = f"{member.words} result indexes do not match the {len(documents)} document positions"
+        return CheckOutcome(name, False, detail, server_fix, figures)
+
+    distractor_score, passage_score = scores[0], scores[1]
+    figures.update(
+        passage_score=passage_score,
+        distractor_score=distractor_score,
+        margin=passage_score - distractor_score,
+    )
+    if passage_score <= distractor_score:
+        detail = f"{member.words} scored the passage at or below the distractor"
+        return CheckOutcome(name, False, detail, server_fix, figures)
+    detail = (
+        f"{member.words} scored the passage above the distractor "
+        f"({passage_score:.4f} over {distractor_score:.4f})"
+    )
+    return CheckOutcome(name, True, detail, "", figures)
+
+
+def _inverse_flag_spellings(name: str) -> tuple[str, ...]:
+    """Return the accepted inverse spellings of a true lock flag."""
+
+    if name.startswith("no-"):
+        return (f"--{name.removeprefix('no-')}",)
+    if name.startswith("enable-"):
+        return (f"--no-{name}", f"--disable-{name.removeprefix('enable-')}")
+    return (f"--no-{name}",)
+
+
+def _rerank_flags_figures(
+    *, lock_flags: int | None = None, matching: int | None = None
+) -> dict[str, object]:
+    """The flags check's counts and mismatched names."""
+
+    return {"lock_flags": lock_flags, "matching": matching, "differing": [], "reversed": [], "absent": []}
+
+
+def _rerank_flags_check(
+    io: Host, rendered_dir: PathLike, member: ModelServerMember, *, target: _RerankTarget
+) -> CheckOutcome:
+    """Compare the running reranker's argv with the projected lock flags."""
+
+    name = f"{member.role}-flags"
+    lock_flags = len(target.flags)
+    if not lock_flags:
+        return CheckOutcome(
+            name, False, f"models.lock {member.role} pin has no flags", _models_fix(),
+            _rerank_flags_figures(lock_flags=0, matching=0),
+        )
+    figures = _rerank_flags_figures(lock_flags=lock_flags)
+    cmdline = _read_model_argv(io, rendered_dir, member)
+    if isinstance(cmdline, Problem):
+        return CheckOutcome(name, False, cmdline.problem, cmdline.fix, figures)
+
+    argv = cmdline.split("\0")
+    mismatches: dict[str, list[str]] = {"differing": [], "reversed": [], "absent": []}
+    issues: list[str] = []
+    for flag, *values in model_flag_arguments(target.flags):
+        lock_name = flag.removeprefix("--")
+        if values:
+            found, value = _last_flag_value(argv, flag)
+            if not found:
+                issue = "absent"
+            elif value != values[0]:
+                issue = "differing"
+            else:
+                continue
+        else:
+            spellings = (flag, *_inverse_flag_spellings(lock_name))
+            last = next((token for token in reversed(argv) if token in spellings), None)
+            if last is None:
+                issue = "absent"
+            elif last != flag:
+                issue = "reversed"
+            else:
+                continue
+        mismatches[issue].append(lock_name)
+        issues.append(f"{lock_name} {issue}")
+
+    figures.update(mismatches, matching=lock_flags - len(issues))
+    if issues:
+        detail = f"{member.words} running flags: {', '.join(issues)}"
+        return CheckOutcome(name, False, detail, _apply_fix(), figures)
+    detail = f"{member.words} running flags match all {lock_flags} lock flags"
+    return CheckOutcome(name, True, detail, "", figures)
 
 
 def _embed_vectors_figures(
@@ -1618,6 +1870,141 @@ def _embed_throughput_check(
         f"{tokens_per_second:.1f} tok/s, {inputs_per_second:.1f} texts/s"
     )
     return CheckOutcome("embed-throughput", True, detail, "", figures)
+
+
+def _latency_figures() -> dict[str, object]:
+    return {"http_status": None, "prompt_tokens": None, "elapsed_seconds": None}
+
+
+def _rerank_throughput_figures(*, pairs: int | None = None) -> dict[str, object]:
+    return {**_latency_figures(), "pairs": pairs, "tokens_per_second": None, "pairs_per_second": None}
+
+
+def _timed_reply_measurement(
+    reply: EngineReply,
+    rendered_dir: PathLike,
+    member: ModelServerMember,
+    *,
+    result_key: str,
+    expected_count: int,
+    figures: dict[str, object],
+) -> tuple[int, float] | Problem:
+    """Read the counts and time shared by the timed supporting-model requests."""
+
+    elapsed = reply.elapsed
+    if elapsed is not None and not math.isfinite(elapsed):
+        elapsed = None
+    figures.update(http_status=reply.status, elapsed_seconds=elapsed)
+    problem = _status_only_request_problem(reply, rendered_dir, member)
+    if problem is not None:
+        return problem
+
+    server_fix = _engine_fix(rendered_dir, member)
+    body = reply.json if isinstance(reply.json, Mapping) else {}
+    results = body.get(result_key)
+    if not isinstance(results, list):
+        return Problem(f"{member.words} response {result_key} is not a list", server_fix)
+    if len(results) != expected_count:
+        outputs, inputs = ("vectors", "inputs") if result_key == "data" else ("results", "documents")
+        detail = f"{member.words} returned {len(results)} {outputs} for {expected_count} {inputs}"
+        return Problem(detail, server_fix)
+    if result_key == "data":
+        entry = results[0]
+        vector = entry.get("embedding") if isinstance(entry, Mapping) else None
+        if not isinstance(vector, list) or not vector:
+            return Problem(f"{member.words} response data has no embedding vector", server_fix)
+
+    usage = body.get("usage")
+    tokens = usage.get("prompt_tokens") if isinstance(usage, Mapping) else None
+    if type(tokens) is not int or tokens <= 0:
+        return Problem(f"{member.words} reply has no prompt token count", server_fix)
+    figures["prompt_tokens"] = tokens
+    if elapsed is None or elapsed <= 0:
+        return Problem(f"{member.words} reply has no elapsed time", server_fix)
+    return tokens, elapsed
+
+
+def _latency_outcome(
+    name: str, reply: EngineReply, rendered_dir: PathLike, member: ModelServerMember, *, result_key: str
+) -> CheckOutcome:
+    figures = _latency_figures()
+    measured = _timed_reply_measurement(
+        reply, rendered_dir, member, result_key=result_key, expected_count=1, figures=figures,
+    )
+    if isinstance(measured, Problem):
+        return CheckOutcome(name, False, measured.problem, measured.fix, figures)
+    tokens, elapsed = measured
+    return CheckOutcome(name, True, f"{tokens} tokens in {elapsed:.3f} s", "", figures)
+
+
+def _embed_latency_check(
+    io: Host,
+    rendered_dir: PathLike,
+    *,
+    case: enginesample.EmbedLatencyCase,
+    target: _EmbedTarget,
+    run_token: str,
+) -> CheckOutcome:
+    text = enginesample.build_embed_query(case.instruction, case.query, run_token)
+    reply = call_model_server(
+        io, rendered_dir, EMBED, path="/v1/embeddings",
+        body={"model": target.served_name, "input": [text]}, max_time=EMBED_LATENCY_TIMEOUT_SECONDS,
+    )
+    return _latency_outcome("embed-latency", reply, rendered_dir, EMBED, result_key="data")
+
+
+def _rerank_latency_check(
+    io: Host,
+    rendered_dir: PathLike,
+    member: ModelServerMember,
+    *,
+    section: enginesample.RerankSection,
+    target: _RerankTarget,
+    run_token: str,
+) -> CheckOutcome:
+    case = section.latency
+    reply = _call_reranker(
+        io, rendered_dir, member, section=section, target=target,
+        query=enginesample.build_rerank_query(case.query, run_token),
+        documents=list(enginesample.build_rerank_documents(section.filler, case.paragraphs, 1)),
+        max_time=RERANK_LATENCY_TIMEOUT_SECONDS,
+    )
+    return _latency_outcome(f"{member.role}-latency", reply, rendered_dir, member, result_key="results")
+
+
+def _rerank_throughput_check(
+    io: Host,
+    rendered_dir: PathLike,
+    member: ModelServerMember,
+    *,
+    section: enginesample.RerankSection,
+    target: _RerankTarget,
+    run_token: str,
+) -> CheckOutcome:
+    name = f"{member.role}-throughput"
+    case = section.throughput
+    documents = list(enginesample.build_rerank_documents(section.filler, case.paragraphs, case.inputs))
+    reply = _call_reranker(
+        io, rendered_dir, member, section=section, target=target,
+        query=enginesample.build_rerank_query(case.query, run_token),
+        documents=documents, max_time=RERANK_THROUGHPUT_TIMEOUT_SECONDS,
+    )
+    pairs = len(documents)
+    figures = _rerank_throughput_figures(pairs=pairs)
+    measured = _timed_reply_measurement(
+        reply, rendered_dir, member, result_key="results", expected_count=pairs, figures=figures,
+    )
+    if isinstance(measured, Problem):
+        return CheckOutcome(name, False, measured.problem, measured.fix, figures)
+    tokens, elapsed = measured
+    tokens_per_second = tokens / elapsed
+    pairs_per_second = pairs / elapsed
+    figures.update(tokens_per_second=round(tokens_per_second, 1), pairs_per_second=round(pairs_per_second, 1))
+    detail = (
+        f"{pairs} pairs, {tokens} tokens in {elapsed:.3f} s: "
+        f"{tokens_per_second:.1f} tok/s, {pairs_per_second:.1f} pairs/s"
+    )
+    return CheckOutcome(name, True, detail, "", figures)
 
 
 def run_engine_verify(
@@ -1798,11 +2185,12 @@ def run_engine_verify(
                 timeout=FRONTEND_TURN_TIMEOUT_SECONDS,
             )
         run_id = uuid.uuid4()
+        run_token = run_id.hex[:8]
         for outcome in _frontend_checks(
             frontend_factory,
             sample=sample,
             password=eval_password,
-            run_token=run_id.hex[:8],
+            run_token=run_token,
             frontend_fix=_frontend_fix(rendered_dir),
         ):
             record(outcome)
@@ -1824,12 +2212,58 @@ def run_engine_verify(
                 "embed-throughput", False, embed_target.problem, embed_target.fix,
                 _embed_throughput_figures(),
             ))
+            record(CheckOutcome(
+                "embed-latency", False, embed_target.problem, embed_target.fix, _latency_figures(),
+            ))
         else:
             record(_embed_vectors_check(
                 io, rendered_dir, case=sample.supporting.embed.vectors, target=embed_target
             ))
             record(_embed_throughput_check(
                 io, rendered_dir, case=sample.supporting.embed.throughput, target=embed_target
+            ))
+            record(_embed_latency_check(
+                io, rendered_dir, case=sample.supporting.embed.latency, target=embed_target, run_token=run_token
+            ))
+
+        rerank_target = _resolve_rerank_target(
+            io,
+            rendered_dir,
+            RERANK,
+            hardware_profile=config.hardware_profile,
+            models_path=actual_models,
+            sleep=sleep,
+        )
+        if isinstance(rerank_target, StageResult):
+            show(rerank_target)
+        elif isinstance(rerank_target, Problem):
+            record(CheckOutcome(
+                f"{RERANK.role}-triple", False, rerank_target.problem, rerank_target.fix,
+                _rerank_triple_figures(),
+            ))
+            record(CheckOutcome(
+                f"{RERANK.role}-flags", False, rerank_target.problem, rerank_target.fix,
+                _rerank_flags_figures(),
+            ))
+            record(CheckOutcome(
+                f"{RERANK.role}-latency", False, rerank_target.problem, rerank_target.fix, _latency_figures(),
+            ))
+            record(CheckOutcome(
+                f"{RERANK.role}-throughput", False, rerank_target.problem, rerank_target.fix,
+                _rerank_throughput_figures(),
+            ))
+        else:
+            record(_rerank_triple_check(
+                io, rendered_dir, RERANK, section=sample.supporting.rerank_2, target=rerank_target
+            ))
+            record(_rerank_flags_check(io, rendered_dir, RERANK, target=rerank_target))
+            record(_rerank_latency_check(
+                io, rendered_dir, RERANK, section=sample.supporting.rerank_2,
+                target=rerank_target, run_token=run_token,
+            ))
+            record(_rerank_throughput_check(
+                io, rendered_dir, RERANK, section=sample.supporting.rerank_2,
+                target=rerank_target, run_token=run_token,
             ))
 
         row = audit_module.AuditRow(

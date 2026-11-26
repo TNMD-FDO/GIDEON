@@ -113,7 +113,10 @@ class Registry(unittest.TestCase):
         self.assertEqual(
             declared_sources(),
             {
-                API_SERVICE_NAME: ("gideon/api", "gideon/guardrail"),
+                API_SERVICE_NAME: (
+                    "gideon/api", "gideon/guardrail", "gideon/turn", "gideon/extraction", "gideon/casecite",
+                    "gideon/host/index/serving.py",
+                ),
                 WORKER_SERVICE_NAME: (
                     "gideon/worker", "gideon/host/cas.py", "gideon/host/sysio.py",
                     "gideon/host/report.py", "gideon/casecite", "gideon/extraction",

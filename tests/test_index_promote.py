@@ -547,8 +547,14 @@ class Promote(unittest.TestCase):
                 extra = self.host.old.replace("2099-01-01", "2098-01-01")
                 self.host.rows[extra] = replace(self.host.rows[self.host.old], gen_id=extra)
                 before = copy.deepcopy((self.host.rows, self.host.targets))
-                out = self.refuse("candidate", "multiple live generations")
-                self.assertIn(stack.logs_fix(self.host.directory, "postgres"), out)
+                collection = self.host.rows[self.host.name].collection
+                detail = f"collection {collection} has multiple live generations"
+                out = self.refuse("candidate", detail)
+                fix = (
+                    f"Run {stack.logs_fix(self.host.directory, 'postgres')}, "
+                    f"then run {report.command(f'index promote {self.host.name}')} again."
+                )
+                self.assertIn(report.stage_line(StageResult("candidate", False, detail, fix)), out.splitlines())
                 self.assert_untouched(before)
 
     def test_interrupted_rebuild_under_each_lock_refuses_before_candidate_on_production(self) -> None:

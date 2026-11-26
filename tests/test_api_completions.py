@@ -556,6 +556,10 @@ class ApiCompletions(unittest.TestCase):
             opensearch_url="http://fixture-lexical:7003",
             opensearch_user="fixture-lexical-reader",
             opensearch_password_file=Path("/fixture/lexical-password"),
+            embed_model="fixture-embed",
+            embed_repository="fixture-owner/fixture-embed",
+            embed_space="fixture-space",
+            embed_dimensions=7,
         )
 
     def request(
@@ -569,7 +573,8 @@ class ApiCompletions(unittest.TestCase):
         spec_version: str = "2.4",
     ) -> ASGIResponse:
         async def run() -> ASGIResponse:
-            app = create_app(self.settings(), transport=handler)
+            # A stub extractor keeps the dev venv's missing eyecite out of the logs counted here.
+            app = create_app(self.settings(), transport=handler, case_extractor=lambda _: ())
             async with ASGISession(
                 app, method, path, body, headers, spec_version
             ) as session:

@@ -5,11 +5,16 @@ from typing import Final
 
 from gideon.host.cas import ROOT as CAS_ROOT
 from gideon.host.images import RegistryTarget, reference
+from gideon.host.index import header
 from gideon.host.render import RenderInputs
 from gideon.host.render.api import (
     API_CHAT_HEADER,
     API_CORPUS_DATABASE_HOST_ENV,
     API_CORPUS_PASSWORD_FILE_ENV,
+    API_EMBED_DIMENSIONS_ENV,
+    API_EMBED_MODEL_ENV,
+    API_EMBED_REPOSITORY_ENV,
+    API_EMBED_SPACE_ENV,
     API_EMBED_URL_ENV,
     API_ENGINE_URL_ENV,
     API_HEALTH_PATH,
@@ -44,7 +49,7 @@ from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_MODEL_ID
 from gideon.host.render.qdrant import QDRANT_READ_ONLY_SECRET_NAME, qdrant_rest_url
 from gideon.host.render.services import ServiceDefinition, image_pin, source_digest
 from gideon.host.render.services.generator import generator_pin
-from gideon.host.render.services.model_server import model_server_members
+from gideon.host.render.services.model_server import model_pin, model_server_members
 from gideon.host.render.worker import (
     WORKER_DATABASE_HOST,
     WORKER_DATABASE_NAME,
@@ -90,6 +95,13 @@ def api_service(
             "Render input checkout is empty; the gideon-api service needs the "
             "release checkout's absolute path. Re-run render with a checkout."
         )
+    embed = model_pin(inputs, EMBED)
+    space = inputs.profile.embedding_space
+    if space is None:
+        raise ValueError(
+            f"Cannot render Compose: profile {inputs.profile.name} has no embedding space. "
+            "Add the profile's embedding space to models.lock, then re-run render."
+        )
     password_file = f"/run/secrets/{TURN_READER_SECRET_NAME}"
     rerank_environment: dict[str, str] = {}
     rerank_secrets: list[str] = []
@@ -129,6 +141,10 @@ def api_service(
             "GIDEON_API_QDRANT_KEY_FILE": f"/run/secrets/{QDRANT_READ_ONLY_SECRET_NAME}",
             API_EMBED_URL_ENV: f"http://{EMBED.service_name}:{EMBED.port}",
             "GIDEON_API_EMBED_KEY_FILE": f"/run/secrets/{EMBED.secret_name}",
+            API_EMBED_MODEL_ENV: embed.serve.served_name,
+            API_EMBED_REPOSITORY_ENV: embed.repo,
+            API_EMBED_SPACE_ENV: header.embedding_space(space.id, header.RELEASE_HEADER),
+            API_EMBED_DIMENSIONS_ENV: str(space.dimensions),
             "GIDEON_API_OPENSEARCH_URL": opensearch_rest_url(),
             "GIDEON_API_OPENSEARCH_USER": OPENSEARCH_TURN_USER,
             "GIDEON_API_OPENSEARCH_PASSWORD_FILE": f"/run/secrets/{OPENSEARCH_TURN_SECRET_NAME}",
@@ -160,14 +176,14 @@ def api_service(
 
 
 class ApiService(ServiceDefinition):
-    """The gideon-api service and its mounted API and guardrail sources.
-
-    A change to either declared source moves the block's digest label.
-    """
+    """The gideon-api service and the mounted sources that drive its digest."""
 
     name = API_SERVICE_NAME
     turn_path = True
-    sources = ("gideon/api", "gideon/guardrail")
+    sources = (
+        "gideon/api", "gideon/guardrail", "gideon/turn", "gideon/extraction", "gideon/casecite",
+        "gideon/host/index/serving.py",
+    )
 
     def applies(self, inputs: RenderInputs) -> bool:
         return api_enabled(inputs.no_gpu)

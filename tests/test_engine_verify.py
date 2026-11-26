@@ -12,7 +12,8 @@ import stat
 import subprocess
 import tempfile
 import unittest
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -39,11 +40,13 @@ from gideon.host.render.engine import (
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
     GENERATOR,
+    RERANK,
 )
 from gideon.host.render.owui import EVAL_IDENTITY, EVAL_PASSWORD_SECRET
+from gideon.host.render.services.model_server import model_command
 from gideon.host.report import Problem
 from gideon.host.secrets import SECRET_REGISTRY
-from gideon.host.stack import exec_argv
+from gideon.host.stack import exec_argv, logs_fix
 from gideon.host.sysio import Command, PathLike
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -52,6 +55,18 @@ RENDERED = "/etc/gideon/rendered"
 MODELS_PATH = "/models.lock"
 SAMPLE_PATH = "/sample.yaml"
 SECRET_VALUE = "not-a-real-secret"
+RERANK_KEY = "fictitious-reranker-key-value"
+RERANK_ELAPSED_SECONDS = 0.75
+
+
+@dataclass(frozen=True)
+class TimedReply:
+    """Overrides for one fake timed request."""
+
+    status: int = 200
+    returncode: int = 0
+    elapsed: float | None = 1.5
+    transform: Callable[[dict[str, Any]], object] | None = None
 
 
 def completed(
@@ -68,7 +83,31 @@ def site_text(profile: str = "1x1v-1d") -> str:
     return ROOT.joinpath("config/site.example.yaml").read_text() + f"\nhardware_profile: {profile}\n"
 
 
-def models_text(max_model_len: int = 4096, embed_width: int = 7) -> str:
+def models_text(
+    max_model_len: int = 4096, embed_width: int = 7, *, pin_reranker: bool = True
+) -> str:
+    rerank_memory = f'''      {RERANK.service_name}:
+        gb: 1
+        role: {RERANK.role}
+''' if pin_reranker else ""
+    rerank_pin = f'''      {RERANK.role}:
+        repo: example/fixture-rerank
+        revision: "{'e' * 40}"
+        gpu: 0
+        serve:
+          served_name: fixture-rerank-model
+          env: {{}}
+          flags:
+            max-model-len: 117
+            no-enable-chunked-prefill: true
+            enable-fixture-mode: true
+            gpu-memory-utilization: 0.375
+            hf-overrides: '{{"fixture": "value with spaces"}}'
+        files:
+          config.json:
+            sha256: sha256:{'f' * 64}
+            size: 1
+''' if pin_reranker else ""
     return f'''version: 1
 reference: 1x1v-1d
 profiles:
@@ -93,7 +132,7 @@ profiles:
       {EMBED.service_name}:
         gb: 1
         role: embed
-    chunk_guards:
+{rerank_memory}    chunk_guards:
       serving_ceiling_million_chunks: 2
       build_refusal_million_chunks: 1
       resident_bytes_per_chunk: 400
@@ -131,19 +170,22 @@ profiles:
           config.json:
             sha256: sha256:{'d' * 64}
             size: 1
-'''
+{rerank_pin}'''
 
 
 def ps_output(
     *, health: str = "healthy", state: str = "running",
     embed_health: str = "healthy", embed_state: str = "running",
+    rerank_health: str = "healthy", rerank_state: str = "running",
+    pin_reranker: bool = True,
 ) -> str:
-    return json.dumps(
-        [
-            {"Service": ENGINE_SERVICE_NAME, "State": state, "Health": health},
-            {"Service": EMBED.service_name, "State": embed_state, "Health": embed_health},
-        ]
-    )
+    rows = [
+        {"Service": ENGINE_SERVICE_NAME, "State": state, "Health": health},
+        {"Service": EMBED.service_name, "State": embed_state, "Health": embed_health},
+    ]
+    if pin_reranker:
+        rows.append({"Service": RERANK.service_name, "State": rerank_state, "Health": rerank_health})
+    return json.dumps(rows)
 
 
 def sse_output(
@@ -220,6 +262,11 @@ class FakeHost:
         throughput_count_offset: int = 0,
         throughput_missing_tokens: bool = False,
         throughput_elapsed: float = 1.25,
+        rerank_status: int = 200,
+        rerank_results: Callable[[list[dict[str, Any]]], object] | None = None,
+        rerank_argv: Callable[[list[str]], list[str]] | None = None,
+        rerank_argv_returncode: int = 0,
+        timed_replies: Mapping[str, TimedReply] | None = None,
         lock_holder: str | None = None,
         lock_error: OSError | None = None,
     ) -> None:
@@ -256,6 +303,11 @@ class FakeHost:
         self.throughput_count_offset = throughput_count_offset
         self.throughput_missing_tokens = throughput_missing_tokens
         self.throughput_elapsed = throughput_elapsed
+        self.rerank_status = rerank_status
+        self.rerank_results = rerank_results
+        self.rerank_argv = rerank_argv
+        self.rerank_argv_returncode = rerank_argv_returncode
+        self.timed_replies = dict(timed_replies or {})
         self.runs: list[tuple[tuple[str, ...], str | None, float | None]] = []
         self.lock_holder = lock_holder
         self.lock_error = lock_error
@@ -369,6 +421,74 @@ class FakeHost:
             f"time_starttransfer=0.20 time_total={elapsed:.2f}\n"
         )
 
+    def rerank_pin(self) -> models.ModelPin:
+        loaded = models.load_models_lock(MODELS_PATH, host=self)
+        assert loaded.lock is not None
+        profile = loaded.lock.profile(loaded.lock.reference)
+        assert profile is not None
+        pin = profile.model(RERANK.role)
+        assert pin is not None
+        return pin
+
+    def _rerank_response(self, body: Mapping[str, object]) -> dict[str, Any]:
+        documents = body["documents"]
+        assert isinstance(documents, list)
+        results: list[dict[str, Any]] = [
+            {
+                "index": index,
+                "relevance_score": (index + 1) / (len(documents) + 1),
+                "document": {"text": document},
+            }
+            for index, document in enumerate(documents)
+        ]
+        results.sort(key=lambda result: result["relevance_score"], reverse=True)
+        tokens = sum(
+            len(f"{body['instruction']} {body['query']} {document}".split())
+            for document in documents
+        )
+        return {"results": results, "usage": {"prompt_tokens": tokens}}
+
+    def _rerank_reply(self, body: Mapping[str, object]) -> str:
+        documents = body["documents"]
+        assert isinstance(documents, list)
+        response: dict[str, Any]
+        if self.rerank_status != 200:
+            response = {"error": {"message": f"fictitious reranker diagnostic: {documents[-1]}"}}
+        else:
+            response = self._rerank_response(body)
+            if self.rerank_results is not None:
+                response["results"] = self.rerank_results(response["results"])
+        return (
+            json.dumps(response)
+            + f"\n@gideon-engine-verify http_code={self.rerank_status} "
+            f"time_starttransfer=0.20 time_total={RERANK_ELAPSED_SECONDS}\n"
+        )
+
+    def _timed_reply(
+        self, command: Command, row: str, body: Mapping[str, Any], passage: str
+    ) -> subprocess.CompletedProcess[str]:
+        settings = self.timed_replies.get(row, TimedReply())
+        if settings.returncode:
+            return completed(command, returncode=settings.returncode, stderr="fixture curl timed out")
+        response: dict[str, Any]
+        if settings.status != 200:
+            response = {"error": {"message": f"fictitious timed diagnostic: {passage}"}}
+        elif row == "embed-latency":
+            response = {
+                "data": [{"embedding": [1.0], "index": index} for index, _ in enumerate(body["input"])],
+                "usage": {"prompt_tokens": sum(len(text.split()) for text in body["input"])},
+            }
+        else:
+            response = self._rerank_response(body)
+        payload = settings.transform(response) if settings.transform is not None else response
+        stdout = json.dumps(payload)
+        if settings.elapsed is not None:
+            stdout += (
+                f"\n@gideon-engine-verify http_code={settings.status} "
+                f"time_starttransfer=0.20 time_total={settings.elapsed}\n"
+            )
+        return completed(command, stdout=stdout)
+
     def run(
         self,
         argv: Command,
@@ -415,6 +535,26 @@ class FakeHost:
             raise self.exec_error
         if tuple(command[-4:]) == ("ps", "--all", "--format", "json"):
             return completed(command, stdout=self.ps)
+        if command == tuple(exec_argv(RENDERED, RERANK.service_name, "cat", "/proc/1/cmdline")):
+            process_argv = ["python3", "vllm", "serve", *model_command(self.rerank_pin(), RERANK)]
+            if self.rerank_argv is not None:
+                process_argv = self.rerank_argv(process_argv)
+            return completed(
+                command, returncode=self.rerank_argv_returncode,
+                stdout="\0".join(process_argv) + "\0",
+                stderr="fictitious private reranker diagnostic",
+            )
+        if "exec" in command and RERANK.service_name in command and command[-3].endswith("/v1/rerank"):
+            assert input is not None
+            body = json.loads(input)
+            assert isinstance(body, dict)
+            sample = enginesample.load_sample(SAMPLE_PATH, host=self).sample
+            assert sample is not None
+            triple = sample.supporting.rerank_2.triple
+            if body["query"] == triple.query:
+                return completed(command, stdout=self._rerank_reply(body))
+            row = "rerank-2-latency" if len(body["documents"]) == 1 else "rerank-2-throughput"
+            return self._timed_reply(command, row, body, triple.passage)
         if "exec" in command and EMBED.service_name in command and command[-3].endswith("/v1/embeddings"):
             assert input is not None
             body = json.loads(input)
@@ -423,6 +563,8 @@ class FakeHost:
             assert isinstance(texts, list)
             sample = enginesample.load_sample(SAMPLE_PATH, host=self).sample
             assert sample is not None
+            if len(texts) == 1 and texts[0].startswith("Instruct: "):
+                return self._timed_reply(command, "embed-latency", body, sample.supporting.rerank_2.triple.passage)
             throughput = len(texts) == sample.supporting.embed.throughput.inputs
             returncode = self.throughput_returncode if throughput else self.embed_returncode
             if returncode != 0:
@@ -842,17 +984,20 @@ class CommandTests(unittest.TestCase):
         self.assertTrue(reply.problem.problem.startswith("embedding server request failed"))
         self.assertIn("logs gideon-embed", reply.problem.fix)
 
-    def make_host(self, **kwargs: Any) -> FakeHost:
+    def make_host(self, *, pin_reranker: bool = True, **kwargs: Any) -> FakeHost:
+        services: dict[str, dict[str, object]] = {GENERATOR.service_name: {}, EMBED.service_name: {}}
+        if pin_reranker:
+            services[RERANK.service_name] = {}
         files = {
             SITE_PATH: site_text(),
-            str(Path(RENDERED) / "compose.yaml"): (
-                f"services:\n  {GENERATOR.service_name}: {{}}\n  {EMBED.service_name}: {{}}\n"
-            ),
-            MODELS_PATH: models_text(),
+            str(Path(RENDERED) / "compose.yaml"): yaml.safe_dump({"services": services}),
+            MODELS_PATH: models_text(pin_reranker=pin_reranker),
             SAMPLE_PATH: ROOT.joinpath("eval/engine-verify/sample.yaml").read_text(),
             str(secrets.secret_path(EVAL_PASSWORD_SECRET)): SECRET_VALUE,
+            str(secrets.secret_path(RERANK.secret_name)): RERANK_KEY,
         }
         files.update(kwargs.pop("files", {}))
+        kwargs.setdefault("ps", ps_output(pin_reranker=pin_reranker))
         host = FakeHost(files=files, **kwargs)
         sample = enginesample.load_sample(SAMPLE_PATH, host=host).sample
         if sample is not None and "needle_content" not in kwargs:
@@ -877,7 +1022,7 @@ class CommandTests(unittest.TestCase):
         host: FakeHost,
         audit_backend: FakeAudit | None = None,
         frontend: FakeFrontend | None = None,
-        observe: list[engine.StageResult] | None = None,
+        observe: Callable[[engine.StageResult], None] | None = None,
     ) -> tuple[int, str, FakeAudit]:
         backend = audit_backend or FakeAudit()
         output = io.StringIO()
@@ -893,7 +1038,7 @@ class CommandTests(unittest.TestCase):
                 audit=backend,
                 sleep=lambda _: None,
                 client_factory=(frontend or self.make_frontend()).factory,
-                observe=(observe.append if observe is not None else None),
+                observe=observe,
             )
         return result, output.getvalue(), backend
 
@@ -921,6 +1066,34 @@ class CommandTests(unittest.TestCase):
             and isinstance(json.loads(body).get("response_format"), Mapping)
         ]
 
+    def rerank_requests(self, host: FakeHost) -> list[tuple[tuple[str, ...], str, float | None]]:
+        return [
+            (argv, body, timeout) for argv, body, timeout in host.runs
+            if "exec" in argv and RERANK.service_name in argv and body is not None
+        ]
+
+    def assert_supporting_refusal(
+        self, result: tuple[int, str, FakeAudit], detail: str, fix: str,
+        *, rows: tuple[str, ...] = ("rerank-2-triple",),
+    ) -> dict[str, object]:
+        code, output, backend = result
+        self.assertEqual(code, 1, output)
+        lines = output.splitlines()
+        self.assertEqual(lines[-1], "audit: ok — engine_verify audit row recorded")
+        for row in rows:
+            self.assertIn(f"{row}: refuse — {detail} Fix: {fix}", lines)
+        self.assertEqual(len(backend.rows), 1)
+        self.assertEqual(backend.rows[0].detail["outcome"], "failed")
+        checks = self.kept_checks(backend)
+        self.assertEqual([name for name, check in checks.items() if not check["ok"]], list(rows))
+        names = [line.split(":", 1)[0] for line in lines]
+        self.assertEqual(names, ["preconditions", *checks, "audit"])
+        self.assertEqual(names[-8:], [
+            "embed-vectors", "embed-throughput", "embed-latency", "rerank-2-triple", "rerank-2-flags",
+            "rerank-2-latency", "rerank-2-throughput", "audit",
+        ])
+        return checks[rows[0]]
+
     def test_stage_order_body_and_audit(self) -> None:
         host = self.make_host()
         code, output, backend = self.run_command(host)
@@ -944,6 +1117,11 @@ class CommandTests(unittest.TestCase):
                 ),
                 "embed-vectors",
                 "embed-throughput",
+                "embed-latency",
+                "rerank-2-triple",
+                "rerank-2-flags",
+                "rerank-2-latency",
+                "rerank-2-throughput",
                 "audit",
             ],
         )
@@ -1039,7 +1217,7 @@ class CommandTests(unittest.TestCase):
                 assert pin is not None
                 cap = pin.serve.flags["max-num-seqs"]
                 observed: list[engine.StageResult] = []
-                code, output, backend = self.run_command(host, observe=observed)
+                code, output, backend = self.run_command(host, observe=observed.append)
                 self.assertEqual(code, 0, output)
                 self.assertEqual([row.name for row in observed[:3]], ["preconditions", "sequence-cap", "needle-32k"])
                 row = observed[1]
@@ -1106,7 +1284,7 @@ class CommandTests(unittest.TestCase):
             with self.subTest(name=name):
                 host = self.make_host(**options)
                 observed: list[engine.StageResult] = []
-                code, output, backend = self.run_command(host, observe=observed)
+                code, output, backend = self.run_command(host, observe=observed.append)
                 self.assertEqual(code, 1, output)
                 self.assertEqual([row.name for row in observed[:3]], ["preconditions", "sequence-cap", "needle-32k"])
                 row = observed[1]
@@ -1353,6 +1531,468 @@ class CommandTests(unittest.TestCase):
                 else:
                     self.assertIn("logs gideon-embed", output)
 
+    def test_rerank_triple_request_and_figures(self) -> None:
+        host = self.make_host()
+        sample = enginesample.load_sample(SAMPLE_PATH, host=host).sample
+        assert sample is not None
+        pin = host.rerank_pin()
+        section = sample.supporting.rerank_2
+        case = section.triple
+        documents = [case.distractor, case.passage]
+
+        code, output, backend = self.run_command(host)
+
+        self.assertEqual(code, 0, output)
+        [(argv, request, timeout), _, _] = self.rerank_requests(host)
+        self.assertEqual(argv, tuple(exec_argv(
+            RENDERED, RERANK.service_name, "sh", "-c", engine.ENGINE_CURL_SCRIPT,
+            "gideon-engine-verify", f"/run/secrets/{RERANK.secret_name}",
+            f"http://{RERANK.service_name}:{RERANK.port}/v1/rerank",
+            str(engine.RERANK_TRIPLE_TIMEOUT_SECONDS), RERANK.key_file_words,
+        )))
+        self.assertEqual(timeout, engine.RERANK_TRIPLE_TIMEOUT_SECONDS + engine.RUN_TIMEOUT_MARGIN_SECONDS)
+        self.assertEqual(json.loads(request), {
+            "model": pin.serve.served_name,
+            "query": case.query,
+            "documents": documents,
+            "instruction": section.instruction,
+        })
+        self.assertNotIn(str(secrets.secret_path(RERANK.secret_name)), host.reads)
+        for text in (" ".join(argv), request, output, repr(backend.rows[0].detail)):
+            self.assertNotIn(RERANK_KEY, text)
+
+        distractor_score, passage_score = (rank / (len(documents) + 1) for rank in (1, 2))
+        prompt_tokens = sum(len(text.split()) for text in documents) + len(documents) * (
+            len(section.instruction.split()) + len(case.query.split())
+        )
+        self.assertEqual(self.kept_checks(backend)["rerank-2-triple"], {
+            "ok": True,
+            "http_status": 200,
+            "documents": len(documents),
+            "results": len(documents),
+            "distractor_score": distractor_score,
+            "passage_score": passage_score,
+            "margin": passage_score - distractor_score,
+            "prompt_tokens": prompt_tokens,
+            "elapsed_seconds": RERANK_ELAPSED_SECONDS,
+        })
+        self.assertIn(
+            f"rerank-2-triple: ok — {RERANK.words} scored the passage above the distractor "
+            f"({passage_score:.4f} over {distractor_score:.4f})",
+            output.splitlines(),
+        )
+        for text in (section.instruction, case.query, *documents):
+            self.assertNotIn(text, output)
+            self.assertNotIn(text, repr(backend.rows[0].detail))
+
+    def test_rerank_triple_reads_scores_by_index_in_either_reply_order(self) -> None:
+        code, output, baseline = self.run_command(self.make_host())
+        self.assertEqual(code, 0, output)
+        host = self.make_host(rerank_results=lambda results: results[::-1])
+        code, output, backend = self.run_command(host)
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.kept_checks(backend)["rerank-2-triple"], self.kept_checks(baseline)["rerank-2-triple"])
+
+    def test_rerank_triple_wrong_ranking_refuses_and_keeps_other_checks(self) -> None:
+        host = self.make_host(rerank_results=lambda results: [
+            {**result, "relevance_score": 1 - result["relevance_score"]}
+            for result in reversed(results)
+        ])
+        figures = self.assert_supporting_refusal(
+            self.run_command(host),
+            f"{RERANK.words} scored the passage at or below the distractor",
+            engine._engine_fix(RENDERED, RERANK),
+        )
+        passage_score = figures["passage_score"]
+        distractor_score = figures["distractor_score"]
+        margin = figures["margin"]
+        assert isinstance(passage_score, float) and isinstance(distractor_score, float)
+        assert isinstance(margin, float)
+        self.assertLess(passage_score, distractor_score)
+        self.assertEqual(margin, passage_score - distractor_score)
+
+    def test_rerank_triple_refuses_malformed_results_and_ties(self) -> None:
+        cases: tuple[tuple[str, Callable[[list[dict[str, Any]]], object], str], ...] = (
+            ("not a list", lambda results: results[0], "response results is not a list"),
+            ("wrong count", lambda results: results[:1], "returned 1 results for 2 documents"),
+            ("missing index", lambda results: [
+                {"relevance_score": results[0]["relevance_score"]}, results[1],
+            ], "result has no integer index"),
+            ("missing score", lambda results: [
+                {"index": results[0]["index"]}, results[1],
+            ], "result has no numeric relevance_score"),
+            ("wrong positions", lambda results: [
+                {**results[0], "index": len(results)}, results[1],
+            ], "result indexes do not match the 2 document positions"),
+            ("duplicate indexes", lambda results: [
+                {**results[0], "index": results[1]["index"]}, results[1],
+            ], "result indexes do not match the 2 document positions"),
+            ("tie", lambda results: [
+                {**results[0], "relevance_score": results[1]["relevance_score"]}, results[1],
+            ], "scored the passage at or below the distractor"),
+        )
+        for name, results, detail in cases:
+            with self.subTest(name=name):
+                self.assert_supporting_refusal(
+                    self.run_command(self.make_host(rerank_results=results)),
+                    f"{RERANK.words} {detail}",
+                    engine._engine_fix(RENDERED, RERANK),
+                )
+
+    def test_rerank_triple_http_refusals_keep_only_the_status(self) -> None:
+        for status, fix in ((400, engine._sample_fix()), (500, engine._engine_fix(RENDERED, RERANK))):
+            with self.subTest(status=status):
+                host = self.make_host(rerank_status=status)
+                sample = enginesample.load_sample(SAMPLE_PATH, host=host).sample
+                assert sample is not None
+                result = self.run_command(host)
+                figures = self.assert_supporting_refusal(result, f"{RERANK.words} returned HTTP {status}", fix)
+                self.assertEqual(figures["http_status"], status)
+                _, output, backend = result
+                for text in ("fictitious reranker diagnostic", sample.supporting.rerank_2.triple.passage):
+                    self.assertNotIn(text, output)
+                    self.assertNotIn(text, repr(backend.rows[0].detail))
+
+    def test_rerank_flags_accept_rendered_argv_and_last_occurrences(self) -> None:
+        def equals_after_overrides(argv: list[str]) -> list[str]:
+            for flag in ("--max-model-len", "--gpu-memory-utilization", "--hf-overrides"):
+                index = argv.index(flag)
+                argv[index:index + 2] = [f"{flag}={argv[index + 1]}"]
+            return [
+                *argv[:3], "--max-model-len", "fictitious earlier value",
+                "--enable-chunked-prefill", "--disable-fixture-mode", *argv[3:],
+                "--disable-chunked-prefill",
+                "--unlocked-fixture-flag=fictitious unrelated value",
+            ]
+
+        for form, transform in (("rendered", None), ("equals after overrides", equals_after_overrides)):
+            with self.subTest(form=form):
+                host = self.make_host(rerank_argv=transform)
+                pin = host.rerank_pin()
+                code, output, backend = self.run_command(host)
+
+                self.assertEqual(code, 0, output)
+                read_argv = tuple(exec_argv(RENDERED, RERANK.service_name, "cat", "/proc/1/cmdline"))
+                reads = [entry for entry in host.runs if entry[0] == read_argv]
+                self.assertEqual(reads, [(
+                    read_argv, None, engine.SEQUENCE_CAP_TIMEOUT_SECONDS + engine.RUN_TIMEOUT_MARGIN_SECONDS,
+                )])
+                self.assertEqual(self.kept_checks(backend)["rerank-2-flags"], {
+                    "ok": True, "lock_flags": len(pin.serve.flags), "matching": len(pin.serve.flags),
+                    "differing": [], "reversed": [], "absent": [],
+                })
+                self.assertIn(
+                    f"rerank-2-flags: ok — {RERANK.words} running flags match all {len(pin.serve.flags)} lock flags",
+                    output.splitlines(),
+                )
+                for text in (output, repr(backend.rows[0].detail)):
+                    for private in (
+                        pin.repo, str(pin.serve.flags["hf-overrides"]), "\0",
+                        "fictitious earlier value", "fictitious unrelated value",
+                    ):
+                        self.assertNotIn(private, text)
+
+    def test_rerank_flags_refuse_differences_absences_and_reversals(self) -> None:
+        def without(argv: list[str], name: str, size: int) -> list[str]:
+            index = argv.index(f"--{name}")
+            return argv[:index] + argv[index + size:]
+
+        def mixed(argv: list[str]) -> list[str]:
+            return [
+                *without(argv, "max-model-len", 2),
+                "--enable-chunked-prefill", "--hf-overrides=fictitious private flag value",
+            ]
+
+        cases: tuple[tuple[Callable[[list[str]], list[str]], tuple[tuple[str, str], ...]], ...] = (
+            (lambda argv: [*argv, "--max-model-len=fictitious private flag value"],
+             (("max-model-len", "differing"),)),
+            (lambda argv: without(argv, "max-model-len", 2), (("max-model-len", "absent"),)),
+            (lambda argv: without(argv, "enable-fixture-mode", 1), (("enable-fixture-mode", "absent"),)),
+            (lambda argv: [*argv, "--enable-chunked-prefill"], (("no-enable-chunked-prefill", "reversed"),)),
+            (lambda argv: [*argv, "--no-enable-fixture-mode"], (("enable-fixture-mode", "reversed"),)),
+            (lambda argv: [*argv, "--disable-fixture-mode"], (("enable-fixture-mode", "reversed"),)),
+            (mixed, (("max-model-len", "absent"), ("no-enable-chunked-prefill", "reversed"),
+                     ("hf-overrides", "differing"))),
+        )
+        for transform, issues in cases:
+            with self.subTest(issues=issues):
+                host = self.make_host(rerank_argv=transform)
+                pin = host.rerank_pin()
+                detail = f"{RERANK.words} running flags: " + ", ".join(f"{name} {issue}" for name, issue in issues)
+                result = self.run_command(host)
+                figures = self.assert_supporting_refusal(
+                    result, detail, f"Run {report.command('apply')}, then retry.", rows=("rerank-2-flags",)
+                )
+                self.assertEqual(figures, {
+                    "ok": False, "lock_flags": len(pin.serve.flags), "matching": len(pin.serve.flags) - len(issues),
+                    **{kind: [name for name, issue in issues if issue == kind]
+                       for kind in ("differing", "reversed", "absent")},
+                })
+                _, output, backend = result
+                for text in (output, repr(backend.rows[0].detail)):
+                    for private in (
+                        pin.repo, str(pin.serve.flags["hf-overrides"]), "\0", "fictitious private flag value",
+                    ):
+                        self.assertNotIn(private, text)
+
+    def test_rerank_flags_refuse_a_pin_with_no_flags_without_reading_argv(self) -> None:
+        document = yaml.safe_load(models_text())
+        profile = document["profiles"][document["reference"]]
+        profile["models"][RERANK.role]["serve"]["flags"] = {}
+        host = self.make_host(files={MODELS_PATH: yaml.safe_dump(document)})
+        figures = self.assert_supporting_refusal(
+            self.run_command(host), f"models.lock {RERANK.role} pin has no flags",
+            f"Edit models.lock, then re-run {report.command('engine verify')}.", rows=("rerank-2-flags",),
+        )
+        self.assertEqual(figures, {
+            "ok": False, "lock_flags": 0, "matching": 0, "differing": [], "reversed": [], "absent": [],
+        })
+        read_argv = tuple(exec_argv(RENDERED, RERANK.service_name, "cat", "/proc/1/cmdline"))
+        self.assertFalse(any(argv == read_argv for argv, _, _ in host.runs))
+
+    def test_rerank_flags_refuse_a_failed_argv_read_without_its_streams(self) -> None:
+        returncode = 17
+        host = self.make_host(rerank_argv_returncode=returncode)
+        pin = host.rerank_pin()
+        result = self.run_command(host)
+        figures = self.assert_supporting_refusal(
+            result, f"{RERANK.words} argv read failed: non-zero exit {returncode}",
+            f"Run {report.command('apply')}, then retry.", rows=("rerank-2-flags",),
+        )
+        self.assertEqual(figures, {
+            "ok": False, "lock_flags": len(pin.serve.flags), "matching": None,
+            "differing": [], "reversed": [], "absent": [],
+        })
+        _, output, backend = result
+        for text in (output, repr(backend.rows[0].detail)):
+            for private in (pin.repo, str(pin.serve.flags["hf-overrides"]), "fictitious private reranker diagnostic", "\0"):
+                self.assertNotIn(private, text)
+
+    def test_timed_requests_reuse_the_frontend_token_and_record_figures(self) -> None:
+        settings = {
+            "embed-latency": TimedReply(elapsed=0.625),
+            "rerank-2-latency": TimedReply(elapsed=0.875),
+            "rerank-2-throughput": TimedReply(elapsed=2.75),
+        }
+        host = self.make_host(timed_replies=settings)
+        frontend = self.make_frontend()
+        sample = enginesample.load_sample(SAMPLE_PATH, host=host).sample
+        lock = models.load_models_lock(MODELS_PATH, host=host).lock
+        assert sample is not None and lock is not None
+        profile = lock.profile(lock.reference)
+        assert profile is not None
+        embed_pin = profile.model(EMBED.role)
+        assert embed_pin is not None
+        embed = sample.supporting.embed.latency
+        rerank = sample.supporting.rerank_2
+        code, output, backend = self.run_command(host, frontend=frontend)
+
+        self.assertEqual(code, 0, output)
+        token = backend.rows[0].run_id.split("-", 1)[0]
+        for frontend_case in (*sample.frontend.positives, sample.frontend.trip):
+            posts = self.frontend_posts(frontend, frontend_case.id)
+            self.assertTrue(posts)
+            for post in posts:
+                self.assertTrue(
+                    post["messages"][0]["content"].endswith(f"[engine verify {token} {frontend_case.id}]")
+                )
+
+        embed_text = f"Instruct: {embed.instruction}\nQuery: {token} {embed.query}"
+        embed_calls = [(argv, body, timeout) for argv, body, timeout in host.runs if EMBED.service_name in argv]
+        self.assertEqual(len(embed_calls), 3)
+        embed_argv, embed_request, embed_timeout = embed_calls[-1]
+        assert embed_request is not None
+        self.assertEqual(json.loads(embed_request), {"model": embed_pin.serve.served_name, "input": [embed_text]})
+        self.assertEqual(embed_argv[-2], str(engine.EMBED_LATENCY_TIMEOUT_SECONDS))
+        self.assertEqual(embed_timeout, engine.EMBED_LATENCY_TIMEOUT_SECONDS + engine.RUN_TIMEOUT_MARGIN_SECONDS)
+        triple_request, latency_request, throughput_request = self.rerank_requests(host)
+        self.assertEqual(json.loads(triple_request[1])["query"], rerank.triple.query)
+
+        checks = self.kept_checks(backend)
+        self.assertEqual(checks["embed-latency"], {
+            "ok": True, "http_status": 200, "prompt_tokens": len(embed_text.split()),
+            "elapsed_seconds": settings["embed-latency"].elapsed,
+        })
+        rerank_model = host.rerank_pin().serve.served_name
+        for row, case, inputs, request, bound in (
+            ("rerank-2-latency", rerank.latency, 1, latency_request, engine.RERANK_LATENCY_TIMEOUT_SECONDS),
+            ("rerank-2-throughput", rerank.throughput, rerank.throughput.inputs,
+             throughput_request, engine.RERANK_THROUGHPUT_TIMEOUT_SECONDS),
+        ):
+            with self.subTest(row=row):
+                argv, body, timeout = request
+                query = f"{token} {case.query}"
+                documents = list(enginesample.build_rerank_documents(rerank.filler, case.paragraphs, inputs))
+                self.assertEqual(json.loads(body), {
+                    "model": rerank_model, "query": query, "instruction": rerank.instruction, "documents": documents,
+                })
+                self.assertEqual(argv[-2], str(bound))
+                self.assertEqual(timeout, bound + engine.RUN_TIMEOUT_MARGIN_SECONDS)
+                tokens = inputs * (len(query.split()) + len(rerank.instruction.split()))
+                tokens += sum(len(document.split()) for document in documents)
+                elapsed = settings[row].elapsed
+                assert elapsed is not None
+                figures: dict[str, object] = {
+                    "ok": True, "http_status": 200, "prompt_tokens": tokens, "elapsed_seconds": elapsed,
+                }
+                detail = f"{tokens} tokens in {elapsed:.3f} s"
+                if row == "rerank-2-throughput":
+                    self.assertEqual(len(documents), inputs)
+                    figures.update(
+                        pairs=inputs, tokens_per_second=round(tokens / elapsed, 1),
+                        pairs_per_second=round(inputs / elapsed, 1),
+                    )
+                    detail = f"{inputs} pairs, {detail}: {tokens / elapsed:.1f} tok/s, {inputs / elapsed:.1f} pairs/s"
+                self.assertEqual(checks[row], figures)
+                self.assertIn(f"{row}: ok — {detail}", output.splitlines())
+
+        for private in (
+            embed.instruction, embed.query, rerank.instruction, rerank.filler, rerank.latency.query,
+            rerank.throughput.query, rerank.triple.query, rerank.triple.passage, rerank.triple.distractor,
+        ):
+            self.assertNotIn(private, output)
+            self.assertNotIn(private, repr(backend.rows[0].detail))
+
+    def test_timed_request_timeout_fails_its_row_and_keeps_other_checks(self) -> None:
+        for row, member in (("embed-latency", EMBED), ("rerank-2-latency", RERANK), ("rerank-2-throughput", RERANK)):
+            with self.subTest(row=row):
+                host = self.make_host(timed_replies={row: TimedReply(returncode=28)})
+                figures = self.assert_supporting_refusal(
+                    self.run_command(host), f"{member.words} request failed: non-zero exit 28 (fixture curl timed out)",
+                    engine._engine_fix(RENDERED, member), rows=(row,),
+                )
+                self.assertIsNone(figures["http_status"])
+                self.assertIsNone(figures["elapsed_seconds"])
+
+    def test_timed_request_http_refusals_keep_only_the_status(self) -> None:
+        for row, member in (("embed-latency", EMBED), ("rerank-2-latency", RERANK), ("rerank-2-throughput", RERANK)):
+            for status in (400, 500):
+                with self.subTest(row=row, status=status):
+                    host = self.make_host(timed_replies={row: TimedReply(status=status)})
+                    sample = enginesample.load_sample(SAMPLE_PATH, host=host).sample
+                    assert sample is not None
+                    result = self.run_command(host)
+                    fix = engine._sample_fix() if status == 400 else engine._engine_fix(RENDERED, member)
+                    figures = self.assert_supporting_refusal(
+                        result, f"{member.words} returned HTTP {status}", fix, rows=(row,),
+                    )
+                    self.assertEqual(figures["http_status"], status)
+                    _, output, backend = result
+                    for private in ("fictitious timed diagnostic", sample.supporting.rerank_2.triple.passage):
+                        self.assertNotIn(private, output)
+                        self.assertNotIn(private, repr(backend.rows[0].detail))
+
+    def test_timed_requests_refuse_malformed_replies(self) -> None:
+        def reply_cases(key: str, count_detail: str) -> list[tuple[TimedReply, str]]:
+            return [
+                (TimedReply(transform=lambda body: {**body, key: {}}), f"response {key} is not a list"),
+                (TimedReply(transform=lambda body: {**body, key: body[key][:-1]}), count_detail),
+                (TimedReply(transform=lambda body: {key: body[key]}), "reply has no prompt token count"),
+                (TimedReply(transform=lambda body: {**body, "usage": {}}), "reply has no prompt token count"),
+                (TimedReply(elapsed=0), "reply has no elapsed time"),
+                (TimedReply(elapsed=None), "response is missing its timing marker"),
+            ]
+
+        sample = enginesample.load_sample(SAMPLE_PATH, host=self.make_host()).sample
+        assert sample is not None
+        for row, member, key, size, count_detail in (
+            ("embed-latency", EMBED, "data", 1, "vectors for 1 inputs"),
+            ("rerank-2-latency", RERANK, "results", 1, "results for 1 documents"),
+            ("rerank-2-throughput", RERANK, "results", sample.supporting.rerank_2.throughput.inputs,
+             f"results for {sample.supporting.rerank_2.throughput.inputs} documents"),
+        ):
+            cases = reply_cases(key, f"returned {size - 1} {count_detail}")
+            for invalid in (0, -3, True, 1.5, "6"):
+                def invalid_usage(body: dict[str, Any], token_count: object = invalid) -> dict[str, Any]:
+                    return {**body, "usage": {"prompt_tokens": token_count}}
+
+                cases.append((
+                    TimedReply(transform=invalid_usage), "reply has no prompt token count",
+                ))
+            if key == "data":
+                cases.append((TimedReply(transform=lambda body: {**body, "data": [{}]}),
+                              "response data has no embedding vector"))
+            for settings, detail in cases:
+                with self.subTest(row=row, detail=detail, settings=settings):
+                    host = self.make_host(timed_replies={row: settings})
+                    self.assert_supporting_refusal(
+                        self.run_command(host), f"{member.words} {detail}", engine._engine_fix(RENDERED, member),
+                        rows=(row,),
+                    )
+
+    def assert_rerank_target_refusal(
+        self, host: FakeHost, result: tuple[int, str, FakeAudit], detail: str, fix: str
+    ) -> None:
+        figures = self.assert_supporting_refusal(
+            result, detail, fix, rows=("rerank-2-triple", "rerank-2-flags", "rerank-2-latency", "rerank-2-throughput"),
+        )
+        self.assertTrue(all(value is None for key, value in figures.items() if key != "ok"))
+        self.assertEqual(self.kept_checks(result[2])["rerank-2-flags"], {
+            "ok": False, "lock_flags": None, "matching": None, "differing": [], "reversed": [], "absent": [],
+        })
+        checks = self.kept_checks(result[2])
+        for row in ("rerank-2-latency", "rerank-2-throughput"):
+            self.assertTrue(all(value is None for key, value in checks[row].items() if key != "ok"))
+        self.assertFalse(any(RERANK.service_name in argv for argv, _, _ in host.runs))
+
+    def test_rerank_target_uses_the_lock_at_the_start_of_its_checks(self) -> None:
+        host = self.make_host()
+
+        def remove_lock_after_embed(row: engine.StageResult) -> None:
+            if row.name == "embed-latency":
+                del host.files[MODELS_PATH]
+
+        result = self.run_command(host, observe=remove_lock_after_embed)
+        failure = models.load_models_lock(MODELS_PATH, host=host)
+        self.assertEqual(len(failure.errors), 1)
+        self.assertIn("models lock is missing", result[1])
+        self.assert_rerank_target_refusal(host, result, models.render_errors(failure.errors), failure.errors[0].fix)
+
+    def test_rerank_target_requires_a_rendered_healthy_service(self) -> None:
+        compose_path = str(Path(RENDERED) / "compose.yaml")
+        missing = self.make_host()
+        compose = yaml.safe_load(missing.files[compose_path])
+        del compose["services"][RERANK.service_name]
+        missing.files[compose_path] = yaml.safe_dump(compose)
+        apply_command = report.command("apply")
+        verify = report.command("engine verify")
+        stopped_fix = (
+            f"Run {apply_command} (which starts the {RERANK.words} and waits for its health); "
+            f"then read its logs with {logs_fix(RENDERED, RERANK.service_name)}; then re-run {verify}."
+        )
+        cases = (
+            (missing, f"rendered Compose has no {RERANK.words} service", f"Run {apply_command}, then retry."),
+            (self.make_host(ps=ps_output(rerank_health="starting")),
+             f"service {RERANK.service_name} is not healthy (health: starting)", stopped_fix),
+            (self.make_host(ps=ps_output(rerank_state="exited", rerank_health="")),
+             f"service {RERANK.service_name} is not running (state: exited)", stopped_fix),
+        )
+        for host, detail, fix in cases:
+            with self.subTest(detail=detail):
+                self.assert_rerank_target_refusal(host, self.run_command(host), detail, fix)
+
+    def test_rerank_target_without_pin_prints_one_skip_and_keeps_no_rerank_check(self) -> None:
+        host = self.make_host(pin_reranker=False)
+        lock = models.load_models_lock(MODELS_PATH, host=host).lock
+        assert lock is not None
+        observed: list[engine.StageResult] = []
+
+        code, output, backend = self.run_command(host, observe=observed.append)
+
+        self.assertEqual(code, 0, output)
+        skip = f"skipped — profile {lock.reference} pins no {RERANK.role} model"
+        self.assertEqual(observed[-3].name, "embed-latency")
+        self.assertEqual(observed[-2], engine.StageResult(RERANK.role, True, skip, ""))
+        self.assertEqual(observed[-1].name, "audit")
+        self.assertEqual(
+            [line for line in output.splitlines() if line.startswith(RERANK.role)],
+            [f"{RERANK.role}: ok — {skip}"],
+        )
+        self.assertFalse(any(RERANK.service_name in argv for argv, _, _ in host.runs))
+        self.assertEqual(backend.rows[0].detail["outcome"], "ok")
+        self.assertFalse(any(name.startswith(RERANK.role) for name in self.kept_checks(backend)))
+
     def test_embed_target_refusals_fail_its_row_after_generator(self) -> None:
         without_pin = yaml.safe_load(models_text())
         pin_profile = without_pin["profiles"][without_pin["reference"]]
@@ -1363,7 +2003,7 @@ class CommandTests(unittest.TestCase):
         del without_space["profiles"][without_space["reference"]]["embedding_space"]
         wrong_role = yaml.safe_load(models_text())
         wrong_role["profiles"][wrong_role["reference"]]["embedding_space"]["role"] = GENERATOR.role
-        compose = f"services:\n  {GENERATOR.service_name}: {{}}\n"
+        compose = f"services:\n  {GENERATOR.service_name}: {{}}\n  {RERANK.service_name}: {{}}\n"
         cases = (
             ("compose", {"files": {str(Path(RENDERED) / "compose.yaml"): compose}},
              "no embedding server service", "sudo python3 -m gideon apply"),
@@ -1380,6 +2020,7 @@ class CommandTests(unittest.TestCase):
                 self.assertEqual(code, 1, output)
                 self.assertIn("embed-vectors: refuse", output)
                 self.assertIn("embed-throughput: refuse", output)
+                self.assertIn("embed-latency: refuse", output)
                 self.assertIn(detail, output)
                 self.assertIn(fix, output)
                 self.assertIn("audit: ok", output)
@@ -1401,7 +2042,13 @@ class CommandTests(unittest.TestCase):
                 })
                 self.assertFalse(throughput_figures["ok"])
                 self.assertTrue(all(value is None for key, value in throughput_figures.items() if key != "ok"))
-                self.assertTrue(all(check["ok"] for row, check in checks.items() if row not in {"embed-vectors", "embed-throughput"}))
+                self.assertEqual(checks["embed-latency"], {
+                    "ok": False, "http_status": None, "prompt_tokens": None, "elapsed_seconds": None,
+                })
+                self.assertTrue(all(
+                    check["ok"] for row, check in checks.items()
+                    if row not in {"embed-vectors", "embed-throughput", "embed-latency"}
+                ))
                 self.assertFalse(any("exec" in argv and EMBED.service_name in argv for argv, _, _ in host.runs))
                 if name in {"unhealthy", "stopped"}:
                     self.assertIn("logs gideon-embed", output)
@@ -1422,7 +2069,7 @@ class CommandTests(unittest.TestCase):
         host = self.make_host(lock_holder=holder.to_json())
         host.reads.clear()
         observed: list[engine.StageResult] = []
-        code, output, backend = self.run_command(host, observe=observed)
+        code, output, backend = self.run_command(host, observe=observed.append)
 
         self.assertEqual(code, 1)
         self.assertIn(f"{holder.command} since {holder.started.isoformat()}", output)
@@ -1708,7 +2355,7 @@ class CommandTests(unittest.TestCase):
                     failure: True,
                 }})
                 observed: list[engine.StageResult] = []
-                code, output, backend = self.run_command(self.make_host(), frontend=frontend, observe=observed)
+                code, output, backend = self.run_command(self.make_host(), frontend=frontend, observe=observed.append)
                 name = f"{engine.FRONTEND_ROW_PREFIX}{case.id}"
                 row = next(row for row in observed if row.name == name)
                 figure = self.kept_checks(backend)[name]
@@ -1760,7 +2407,9 @@ class CommandTests(unittest.TestCase):
                 self.assertIn("audit: ok", output)
                 checks = backend.rows[0].detail["checks"]
                 assert isinstance(checks, Mapping)
-                self.assertEqual(list(checks)[-5:-2], expected_names)
+                names = list(checks)
+                supporting_start = names.index("embed-vectors")
+                self.assertEqual(names[supporting_start - len(expected_names):supporting_start], expected_names)
                 delete_paths = [
                     path for method, path, _ in frontend.requests if method == "DELETE"
                 ]
@@ -1797,7 +2446,7 @@ class CommandTests(unittest.TestCase):
     def test_observer_sees_the_no_gpu_row_and_smoke_uses_three_decimals(self) -> None:
         host = self.make_host(files={str(Path("/etc/gideon/no-gpu")): "marker"})
         observed: list[engine.StageResult] = []
-        code, output, _ = self.run_command(host, observe=observed)
+        code, output, _ = self.run_command(host, observe=observed.append)
 
         self.assertEqual(code, 0)
         self.assertEqual([row.name for row in observed], ["engine"])
@@ -2039,7 +2688,7 @@ class CommandTests(unittest.TestCase):
             structured_content=[None, "fixture invalid JSON"],
         )
         observed: list[engine.StageResult] = []
-        code, output, backend = self.run_command(host, observe=observed)
+        code, output, backend = self.run_command(host, observe=observed.append)
         row = next(row for row in observed if row.name == "structured")
         figure = self.kept_checks(backend)["structured"]
         self.assertEqual(code, 1)
@@ -2095,7 +2744,11 @@ class CommandTests(unittest.TestCase):
         ]
         self.assertEqual(
             list(checks),
-            ["sequence-cap", "needle-32k", "needle-128k", "needle-256k", "structured", "smoke", *expected_frontend, "embed-vectors", "embed-throughput"],
+            [
+                "sequence-cap", "needle-32k", "needle-128k", "needle-256k", "structured", "smoke",
+                *expected_frontend, "embed-vectors", "embed-throughput", "embed-latency", "rerank-2-triple",
+                "rerank-2-flags", "rerank-2-latency", "rerank-2-throughput",
+            ],
         )
 
     def test_needle_rows_and_audit_never_keep_sample_text(self) -> None:
@@ -2115,6 +2768,7 @@ class CommandTests(unittest.TestCase):
 
     def test_no_gpu_skips_before_any_read_or_run(self) -> None:
         host = self.make_host(files={str(Path("/etc/gideon/no-gpu")): "marker"})
+        host.reads.clear()
         audit_backend = FakeAudit()
         code, output, backend = self.run_command(host, audit_backend)
 
@@ -2122,6 +2776,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(output, "engine: ok — skipped — no-GPU host\n")
         self.assertNotIn("embed-vectors", output)
         self.assertNotIn("embed-throughput", output)
+        self.assertEqual(host.reads, [])
         self.assertEqual(host.runs, [])
         self.assertEqual(backend.rows, [])
 

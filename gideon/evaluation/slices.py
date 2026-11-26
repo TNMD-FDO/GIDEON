@@ -56,9 +56,9 @@ class SliceSpec:
     run, even when no counted case routes to it.
     ``judgments`` names the stores surface for the manifest its definition reads.
     ``accepts_assessments`` is whether ``eval run`` admits ``--assessed``, the
-    model assessor's grades file, for the slice. Every surface a slice names
-    is required for each run. The assessments file is optional, so its
-    admission is a field on the spec.
+    model assessor's grades file, for the slice. ``accepts_ranked`` admits
+    ``--ranked``, a ranked-list file that replaces the Research surface for
+    that run.
     A slice names at least one surface on the box, and the ranked-list file
     alone is not one: a set naming nothing on the box is refused at
     construction.
@@ -84,6 +84,7 @@ class SliceSpec:
     ceiling_cases: Callable[[LoadedSet, str], frozenset[str]] | None = None
     decision: DecisionMetric | None = None
     accepts_assessments: bool = False
+    accepts_ranked: bool = False
 
     def __post_init__(self) -> None:
         if CallSurface.TURNS in self.surfaces and CallSurface.ENGINE not in self.surfaces:
@@ -97,6 +98,19 @@ class SliceSpec:
                 "an evaluation slice must name at least one surface on the box "
                 "because every run uses the box's preconditions and record"
             )
+
+        if self.accepts_ranked and CallSurface.RESEARCH not in self.surfaces:
+            raise ValueError(
+                "a slice accepting a ranked file must name the Research surface: "
+                "the file stands in for Research"
+            )
+
+    def run_surfaces(self, *, has_ranked: bool) -> frozenset[CallSurface]:
+        """Replace Research with the ranked-list surface when an accepted file is given."""
+
+        if self.accepts_ranked and has_ranked:
+            return (self.surfaces - {CallSurface.RESEARCH}) | {CallSurface.RANKED_FILE}
+        return self.surfaces
 
 
 _EXTRACTION: Final[SliceSpec] = SliceSpec(
@@ -147,26 +161,28 @@ _JUDGE_TRIPLES: Final[SliceSpec] = SliceSpec(
 )
 _JUDGMENTS: Final[SliceSpec] = SliceSpec(
     runner=judgments_slice.run_judgments,
-    surfaces=frozenset({CallSurface.RANKED_FILE, CallSurface.STORES}),
+    surfaces=frozenset({CallSurface.RESEARCH, CallSurface.STORES}),
     repeats=1,
     judge_prompt=None,
     compares_reference=False,
     engine_calls=None,
     gate_pass=(
-        "every judged query had a ranked list and every ranked entry is held by the generation, "
-        "the metrics reported and never gated"
+        "every judged query had a successful turn with resolved pool entries or a ranked list "
+        "with entries held by the generation, the metrics reported and never gated"
     ),
     gate_fail=(
-        "one or more judged queries have no ranked list or the file has ranked entries "
-        "the generation does not hold"
+        "one or more judged queries had a failed turn, an unresolved pool entry, "
+        "a missing ranked list, or a ranked entry the generation does not hold"
     ),
     gate_fix=(
-        "Add a ranked list for each missing query id in the report, or use --generation <name> "
-        "to score the file against the generation it was drawn from."
+        "Review the reported query ids and check the Research service logs for failed turns "
+        "or unresolved pool entries. For a ranked file, add a list for each missing query id "
+        "or use --generation <name> to score against the generation it was drawn from."
     ),
     categories=frozenset({("judgments", "judgments")}),
     turn_calls=None,
     accepts_assessments=True,
+    accepts_ranked=True,
 )
 _GOLD_DROP: Final[SliceSpec] = SliceSpec(
     runner=golddrop_slice.run_gold_drop,

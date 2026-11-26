@@ -43,12 +43,34 @@ from gideon.host.render.services.model_server import (
     ENGINE_ACCESS_LOG_EXCLUDED_PATHS,
     ModelServerService,
     model_command,
+    model_flag_arguments,
     model_service,
 )
 from gideon.host.render.yamlout import dump_fragment
 
 
 class Family(unittest.TestCase):
+    def test_projected_flags_extend_the_model_command_in_lock_order(self) -> None:
+        pin = inputs().profile.model(RERANK.role)
+        assert pin is not None
+        flags: dict[str, str | float | bool] = {
+            "gpu-memory-utilization": 0.375,
+            "enable-fixture-mode": True,
+            "hf-overrides": '{"fixture": "value with spaces"}',
+        }
+        projected = model_flag_arguments(flags)
+        self.assertEqual(projected, [
+            ("--gpu-memory-utilization", str(flags["gpu-memory-utilization"])),
+            ("--enable-fixture-mode",),
+            ("--hf-overrides", flags["hf-overrides"]),
+        ])
+        baseline = replace(pin, serve=replace(pin.serve, flags={}))
+        configured = replace(pin, serve=replace(pin.serve, flags=flags))
+        self.assertEqual(
+            model_command(configured, RERANK),
+            model_command(baseline, RERANK) + [token for group in projected for token in group],
+        )
+
     def test_members_are_unique_and_match_the_committed_pins(self) -> None:
         loaded = load_models_lock(ROOT / "models.lock")
         self.assertTrue(loaded.ok, loaded.errors)

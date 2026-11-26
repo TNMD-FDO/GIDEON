@@ -150,7 +150,7 @@ Models pull fetches and verifies the selected profile's model files, adding the 
 
 ### gideon engine verify
 
-Engine verify runs corpus-independent engine, frontend guardrail, and embedding checks, recording their results. A CSA or developer runs it after an engine or driver change; install and upgrade also run it. It refuses while an evaluation holds the engine lock.
+Engine verify runs corpus-independent engine, frontend guardrail, embedding, and reranker checks, recording their results. A CSA or developer runs it after an engine or driver change; install and upgrade also run it. It refuses while an evaluation holds the engine lock.
 
 **Command.** `gideon engine verify`.\
 **Steps.** [docs/runbooks/model-upgrade.md §7](runbooks/model-upgrade.md).
@@ -262,7 +262,9 @@ Eval run scores an evaluation set, compares per-case verdicts with the committed
 
 The quiet window covers weeknights 19:00 to 06:00 and Friday 19:00 to Monday 06:00 in the site's timezone. The account used for evaluation turns through the frontend is called the eval identity.
 
-`extraction` scores the set's labelled exact objects, and `judgments --ranked <file> --generation <name>` scores ranked gold-evidence coordinates against attorneys' grades, reporting nDCG@10, recall@50, and Hole@10 without gating those measures. It reads the generation's manifest first, because a graded passage the generation does not hold under its graded text could not have been retrieved from it: such a passage is left out of that query's figures and listed by query id. A ranked entry the generation does not hold shows the file was drawn from another index, so its query and the run fail. The run records the generation and its corpus lockfile, and the generation is chosen as it is for `gold-drop` below. With `--assessed <file>`, a model assessor's grades file written on the box outside the checkout, the report adds two lines: the passages in each top ten that no attorney graded, with the model's grade counts over them, and the model's disagreement with the attorneys' grades as a rate and Cohen's κ. No measure or verdict changes, and the run records the file's SHA-256, prompt, and model.
+`extraction` scores the set's labelled exact objects. `judgments` sends each query to the Research service's `/turn` endpoint and scores the retrieved passages against attorneys' grades. Research uses the selected stack's live index generation, so a name supplied with `--generation <name>` must match it. Use `--baseline off` to score the same queries with each model-driven stage in its off setting. To score a saved ranked list, supply `--ranked <file>` and use `--generation <name>` to select the generation it came from. Without a name, a file run selects the same generation as `gold-drop` below.
+
+The report gives nDCG@10, recall@50, and Hole@10. Coverage and input validity decide whether the run passes. The report lists graded passages the generation lacks under their graded text by query ID and excludes them from the figures. A failed Research request, an unresolved retrieved passage, or a ranked entry the generation does not hold fails the affected query and the run. The run records the generation and its corpus lockfile. With `--assessed <file>`, the report also shows the passages in each top ten that no attorney graded, the model's grade counts for them, and the model's disagreement with the attorneys' grades as a rate and Cohen's κ. The run records the assessment file's SHA-256, prompt, and model alongside the measures computed from the attorneys' grades.
 
 `guardrails` runs three guardrail families through General's service, with six cases also through the frontend, in the quiet window. It gates each family and the harness's false-refusal counts at their ceilings, while the judge's readings are reported without gating.
 

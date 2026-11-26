@@ -1,0 +1,10 @@
+{
+  "id": "fixture-embedding-response",
+  "object": "list",
+  "created": 0,
+  "model": "fixture-embed",
+  "data": [
+    {"object": "embedding", "index": 0, "embedding": [0.1, -0.2, 0.3]}
+  ],
+  "usage": {"prompt_tokens": 7, "total_tokens": 7}
+}

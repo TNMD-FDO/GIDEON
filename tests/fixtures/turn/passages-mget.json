@@ -1,0 +1,45 @@
+{
+  "docs": [
+    {
+      "_index": "caselaw__corpus-2026-10-21__qwen3-embedding-8b-1024-bf16",
+      "_id": "743fe666ec256cf5cd3955fd053b2efaeeef671f45c66d65e7ad26d359146d30",
+      "_version": 1,
+      "_seq_no": 295416,
+      "_primary_term": 1,
+      "found": true,
+      "_source": {
+        "caption": "Invented v. Caption, 1 F.4th 1",
+        "text": "An invented passage standing in for the serving copy's text."
+      }
+    },
+    {
+      "_index": "caselaw__corpus-2026-10-21__qwen3-embedding-8b-1024-bf16",
+      "_id": "4e0cb325b01bab2be795f07d123dd3a92dbb587b4b2f07d46656d4474dbf8964",
+      "_version": 1,
+      "_seq_no": 1714784,
+      "_primary_term": 1,
+      "found": true,
+      "_source": {
+        "caption": "Invented v. Caption, 1 F.4th 1",
+        "text": "An invented passage standing in for the serving copy's text."
+      }
+    },
+    {
+      "_index": "caselaw__corpus-2026-10-21__qwen3-embedding-8b-1024-bf16",
+      "_id": "940faaebc5b239b4858a827c275ec0270a0745859c21a3669b691eb99ff7ecb5",
+      "_version": 1,
+      "_seq_no": 2280977,
+      "_primary_term": 1,
+      "found": true,
+      "_source": {
+        "caption": "Invented v. Caption, 1 F.4th 1",
+        "text": "An invented passage standing in for the serving copy's text."
+      }
+    },
+    {
+      "_index": "caselaw__corpus-2026-10-21__qwen3-embedding-8b-1024-bf16",
+      "_id": "absent-chunk-id-for-the-proof",
+      "found": false
+    }
+  ]
+}

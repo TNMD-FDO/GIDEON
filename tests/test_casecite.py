@@ -237,6 +237,29 @@ class EyeciteAdapter(unittest.TestCase):
             ("466 U.S. 668", "104 S. Ct. 2052"),
         )
 
+    def test_indexed_spelling_matches_the_full_finding_at_each_span(self) -> None:
+        from gideon.casecite.adapter import (
+            extract_case_cites,
+            extract_indexed_case_cites,
+            find_citations,
+        )
+
+        typed = ("444 U. S. 987", "444 U.S. 987")
+        source = f"[FICTIONAL TEST ONLY] {typed[0]}. {typed[1]}."
+        entries = extract_indexed_case_cites(source)
+        self.assertEqual(tuple(obj.text for obj, _ in entries), typed)
+        self.assertEqual(tuple(obj for obj, _ in entries), extract_case_cites(source))
+        findings = {
+            (cite.start, cite.end): cite.reporter_cite
+            for cite in find_citations(source)
+            if cite.form == "full" and cite.kind == "case"
+        }
+        for obj, spelling in entries:
+            with self.subTest(typed=obj.text):
+                self.assertEqual(obj.text, source[obj.start:obj.end])
+                self.assertEqual(spelling, findings[obj.start, obj.end])
+                self.assertEqual(spelling, typed[1])
+
     def test_find_citations_over_fictitious_opinion(self) -> None:
         from gideon.casecite.adapter import find_citations
 

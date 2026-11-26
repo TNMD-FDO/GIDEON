@@ -4,13 +4,14 @@ import difflib
 import hashlib
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, TypeGuard, cast
 
 import yaml  # type: ignore[import-untyped]
 
 from gideon.host import report
+from gideon.host.render.engine import RERANK
 from gideon.host.sysio import Host, PathLike
 
 
@@ -80,11 +81,61 @@ class EmbedThroughputCase:
 
 
 @dataclass(frozen=True, slots=True)
+class EmbedLatencyCase:
+    """One instructed embedding query for a latency reading."""
+
+    id: str
+    instruction: str
+    query: str
+
+
+@dataclass(frozen=True, slots=True)
 class EmbedSection:
     """The embedding server's cases in the supporting sample."""
 
     vectors: EmbedVectorsCase
     throughput: EmbedThroughputCase
+    latency: EmbedLatencyCase
+
+
+@dataclass(frozen=True, slots=True)
+class RerankTripleCase:
+    """A query and two passages for checking the reranker's score order."""
+
+    id: str
+    query: str
+    passage: str
+    distractor: str
+
+
+@dataclass(frozen=True, slots=True)
+class RerankLatencyCase:
+    """One query and one generated document for a reranker latency reading."""
+
+    id: str
+    query: str
+    paragraphs: int
+
+
+@dataclass(frozen=True, slots=True)
+class RerankThroughputCase:
+    """One query and a batch of generated documents for a throughput reading."""
+
+    id: str
+    query: str
+    paragraphs: int
+    inputs: int
+
+
+@dataclass(frozen=True, slots=True)
+class RerankSection:
+    """The reranker's instruction and cases in the supporting sample."""
+
+    instruction: str
+    filler: str
+    triple: RerankTripleCase
+    latency: RerankLatencyCase
+    throughput: RerankThroughputCase
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +143,7 @@ class SupportingSection:
     """Supporting model cases keyed by their model role."""
 
     embed: EmbedSection
+    rerank_2: RerankSection
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,10 +218,15 @@ _NEEDLE_KEYS: Final = ("id", "filler", "planted", "question", "expected", "depth
 _STRUCTURED_KEYS: Final = ("id", "prompt", "schema_name", "schema")
 _FRONTEND_KEYS: Final = ("positives", "trip")
 _FRONTEND_CASE_KEYS: Final = ("id", "prompt")
-_SUPPORTING_KEYS: Final = ("embed",)
-_EMBED_KEYS: Final = ("vectors", "throughput")
+_SUPPORTING_KEYS: Final = ("embed", RERANK.role)
+_EMBED_KEYS: Final = ("vectors", "throughput", "latency")
 _EMBED_VECTORS_KEYS: Final = ("id", "texts")
 _EMBED_THROUGHPUT_KEYS: Final = ("id", "filler", "paragraphs", "inputs")
+_EMBED_LATENCY_KEYS: Final = ("id", "instruction", "query")
+_RERANK_KEYS: Final = ("instruction", "filler", "triple", "latency", "throughput")
+_RERANK_TRIPLE_KEYS: Final = ("id", "query", "passage", "distractor")
+_RERANK_LATENCY_KEYS: Final = ("id", "query", "paragraphs")
+_RERANK_THROUGHPUT_KEYS: Final = (*_RERANK_LATENCY_KEYS, "inputs")
 _CASE_ID: Final[re.Pattern[str]] = re.compile(r"[a-z0-9-]+")
 _SCHEMA_KEYS: Final = (
     "type",
@@ -440,6 +497,45 @@ def _validate_embed_throughput(
     return EmbedThroughputCase(case_id, filler, paragraphs, inputs)
 
 
+def _required_case[Case](
+    section: Mapping[object, object],
+    prefix: str,
+    key: str,
+    errors: list[SampleError],
+    validate_case: Callable[[object, list[SampleError], str], Case | None],
+) -> Case | None:
+    path = _path(prefix, key)
+    if key not in section:
+        errors.append(_error(path, "missing required key"))
+        return None
+    return validate_case(section[key], errors, path)
+
+
+def _required_case_id(
+    case: Mapping[object, object], prefix: str, errors: list[SampleError]
+) -> str | None:
+    case_id = _required_string(case, prefix, "id", errors)
+    if case_id is not None and _CASE_ID.fullmatch(case_id) is None:
+        errors.append(_error(_path(prefix, "id"), "expected lowercase letters, digits, and hyphens"))
+        return None
+    return case_id
+
+
+def _validate_embed_latency(
+    value: object, errors: list[SampleError], prefix: str
+) -> EmbedLatencyCase | None:
+    if not isinstance(value, Mapping):
+        errors.append(_error(prefix, f"expected a mapping (got {_kind(value)})"))
+        return None
+    _walk_unknown(value, _EMBED_LATENCY_KEYS, prefix, errors)
+    case_id = _required_case_id(value, prefix, errors)
+    instruction = _required_string(value, prefix, "instruction", errors)
+    query = _required_string(value, prefix, "query", errors)
+    if case_id is None or instruction is None or query is None:
+        return None
+    return EmbedLatencyCase(case_id, instruction, query)
+
+
 def _validate_embed(
     value: object, errors: list[SampleError], prefix: str
 ) -> EmbedSection | None:
@@ -449,19 +545,83 @@ def _validate_embed(
         errors.append(_error(prefix, f"expected a mapping (got {_kind(value)})"))
         return None
     _walk_unknown(value, _EMBED_KEYS, prefix, errors)
-    if "vectors" not in value:
-        errors.append(_error(_path(prefix, "vectors"), "missing required key"))
-        vectors = None
-    else:
-        vectors = _validate_embed_vectors(value["vectors"], errors, _path(prefix, "vectors"))
-    if "throughput" not in value:
-        errors.append(_error(_path(prefix, "throughput"), "missing required key"))
-        throughput = None
-    else:
-        throughput = _validate_embed_throughput(value["throughput"], errors, _path(prefix, "throughput"))
-    if vectors is None or throughput is None:
+    vectors = _required_case(value, prefix, "vectors", errors, _validate_embed_vectors)
+    throughput = _required_case(value, prefix, "throughput", errors, _validate_embed_throughput)
+    latency = _required_case(value, prefix, "latency", errors, _validate_embed_latency)
+    if vectors is None or throughput is None or latency is None:
         return None
-    return EmbedSection(vectors, throughput)
+    return EmbedSection(vectors, throughput, latency)
+
+
+def _validate_rerank_triple(
+    value: object, errors: list[SampleError], prefix: str
+) -> RerankTripleCase | None:
+    """Validate the case identifier, query, and two passages."""
+
+    if not isinstance(value, Mapping):
+        errors.append(_error(prefix, f"expected a mapping (got {_kind(value)})"))
+        return None
+    start = len(errors)
+    _walk_unknown(value, _RERANK_TRIPLE_KEYS, prefix, errors)
+    case_id = _required_string(value, prefix, "id", errors)
+    query = _required_string(value, prefix, "query", errors)
+    passage = _required_string(value, prefix, "passage", errors)
+    distractor = _required_string(value, prefix, "distractor", errors)
+    if case_id is not None and _CASE_ID.fullmatch(case_id) is None:
+        errors.append(_error(_path(prefix, "id"), "expected lowercase letters, digits, and hyphens"))
+    if len(errors) != start or case_id is None or query is None or passage is None or distractor is None:
+        return None
+    return RerankTripleCase(case_id, query, passage, distractor)
+
+
+def _validate_rerank_latency(
+    value: object, errors: list[SampleError], prefix: str
+) -> RerankLatencyCase | None:
+    if not isinstance(value, Mapping):
+        errors.append(_error(prefix, f"expected a mapping (got {_kind(value)})"))
+        return None
+    _walk_unknown(value, _RERANK_LATENCY_KEYS, prefix, errors)
+    case_id = _required_case_id(value, prefix, errors)
+    query = _required_string(value, prefix, "query", errors)
+    paragraphs = _required_positive_int(value, prefix, "paragraphs", errors)
+    if case_id is None or query is None or paragraphs is None:
+        return None
+    return RerankLatencyCase(case_id, query, paragraphs)
+
+
+def _validate_rerank_throughput(
+    value: object, errors: list[SampleError], prefix: str
+) -> RerankThroughputCase | None:
+    if not isinstance(value, Mapping):
+        errors.append(_error(prefix, f"expected a mapping (got {_kind(value)})"))
+        return None
+    _walk_unknown(value, _RERANK_THROUGHPUT_KEYS, prefix, errors)
+    case_id = _required_case_id(value, prefix, errors)
+    query = _required_string(value, prefix, "query", errors)
+    paragraphs = _required_positive_int(value, prefix, "paragraphs", errors)
+    inputs = _required_positive_int(value, prefix, "inputs", errors)
+    if case_id is None or query is None or paragraphs is None or inputs is None:
+        return None
+    return RerankThroughputCase(case_id, query, paragraphs, inputs)
+
+
+def _validate_rerank(
+    value: object, errors: list[SampleError], prefix: str
+) -> RerankSection | None:
+    """Validate the reranker's instruction and sample cases."""
+
+    if not isinstance(value, Mapping):
+        errors.append(_error(prefix, f"expected a mapping (got {_kind(value)})"))
+        return None
+    _walk_unknown(value, _RERANK_KEYS, prefix, errors)
+    instruction = _required_string(value, prefix, "instruction", errors)
+    filler = _required_string(value, prefix, "filler", errors)
+    triple = _required_case(value, prefix, "triple", errors, _validate_rerank_triple)
+    latency = _required_case(value, prefix, "latency", errors, _validate_rerank_latency)
+    throughput = _required_case(value, prefix, "throughput", errors, _validate_rerank_throughput)
+    if instruction is None or filler is None or triple is None or latency is None or throughput is None:
+        return None
+    return RerankSection(instruction, filler, triple, latency, throughput)
 
 
 def _validate_supporting(
@@ -475,9 +635,17 @@ def _validate_supporting(
     _walk_unknown(value, _SUPPORTING_KEYS, prefix, errors)
     if "embed" not in value:
         errors.append(_error(_path(prefix, "embed"), "missing required key"))
+        embed = None
+    else:
+        embed = _validate_embed(value["embed"], errors, _path(prefix, "embed"))
+    rerank_path = _path(prefix, RERANK.role)
+    if RERANK.role not in value:
+        errors.append(_error(rerank_path, "missing required key"))
         return None
-    embed = _validate_embed(value["embed"], errors, _path(prefix, "embed"))
-    return SupportingSection(embed) if embed is not None else None
+    rerank = _validate_rerank(value[RERANK.role], errors, rerank_path)
+    if embed is None or rerank is None:
+        return None
+    return SupportingSection(embed, rerank)
 
 
 def _validate_needle(
@@ -915,10 +1083,32 @@ def build_needle_prompt(case: NeedleCase, blocks: int) -> list[dict[str, str]]:
 def build_throughput_texts(case: EmbedThroughputCase) -> tuple[str, ...]:
     """Build distinct texts with paragraph numbers running across the batch."""
 
+    return _numbered_texts(case.filler, case.paragraphs, case.inputs)
+
+
+def build_embed_query(instruction: str, query: str, run_token: str) -> str:
+    """Build an instructed embedding query with the run token at its head."""
+
+    return f"Instruct: {instruction}\nQuery: {run_token} {query}"
+
+
+def build_rerank_query(query: str, run_token: str) -> str:
+    """Prefix a timed reranker query with its run token."""
+
+    return f"{run_token} {query}"
+
+
+def build_rerank_documents(filler: str, paragraphs: int, inputs: int) -> tuple[str, ...]:
+    """Build distinct documents with paragraph numbers running across the batch."""
+
+    return _numbered_texts(filler, paragraphs, inputs)
+
+
+def _numbered_texts(filler: str, paragraphs: int, inputs: int) -> tuple[str, ...]:
     return tuple(
         "\n".join(
-            f"Paragraph {number}. {case.filler}"
-            for number in range(index * case.paragraphs + 1, (index + 1) * case.paragraphs + 1)
+            f"Paragraph {number}. {filler}"
+            for number in range(index * paragraphs + 1, (index + 1) * paragraphs + 1)
         )
-        for index in range(case.inputs)
+        for index in range(inputs)
     )

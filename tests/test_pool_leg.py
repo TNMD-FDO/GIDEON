@@ -16,13 +16,14 @@ from typing import cast
 from unittest.mock import MagicMock, Mock, patch
 
 from gideon.evaluation import evalset, judgments, pool_leg
-from gideon.host import stack
+from gideon.host import enginesample, stack
 from gideon.host.render import worker
 from gideon.host.render.ci import EMBED_RELAY_SERVICE_NAME
 from gideon.host.render.opensearch import OPENSEARCH_SERVICE_NAME
 from gideon.host.render.qdrant import QDRANT_SERVICE_NAME
 from gideon.host.report import Problem
 from gideon.host.sysio import Host
+from gideon.turn import instruction
 
 QUESTION = "Fictional research question about café jurisdiction {query}"
 TEXT = "Fictitious café opinion ⚖"
@@ -159,13 +160,13 @@ def _top(pid: int | None = None, *, marker: str = ENTRY_ARGS[1]) -> str:
 
 class QueryBodies(unittest.TestCase):
     def test_instruction_is_the_exact_query_side_form(self) -> None:
-        task = (
-            "Given a legal research question, retrieve passages from court opinions, "
-            "statutes, rules, and sentencing guidelines that answer it"
-        )
-        self.assertEqual(pool_leg.RETRIEVAL_INSTRUCTION, task)
-        self.assertEqual(pool_leg.INSTRUCTED_FORM, "Instruct: {task}\nQuery: {query}")
-        self.assertEqual(pool_leg.instructed(QUESTION).encode(), f"Instruct: {task}\nQuery: {QUESTION}".encode())
+        task = instruction.RETRIEVAL_INSTRUCTION
+        self.assertEqual(instruction.instructed(QUESTION).encode(), f"Instruct: {task}\nQuery: {QUESTION}".encode())
+
+    def test_engine_verify_query_takes_the_turn_form(self) -> None:
+        task = "Fictitious verify task"
+        expected = instruction.INSTRUCTED_FORM.format(task=task, query=f"run-token {QUESTION}")
+        self.assertEqual(enginesample.build_embed_query(task, QUESTION, "run-token"), expected)
 
     def test_dense_body_payload_selection_and_optional_filter(self) -> None:
         vector = (0.25, -0.5)
@@ -328,19 +329,22 @@ class WireShapes(unittest.TestCase):
         for line in (f"pool leg: {QUESTION}: ValueError", "pool leg: line 0: ValueError", "pool leg: judgments-001: bad class"):
             self.assertIsNone(pool_leg.FAILURE_LINE.fullmatch(line))
 
-    def test_module_level_imports_are_standard_library_only(self) -> None:
-        import sys
-
-        tree = ast.parse(Path(pool_leg.__file__).read_text(encoding="utf-8"))
-        for node in tree.body:
-            if isinstance(node, ast.Import):
-                modules = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                modules = [node.module or ""]
-            else:
-                continue
-            for module in modules:
-                self.assertIn(module.split(".")[0], sys.stdlib_module_names)
+    def test_module_level_imports_allow_stdlib_and_the_shared_instruction(self) -> None:
+        for source in (pool_leg, instruction):
+            path = source.__file__
+            assert path is not None
+            tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+            for node in tree.body:
+                if isinstance(node, ast.Import):
+                    modules = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    modules = [node.module or ""]
+                else:
+                    continue
+                for module in modules:
+                    if source is pool_leg and module == instruction.__name__:
+                        continue
+                    self.assertIn(module.split(".")[0], sys.stdlib_module_names, f"{source.__name__}: {module}")
 
     def test_coordinate_rule_is_held_to_the_judgments_files(self) -> None:
         self.assertEqual(pool_leg.SOURCE_ID_PATTERN.pattern, judgments.SOURCE_ID_PATTERN.pattern)
@@ -391,7 +395,7 @@ class Entry(unittest.TestCase):
         self.assertEqual([name for name, _ in fake.calls], sequence * len(queries))
         for index, query in enumerate(queries):
             calls = fake.calls[index * len(sequence):(index + 1) * len(sequence)]
-            self.assertEqual(calls[0][1], pool_leg.instructed(query.question))
+            self.assertEqual(calls[0][1], instruction.instructed(query.question))
             self.assertEqual(calls[1][1], pool_leg.dense_body((0.25, -0.5, 0.75), query.scope_courts, pool_leg.LEG_LIMIT))
             self.assertEqual(calls[2][1], pool_leg.dense_body((0.25, -0.5, 0.75), HEADER.controlling_courts, pool_leg.LEG_LIMIT))
             self.assertEqual(calls[3][1], pool_leg.lexical_body(query.question, query.scope_courts, pool_leg.LEG_LIMIT))
@@ -570,7 +574,7 @@ class ImageClients(unittest.TestCase):
         self.assertEqual(json.loads(stdout)["id"], "judgments-001")
         self.settings_loader.assert_called_once_with()
         self.embed_factory.assert_called_once_with(HEADER.served_model, HEADER.dimensions)
-        self.embedder.embed.assert_called_once_with([pool_leg.instructed(QUESTION)])
+        self.embedder.embed.assert_called_once_with([instruction.instructed(QUESTION)])
         self.assertEqual(self.http_factory.call_count, 2)
         self.assertEqual(self.http_factory.call_args_list[0].kwargs, {
             "base_url": self.configuration.opensearch_url, "auth": self.auth,

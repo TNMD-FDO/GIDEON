@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from gideon.cli import (
+    BASELINE_CHOICES,
     SITUATIONS,
     _label_stub_groups,
     _stub,
@@ -20,6 +21,7 @@ from gideon.cli import (
     main,
     start_screen,
 )
+from gideon.evaluation.baselines import BASELINES
 from gideon.host.index.generations import COLLECTIONS
 from gideon.host.steps import STEPS
 
@@ -280,19 +282,24 @@ class Help(unittest.TestCase):
         self.assertIn("--kind {manual,smoke,nightly}", command.getvalue())
         self.assertIn("--set DIR", command.getvalue())
         self.assertIn("--ranked FILE", command.getvalue())
+        choices = "{" + ",".join(BASELINES) + "}"
+        self.assertIn(f"--baseline {choices}", command.getvalue())
         self.assertIn("--generation NAME", command.getvalue())
         self.assertIn("frozen slice to run", command.getvalue())
         self.assertIn("eval set version directory", command.getvalue())
-        self.assertIn("ranked-list JSONL file", command.getvalue())
         self.assertIn(
             "run the turns against the standing CI sibling instead of production",
             collapsed(command.getvalue()),
         )
         self.assertIn("the word the run's record carries for its purpose", command.getvalue())
         run_help = collapsed(command.getvalue())
+        self.assertIn("--ranked FILE ranked-list JSONL file to score in place of calling /turn", run_help)
         self.assertIn(
-            "--generation NAME index generation a slice reading the stores runs over; "
-            "default: the stack's live one",
+            f"--baseline {choices} run through /turn with each model-driven stage in its off setting",
+            run_help,
+        )
+        self.assertIn(
+            "--generation NAME index generation to score. With /turn, NAME must be the selected stack's live generation",
             run_help,
         )
         self.assertIn("nightly also waits for a held engine and stops at 06:00", run_help)
@@ -313,6 +320,18 @@ class Help(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("--run ID", reference.getvalue())
         self.assertIn("recorded evaluation run id", reference.getvalue())
+
+    def test_eval_baseline_choices_follow_the_closed_registry(self) -> None:
+        parser = build_parser()
+        argv = ["eval", "run", "--slice", "judgments", "--baseline"]
+        self.assertEqual(BASELINE_CHOICES, tuple(BASELINES))
+        for baseline in BASELINES:
+            self.assertEqual(parser.parse_args([*argv, baseline]).baseline, baseline)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as ctx:
+            parser.parse_args([*argv, "fictitious-baseline"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("invalid choice", stderr.getvalue())
 
     def test_status_help_names_its_blocks_and_front_door_contract(self) -> None:
         out = io.StringIO()

@@ -14,16 +14,12 @@ from dataclasses import dataclass
 from types import FrameType
 from typing import TYPE_CHECKING, Any, Final, NoReturn, cast
 
+from gideon.turn.instruction import instructed
+
 if TYPE_CHECKING:
     from gideon.host.report import Problem
     from gideon.host.sysio import Host
 
-# E4: the release's default query-side embedding instruction, a product artifact and never a site key.
-RETRIEVAL_INSTRUCTION: Final[str] = (
-    "Given a legal research question, retrieve passages from court opinions, "
-    "statutes, rules, and sentencing guidelines that answer it"
-)
-INSTRUCTED_FORM: Final[str] = "Instruct: {task}\nQuery: {query}"
 # E19: the starting depth of every retrieval leg, with no score-based pre-filter.
 LEG_LIMIT: Final[int] = 50
 LEG_NAMES: Final = ("dense", "lexical", "controlling")
@@ -232,12 +228,6 @@ class LegQuery:
             raise ValueError("invalid question")
         scope = item["scope_courts"]
         return cls(query_id, question, None if scope is None else _courts(scope))
-
-
-def instructed(question: str) -> str:
-    """Apply the embedding model's query-side form with the release's default instruction."""
-
-    return INSTRUCTED_FORM.format(task=RETRIEVAL_INSTRUCTION, query=question)
 
 
 def dense_body(

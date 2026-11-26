@@ -103,6 +103,16 @@ def model_pin(inputs: RenderInputs, member: ModelServerMember) -> ModelPin:
     return model
 
 
+def model_flag_arguments(flags: Mapping[str, str | int | float | bool]) -> list[tuple[str, ...]]:
+    """Project locked flags into argv tokens, grouped by flag in lock order."""
+
+    arguments: list[tuple[str, ...]] = []
+    for name, value in flags.items():
+        flag = f"--{name}"
+        arguments.append((flag,) if value is True else (flag, str(value)))
+    return arguments
+
+
 def model_command(pin: ModelPin, member: ModelServerMember) -> list[str]:
     """Build the vLLM command from a member's locked serving baseline."""
 
@@ -121,10 +131,8 @@ def model_command(pin: ModelPin, member: ModelServerMember) -> list[str]:
         "--middleware",
         route_guard_import_path(),
     ]
-    for name, value in pin.serve.flags.items():
-        command.append(f"--{name}")
-        if value is not True:
-            command.append(str(value))
+    for arguments in model_flag_arguments(pin.serve.flags):
+        command.extend(arguments)
     return command
 
 

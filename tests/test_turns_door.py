@@ -1342,33 +1342,82 @@ class DoorBody(unittest.TestCase):
             {"role": "user", "content": "tagged prompt [turn harness abcd1234 one]"}
         ])
 
-    def test_client_timeout_failure_discards_stream_prefix_and_is_typed(self) -> None:
-        records = (
+    def test_non_200_body_is_kept_only_when_requested(self) -> None:
+        host = FakeHost(answer="A fictitious failure detail.", completion_status=400)
+        body = door.completion_body(
+            model=GENERAL_MODEL_ID, prompt="Fictitious request", instruction=None, stream=False,
+        )
+        default = door.complete(
+            host, RENDERED_COMPOSE.parent, model=GENERAL_MODEL_ID,
+            prompt="Fictitious request", stream=False, max_time=1.0,
+        )
+        detailed = door.request(
+            host, RENDERED_COMPOSE.parent, url="http://fixture.invalid/completions",
+            body=body, max_time=1.0, keep_failure_detail=True,
+        )
+        self.assertEqual(default.status, host.completion_status)
+        self.assertEqual(default.body_text, "")
+        self.assertEqual(detailed.status, default.status)
+        self.assertEqual(detailed.problem, default.problem)
+        self.assertIn(host.answer, detailed.body_text)
+        self.assertNotIn(host.answer, repr(detailed))
+
+    def test_client_failure_exit_is_parsed_only_when_requested(self) -> None:
+        host = FakeHost()
+        prefix = (
             {"kind": "head", "status": 200, "media_type": door.EVENT_STREAM_MEDIA_TYPE},
             {
                 "kind": "data",
                 "offset": 0.1,
-                "payload": json.dumps({"choices": [{"delta": {"content": "partial"}}]}),
+                "payload": json.dumps({"choices": [{"delta": {"content": "Fictitious prefix"}}]}),
             },
-            {"kind": "failure", "exception": "TimeoutError"},
         )
-        reply = door._parse_envelope(
-            "\n".join(json.dumps(record) for record in records),
-            RENDERED_COMPOSE.parent,
-        )
+        for exception, expected_type in (("TimeoutError", Timeout), ("OSError", Problem)):
+            failure = {"kind": "failure", "exception": exception}
+            records = (*prefix, failure) if exception == "TimeoutError" else (failure,)
+            result = subprocess.CompletedProcess(
+                ("fixture",), doorclient.FAILURE_EXIT_CODE,
+                "\n".join(json.dumps(record) for record in records), "",
+            )
+            with self.subTest(exception=exception), patch.object(host, "run", return_value=result):
+                default = door.request(
+                    host, RENDERED_COMPOSE.parent, url="http://fixture.invalid/completions",
+                    body={"stream": True}, max_time=1.0,
+                )
+                detailed = door.request(
+                    host, RENDERED_COMPOSE.parent, url="http://fixture.invalid/completions",
+                    body={"stream": True}, max_time=1.0, keep_failure_detail=True,
+                )
 
-        self.assertIsInstance(reply.problem, Timeout)
-        self.assertEqual(reply.events, ())
-        self.assertIsNone(reply.elapsed)
+                self.assertIs(type(default.problem), Problem)
+                assert default.problem is not None
+                self.assertIn(f"non-zero exit {result.returncode}", default.problem.problem)
+                self.assertIs(type(detailed.problem), expected_type)
+                assert detailed.problem is not None
+                self.assertIn(exception, detailed.problem.problem)
+                self.assertEqual(detailed.events, ())
+                self.assertEqual(detailed.body_text, "")
+                self.assertIsNone(detailed.elapsed)
 
-        other = door._parse_envelope(
-            json.dumps({"kind": "failure", "exception": "OSError"}),
-            RENDERED_COMPOSE.parent,
+    def test_client_failure_exit_cannot_return_a_response_body(self) -> None:
+        host = FakeHost()
+        records = (
+            {"kind": "head", "status": 400, "media_type": "application/json"},
+            {"kind": "body", "text": "A fictitious response."},
+            {"kind": "elapsed", "seconds": 0.1},
         )
-        self.assertIsInstance(other.problem, Problem)
-        self.assertNotIsInstance(other.problem, Timeout)
-        self.assertEqual(other.events, ())
-        self.assertIsNone(other.elapsed)
+        result = subprocess.CompletedProcess(
+            ("fixture",), doorclient.FAILURE_EXIT_CODE,
+            "\n".join(json.dumps(record) for record in records), "",
+        )
+        with patch.object(host, "run", return_value=result):
+            reply = door.request(
+                host, RENDERED_COMPOSE.parent, url="http://fixture.invalid/completions",
+                body=None, max_time=1.0, keep_failure_detail=True,
+            )
+        self.assertIsInstance(reply.problem, Problem)
+        self.assertIsNone(reply.status)
+        self.assertEqual(reply.body_text, "")
 
     def test_runner_timeout_is_typed_as_a_cut(self) -> None:
         host = FakeHost()
@@ -1377,7 +1426,7 @@ class DoorBody(unittest.TestCase):
             "run",
             side_effect=subprocess.TimeoutExpired("fixture", 1.0),
         ):
-            reply = door._run(
+            reply = door.request(
                 host,
                 RENDERED_COMPOSE.parent,
                 url="http://fixture.invalid/completions",

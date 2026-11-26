@@ -26,11 +26,14 @@ class CallSurface(Enum):
     probes no reader; a runner reports the database refusal if its read fails.
     The stores surface resolves one index generation before the run and probes
     no store.
+    The Research service's ``/turn`` surface alone reaches no engine. A runner
+    whose Research turns generate also names the engine surface.
     """
 
     ENGINE = ("engine", True)
     IMAGE = ("image", True)
     RECORD = ("record", True)
+    RESEARCH = ("research", True)
     STORES = ("stores", True)
     TURNS = ("turns", True)
     RANKED_FILE = ("ranked-file", False)
@@ -112,6 +115,8 @@ class RunContext:
     service or managed frontend drivers.
     ``image`` is present for a slice that runs code in the pinned service image.
     ``generation`` is present for a slice that names the stores surface.
+    ``turn_overrides`` is the mapping sent to the Research turn, or None for
+    the shipped configuration.
     ``assessments`` is the optional judge-derived input with grades by query
     and coordinates, the prompt, and the model. Runners may put facts derived
     from it under ``judge`` alone in case results.
@@ -137,3 +142,4 @@ class RunContext:
     checkout: PathLike | None = None
     image: ImageAccess | None = None
     generation: GenerationAccess | None = None
+    turn_overrides: Mapping[str, JSONValue] | None = field(default=None, kw_only=True)

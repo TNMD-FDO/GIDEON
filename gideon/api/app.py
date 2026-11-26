@@ -2,8 +2,8 @@
 
 import logging
 import time
-from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import AsyncExitStack, asynccontextmanager
 
 import httpx
 from starlette.applications import Starlette
@@ -11,6 +11,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import BaseRoute, Match, Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from gideon.turn import objects
+from gideon.turn.endpoint import TurnClients, TurnEndpoint
+from gideon.turn.generation import Connect
 
 from .auth import BearerAuthMiddleware
 from .model import model_listing
@@ -21,8 +25,10 @@ from .upstream import EngineClient
 _HEALTH_PATH = "/health"
 _MODELS_PATH = "/v1/models"
 _COMPLETIONS_PATH = "/v1/chat/completions"
+_TURN_PATH = "/turn"
 _REQUEST_LOG = logging.getLogger("gideon.api.request")
 _APP_LOG = logging.getLogger("gideon.api.app")
+_STARTUP_LOG = logging.getLogger("gideon.api.startup")
 
 _UNMATCHED = "-"
 
@@ -116,19 +122,45 @@ def create_app(
     settings: Settings,
     *,
     transport: httpx.AsyncBaseTransport | None = None,
+    embed_transport: httpx.AsyncBaseTransport | None = None,
+    qdrant_transport: httpx.AsyncBaseTransport | None = None,
+    opensearch_transport: httpx.AsyncBaseTransport | None = None,
+    record_connect: Connect | None = None,
+    case_extractor: objects.CaseExtractor | None = None,
+    turn_clock: Callable[[], float] = time.monotonic,
 ) -> Starlette:
-    """Build the service application with one shared upstream client."""
+    """Build the service application and manage its upstream clients."""
 
     @asynccontextmanager
     async def lifespan(application: Starlette) -> AsyncIterator[None]:
-        engine = EngineClient(settings, transport=transport)
-        application.state.engine = engine
-        application.state.model_id = settings.model_id
-        application.state.engine_model = settings.engine_model
-        try:
+        extractor = case_extractor
+        if extractor is None:
+            try:
+                extractor = objects.load_case_extractor()
+            except Exception:  # noqa: BLE001 - Legal extraction must never stop service startup.
+                extractor = None
+        application.state.case_extractor = extractor
+        if extractor is None:
+            _STARTUP_LOG.warning("Could not load gideon.casecite.adapter")
+
+        async with AsyncExitStack() as resources:
+            engine = EngineClient(settings, transport=transport)
+            resources.push_async_callback(engine.aclose)
+            application.state.engine = engine
+            application.state.model_id = settings.model_id
+            application.state.engine_model = settings.engine_model
+
+            async def turn_client(url: str, transport: httpx.AsyncBaseTransport | None) -> httpx.AsyncClient:
+                return await resources.enter_async_context(httpx.AsyncClient(
+                    base_url=url, transport=transport, trust_env=False, follow_redirects=False, timeout=None,
+                ))
+
+            application.state.turn_clients = TurnClients(
+                await turn_client(settings.embed_url, embed_transport),
+                await turn_client(settings.qdrant_url, qdrant_transport),
+                await turn_client(settings.opensearch_url, opensearch_transport),
+            )
             yield
-        finally:
-            await engine.aclose()
 
     routes = [
         Route(_HEALTH_PATH, health, methods=["GET"]),
@@ -140,6 +172,7 @@ def create_app(
             CompletionRelay(settings),
             methods=["POST"],
         ),
+        Route(_TURN_PATH, TurnEndpoint(settings, connect=record_connect, clock=turn_clock), methods=["POST"]),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
     app.add_middleware(BearerAuthMiddleware, key=settings.api_key, health_path=_HEALTH_PATH)

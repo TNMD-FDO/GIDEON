@@ -1,0 +1,53 @@
+{
+  "result": {
+    "groups": [
+      {
+        "id": "fixture-cluster-shared",
+        "hits": [
+          {
+            "id": "00000000-0000-4000-8000-000000000001",
+            "version": 1,
+            "score": 0.9,
+            "payload": {
+              "chunk_id": "fixture-chunk-shared",
+              "dupe_cluster": "fixture-cluster-shared",
+              "boilerplate": false
+            }
+          }
+        ]
+      },
+      {
+        "id": "fixture-cluster-duplicate",
+        "hits": [
+          {
+            "id": "00000000-0000-4000-8000-000000000002",
+            "version": 1,
+            "score": 0.8,
+            "payload": {
+              "chunk_id": "fixture-chunk-dense",
+              "dupe_cluster": "fixture-cluster-duplicate",
+              "boilerplate": false
+            }
+          }
+        ]
+      },
+      {
+        "id": "fixture-cluster-boilerplate",
+        "hits": [
+          {
+            "id": "00000000-0000-4000-8000-000000000003",
+            "version": 1,
+            "score": 0.7,
+            "payload": {
+              "chunk_id": "fixture-chunk-boilerplate",
+              "dupe_cluster": "fixture-cluster-boilerplate",
+              "boilerplate": true
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "status": "ok",
+  "time": 0.002
+}

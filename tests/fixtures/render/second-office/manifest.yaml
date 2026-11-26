@@ -15,7 +15,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "6f5ba2e7db01b9342212b6356da129e883d16768e7811610d42d6fc2c61ff260"
+    sha256: "73a549721162ef110d937d7e0a5a623099ac516c693636ec730fe0a73b1fefb0"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -258,7 +258,7 @@ services:
   gideon-generator: "8cdb38ca9883e9689053bb4962d060c856c461d02048d210167c53f8eb4a79b0"
   gideon-embed: "3ca04e74cdc5328c840b2cbe2dd6b8814dcf6927710d535818fe56a2b433f102"
   gideon-rerank-2: "0888a7fdd5dbda45f7500896cabfe7f8acebd2acd4680282a318f0dcf2c2d240"
-  gideon-api: "5ffd17a2ced7a24c76dc9f089b16fff820a50ce153eea80691888b3ab27edaef"
+  gideon-api: "970027b8c8adeccd42171ba011e6e507a1edf9ad7d3c240f4ed6262983d516c3"
   gideon-worker: "b0f4a0d00bb1c7d62cf5b1c3f0417bce2dfe53fa9ac445a11caa038f95a82393"
   gideon-egress: "eaa0cce20818c30032a33977c8606d993f8afaf73850ff2743240643c26e3c49"
   dcgm-exporter: "6fab2abeeebd3394106602a966f1abef6b9280497f7d815ebeda9669516839fe"

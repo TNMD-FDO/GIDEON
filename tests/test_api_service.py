@@ -28,6 +28,10 @@ EMBED_KEY = "fixture-embedding-key"
 OPENSEARCH_PASSWORD = "fixture-lexical-password"
 QDRANT_URL = "http://fixture-vector:7001"
 EMBED_URL = "http://fixture-embedding:7002/"
+EMBED_MODEL = "fixture-embed"
+EMBED_REPOSITORY = "fixture-owner/fixture-embed"
+EMBED_SPACE = "fixture-space"
+EMBED_DIMENSIONS = 7
 OPENSEARCH_URL = "http://fixture-lexical:7003"
 RECORD = RecordCoordinates(
     "fixture-postgres", 5432, "fixture-db", "fixture-reader", Path("/fixture/reader-password"),
@@ -64,6 +68,10 @@ class ApiService(unittest.TestCase):
             opensearch_url=OPENSEARCH_URL,
             opensearch_user="fixture-lexical-reader",
             opensearch_password_file=Path("/fixture/lexical-password"),
+            embed_model=EMBED_MODEL,
+            embed_repository=EMBED_REPOSITORY,
+            embed_space=EMBED_SPACE,
+            embed_dimensions=EMBED_DIMENSIONS,
         )
 
     def loaded_settings_environment(self, root: Path) -> dict[str, str]:
@@ -91,6 +99,10 @@ class ApiService(unittest.TestCase):
             "GIDEON_API_QDRANT_KEY_FILE": str(root / "qdrant-key"),
             "GIDEON_API_EMBED_URL": EMBED_URL,
             "GIDEON_API_EMBED_KEY_FILE": str(root / "embed-key"),
+            "GIDEON_API_EMBED_MODEL": EMBED_MODEL,
+            "GIDEON_API_EMBED_REPOSITORY": EMBED_REPOSITORY,
+            "GIDEON_API_EMBED_SPACE": EMBED_SPACE,
+            "GIDEON_API_EMBED_DIMENSIONS": str(EMBED_DIMENSIONS),
             "GIDEON_API_OPENSEARCH_URL": OPENSEARCH_URL,
             "GIDEON_API_OPENSEARCH_USER": "fixture-lexical-reader",
             "GIDEON_API_OPENSEARCH_PASSWORD_FILE": str(root / "lexical-password"),
@@ -299,6 +311,10 @@ class ApiService(unittest.TestCase):
         self.assertEqual(settings.instruction, INSTRUCTION)
         self.assertEqual(settings.model_id, MODEL_ID)
         self.assertEqual(settings.engine_model, ENGINE_MODEL)
+        self.assertEqual(settings.embed_model, EMBED_MODEL)
+        self.assertEqual(settings.embed_repository, EMBED_REPOSITORY)
+        self.assertEqual(settings.embed_space, EMBED_SPACE)
+        self.assertEqual(settings.embed_dimensions, EMBED_DIMENSIONS)
 
     def test_reranker_settings_accept_both_or_neither(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -371,6 +387,10 @@ class ApiService(unittest.TestCase):
                 "GIDEON_API_QDRANT_KEY_FILE",
                 "GIDEON_API_EMBED_URL",
                 "GIDEON_API_EMBED_KEY_FILE",
+                "GIDEON_API_EMBED_MODEL",
+                "GIDEON_API_EMBED_REPOSITORY",
+                "GIDEON_API_EMBED_SPACE",
+                "GIDEON_API_EMBED_DIMENSIONS",
                 "GIDEON_API_OPENSEARCH_URL",
                 "GIDEON_API_OPENSEARCH_USER",
                 "GIDEON_API_OPENSEARCH_PASSWORD_FILE",

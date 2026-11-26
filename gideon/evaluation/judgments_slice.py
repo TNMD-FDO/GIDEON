@@ -1,10 +1,11 @@
-"""Run the ``judgments@2`` metrics against a generation's manifest."""
+"""Score Research pools or ranked files against a generation's manifest."""
 
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Final, cast
 
+from gideon.evaluation import baselines, pool_coordinates, research_door
 from gideon.evaluation.assessments import Assessments, agreement
 from gideon.evaluation.evalset import LoadedSet, select_cases
 from gideon.evaluation.generation import GenerationAccess
@@ -32,9 +33,63 @@ from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceRe
 from gideon.host import report
 from gideon.host.report import Problem
 
-PROBLEMS: Final[frozenset[str]] = frozenset({"generation-unresolved", "record-unreachable"})
+PROBLEMS: Final[frozenset[str]] = frozenset({
+    "generation-unresolved", "record-unreachable", "turn-failed", "turn-cut",
+    "turn-reply-invalid", "generation-differs", "config-differs", "pool-unresolved", "case-not-judgments",
+})
+_JUDGMENTS_CATEGORY: Final[tuple[str, str]] = ("judgments", "judgments")
 _FIGURE_KEYS: Final[tuple[str, ...]] = ("ndcg_at_10", "recall_at_50", "hole_at_10")
 _GRADES: Final = range(4)
+
+
+@dataclass(frozen=True, slots=True)
+class _RankedTurns:
+    """The resolved rankings, per-query refusals, and reply latencies."""
+
+    ranked: dict[str, tuple[Coordinates, ...]] | Problem
+    failures: dict[str, dict[str, JSONValue]]
+    latencies: dict[str, float]
+
+
+def _rank_turns(
+    eval_set: LoadedSet, case_ids: tuple[str, ...], generation: GenerationAccess,
+    expected_hash: str, context: RunContext,
+) -> _RankedTurns:
+    pools: dict[str, tuple[str, ...]] = {}
+    failures: dict[str, dict[str, JSONValue]] = {}
+    latencies: dict[str, float] = {}
+    for case_id in case_ids:
+        context.checkpoint()
+        reply = research_door.send(
+            context.host, context.turns_dir, cast(str, eval_set.cases_by_id[case_id]["question"]),
+            context.turn_overrides,
+        )
+        if isinstance(reply, research_door.Failure):
+            failure: dict[str, JSONValue] = {"problem": reply.code}
+            if reply.state is not None:
+                failure["turn_state"] = reply.state
+            failures[case_id] = failure
+            continue
+        latencies[case_id] = reply.latency_ms
+        if reply.generation_id != generation.name or generation.corpus_lockfile not in reply.lockfiles:
+            failures[case_id] = {"problem": "generation-differs"}
+        elif reply.config_hash != expected_hash:
+            failures[case_id] = {"problem": "config-differs"}
+        else:
+            pools[case_id] = reply.chunk_ids
+
+    context.checkpoint()
+    resolved = pool_coordinates.read_coordinates(generation.name, pools, context)
+    if isinstance(resolved, Problem):
+        return _RankedTurns(resolved, failures, latencies)
+    ranked: dict[str, tuple[Coordinates, ...]] = {}
+    for case_id, entries in resolved.items():
+        coordinates_at_rank = tuple(entry for entry in entries if entry is not None)
+        if len(coordinates_at_rank) != len(entries):
+            failures[case_id] = {"problem": "pool-unresolved"}
+        else:
+            ranked[case_id] = coordinates_at_rank
+    return _RankedTurns(ranked, failures, latencies)
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +210,9 @@ def _report(
     generation: GenerationAccess,
     drop_counts: Counter[DropKind],
     assessment_lines: tuple[str, ...],
+    *,
+    door_detail: str,
+    uses_turn: bool,
 ) -> str:
     """Render the summary from ids and computed values, never case content."""
 
@@ -180,7 +238,7 @@ def _report(
 
     lines = [
         f"judged queries {len(judged_ids)} of {len(results)}, definition {DEFINITION_ID}, "
-        f"generation {generation.name} ({generation.corpus_lockfile})"
+        f"generation {generation.name} ({generation.corpus_lockfile}), {door_detail}"
     ]
     for key in _FIGURE_KEYS:
         values = tuple(
@@ -202,6 +260,17 @@ def _report(
     if foreign:
         count = sum(cast(int, result.metrics["foreign_ranked"]) for result in foreign)
         lines.append(f"foreign ranked entries {count}: " + " ".join(result.case_id for result in foreign))
+    if uses_turn:
+        failed_turns = []
+        unresolved_pools = []
+        for result in results:
+            problem = result.metrics.get("problem")
+            if problem == "pool-unresolved":
+                unresolved_pools.append(result.case_id)
+            elif problem is not None:
+                failed_turns.append(result.case_id)
+        lines.append(f"failed turns: {' '.join(failed_turns) or 'none'}")
+        lines.append(f"unresolved pools: {' '.join(unresolved_pools) or 'none'}")
     if no_relevant:
         lines.append(f"no relevant passage: {' '.join(no_relevant)}")
     if no_positive:
@@ -221,12 +290,17 @@ def _report(
 
 def _failed(
     case_ids: tuple[str, ...], unsigned: int, code: str, problem: Problem,
+    *, door_detail: str, latencies: Mapping[str, float] | None = None,
 ) -> SliceResult:
     """Fail every counted query and report the problem with its fix."""
 
-    results = tuple(CaseResult(case_id, 1, "fail", {"problem": code}) for case_id in case_ids)
+    reply_latencies = {} if latencies is None else latencies
+    results = tuple(
+        CaseResult(case_id, 1, "fail", {"problem": code}, latency_ms=reply_latencies.get(case_id))
+        for case_id in case_ids
+    )
     lines = (
-        f"{len(case_ids)} counted, {unsigned} unsigned excluded",
+        f"{len(case_ids)} counted, {unsigned} unsigned excluded, {door_detail}",
         *report.failure_lines(problem.fix, f"{code}: {problem.problem}"),
         "judgments: fail",
     )
@@ -240,17 +314,57 @@ def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
     case_ids = tuple(sorted(selected.counted))
     assessments = context.assessments
     generation = context.generation
+    ranked_lists = context.ranked
+    uses_turn = ranked_lists is None
+    expected_hash: str | Problem | None = None
+    door_detail = "door ranked-file"
+    if uses_turn:
+        expected_hash = baselines.expected_config_hash(context.turn_overrides)
+        baseline = next(
+            (word for word, overrides in baselines.BASELINES.items() if overrides == context.turn_overrides),
+            "shipped",
+        )
+        hash_text = expected_hash if isinstance(expected_hash, str) else "unavailable"
+        door_detail = f"door {research_door.TURN_PATH}, config hash {hash_text}, baseline {baseline}"
     if generation is None:
+        ranked_flag = "" if uses_turn else " --ranked <file>"
         assessed_flag = " --assessed <file>" if assessments is not None else ""
         retry = report.command(
-            f"eval run --slice {slice_name} --ranked <file>{assessed_flag} --generation <name>"
+            f"eval run --slice {slice_name}{ranked_flag}{assessed_flag} --generation <name>"
         )
         return _failed(case_ids, len(selected.unsigned), "generation-unresolved", Problem(
             "the stores generation was not resolved",
             f"Run {retry} through the command's stores preconditions, then retry.",
-        ))
+        ), door_detail=door_detail)
 
-    ranked_lists = context.ranked or {}
+    failures: dict[str, dict[str, JSONValue]] = {}
+    latencies: dict[str, float] = {}
+    if ranked_lists is None:
+        if isinstance(expected_hash, Problem):
+            return _failed(case_ids, len(selected.unsigned), "config-differs", expected_hash, door_detail=door_detail)
+        assert expected_hash is not None
+        # A supplied set may count another suite's case in this slice's list; it
+        # carries no question, so the run stops before its first turn.
+        foreign_cases = tuple(
+            case_id for case_id in case_ids
+            if (eval_set.cases_by_id[case_id].get("suite"), eval_set.cases_by_id[case_id].get("category"))
+            != _JUDGMENTS_CATEGORY
+        )
+        if foreign_cases:
+            return _failed(case_ids, len(selected.unsigned), "case-not-judgments", Problem(
+                f"counted cases outside the judgments queries: {' '.join(foreign_cases)}",
+                f"List only judgments queries in the set's {slice_name} slice, then retry.",
+            ), door_detail=door_detail)
+        turn_inputs = _rank_turns(eval_set, case_ids, generation, expected_hash, context)
+        latencies = turn_inputs.latencies
+        if isinstance(turn_inputs.ranked, Problem):
+            return _failed(
+                case_ids, len(selected.unsigned), "record-unreachable", turn_inputs.ranked,
+                door_detail=door_detail, latencies=latencies,
+            )
+        ranked_lists = turn_inputs.ranked
+        failures = turn_inputs.failures
+
     source_ids = {entry[0] for ranked in ranked_lists.values() for entry in ranked}
     active = set(case_ids)
     grouped: dict[str, list[GradedPassage]] = {}
@@ -263,7 +377,10 @@ def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
     context.checkpoint()
     manifest = read_manifest(generation.name, tuple(sorted(source_ids)), context)
     if isinstance(manifest, Problem):
-        return _failed(case_ids, len(selected.unsigned), "record-unreachable", manifest)
+        return _failed(
+            case_ids, len(selected.unsigned), "record-unreachable", manifest,
+            door_detail=door_detail, latencies=latencies,
+        )
 
     case_results: list[CaseResult] = []
     query_assessments: list[_QueryAssessment] = []
@@ -283,7 +400,8 @@ def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
         ranked = ranked_lists.get(case_id, ())
         covered = case_id in ranked_lists
         foreign = foreign_entries(ranked, manifest)
-        can_score = bool(held and covered and not foreign)
+        failure = failures.get(case_id, {})
+        can_score = bool(held and covered and not foreign and not failure)
         if can_score:
             figures: tuple[float | None, float | None, float | None] = (
                 _rounded(ndcg_at_10(ranked, held)),
@@ -304,6 +422,7 @@ def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
             "dropped_passages": len(dropped),
             "dropped": list[JSONValue](sorted(dropped_coordinates)),
             "foreign_ranked": len(foreign),
+            **failure,
         }
         judge = None
         if assessments is not None:
@@ -316,10 +435,10 @@ def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
             CaseResult(
                 case_id,
                 1,
-                "fail" if foreign or (passages and not covered) else "pass",
+                "fail" if failure or foreign or (passages and not covered) else "pass",
                 metrics,
                 judge=judge,
-                latency_ms=None,
+                latency_ms=latencies.get(case_id),
             )
         )
 
@@ -328,10 +447,13 @@ def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
         () if assessments is None else _assessment_lines(assessments, query_assessments)
     )
     # The verdict is coverage and input validity, never a metric: a row fails
-    # exactly when a judged query had no ranked list or its list holds an entry
-    # the generation does not hold, so the verdict is based on its rows.
+    # exactly when its turn failed, its pool did not resolve, a judged query had
+    # no ranked list, or its list holds an entry the generation does not hold.
     return SliceResult(
         all(result.verdict == "pass" for result in results),
-        _report(results, held_by_query, ranked_lists, generation, drop_counts, assessment_lines),
+        _report(
+            results, held_by_query, ranked_lists, generation, drop_counts, assessment_lines,
+            door_detail=door_detail, uses_turn=uses_turn,
+        ),
         results,
     )

@@ -148,7 +148,10 @@ def _gate_result(phase: _Phase, code: int, observed: list[StageResult]) -> Stage
     if len(observed) == 1 and observed[0].name == "engine" and observed[0].detail.startswith("skipped"):
         return StageResult(phase.name, True, ENGINE_VERIFY_SKIPPED_DETAIL, "")
     if code == 0:
-        checks = sum(row.name not in {"preconditions", "audit"} for row in observed)
+        checks = sum(
+            row.name not in {"preconditions", "audit"} and not row.detail.startswith("skipped")
+            for row in observed
+        )
         return StageResult(phase.name, True, f"engine verify completed ({checks} checks ok)", "")
     failed_names = ", ".join(row.name for row in observed if not row.ok)
     return StageResult(

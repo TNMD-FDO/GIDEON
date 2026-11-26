@@ -27,6 +27,10 @@ from gideon.host.render import RenderInputs, worker
 from gideon.host.render.api import (
     API_CORPUS_DATABASE_HOST_ENV,
     API_CORPUS_PASSWORD_FILE_ENV,
+    API_EMBED_DIMENSIONS_ENV,
+    API_EMBED_MODEL_ENV,
+    API_EMBED_REPOSITORY_ENV,
+    API_EMBED_SPACE_ENV,
     API_EMBED_URL_ENV,
     API_ENGINE_URL_ENV,
     API_INSTRUCTION_MOUNT,
@@ -606,6 +610,10 @@ class Compose(unittest.TestCase):
         target = parse_registry(render_inputs.site.registry)
         assert target is not None
         definition = api_service(render_inputs, target)
+        self.assertLessEqual(
+            {API_EMBED_DIMENSIONS_ENV, API_EMBED_MODEL_ENV, API_EMBED_REPOSITORY_ENV, API_EMBED_SPACE_ENV},
+            environment.keys(),
+        )
         self.assertEqual(
             environment,
             {

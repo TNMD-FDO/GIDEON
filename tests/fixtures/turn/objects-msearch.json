@@ -1,0 +1,53 @@
+{
+  "took": 5,
+  "responses": [
+    {
+      "status": 200,
+      "took": 3,
+      "timed_out": false,
+      "_shards": {"total": 1, "successful": 1, "skipped": 0, "failed": 0},
+      "hits": {
+        "total": {"value": 1, "relation": "eq"},
+        "max_score": null,
+        "hits": [
+          {
+            "_id": "fixture-chunk-held",
+            "_index": "caselaw__corpus-2099-01-01__fixture-space",
+            "_score": 0.0,
+            "_source": {"dupe_cluster": "fixture-cluster-held", "boilerplate": false},
+            "fields": {"dupe_cluster": ["fixture-cluster-held"]},
+            "sort": [0.0, "fixture-doc-held", 2]
+          }
+        ]
+      }
+    },
+    {
+      "status": 200,
+      "took": 2,
+      "timed_out": false,
+      "_shards": {"total": 1, "successful": 1, "skipped": 0, "failed": 0},
+      "hits": {
+        "total": {"value": 2, "relation": "eq"},
+        "max_score": null,
+        "hits": [
+          {
+            "_id": "fixture-chunk-citing",
+            "_index": "caselaw__corpus-2099-01-01__fixture-space",
+            "_score": 4.0,
+            "_source": {"dupe_cluster": "fixture-cluster-citing", "boilerplate": false},
+            "fields": {"dupe_cluster": ["fixture-cluster-citing"]},
+            "sort": [4.0, "fixture-doc-citing", 1]
+          },
+          {
+            "_id": "fixture-chunk-citing-later",
+            "_index": "caselaw__corpus-2099-01-01__fixture-space",
+            "_score": 3.0,
+            "_source": {"dupe_cluster": "fixture-cluster-citing-later", "boilerplate": true},
+            "fields": {"dupe_cluster": ["fixture-cluster-citing-later"]},
+            "sort": [3.0, "fixture-doc-citing-later", 0]
+          }
+        ]
+      }
+    }
+  ]
+}

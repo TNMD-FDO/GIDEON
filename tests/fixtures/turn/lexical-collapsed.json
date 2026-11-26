@@ -1,0 +1,32 @@
+{
+  "took": 2,
+  "timed_out": false,
+  "_shards": {"total": 1, "successful": 1, "skipped": 0, "failed": 0},
+  "hits": {
+    "total": {"value": 3, "relation": "eq"},
+    "max_score": 7.0,
+    "hits": [
+      {
+        "_id": "fixture-chunk-shared",
+        "_index": "caselaw__corpus-2099-01-01__fixture-space",
+        "_score": 7.0,
+        "_source": {"dupe_cluster": "fixture-cluster-shared", "boilerplate": false},
+        "fields": {"dupe_cluster": ["fixture-cluster-shared"]}
+      },
+      {
+        "_id": "fixture-chunk-lexical",
+        "_index": "caselaw__corpus-2099-01-01__fixture-space",
+        "_score": 6.0,
+        "_source": {"dupe_cluster": "fixture-cluster-duplicate", "boilerplate": false},
+        "fields": {"dupe_cluster": ["fixture-cluster-duplicate"]}
+      },
+      {
+        "_id": "fixture-chunk-lexical-only",
+        "_index": "caselaw__corpus-2099-01-01__fixture-space",
+        "_score": 5.0,
+        "_source": {"dupe_cluster": "fixture-cluster-lexical-only", "boilerplate": false},
+        "fields": {"dupe_cluster": ["fixture-cluster-lexical-only"]}
+      }
+    ]
+  }
+}

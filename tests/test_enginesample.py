@@ -11,12 +11,17 @@ import yaml  # type: ignore[import-untyped]
 
 from gideon.host import report
 from gideon.host.enginesample import (
+    EmbedLatencyCase,
     EmbedSection,
     EmbedThroughputCase,
     EmbedVectorsCase,
     FrontendCase,
     FrontendSection,
     NeedleCase,
+    RerankLatencyCase,
+    RerankSection,
+    RerankThroughputCase,
+    RerankTripleCase,
     Sample,
     SampleError,
     SampleLoadResult,
@@ -24,7 +29,10 @@ from gideon.host.enginesample import (
     StructuredCase,
     SupportingSection,
     blocks_for,
+    build_embed_query,
     build_needle_prompt,
+    build_rerank_documents,
+    build_rerank_query,
     build_throughput_texts,
     check_schema,
     load_sample,
@@ -214,15 +222,44 @@ class SampleTests(unittest.TestCase):
         assert isinstance(vectors, Mapping)
         throughput = embed["throughput"]
         assert isinstance(throughput, Mapping)
+        embed_latency = embed["latency"]
+        assert isinstance(embed_latency, Mapping)
+        rerank = supporting["rerank-2"]
+        assert isinstance(rerank, Mapping)
+        triple = rerank["triple"]
+        assert isinstance(triple, Mapping)
+        rerank_latency = rerank["latency"]
+        rerank_throughput = rerank["throughput"]
+        assert isinstance(rerank_latency, Mapping) and isinstance(rerank_throughput, Mapping)
         self.assertEqual(
             result.sample.supporting,
-            SupportingSection(EmbedSection(
-                vectors=EmbedVectorsCase(id=vectors["id"], texts=tuple(vectors["texts"])),
-                throughput=EmbedThroughputCase(
-                    id=throughput["id"], filler=throughput["filler"],
-                    paragraphs=throughput["paragraphs"], inputs=throughput["inputs"],
+            SupportingSection(
+                embed=EmbedSection(
+                    vectors=EmbedVectorsCase(id=vectors["id"], texts=tuple(vectors["texts"])),
+                    throughput=EmbedThroughputCase(
+                        id=throughput["id"], filler=throughput["filler"],
+                        paragraphs=throughput["paragraphs"], inputs=throughput["inputs"],
+                    ),
+                    latency=EmbedLatencyCase(
+                        embed_latency["id"], embed_latency["instruction"], embed_latency["query"],
+                    ),
                 ),
-            )),
+                rerank_2=RerankSection(
+                    instruction=rerank["instruction"],
+                    filler=rerank["filler"],
+                    triple=RerankTripleCase(
+                        id=triple["id"], query=triple["query"],
+                        passage=triple["passage"], distractor=triple["distractor"],
+                    ),
+                    latency=RerankLatencyCase(
+                        rerank_latency["id"], rerank_latency["query"], rerank_latency["paragraphs"],
+                    ),
+                    throughput=RerankThroughputCase(
+                        rerank_throughput["id"], rerank_throughput["query"],
+                        rerank_throughput["paragraphs"], rerank_throughput["inputs"],
+                    ),
+                ),
+            ),
         )
         self.assertEqual(len(result.sample.supporting.embed.vectors.texts), 3)
         self.assertEqual(result.sample.supporting.embed.throughput.inputs, throughput["inputs"])
@@ -294,6 +331,26 @@ class RefusalTests(unittest.TestCase):
                     "vectors": {"id": "fixture-vectors", "texts": ["Invented text."]},
                     "throughput": {
                         "id": "fixture-throughput", "filler": "Invented filler.",
+                        "paragraphs": 2, "inputs": 3,
+                    },
+                    "latency": {
+                        "id": "fixture-embed-latency",
+                        "instruction": "Find the imaginary drawers.",
+                        "query": "Where is the imaginary drawer?",
+                    },
+                },
+                "rerank-2": {
+                    "instruction": "Rank passages from an invented workshop.",
+                    "filler": "An imaginary drawer holds purple paper.",
+                    "triple": {
+                        "id": "fixture-triple",
+                        "query": "What color is the imaginary drawer?",
+                        "passage": "The imaginary drawer is purple.",
+                        "distractor": "The imaginary drawer holds paper.",
+                    },
+                    "latency": {"id": "fixture-rerank-latency", "query": "Where is the paper?", "paragraphs": 2},
+                    "throughput": {
+                        "id": "fixture-rerank-throughput", "query": "What is in the drawer?",
                         "paragraphs": 2, "inputs": 3,
                     },
                 },
@@ -396,12 +453,85 @@ class RefusalTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assert_refuses(text, path)
 
+        rerank = ("supporting", "rerank-2")
+        triple = (*rerank, "triple")
+        for case_path in (
+            rerank,
+            (*rerank, "instruction"),
+            triple,
+            (*triple, "id"),
+            (*triple, "query"),
+            (*triple, "passage"),
+            (*triple, "distractor"),
+        ):
+            with self.subTest(missing=case_path):
+                self.assert_refuses(changed(case_path, None, remove=True), ".".join(case_path))
+
+        for case_path, value in (
+            (rerank, []),
+            ((*rerank, "instruction"), ""),
+            ((*rerank, "instruction"), 7),
+            (triple, []),
+            ((*triple, "id"), "Bad Id"),
+            ((*triple, "query"), 7),
+            ((*triple, "passage"), ""),
+            ((*triple, "distractor"), []),
+        ):
+            with self.subTest(path=case_path, value=value):
+                self.assert_refuses(changed(case_path, value), ".".join(case_path))
+
+        for case_path, fields in (
+            (("supporting", "embed", "latency"), ("id", "instruction", "query")),
+            ((*rerank, "latency"), ("id", "query", "paragraphs")),
+            ((*rerank, "throughput"), ("id", "query", "paragraphs", "inputs")),
+        ):
+            with self.subTest(case=case_path):
+                self.assert_refuses(changed(case_path, None, remove=True), ".".join(case_path))
+                self.assert_refuses(changed(case_path, []), ".".join(case_path))
+            for field in fields:
+                field_path = (*case_path, field)
+                self.assert_refuses(changed(field_path, None, remove=True), ".".join(field_path))
+                invalid: tuple[object, ...]
+                if field in {"paragraphs", "inputs"}:
+                    invalid = (0, -1, True, 2.5, "3")
+                elif field == "id":
+                    invalid = ("", "Bad Id", 7)
+                else:
+                    invalid = ("", 7)
+                for invalid_value in invalid:
+                    with self.subTest(path=field_path, value=invalid_value):
+                        self.assert_refuses(changed(field_path, invalid_value), ".".join(field_path))
+        for value in ("", 7):
+            self.assert_refuses(changed((*rerank, "filler"), value), "supporting.rerank-2.filler")
+        self.assert_refuses(changed((*rerank, "filler"), None, remove=True), "supporting.rerank-2.filler")
+
+    def test_supporting_collects_errors_across_model_sections(self) -> None:
+        document = self.valid_document()
+        document["supporting"] = {"rerank-2": {"instruction": "", "triple": []}}
+        result = self.load_text(self.dump(document))
+        self.assertFalse(result.ok)
+        self.assertIsNone(result.sample)
+        self.assertEqual(
+            {error.path for error in result.errors},
+            {
+                "supporting.embed", "supporting.rerank-2.instruction", "supporting.rerank-2.triple",
+                "supporting.rerank-2.filler", "supporting.rerank-2.latency", "supporting.rerank-2.throughput",
+            },
+        )
+        self.assertTrue(all(error.fix for error in result.errors))
+
     def test_supporting_unknown_keys_name_the_nearest_valid_key(self) -> None:
         for parent, typo, expected in (
             (("supporting",), "embd", "embed"),
             (("supporting", "embed"), "vector", "vectors"),
             (("supporting", "embed", "vectors"), "text", "texts"),
             (("supporting", "embed", "throughput"), "paragraph", "paragraphs"),
+            (("supporting",), "rerank2", "rerank-2"),
+            (("supporting", "rerank-2"), "instructon", "instruction"),
+            (("supporting", "rerank-2", "triple"), "distrctor", "distractor"),
+            (("supporting", "embed", "latency"), "instructon", "instruction"),
+            (("supporting", "rerank-2", "latency"), "paragraph", "paragraphs"),
+            (("supporting", "rerank-2", "throughput"), "input", "inputs"),
         ):
             with self.subTest(parent=parent):
                 document = self.valid_document()
@@ -438,6 +568,23 @@ class RefusalTests(unittest.TestCase):
                 assert isinstance(throughput, dict)
                 del throughput[key]
                 self.assert_refuses(self.dump(document), f"supporting.embed.throughput.{key}")
+
+    def test_timed_queries_put_the_run_token_at_the_head_of_the_query(self) -> None:
+        self.assertEqual(
+            build_embed_query("Find invented text.", "Where is the drawer?", "f1c71005"),
+            "Instruct: Find invented text.\nQuery: f1c71005 Where is the drawer?",
+        )
+        self.assertEqual(
+            build_rerank_query("Where is the drawer?", "f1c71005"),
+            "f1c71005 Where is the drawer?",
+        )
+
+    def test_rerank_documents_number_paragraphs_across_the_batch(self) -> None:
+        self.assertEqual(build_rerank_documents("Fictitious filler.", 2, 3), (
+            "Paragraph 1. Fictitious filler.\nParagraph 2. Fictitious filler.",
+            "Paragraph 3. Fictitious filler.\nParagraph 4. Fictitious filler.",
+            "Paragraph 5. Fictitious filler.\nParagraph 6. Fictitious filler.",
+        ))
 
     def test_throughput_builder_numbers_distinct_texts_across_the_batch(self) -> None:
         case = EmbedThroughputCase("fixture-throughput", "Fictitious filler.", 2, 3)

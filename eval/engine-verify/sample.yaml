@@ -77,3 +77,37 @@ supporting:
         the next day. Nothing in this workshop belongs to a real place or person.
       paragraphs: 7
       inputs: 32
+    latency:
+      id: workshop-drawer-labels
+      instruction: >-
+        Given a legal research question, retrieve passages from court opinions,
+        statutes, rules, and sentencing guidelines that answer it
+      query: How does the workshop label the drawers that hold game pieces?
+  rerank-2:
+    instruction: >-
+      Given a legal research question, judge whether the passage answers it
+      or states the governing rule
+    filler: >-
+      The workshop caretaker lays out smooth wooden pieces, scraps of ribbon,
+      and folded paper on a broad tabletop. Each drawer has a painted label
+      so visitors can put the pieces away when the afternoon game ends. A
+      shallow tray beside the window holds unfinished shapes. The caretaker
+      keeps a notebook of different arrangements to try on the next rainy day.
+    triple:
+      id: workshop-game-winning-pieces
+      query: How many wooden pieces does a player need to win the workshop's tabletop game?
+      passage: >-
+        In the workshop's tabletop game, the first player to collect five
+        wooden pieces wins.
+      distractor: >-
+        The workshop stores the wooden pieces for its tabletop game in a
+        blue drawer and sets them out before players arrive.
+    latency:
+      id: workshop-rainy-day-notebook
+      query: Where does the caretaker keep ideas for a rainy afternoon?
+      paragraphs: 7
+    throughput:
+      id: workshop-game-piece-drawers
+      query: How do visitors know where to put the game pieces after playing?
+      paragraphs: 7
+      inputs: 40

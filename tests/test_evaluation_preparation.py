@@ -38,7 +38,7 @@ from test_judgments_slice import (
     _ranked_file,
 )
 
-from gideon.evaluation import command, sampling
+from gideon.evaluation import baselines, command, sampling
 from gideon.evaluation.assessments import (
     ASSESSMENTS_FIX,
     ASSESSMENTS_LABEL,
@@ -72,26 +72,30 @@ class SliceSurfaces(unittest.TestCase):
         on_box = {surface for surface in CallSurface if surface.on_box}
         self.assertEqual(on_box, {
             CallSurface.ENGINE, CallSurface.IMAGE, CallSurface.RECORD,
-            CallSurface.STORES, CallSurface.TURNS,
+            CallSurface.RESEARCH, CallSurface.STORES, CallSurface.TURNS,
         })
         for name, spec in SLICE_RUNNERS.items():
             with self.subTest(slice_name=name):
                 self.assertTrue(spec.surfaces & on_box)
 
     def test_construction_requires_an_on_box_surface(self) -> None:
-        spec = SLICE_RUNNERS["judgments"]
+        spec = SLICE_RUNNERS["extraction"]
         for surfaces in (frozenset(), frozenset({CallSurface.RANKED_FILE})):
             with (
                 self.subTest(surfaces=surfaces),
                 self.assertRaisesRegex(ValueError, "must name at least one surface on the box"),
             ):
                 replace(spec, surfaces=surfaces)
-        surfaces = frozenset({CallSurface.RANKED_FILE, CallSurface.STORES})
+        surfaces = frozenset({CallSurface.RESEARCH})
         self.assertEqual(replace(spec, surfaces=surfaces).surfaces, surfaces)
 
     def test_turns_without_the_engine_is_refused_at_construction(self) -> None:
         with self.assertRaisesRegex(ValueError, "turns surface must name the engine surface"):
             replace(SLICE_RUNNERS["extraction"], surfaces=frozenset({CallSurface.TURNS}))
+
+    def test_accepting_a_ranked_file_without_research_is_refused_at_construction(self) -> None:
+        with self.assertRaisesRegex(ValueError, "accepting a ranked file must name the Research surface"):
+            replace(SLICE_RUNNERS["extraction"], accepts_ranked=True)
 
     def test_replacing_a_runner_keeps_the_surfaces(self) -> None:
         for name, original in SLICE_RUNNERS.items():
@@ -102,17 +106,20 @@ class SliceSurfaces(unittest.TestCase):
                 self.assertEqual(changed.surfaces, original.surfaces)
 
 
-def _admissible_surfaces() -> tuple[frozenset[CallSurface], ...]:
-    """Every set of surfaces a registry entry can be constructed with."""
+def _admissible_surfaces() -> tuple[tuple[frozenset[CallSurface], bool], ...]:
+    """Every admissible set of declared surfaces, with and without the ranked door."""
 
     admissible = []
-    for size in range(len(CallSurface) + 1):
-        for chosen in combinations(CallSurface, size):
-            try:
-                replace(SLICE_RUNNERS["judgments"], surfaces=frozenset(chosen))
-            except ValueError:
-                continue
-            admissible.append(frozenset(chosen))
+    declared = tuple(surface for surface in CallSurface if surface is not CallSurface.RANKED_FILE)
+    for size in range(len(declared) + 1):
+        for chosen in combinations(declared, size):
+            surfaces = frozenset(chosen)
+            for use_ranked in (False, True):
+                try:
+                    replace(SLICE_RUNNERS["judgments"], surfaces=surfaces, accepts_ranked=use_ranked)
+                except ValueError:
+                    continue
+                admissible.append((surfaces, use_ranked))
     return tuple(admissible)
 
 
@@ -122,6 +129,7 @@ def _invoke_planted(
     ranked_path: Path,
     surfaces: frozenset[CallSurface],
     *,
+    use_ranked: bool = False,
     supplied_set: Path | None = None,
     site_path: Path | None = None,
     stack_name: str = PRODUCTION_STACK,
@@ -150,12 +158,12 @@ def _invoke_planted(
     target = command.engine.EngineTarget("fictitious-target-profile", "fictitious-model", 1)
     replacement = dict(SLICE_RUNNERS)
     replacement["judgments"] = replace(
-        replacement["judgments"], surfaces=surfaces, runner=run_slice
+        replacement["judgments"], surfaces=surfaces, runner=run_slice, accepts_ranked=use_ranked,
     )
     argv = ["eval", "run", "--slice", "judgments", "--stack", stack_name, *flags]
     if generation_name is not None:
         argv.extend(("--generation", generation_name))
-    if CallSurface.RANKED_FILE in surfaces:
+    if use_ranked:
         argv.extend(("--ranked", str(ranked_path)))
     if supplied_set is not None:
         argv.extend(("--set", str(supplied_set)))
@@ -176,6 +184,7 @@ def _invoke_planted(
             "probe",
             return_value=command.door.ProbeResult(True, "door ready", None),
         ),
+        patch.object(command.research_door, "probe", return_value=None),
         patch.object(command.stacks.secrets, "select_directory") as select_directory,
     ):
         outcome = _invoke(argv, **kwargs)
@@ -268,6 +277,7 @@ class PreparationRoutes(unittest.TestCase):
             assessed_path, _ = _assessed_file(directory, ((case_id, coordinate, 0),))
             (code, stdout, stderr), contexts, _ = _invoke_planted(
                 EvalHost(), checkout, ranked_path, SLICE_RUNNERS["judgments"].surfaces,
+                use_ranked=True,
                 flags=("--assessed", str(assessed_path)),
             )
         self.assertEqual((code, stderr), (0, ""), stdout)
@@ -291,6 +301,7 @@ class PreparationRoutes(unittest.TestCase):
             with patch.object(host, "geteuid", wraps=host.geteuid) as root_lookup:
                 (code, stdout, stderr), contexts, _ = _invoke_planted(
                     host, checkout, ranked_path, SLICE_RUNNERS["judgments"].surfaces,
+                    use_ranked=True,
                     flags=("--assessed", str(assessed_path)),
                 )
                 root_lookup.assert_not_called()
@@ -384,15 +395,16 @@ class PreparationRoutes(unittest.TestCase):
             site_result = command.site.load_site(ROOT / "config/site.example.yaml")
             self.assertIsNotNone(site_result.config)
             assert site_result.config is not None
-            for surfaces in _admissible_surfaces():
-                with self.subTest(surfaces=surfaces):
+            for surfaces, use_ranked in _admissible_surfaces():
+                with self.subTest(surfaces=surfaces, use_ranked=use_ranked):
                     host = EvalHost()
                     (code, stdout, stderr), contexts, target = _invoke_planted(
-                        host, checkout, ranked_path, surfaces
+                        host, checkout, ranked_path, surfaces, use_ranked=use_ranked,
                     )
                     self.assertEqual((code, stderr), (0, ""), stdout)
                     self.assertEqual(len(contexts), 1)
                     context = contexts[0]
+                    self.assertIsNone(context.turn_overrides)
                     self.assertEqual(
                         context.served_model_name is None,
                         CallSurface.ENGINE not in surfaces,
@@ -408,7 +420,7 @@ class PreparationRoutes(unittest.TestCase):
                     ]
                     self.assertEqual(len(generation_reads), int(CallSurface.STORES in surfaces))
                     if CallSurface.STORES in surfaces:
-                        if CallSurface.RANKED_FILE in surfaces:
+                        if use_ranked:
                             self.assertLess(stdout.index("ranked: ok"), stdout.index("preconditions: ok"))
                         row = _generation_row()
                         assert context.generation is not None
@@ -422,7 +434,7 @@ class PreparationRoutes(unittest.TestCase):
                         self.assertEqual(context.image.checkout, checkout)
                         self.assertIn("gideon@sha256:", context.image.reference)
                     self.assertEqual(
-                        context.ranked is None, CallSurface.RANKED_FILE not in surfaces
+                        context.ranked is not None, use_ranked,
                     )
                     sql = next(
                         input for argv, input in host.calls
@@ -516,11 +528,11 @@ class PreparationRoutes(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             checkout, _ids = _fixture(directory, {1: 3})
             ranked_path, _ranked_bytes = _ranked_file(directory, {1: (1,)})
-            for surfaces in _admissible_surfaces():
-                with self.subTest(surfaces=surfaces):
+            for surfaces, use_ranked in _admissible_surfaces():
+                with self.subTest(surfaces=surfaces, use_ranked=use_ranked):
                     host = EvalHost(probe_rc=1)
                     (code, stdout, stderr), contexts, _target = _invoke_planted(
-                        host, checkout, ranked_path, surfaces
+                        host, checkout, ranked_path, surfaces, use_ranked=use_ranked,
                     )
                     self.assertEqual((code, stderr), (1, ""), stdout)
                     self.assertEqual(stdout.count("preconditions: refuse"), 1)
@@ -536,11 +548,12 @@ class PreparationRoutes(unittest.TestCase):
             ranked_path, _ranked_bytes = _ranked_file(directory, {1: (1,)})
             supplied_set = Path(directory) / (checkout / SET_ROOT).name
             shutil.copytree(checkout / SET_ROOT, supplied_set)
-            for surfaces in _admissible_surfaces():
-                with self.subTest(surfaces=surfaces):
+            for surfaces, use_ranked in _admissible_surfaces():
+                with self.subTest(surfaces=surfaces, use_ranked=use_ranked):
                     host = EvalHost()
                     (code, stdout, stderr), contexts, _target = _invoke_planted(
-                        host, checkout, ranked_path, surfaces, supplied_set=supplied_set
+                        host, checkout, ranked_path, surfaces,
+                        use_ranked=use_ranked, supplied_set=supplied_set,
                     )
                     self.assertEqual((code, stderr), (0, ""), stdout)
                     self.assertEqual(len(contexts), 1)
@@ -971,6 +984,98 @@ class SiblingSurfaceRule(unittest.TestCase):
         self.assertIn("load: ok", stdout)
         self.assertNotIn("load: refuse", stdout)
         self.assertIn("preconditions: refuse — root privileges are required", stdout)
+
+
+class ResearchPreparation(unittest.TestCase):
+    """Research checks the resolved generation and the selected stack before recording."""
+
+    def setUp(self) -> None:
+        self.checkout, _ = _fixture(self.enterContext(tempfile.TemporaryDirectory()), {1: RELEVANT_GRADE})
+
+    def run_judgments(self, host: EvalHost, *flags: str) -> tuple[int, str, str]:
+        return _invoke(
+            ["eval", "run", "--slice", "judgments", *flags],
+            **_run_kwargs(host, checkout=self.checkout, court_path=self.checkout / "courts.yaml"),
+        )
+
+    def test_built_generation_refusal_names_promotion_and_a_ranked_retry_on_the_same_stack(self) -> None:
+        _copy_sibling_artifacts(self.checkout)
+        for stack_name, row in (
+            (PRODUCTION_STACK, _generation_row(state="built")),
+            (CI_STACK, _sibling_row(self.checkout)),
+        ):
+            host = EvalHost()
+            host.generation_output = json.dumps(row) + "\n"
+            name = row["gen_id"]
+            with (
+                self.subTest(stack=stack_name),
+                patch.object(command.research_door, "probe") as probe,
+                patch.object(command.stacks.secrets, "select_directory"),
+            ):
+                flags = ("--stack", CI_STACK) if stack_name == CI_STACK else ()
+                code, stdout, stderr = self.run_judgments(host, *flags, "--generation", name)
+                probe.assert_not_called()
+                self.assertEqual((code, stderr), (1, ""), stdout)
+                self.assertIn(f"generation {name} is built and /turn requires a live generation", stdout)
+                self.assertIn(report.command(f"index promote {name}"), stdout)
+                stack_flag = f" --stack {CI_STACK}" if flags else ""
+                self.assertIn(report.command(
+                    f"eval run --slice judgments --ranked <file>{stack_flag} --generation {name}"
+                ), stdout)
+                self.assertEqual([line.split(":", 1)[0] for line in stdout.splitlines()], ["load", "preconditions"])
+                self.assertEqual(host.lock_records, [])
+                self.assertFalse(any(argv[0] == "git" for argv, _ in host.calls))
+
+    def test_no_gpu_refuses_after_generation_resolution_and_before_the_probe(self) -> None:
+        host = EvalHost()
+        host.generation_output = json.dumps(_generation_row()) + "\n"
+        with (
+            patch.object(command.nogpu, "is_no_gpu_host", return_value=True),
+            patch.object(command.research_door, "probe") as probe,
+        ):
+            code, stdout, stderr = self.run_judgments(host)
+        probe.assert_not_called()
+        self.assertEqual((code, stderr), (1, ""), stdout)
+        self.assertIn("this host carries the no-GPU marker and serves no /turn", stdout)
+        self.assertIn("Run the evaluation on a GPU host", stdout)
+        (_argv, sql), = host.calls
+        self.assertIn("FROM public.index_generations", sql or "")
+
+    def test_expected_hash_refusal_precedes_the_research_probe(self) -> None:
+        host = EvalHost()
+        host.generation_output = json.dumps(_generation_row()) + "\n"
+        refused = baselines.expected_config_hash({"fictitious-override": True})
+        assert isinstance(refused, command.Problem)
+        for baseline in (None, *baselines.BASELINES):
+            with (
+                self.subTest(baseline=baseline),
+                patch.object(baselines, "expected_config_hash", return_value=refused) as expected_hash,
+                patch.object(command.research_door, "probe") as probe,
+            ):
+                flags = () if baseline is None else ("--baseline", baseline)
+                code, stdout, stderr = self.run_judgments(host, *flags)
+                expected_hash.assert_called_once_with(None if baseline is None else baselines.BASELINES[baseline])
+                probe.assert_not_called()
+                self.assertEqual((code, stderr), (1, ""), stdout)
+                self.assertIn(refused.problem, stdout)
+                self.assertIn(refused.fix, stdout)
+                self.assertIn("checkout's retrieval whitelist", stdout)
+
+    def test_retries_keep_the_baseline_for_research_and_drop_it_for_a_ranked_file(self) -> None:
+        host = EvalHost()
+        row = _generation_row(state="built")
+        name = row["gen_id"]
+        host.generation_output = json.dumps(row) + "\n"
+        flags = ("--baseline", "off", "--generation", name)
+        code, stdout, stderr = self.run_judgments(host, *flags)
+        self.assertEqual((code, stderr), (1, ""), stdout)
+        self.assertIn(report.command(f"eval run --slice judgments --ranked <file> --generation {name}"), stdout)
+        self.assertNotIn("--baseline", stdout)
+
+        host.generation_code = 23
+        code, stdout, stderr = self.run_judgments(host, *flags)
+        self.assertEqual((code, stderr), (1, ""), stdout)
+        self.assertIn(report.command(f"eval run --slice judgments --baseline off --generation {name}") + " again.", stdout)
 
 
 class PreparationBoundaries(unittest.TestCase):

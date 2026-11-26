@@ -330,6 +330,10 @@ class ApiRelaySockets(unittest.TestCase):
             opensearch_url="http://fixture-lexical:7003",
             opensearch_user="fixture-lexical-reader",
             opensearch_password_file=Path("/fixture/lexical-password"),
+            embed_model="fixture-embed",
+            embed_repository="fixture-owner/fixture-embed",
+            embed_space="fixture-space",
+            embed_dimensions=7,
         )
         self.service_server = StartedServer(
             uvicorn.Config(
