@@ -377,12 +377,16 @@ class SyntheticSetContract(TestCase):
                         tuple(case["id"] for case in self.cases[category]),
                     )
 
-    def test_no_slice_id_list_names_a_synthetic_case(self) -> None:
-        paths = sorted((ROOT / SET_ROOT / "slices").rglob("*.ids"))
+    def test_synthetic_cases_appear_only_in_their_category_synthetic_list(self) -> None:
+        slices = ROOT / SET_ROOT / "slices"
+        paths = sorted(slices.rglob("*.ids"))
         self.assertTrue(paths)
         for category, cases in self.cases.items():
             case_ids = {cast(str, case["id"]) for case in cases}
+            allowed = slices / f"research-qa-{category}" / "synthetic.ids"
             for path in paths:
+                if path == allowed:
+                    continue
                 with self.subTest(category=category, path=path.relative_to(ROOT)):
                     listed = set(path.read_text(encoding="utf-8").splitlines())
                     self.assertFalse(case_ids & listed)

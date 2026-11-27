@@ -2,7 +2,7 @@
 
 import json
 import secrets
-from collections.abc import Iterable
+from collections.abc import Iterable, Set
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -19,17 +19,17 @@ _UNAUTHORIZED_BODY = json.dumps(
 
 
 class BearerAuthMiddleware:
-    """Require the configured bearer key on every path except health."""
+    """Require the configured bearer key outside the open /health and /metrics paths."""
 
-    def __init__(self, app: ASGIApp, key: str, health_path: str) -> None:
+    def __init__(self, app: ASGIApp, key: str, open_paths: Set[str]) -> None:
         self.app = app
         # The header arrives as bytes and is compared as bytes: a non-ASCII
         # token would make a string comparison raise rather than refuse.
         self.key = key.encode("utf-8")
-        self.health_path = health_path
+        self.open_paths = open_paths
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope.get("path") == self.health_path:
+        if scope["type"] != "http" or scope.get("path") in self.open_paths:
             await self.app(scope, receive, send)
             return
         presented = self._authorization_value(scope.get("headers", ()))

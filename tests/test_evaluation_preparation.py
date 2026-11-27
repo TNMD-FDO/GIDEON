@@ -29,6 +29,7 @@ from test_evaluation_run import (
     _invoke,
     _run_kwargs,
     _sibling_row,
+    fixture_judge_retry,
 )
 from test_judgments_slice import (
     _assessed_file,
@@ -98,6 +99,10 @@ class SliceSurfaces(unittest.TestCase):
     def test_accepting_a_ranked_file_without_research_is_refused_at_construction(self) -> None:
         with self.assertRaisesRegex(ValueError, "accepting a ranked file must name the Research surface"):
             replace(SLICE_RUNNERS["extraction"], accepts_ranked=True)
+
+    def test_accepting_selection_without_research_is_refused_at_construction(self) -> None:
+        with self.assertRaisesRegex(ValueError, "accepting --unsigned and --tuning must name the Research surface"):
+            replace(SLICE_RUNNERS["extraction"], accepts_selection=True)
 
     def test_replacing_a_runner_keeps_the_surfaces(self) -> None:
         for name, original in SLICE_RUNNERS.items():
@@ -1048,6 +1053,50 @@ class ResearchPreparation(unittest.TestCase):
             models_path=self.models_path,
             **_run_kwargs(host, checkout=self.checkout, court_path=self.checkout / "courts.yaml"),
         )
+
+    def test_registered_research_engine_slices_prepare_turns_and_hold_the_synthesis_judge(self) -> None:
+        expected_hash = baselines.expected_config_hash(None, reranker=self.production_reranker)
+        self.assertIsInstance(expected_hash, str)
+        for name in ("research-qa-retrieval", "research-qa-synthesis"):
+            with self.subTest(slice_name=name):
+                spec = SLICE_RUNNERS[name]
+                host = EvalHost()
+                generation = _generation_row()
+                host.generation_output = json.dumps(generation) + "\n"
+                kwargs = _run_kwargs(host)
+                rendered = Path(kwargs["rendered_dir"])
+                target = command.engine.EngineTarget("fictitious-profile", "fictitious-model", 1000)
+                held = fixture_judge_retry()
+                runner = Mock(return_value=SliceResult(True, "Fictitious Research report\n", ()))
+                with (
+                    patch.dict(command.SLICE_RUNNERS, {name: replace(spec, runner=runner)}),
+                    patch.object(command.nogpu, "is_no_gpu_host", return_value=False),
+                    patch.object(command.engine, "resolve_engine_target", return_value=target) as resolve,
+                    patch.object(command.sampling, "hold_running", return_value=held) as hold,
+                    patch.object(command.research_door, "probe", return_value=None) as probe,
+                ):
+                    code, stdout, stderr = _invoke(
+                        ["eval", "run", "--slice", name], **kwargs,
+                    )
+                self.assertEqual((code, stderr), (0, ""), stdout)
+                self.assertIn("engine lock taken", stdout)
+                self.assertIn(f"door {command.research_door.TURN_PATH} probed", stdout)
+                resolve.assert_called_once()
+                probe.assert_called_once_with(host, rendered, sibling=False)
+                runner.assert_called_once()
+                context = cast(RunContext, runner.call_args.args[2])
+                assert context.generation is not None
+                self.assertEqual(context.generation.name, generation["gen_id"])
+                self.assertEqual(context.expected_config_hash, expected_hash)
+                self.assertEqual(context.served_model_name, target.served_model_name)
+                self.assertEqual(context.judge_prompt_id, spec.judge_prompt)
+                if name == "research-qa-synthesis":
+                    hold.assert_called_once()
+                    self.assertIs(context.judge_retry, held)
+                else:
+                    hold.assert_not_called()
+                    self.assertIsNone(context.judge_retry)
+                self.assertEqual(host.locks, {})
 
     def test_production_without_a_reranker_and_ci_prepare_the_off_stage_hash(self) -> None:
         profile = next(profile for profile in self.profiles if profile.model(RERANK.role) is None)

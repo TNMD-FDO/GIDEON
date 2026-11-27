@@ -2,7 +2,7 @@
 
 import logging
 import time
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence, Set
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import cast
 
@@ -13,7 +13,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import BaseRoute, Match, Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from gideon.turn import objects
+from gideon.turn import frontend, measures, objects
 from gideon.turn.config import RETRIEVAL_CONFIG
 from gideon.turn.endpoint import TurnClients, TurnEndpoint
 from gideon.turn.generation import Connect
@@ -26,6 +26,8 @@ from .settings import Settings
 from .upstream import EngineClient
 
 _HEALTH_PATH = "/health"
+_METRICS_PATH = "/metrics"
+_OPEN_PATHS = frozenset({_HEALTH_PATH, _METRICS_PATH})
 _MODELS_PATH = "/v1/models"
 _COMPLETIONS_PATH = "/v1/chat/completions"
 _TURN_PATH = "/turn"
@@ -39,13 +41,15 @@ _UNMATCHED = "-"
 class RequestLogMiddleware:
     """Log method, route template, status, and elapsed seconds without content.
 
+    The open /health and /metrics paths are skipped.
     A response that never started logs ``-`` for its status, and a caller that
     left before the response finished adds ``disconnected``.
     """
 
-    def __init__(self, app: ASGIApp, routes: Sequence[BaseRoute]) -> None:
+    def __init__(self, app: ASGIApp, routes: Sequence[BaseRoute], open_paths: Set[str]) -> None:
         self.app = app
         self.routes = routes
+        self.open_paths = open_paths
 
     def _template(self, scope: Scope) -> str:
         for route in self.routes:
@@ -55,7 +59,7 @@ class RequestLogMiddleware:
         return _UNMATCHED
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope.get("path") == _HEALTH_PATH:
+        if scope["type"] != "http" or scope.get("path") in self.open_paths:
             await self.app(scope, receive, send)
             return
         status: int | None = None
@@ -101,6 +105,16 @@ async def health(_: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+async def metrics(request: Request) -> Response:
+    """Return the in-memory turn measures and live rerank gate counts."""
+
+    state = request.app.state
+    return Response(
+        measures.format_metrics(state.turn_measures, state.rerank_gate),
+        headers={"content-type": measures.CONTENT_TYPE},
+    )
+
+
 async def models(request: Request) -> Response:
     """List General when the engine confirms its served model is available."""
 
@@ -129,7 +143,9 @@ def create_app(
     qdrant_transport: httpx.AsyncBaseTransport | None = None,
     opensearch_transport: httpx.AsyncBaseTransport | None = None,
     rerank_transport: httpx.AsyncBaseTransport | None = None,
+    frontend_transport: httpx.AsyncBaseTransport | None = None,
     record_connect: Connect | None = None,
+    denial_connect: Connect | None = None,
     case_extractor: objects.CaseExtractor | None = None,
     turn_clock: Callable[[], float] = time.monotonic,
 ) -> Starlette:
@@ -163,13 +179,16 @@ def create_app(
                 await turn_client(settings.embed_url, embed_transport),
                 await turn_client(settings.qdrant_url, qdrant_transport),
                 await turn_client(settings.opensearch_url, opensearch_transport),
+                frontend=await resources.enter_async_context(frontend.frontend_client(transport=frontend_transport)),
                 reranker=await turn_client(settings.rerank_url, rerank_transport) if settings.rerank_url is not None else None,
             )
             application.state.rerank_gate = Gate(cast(int, RETRIEVAL_CONFIG["rerank.semaphore"]))
+            application.state.turn_measures = measures.TurnMeasures()
             yield
 
     routes = [
         Route(_HEALTH_PATH, health, methods=["GET"]),
+        Route(_METRICS_PATH, metrics, methods=["GET"]),
         Route(_MODELS_PATH, models, methods=["GET"]),
         # An instance, not a function: Starlette calls a non-function endpoint
         # as an ASGI application, which is the relay's shape.
@@ -178,10 +197,14 @@ def create_app(
             CompletionRelay(settings),
             methods=["POST"],
         ),
-        Route(_TURN_PATH, TurnEndpoint(settings, connect=record_connect, clock=turn_clock), methods=["POST"]),
+        Route(
+            _TURN_PATH,
+            TurnEndpoint(settings, connect=record_connect, denial_connect=denial_connect, clock=turn_clock),
+            methods=["POST"],
+        ),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
-    app.add_middleware(BearerAuthMiddleware, key=settings.api_key, health_path=_HEALTH_PATH)
+    app.add_middleware(BearerAuthMiddleware, key=settings.api_key, open_paths=_OPEN_PATHS)
     # Added last, so outermost: a refused request is logged too.
-    app.add_middleware(RequestLogMiddleware, routes=routes)
+    app.add_middleware(RequestLogMiddleware, routes=routes, open_paths=_OPEN_PATHS)
     return app

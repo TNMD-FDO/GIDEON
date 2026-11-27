@@ -8,7 +8,7 @@ nightly's wait, the challenger pair's two passes, one lock, and stop rule, and
 every mode fix parsed back through the parser.
 
 The registry's flags are held entry by entry: its categories within the shape
-registry and named once, each committed slice's counted cases within its
+registry and owned once per composite, each committed slice's counted cases within its
 entry's, every ``smoke`` case routed to a part, every engine-naming part owning
 a ``turn_calls``, every directory under ``eval/reference/`` naming a comparing
 slice, and ``--stack ci``'s refusals derived from the registry. The engine's
@@ -56,6 +56,7 @@ from zoneinfo import ZoneInfo
 from test_evaluation_record import read_psql_set
 from test_judge import engine_output, valid_content
 from test_preflight import FakeHost
+from test_research_qa_slice import ResearchQAHost
 
 import gideon
 from gideon.cli import build_parser, main
@@ -66,6 +67,7 @@ from gideon.evaluation import (
     evalset,
     judge,
     reference,
+    research_qa_slice,
     results,
     sampling,
     signoffs,
@@ -997,6 +999,38 @@ class Command(unittest.TestCase):
         self.assertIn("\\set run_verdict 'fail'", write_sql or "")
         self.assertIn("\\set result_0_verdict 'fail'", write_sql or "")
 
+    def test_research_provenance_reference_is_bound_to_the_result_column(self) -> None:
+        host = EvalHost()
+        slice_name = "research-qa-retrieval"
+        loaded = load_set(ROOT / SET_ROOT).loaded
+        assert loaded is not None
+        case_id = select_cases(loaded, slice_name).counted[0]
+        provenance_ref = "fictitious-research-message-id"
+        result = SliceResult(
+            True, "Fictitious retrieval report\n",
+            (CaseResult(case_id, 1, "pass", {}, provenance_ref=provenance_ref),),
+        )
+        with patch.object(command.research_door, "probe", return_value=None):
+            code, stdout, stderr, _observed = _invoke_engine_command(
+                host, slice_name=slice_name, stack_name=PRODUCTION_STACK, kind="manual",
+                on_run=lambda _context: result,
+            )
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        self.assertIn(f"record: ok — run {RUN_ID} recorded (1 run row, 1 result rows)", stdout)
+        sql, = (
+            payload for _argv, payload in host.calls
+            if payload is not None and "INSERT INTO eval_results" in payload
+        )
+        insert, = (line for line in sql.splitlines() if line.startswith("INSERT INTO eval_results"))
+        columns, values = insert.removeprefix("INSERT INTO eval_results (").removesuffix(");").split(") VALUES (")
+        bound = dict(zip(columns.split(", "), values.split(", "), strict=True))
+        for field, expected in (("case_id", case_id), ("provenance_ref", provenance_ref)):
+            with self.subTest(field=field):
+                name = f"result_0_{field}"
+                self.assertEqual(bound[field], f":'{name}'")
+                line = next(line for line in sql.splitlines() if line.startswith(f"\\set {name} "))
+                self.assertEqual(read_psql_set(line, name), expected)
+
     def test_regression_fails_gate_and_names_id_after_recording_fail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             checkout = _reference_checkout(directory)
@@ -1485,6 +1519,7 @@ def _invoke_engine_command(
     generation_reply: str | None = None,
     verdicts: Mapping[str, bool] | None = None,
     run_id_factory: Callable[[], str] | None = None,
+    flags: tuple[str, ...] = (),
 ) -> tuple[int, str, str, dict[str, list[Any]]]:
     observed: dict[str, list[Any]] = {
         "contexts": [],
@@ -1520,7 +1555,7 @@ def _invoke_engine_command(
     names = (slice_name,) if second_slice_name is None else (slice_name, second_slice_name)
     args = [
         "eval", "run", *(flag for name in names for flag in ("--slice", name)), "--stack", stack_name,
-        "--kind", kind, *set_args,
+        "--kind", kind, *set_args, *flags,
     ]
     run_kwargs = _run_kwargs(host)
     if run_id_factory is not None:
@@ -2536,6 +2571,34 @@ class SliceRegistry(unittest.TestCase):
         self.assertIs(SMOKE_PARTS["gold-drop"], spec)
         self.assertEqual(tuple(SMOKE_PARTS), ("guardrails", "extraction", "gold-drop"))
 
+    def test_research_qa_entries_settings(self) -> None:
+        for category, prompt, reported in (
+            ("retrieval", None, "gold figures"),
+            ("synthesis", "synthesis@1", "gold figures and judge grades"),
+        ):
+            with self.subTest(category=category):
+                name = f"research-qa-{category}"
+                spec = SLICE_RUNNERS[name]
+                self.assertIs(inspect.getmodule(spec.runner), research_qa_slice)
+                self.assertEqual(spec.surfaces, frozenset({CallSurface.ENGINE, CallSurface.RESEARCH, CallSurface.STORES}))
+                self.assertEqual(spec.categories, frozenset({("research-qa", category)}))
+                self.assertEqual(spec.repeats, 1)
+                self.assertEqual(spec.judge_prompt, prompt)
+                self.assertFalse(spec.compares_reference)
+                self.assertFalse(spec.accepts_assessments)
+                self.assertFalse(spec.accepts_ranked)
+                self.assertTrue(spec.accepts_selection)
+                for field in ("engine_calls", "turn_calls", "ceiling_cases", "decision"):
+                    with self.subTest(field=field):
+                        self.assertIsNone(getattr(spec, field))
+                self.assertNotIn(name, SMOKE_PARTS)
+                self.assertNotIn(name, BUILD_GATES_PARTS)
+                self.assertIn(f"{reported} reported and never gated", spec.gate_pass)
+                for phrase in ("valid turn", "different generation or configuration", "pool could not be resolved"):
+                    self.assertIn(phrase, spec.gate_fail)
+                for phrase in ("failed turns", "unresolved pools", "Research service logs"):
+                    self.assertIn(phrase, spec.gate_fix)
+
     def test_segmenter_entry_is_image_and_record_only(self) -> None:
         spec = SLICE_RUNNERS["segmenter-300"]
         self.assertEqual(spec.surfaces, frozenset({CallSurface.IMAGE, CallSurface.RECORD}))
@@ -2553,13 +2616,14 @@ class SliceRegistry(unittest.TestCase):
             with self.subTest(slice_name=slice_name):
                 self.assertTrue(spec.categories <= evalset.SHAPE_REGISTRY.keys())
 
-    def test_no_category_is_named_by_two_entries(self) -> None:
-        owners: dict[tuple[str, str], str] = {}
-        for slice_name, spec in SLICE_RUNNERS.items():
-            for category in spec.categories:
-                with self.subTest(category=category):
-                    self.assertNotIn(category, owners)
-                    owners[category] = slice_name
+    def test_each_composite_has_at_most_one_owner_per_category(self) -> None:
+        for composite, parts in (("smoke", SMOKE_PARTS), ("build-gates", BUILD_GATES_PARTS)):
+            owners: dict[tuple[str, str], str] = {}
+            for slice_name, spec in parts.items():
+                for category in spec.categories:
+                    with self.subTest(composite=composite, category=category):
+                        self.assertNotIn(category, owners)
+                        owners[category] = slice_name
 
     def test_committed_counted_cases_match_their_entry_categories(self) -> None:
         loaded = load_set(ROOT / SET_ROOT).loaded
@@ -3153,6 +3217,290 @@ class BaselineFlags(unittest.TestCase):
                 retry = build_parser().parse_args(shlex.split(match.group(1)))
                 self.assertEqual(retry.slice, list(names))
                 self.assertEqual((retry.baseline, retry.kind, retry.stack), (None, "nightly", "ci"))
+
+
+class SelectionFlags(unittest.TestCase):
+    """Selection flags and the command's record guard over planted runners."""
+
+    slice_name = "research-qa-retrieval"
+    counted = "fictitious-tuning-case"
+    held_out = "fictitious-held-out-case"
+    unsigned = "fictitious-selected-unsigned-case"
+    outside_unsigned = "fictitious-unselected-unsigned-case"
+    outside_held_out = "fictitious-unselected-held-out-case"
+
+    def setUp(self) -> None:
+        selected = (self.counted, self.held_out, self.unsigned)
+        active = (*selected, self.outside_unsigned, self.outside_held_out)
+        cases: dict[str, evalset.Case] = {
+            case_id: {"id": case_id, "suite": "research-qa", "category": "retrieval"}
+            for case_id in active
+        }
+        self.loaded = LoadedSet(
+            version="eval-v1",
+            cases_by_file={"fictitious.jsonl": tuple(cases.values())},
+            cases_by_id=cases,
+            active_ids=active,
+            slices={self.slice_name: selected},
+            slice_lists={self.slice_name: {"fictitious": selected}},
+            digest="fictitious-set-digest",
+            unsigned_ids=frozenset({self.unsigned, self.outside_unsigned}),
+            held_out_ids=frozenset({self.held_out, self.outside_held_out}),
+        )
+
+    def run_results(
+        self, host: EvalHost, result: SliceResult, *flags: str,
+    ) -> tuple[int, str, str, dict[str, list[Any]]]:
+        with (
+            patch.object(command, "load_set_with_courts", return_value=evalset.EvalSetLoadResult(loaded=self.loaded)),
+            patch.object(command.research_door, "probe", return_value=None),
+        ):
+            return _invoke_engine_command(
+                host, slice_name=self.slice_name, stack_name=PRODUCTION_STACK, kind="manual",
+                on_run=lambda _context: result, flags=flags,
+            )
+
+    def assert_no_record(self, host: EvalHost, stdout: str) -> None:
+        self.assertNotIn("record:", stdout)
+        self.assertNotIn("gate:", stdout)
+        _assert_no_verdict_line(self, stdout)
+        self.assertFalse(any("INSERT INTO eval_runs" in (sql or "") for _, sql in host.calls))
+
+    def test_incompatible_selection_flags_refuse_before_any_rows(self) -> None:
+        selected_slice = ("--slice", self.slice_name)
+        cases: list[tuple[tuple[str, ...], str]] = [(
+            (*selected_slice, "--unsigned", "--tuning"),
+            "--unsigned and --tuning cannot be combined",
+        )]
+        for flag in ("--unsigned", "--tuning"):
+            cases.extend((
+                (("--slice", "judgments", flag), f"{flag} is not valid for slice 'judgments'"),
+                ((*selected_slice, flag, "--decision", "--against", RUN_ID),
+                 f"{flag} cannot be combined with --decision"),
+                ((*selected_slice, flag, "--kind", "smoke"), f"{flag} requires --kind manual"),
+                ((*selected_slice, flag, "--kind", "nightly", "--slice", "smoke"), f"{flag} is not valid for slice 'smoke'"),
+                (("--slice", "smoke", "--kind", "nightly", flag), f"{flag} is not valid for slice 'smoke'"),
+                ((*selected_slice, "--slice", "research-qa-synthesis", flag, "--kind", "nightly",
+                  "--set", "/fictitious/set"), f"{flag} requires --kind manual"),
+                ((*selected_slice, "--slice", "research-qa-synthesis", flag, "--set", "/fictitious/set"),
+                 f"{flag} runs one slice at a time"),
+                ((*selected_slice, *selected_slice, flag), f"{flag} runs one slice at a time"),
+                (("--challenger", flag), f"--challenger cannot be combined with {flag}"),
+            ))
+        for flags, problem in cases:
+            with self.subTest(flags=flags):
+                host = ChallengerHost()
+                with patch.object(command.stacks.secrets, "select_directory") as select_directory:
+                    code, stdout, stderr = _invoke(
+                        ["eval", "run", "--stack", "ci", *flags], **_run_kwargs(host),
+                    )
+                self.assertEqual((code, stdout), (1, ""))
+                self.assertIn(problem, stderr)
+                if "--challenger" not in flags and "is not valid for slice" not in problem:
+                    self.assertIn(repr(flags[1]), stderr)
+                select_directory.assert_not_called()
+                self.assertEqual((host.calls, host.reads, host.exists_calls, host.lock_records), ([], [], [], []))
+                if "--challenger" in flags:
+                    match = re.search(r"Fix: Run (?:sudo python3 -m )?gideon (eval run .+), then retry\.", stderr)
+                    assert match is not None, stderr
+                    retry = build_parser().parse_args(shlex.split(match.group(1)))
+                    self.assertFalse(retry.unsigned or retry.tuning or retry.decision)
+                    continue
+                if "is not valid for slice" in problem:
+                    denied = problem.rsplit(" ", 1)[1].strip("'")
+                    self.assertIn(f"Fix: Remove {next(given for given in ("--unsigned", "--tuning") if given in flags)} when running --slice {denied}, then retry.", stderr)
+                    continue
+                # Each printed run keeps its selection flag and is manual, one per
+                # slice, so following the fix reads no case the run did not ask for.
+                retries = [
+                    build_parser().parse_args(shlex.split(command_text))
+                    for command_text in re.findall(
+                        r"(?:sudo python3 -m )?gideon (eval run .+?)(?= and | or |, then retry\.)", stderr,
+                    )
+                ]
+                named = list(dict.fromkeys(flags[i + 1] for i, flag in enumerate(flags) if flag == "--slice"))
+                given = {flag for flag in ("--unsigned", "--tuning") if flag in flags}
+                self.assertEqual(len(retries), len(named) * len(given), stderr)
+                for retry in retries:
+                    self.assertEqual(len(retry.slice), 1)
+                    self.assertIn(retry.slice[0], named)
+                    self.assertEqual(retry.kind, "manual")
+                    self.assertFalse(retry.decision)
+                    self.assertEqual(retry.stack, "ci")
+                    self.assertEqual(retry.set, "<dir>" if "--set" in flags else None)
+                    self.assertEqual(int(retry.unsigned) + int(retry.tuning), 1)
+                    self.assertIn("--unsigned" if retry.unsigned else "--tuning", given)
+
+    def test_unsigned_guard_requires_flag_slice_membership_and_boolean_mark(self) -> None:
+        cases: tuple[tuple[tuple[str, ...], str, Mapping[str, results.JSONValue]], ...] = (
+            ((), self.unsigned, {"unsigned": True}),
+            (("--unsigned",), self.outside_unsigned, {"unsigned": True}),
+            (("--unsigned",), self.unsigned, {}),
+            (("--unsigned",), self.unsigned, {"unsigned": 1}),
+            (("--unsigned",), self.counted, {"unsigned": True}),
+            ((), self.counted, {"unsigned": True}),
+        )
+        for flags, case_id, metrics in cases:
+            with self.subTest(flags=flags, case_id=case_id, metrics=metrics):
+                host = EvalHost()
+                response = SliceResult(True, "Fictitious result\n", (CaseResult(case_id, 1, "pass", metrics),))
+                code, stdout, stderr, _ = self.run_results(host, response, *flags)
+                self.assertEqual((code, stderr), (1, ""), stdout)
+                self.assertIn(f"run: refuse — runner returned unsigned cases: {case_id}", stdout)
+                self.assertIn("must select through the loader", stdout)
+                self.assert_no_record(host, stdout)
+
+    def test_tuning_guard_refuses_any_held_out_result_before_record(self) -> None:
+        host = EvalHost()
+        ids = (self.held_out, self.outside_held_out)
+        response = SliceResult(
+            True, "Fictitious tuning report\n", tuple(CaseResult(case_id, 1, "pass", {}) for case_id in ids),
+        )
+        code, stdout, stderr, _ = self.run_results(host, response, "--tuning")
+        self.assertEqual((code, stderr), (1, ""), stdout)
+        self.assertIn(f"run: refuse — runner returned held-out cases: {' '.join(ids)}", stdout)
+        self.assertIn("loader's tuning_cases", stdout)
+        self.assert_no_record(host, stdout)
+
+    def test_recorded_selection_flags_and_run_details(self) -> None:
+        plain = CaseResult(self.counted, 1, "pass", {})
+        marked = CaseResult(self.unsigned, 1, "fail", {"unsigned": True})
+        cases = (
+            ((), (plain,), "1 unsigned excluded"),
+            (("--unsigned",), (plain, marked), "1 unsigned run and marked"),
+            (("--tuning",), (plain,), "tuning run read the tuning cases and no held-out case"),
+        )
+        generation_name = _generation_row()["gen_id"]
+        for flags, rows, expected_detail in cases:
+            with self.subTest(flags=flags):
+                host = EvalHost()
+                response = SliceResult(True, "Fictitious selection report\n", rows)
+                code, stdout, stderr, observed = self.run_results(
+                    host, response, *flags, "--baseline", "off", "--generation", generation_name,
+                )
+                self.assertEqual((code, stderr), (0, ""), stdout)
+                run_line = next(line for line in stdout.splitlines() if line.startswith("run: ok"))
+                self.assertIn(expected_detail, run_line)
+                if flags == ("--unsigned",):
+                    self.assertNotIn("unsigned excluded", run_line)
+                context, = observed["contexts"]
+                self.assertEqual((context.unsigned, context.tuning), ("--unsigned" in flags, "--tuning" in flags))
+                self.assertEqual(context.turn_overrides, command.baselines.BASELINES["off"])
+                self.assertEqual(context.generation.name, generation_name)
+                sql, = (
+                    payload for _, payload in host.calls
+                    if payload is not None and "INSERT INTO eval_runs" in payload
+                )
+                line = next(line for line in sql.splitlines() if line.startswith("\\set overrides "))
+                self.assertEqual(json.loads(read_psql_set(line, "overrides"))[research_qa_slice.RUN_KEY], {
+                    "definition": research_qa_slice.DEFINITION_ID,
+                    **{flag.removeprefix("--"): True for flag in flags},
+                })
+                self.assertEqual(sql.count("INSERT INTO eval_results"), len(rows))
+                if "--unsigned" in flags:
+                    case_binding = next(
+                        line for line in sql.splitlines()
+                        if re.fullmatch(r"\\set result_\d+_case_id " + repr(self.unsigned), line)
+                    )
+                    name = case_binding.split()[1].removesuffix("_case_id") + "_metrics"
+                    metrics = next(line for line in sql.splitlines() if line.startswith(f"\\set {name} "))
+                    self.assertEqual(json.loads(read_psql_set(metrics, name)), {"unsigned": True})
+
+    def test_unsigned_run_stopped_before_first_turn_counts_zero_marked_rows(self) -> None:
+        host = EvalHost()
+        response = SliceResult(False, "Fictitious refusal before the first turn\n", ())
+        code, stdout, stderr, _ = self.run_results(host, response, "--unsigned")
+        self.assertEqual((code, stderr), (1, ""), stdout)
+        self.assertIn("run: ok — 0 active cases evaluated, 1 tuning, 1 held out, 0 unsigned run and marked", stdout)
+        self.assertIn("1 run row, 0 result rows", stdout)
+        self.assertNotIn("unsigned excluded", stdout)
+
+    def assert_registered_runner_selection(self, flag: str, expected: tuple[str, ...]) -> None:
+        host = EvalHost()
+        kwargs = _run_kwargs(host)
+        research = ResearchQAHost(command.baselines.BASELINES["off"])
+        research.production_dir = research.turns_dir = Path(kwargs["rendered_dir"])
+        generation = research.generation
+        host.generation_output = json.dumps({
+            "gen_id": generation.name, "corpus_lockfile": generation.corpus_lockfile, "state": generation.state,
+        }) + "\n"
+        chunk = research.add_chunk(("fictitious/selection-source", "a" * 64, 0, 4))
+        planted = {
+            case_id: {
+                **case,
+                "question": f"Fictitious selection question for {case_id}",
+                "gold": [{"source_id": "fictitious/selection-source", "sha256": "a" * 64, "start": 0, "end": 4}],
+            }
+            for case_id, case in self.loaded.cases_by_id.items()
+        }
+        loaded = replace(self.loaded, cases_by_id=planted, cases_by_file={"fictitious.jsonl": tuple(planted.values())})
+        for _ in expected:
+            research.queue_turn((chunk,), (chunk,))
+
+        command_run = host.run
+
+        def run(argv: list[str] | tuple[str, ...], *, input: str | None = None, **options: Any) -> subprocess.CompletedProcess[str]:
+            if argv[-2].endswith(command.research_door.TURN_PATH) or (
+                input is not None and ("FROM public.chunks" in input or "FROM public.generation_documents" in input)
+            ):
+                return research.run(argv, input=input, **options)
+            return command_run(argv, input=input, **options)
+
+        with (
+            patch.object(host, "run", side_effect=run),
+            patch.object(command, "load_set_with_courts", return_value=evalset.EvalSetLoadResult(loaded=loaded)),
+            patch.object(command.nogpu, "is_no_gpu_host", return_value=False),
+            patch.object(command.research_door, "probe", return_value=None),
+            patch.object(command.engine, "resolve_engine_target", return_value=command.engine.EngineTarget(
+                "fictitious-profile", "fictitious-model", 1000,
+            )),
+        ):
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", self.slice_name, flag, "--baseline", "off"], **kwargs,
+            )
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        self.assertEqual(research.turn_questions(), [planted[case_id]["question"] for case_id in expected])
+        sql, = (payload for _, payload in host.calls if payload is not None and "INSERT INTO eval_results" in payload)
+        bindings: dict[str, str] = {}
+        for line in sql.splitlines():
+            if line.startswith("\\set result_"):
+                name = line.split()[1]
+                bindings[name] = read_psql_set(line, name)
+        metrics = {
+            bindings[f"result_{index}_case_id"]: json.loads(bindings[f"result_{index}_metrics"])
+            for index in range(len(expected))
+        }
+        self.assertEqual(set(metrics), set(expected))
+        if flag == "--unsigned":
+            self.assertIs(metrics[self.unsigned]["unsigned"], True)
+            self.assertNotIn("gold_passages", metrics[self.unsigned])
+            self.assertIn("1 unsigned run and marked", stdout)
+        else:
+            self.assertIn("tuning run read the tuning cases and no held-out case", stdout)
+
+    def test_registered_runner_records_unsigned_and_tuning_runs(self) -> None:
+        for flag, expected in (
+            ("--unsigned", (*sorted((self.counted, self.held_out)), self.unsigned)),
+            ("--tuning", (self.counted,)),
+        ):
+            with self.subTest(flag=flag):
+                self.assert_registered_runner_selection(flag, expected)
+
+    def test_valid_selection_flags_are_reprinted_on_preconditions_refusal(self) -> None:
+        generation_name = _generation_row()["gen_id"]
+        for flag in ("--unsigned", "--tuning"):
+            with self.subTest(flag=flag):
+                host = EvalHost(effective_uid=1)
+                code, stdout, stderr = _invoke([
+                    "eval", "run", "--slice", self.slice_name, flag, "--baseline", "off",
+                    "--generation", generation_name,
+                ], **_run_kwargs(host))
+                self.assertEqual((code, stderr), (1, ""), stdout)
+                match = re.search(r"Fix: Run (?:sudo python3 -m )?gideon (eval run .+), then retry\.", stdout)
+                assert match is not None, stdout
+                retry = build_parser().parse_args(shlex.split(match.group(1)))
+                self.assertEqual((retry.unsigned, retry.tuning), (flag == "--unsigned", flag == "--tuning"))
+                self.assertEqual((retry.slice, retry.baseline, retry.generation), ([self.slice_name], "off", generation_name))
 
 
 class ChallengerPair(unittest.TestCase):

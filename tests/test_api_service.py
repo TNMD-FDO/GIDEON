@@ -7,13 +7,14 @@ import unittest
 from itertools import combinations
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import httpx
 
 from gideon.api import __main__ as api_main
 from gideon.api.app import create_app
 from gideon.api.settings import RecordCoordinates, Settings, load_settings
+from gideon.turn import measures
 from gideon.turn.scope import CourtFileError
 
 API_KEY = "fixture-api-key"
@@ -163,24 +164,36 @@ class ApiService(unittest.TestCase):
             calls.append(request)
             return httpx.Response(200, json={"data": []}, request=request)
 
-        response = self.request(httpx.MockTransport(engine), "GET", "/health")
+        with self.assertNoLogs("gideon.api.request", level="INFO"):
+            response = self.request(httpx.MockTransport(engine), "GET", "/health")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response_body(response), {"status": "ok"})
         self.assertEqual(calls, [])
 
-    def test_models_without_a_key_is_refused_before_the_engine(self) -> None:
+    def test_metrics_is_keyless_unlogged_and_uses_the_prometheus_content_type(self) -> None:
+        engine = Mock(side_effect=AssertionError("A scrape must not call the engine."))
+        with self.assertNoLogs("gideon.api.request", level="INFO"):
+            response = self.request(httpx.MockTransport(engine), "GET", "/metrics")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], measures.CONTENT_TYPE)
+        self.assertTrue(response.text.startswith(f"# HELP {measures.RETRIEVAL_METRIC} "))
+        engine.assert_not_called()
+
+    def test_protected_routes_without_a_key_are_refused_before_the_engine(self) -> None:
         calls: list[httpx.Request] = []
 
         def engine(request: httpx.Request) -> httpx.Response:
             calls.append(request)
             return httpx.Response(200, json={"data": []}, request=request)
 
-        response = self.request(httpx.MockTransport(engine), "GET", "/v1/models")
-
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(response.headers["www-authenticate"], "Bearer")
-        self.assertEqual(response_body(response)["error"]["type"], "invalid_request_error")
+        for method, path in (("GET", "/v1/models"), ("POST", "/v1/chat/completions"), ("POST", "/turn")):
+            with self.subTest(path=path):
+                response = self.request(httpx.MockTransport(engine), method, path)
+                self.assertEqual(response.status_code, 401)
+                self.assertEqual(response.headers["www-authenticate"], "Bearer")
+                self.assertEqual(response_body(response)["error"]["type"], "invalid_request_error")
         self.assertEqual(calls, [])
 
     def test_models_with_a_wrong_key_is_refused_before_the_engine(self) -> None:

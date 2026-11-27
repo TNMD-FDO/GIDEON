@@ -665,13 +665,19 @@ class HeldOutCases(unittest.TestCase):
         self.assertEqual(select_cases(result.loaded, "demo").counted, ("extraction-001", "extraction-002", "extraction-003"))
         self.assertTrue(set(tuning_cases(result.loaded, "demo")).isdisjoint(result.loaded.held_out_ids))
 
-    def test_committed_slices_have_all_counted_cases_available_for_tuning(self) -> None:
+    def test_committed_slices_respect_held_out_ids_when_tuning(self) -> None:
         result = load_set(ROOT / SET_ROOT)
         self.assertTrue(result.ok, result.findings)
-        assert result.loaded is not None
-        for slice_name in result.loaded.slices:
+        loaded = result.loaded
+        assert loaded is not None
+        for slice_name in loaded.slices:
             with self.subTest(slice=slice_name):
-                self.assertEqual(tuning_cases(result.loaded, slice_name), select_cases(result.loaded, slice_name).counted)
+                expected = tuple(
+                    case_id
+                    for case_id in select_cases(loaded, slice_name).counted
+                    if case_id not in loaded.held_out_ids
+                )
+                self.assertEqual(tuning_cases(loaded, slice_name), expected)
 
     def test_tuning_tools_import_tuning_cases_and_never_call_select_cases(self) -> None:
         for relative in TUNING_TOOLS:

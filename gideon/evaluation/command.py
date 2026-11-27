@@ -24,6 +24,7 @@ from gideon.evaluation import (
     record,
     reference,
     research_door,
+    research_qa_slice,
     sampling,
     stacks,
     window,
@@ -87,6 +88,7 @@ NIGHTLY_LOCK_POLL_SECONDS: Final[int] = 60
 _LOAD_FIX: Final[str] = "Correct every listed eval-set finding, then retry."
 _NO_GPU_FIX: Final[str] = "Run the evaluation on a GPU host, then retry."
 _UNSIGNED_RESULT_FIX: Final[str] = "The runner must select through the loader, then retry."
+_TUNING_RESULT_FIX: Final[str] = "The runner must select through the loader's tuning_cases, then retry."
 _WINDOW_START_FIX: Final[str] = "Start the run at the window's opening, then retry."
 _LOSES_FIX: Final[str] = "A change that loses is not adopted; keep the default."
 _PARTIAL_DETAIL: Final[str] = "partial: aborted at the window's end, nothing kept"
@@ -170,6 +172,8 @@ class _Request:
     generation_name: object = None
     assessed_path: str | None = None
     baseline: str | None = None
+    unsigned: bool = False
+    tuning: bool = False
 
     def retry_command(
         self, *, slice_spec: SliceSpec | None = None, flags: str | None = None,
@@ -815,6 +819,57 @@ def _suite_problem(
     return None
 
 
+def _selection_flag_problem(
+    names: tuple[str, ...], mode: _Mode, flags: str, *,
+    unsigned: bool, tuning: bool, supplied_set: bool,
+) -> Problem | None:
+    """Refuse selection flags before a slice or nightly suite starts.
+
+    ``flags`` are the run's baseline, stack, and engine flags. A fix keeps the
+    selection flag and reprints one manual run per slice, so following it never
+    reads a held-out case or an unsigned case the run did not ask for.
+    """
+
+    if not (unsigned or tuning):
+        return None
+    flag = "--unsigned" if unsigned else "--tuning"
+    set_flag = " --set <dir>" if supplied_set else ""
+
+    def manual(selection: str) -> str:
+        return " and ".join(
+            report.command(f"eval run --slice {name}{set_flag}{flags} {selection}")
+            # A slice named twice is printed once, so the fix never runs it twice.
+            for name in dict.fromkeys(names or ("<name>",))
+        )
+
+    slice_names = ", ".join(repr(name) for name in names) or "'<name>'"
+    if unsigned and tuning:
+        return Problem(
+            f"--unsigned and --tuning cannot be combined for slice {slice_names}",
+            f"Run {manual('--unsigned')} or {manual('--tuning')}, then retry.",
+        )
+    denied = next(
+        (name for name in names if name in SLICE_RUNNERS and not SLICE_RUNNERS[name].accepts_selection),
+        None,
+    )
+    if denied is not None:
+        return Problem(
+            f"{flag} is not valid for slice {denied!r}",
+            f"Remove {flag} when running --slice {denied}, then retry.",
+        )
+    if mode.pairs:
+        detail = f"{flag} cannot be combined with --decision for slice {slice_names}"
+    elif mode.kind != _MANUAL_KIND:
+        detail = f"{flag} requires --kind manual for slice {slice_names}"
+    elif len(names) > 1:
+        # Checked here, before the suite rule, whose fix would name a nightly
+        # run that reads every case the flag was given to leave out.
+        detail = f"{flag} runs one slice at a time, not {slice_names}"
+    else:
+        return None
+    return Problem(detail, f"Run {manual(flag)}, then retry.")
+
+
 def _flag_problem(
     request: _Request,
     slice_spec: SliceSpec | None,
@@ -1428,6 +1483,13 @@ def _prepare_on_box(
             return None
         turn_overrides, expected_config_hash, door_facts, door_detail = research
         overrides = {**overrides, "research": door_facts}
+    if slice_spec.accepts_selection:
+        selection_facts: dict[str, object] = {"definition": research_qa_slice.DEFINITION_ID}
+        if request.unsigned:
+            selection_facts["unsigned"] = True
+        if request.tuning:
+            selection_facts["tuning"] = True
+        overrides = {**overrides, research_qa_slice.RUN_KEY: selection_facts}
     record_facts = _on_box_record_facts(request, seams, target.profile_name)
     if isinstance(record_facts, StageResult):
         print_stage(record_facts)
@@ -1702,7 +1764,7 @@ def _record(
             verdict=result.verdict,
             metrics=result.metrics,
             judge=result.judge,
-            provenance_ref=None,
+            provenance_ref=result.provenance_ref,
             latency_ms=result.latency_ms,
         )
         for result in slice_result.results
@@ -1864,6 +1926,8 @@ def _run_body(
         checkout=seams.checkout,
         image=prepared.image,
         generation=prepared.generation,
+        unsigned=request.unsigned,
+        tuning=request.tuning,
     )
     if pass_value.subject_change is not None:
         assert pass_value.prompt_id is not None
@@ -1878,25 +1942,36 @@ def _run_body(
     )
     slice_result = run_result.result
     selection = select_cases(loaded, slice_name)
-    # Any unsigned id, not the slice's alone: a runner that reached past its
-    # own selection must not put the case it found into a gate's count either.
-    unsigned_results = tuple(
-        dict.fromkeys(
-            result.case_id
-            for result in slice_result.results
-            if result.case_id in loaded.unsigned_ids
-        )
-    )
-    if unsigned_results:
+    selected_unsigned = set(selection.unsigned)
+    unsigned_rows = 0
+    invalid_unsigned: dict[str, None] = {}
+    for result in slice_result.results:
+        marked = result.metrics.get("unsigned") is True
+        if result.case_id in loaded.unsigned_ids or marked:
+            if request.unsigned and result.case_id in selected_unsigned and marked:
+                unsigned_rows += 1
+            else:
+                invalid_unsigned[result.case_id] = None
+    if invalid_unsigned:
         print_stage(
             StageResult(
                 "run",
                 False,
-                f"runner returned unsigned cases: {' '.join(unsigned_results)}",
+                f"runner returned unsigned cases: {' '.join(invalid_unsigned)}",
                 _UNSIGNED_RESULT_FIX,
             )
         )
         return _RunBodyOutcome(1)
+    if request.tuning:
+        held_out_results = dict.fromkeys(
+            result.case_id for result in slice_result.results if result.case_id in loaded.held_out_ids
+        )
+        if held_out_results:
+            print_stage(StageResult(
+                "run", False, f"runner returned held-out cases: {' '.join(held_out_results)}",
+                _TUNING_RESULT_FIX,
+            ))
+            return _RunBodyOutcome(1)
     if request.mode.pairs or run_result.partial:
         cases = len({result.case_id for result in slice_result.results})
         run_detail = (
@@ -1919,8 +1994,12 @@ def _run_body(
             f"at {slice_spec.repeats} repeats"
         )
     run_detail += f", {len(selection.tuning)} tuning, {len(selection.held_out)} held out"
-    if selection.takes_signoff:
+    if request.unsigned:
+        run_detail += f", {unsigned_rows} unsigned run and marked"
+    elif selection.takes_signoff:
         run_detail += f", {len(selection.unsigned)} unsigned excluded"
+    if request.tuning:
+        run_detail += "; tuning run read the tuning cases and no held-out case"
     print_stage(StageResult("run", True, run_detail, ""))
     print(slice_result.report, end="")
     if slice_result.report and not slice_result.report.endswith("\n"):
@@ -2040,7 +2119,7 @@ def _challenger_flag_problem(args: argparse.Namespace) -> Problem | None:
         " --force" if getattr(args, "force", False) else ""
     )
     fix = f"Run {report.command(_challenger_retry(flags))}, then retry."
-    for name in ("baseline", "slice", "set", "ranked", "assessed", "decision", "against"):
+    for name in ("baseline", "slice", "set", "ranked", "assessed", "decision", "against", "unsigned", "tuning"):
         value = getattr(args, name, None)
         if value is not None and value is not False:
             return Problem(f"--challenger cannot be combined with --{name}", fix)
@@ -2134,16 +2213,30 @@ def run_eval(
         )
     stack_name = getattr(args, "stack", PRODUCTION_STACK)
     stack_flag = stacks.flag_fragment(stack_name)
-    command_flags = ("" if mode.challenger else stack_flag) + mode.kind_flags
+    mode_flags = ("" if mode.challenger else stack_flag) + mode.kind_flags
     against = getattr(args, "against", None)
+    decision_flags = ""
     if mode.pairs and isinstance(against, str) and against:
-        command_flags += f" --decision --against {against}"
+        decision_flags = f" --decision --against {against}"
     force_flag = " --force" if getattr(args, "force", False) else ""
     generation_name = getattr(args, "generation", None)
     generation_flag = "" if generation_name is None else f" --generation {generation_name}"
-    command_flags += force_flag + generation_flag
+    engine_flags = force_flag + generation_flag
+    unsigned = bool(getattr(args, "unsigned", False))
+    tuning = bool(getattr(args, "tuning", False))
+    selection_flags = (" --unsigned" if unsigned else "") + (" --tuning" if tuning else "")
     baseline = getattr(args, "baseline", None)
     baseline_flag = "" if baseline is None else f" --baseline {baseline}"
+    supplied_root = getattr(args, "set", None)
+    flag_problem = _selection_flag_problem(
+        names, mode, baseline_flag + ("" if mode.challenger else stack_flag) + engine_flags,
+        unsigned=unsigned, tuning=tuning,
+        supplied_set=supplied_root is not None,
+    )
+    if flag_problem is not None:
+        print(refusal(_COMMAND, flag_problem.problem, flag_problem.fix), file=sys.stderr)
+        return 1
+    command_flags = mode_flags + decision_flags + engine_flags + selection_flags
     if baseline is not None:
         baseline_problem = _baseline_flag_problem(args, names, command_flags, baseline_flag)
         if baseline_problem is not None:
@@ -2162,7 +2255,6 @@ def run_eval(
         return 1
     paths = stacks.resolve_stack(stack_name, rendered_dir)
     actual_models = checkout / "models.lock" if models_path is None else models_path
-    supplied_root = getattr(args, "set", None)
     set_root = checkout / SET_ROOT if supplied_root is None else Path(supplied_root)
     selected_court_path = courts.default_courts_path() if court_path is None else Path(court_path)
     request = _Request(
@@ -2179,6 +2271,8 @@ def run_eval(
         assessed_path=getattr(args, "assessed", None),
         generation_name=generation_name,
         baseline=baseline,
+        unsigned=unsigned,
+        tuning=tuning,
         set_root=set_root,
         supplied_set=supplied_root is not None,
         command_flags=command_flags,

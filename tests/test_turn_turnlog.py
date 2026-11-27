@@ -7,13 +7,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import get_args
 from unittest.mock import patch
 
 from gideon import __version__, guardrail
 from gideon.evaluation import evalset
 from gideon.turn import turnlog
-from gideon.turn.passages import Passage
+from gideon.turn.finalset import FinalHit
 
 ROOT = Path(__file__).resolve().parent.parent
 MIGRATION = ROOT / "migrations/0034_turn_log.sql"
@@ -68,7 +69,11 @@ class TurnLog(unittest.TestCase):
                 "reserved": SENTINEL, "controlling_rank": True, "rank": 1, "stage2_score": float("nan"),
             },
         ]
-        self.turn.evidence = [Passage("fixture-chunk", 1, SENTINEL, SENTINEL), Passage(SENTINEL, 2, SENTINEL, SENTINEL)]
+        hit = FinalHit(7, "fixture-chunk", 1, 2, 0.0, "circuit_published", "pin", 0, "fixture-opinion", 3)
+        self.turn.evidence = [hit, SimpleNamespace(
+            number=0, chunk_id=SENTINEL, pool_rank=True, rank=-1, stage2_score=float("nan"), authority_tier=SENTINEL,
+            seat=SENTINEL, object=False, doc_id=SENTINEL, tokens=0, caption=SENTINEL, text=SENTINEL,
+        )]
         self.turn.engine_counters = [
             turnlog.AttemptCounters(True, "length", 12, 7, 3),
             turnlog.AttemptCounters(False, SENTINEL, -1, 4),
@@ -93,15 +98,33 @@ class TurnLog(unittest.TestCase):
             entry, {**entry, "chunk_id": None, "dupe_cluster": None, "authority_tier": None,
                     "reserved": None, "controlling_rank": None, "rank": 1, "stage2_score": None},
         ])
-        self.assertEqual(json.loads(row["evidence"]), [
-            {"number": 1, "chunk_id": entry["chunk_id"], "pool_rank": 1},
-            {"number": 2, "chunk_id": None, "pool_rank": 2},
-        ])
+        self.assertEqual(json.loads(row["evidence"]), [hit.to_wire(), dict.fromkeys(hit.to_wire())])
         self.assertEqual(json.loads(row["engine_counters"]), [
             {"thinking": True, "finish_reason": "length", "prompt_tokens": 12, "completion_tokens": 7, "reasoning_tokens": 3},
             {"thinking": False, "finish_reason": None, "prompt_tokens": None, "completion_tokens": 4, "reasoning_tokens": None},
         ])
         self.assertEqual((row["support_level"], row["gate_report"], row["misses"]), (None, None, None))
+
+    def test_evidence_validates_seat_score_and_token_count(self) -> None:
+        hit = FinalHit(1, "fixture-chunk", 2, 1, 1.0, "state_home", "controlling", None, "fixture-opinion", 3)
+        cases = (
+            ("controlling", 1, 3, "controlling", 1, 3),
+            ("score", None, 1, "score", None, 1),
+            ("fixture-seat", 1.1, -1, None, None, None),
+            (True, True, True, None, None, None),
+            ("pin", -0.1, 2.0, "pin", None, None),
+            ("score", "0.5", "3", "score", None, None),
+        )
+        self.turn.evidence = [SimpleNamespace(**{
+            **hit.to_wire(), "seat": seat, "stage2_score": score, "tokens": tokens,
+        }) for seat, score, tokens, *_ in cases]
+        turnlog.record_turn(self.turn, elapsed_ms=lambda: 17.0)
+        self.dispatch.assert_called_once()
+        _, _, columns, values = self.dispatch.call_args.args
+        evidence = json.loads(dict(zip(columns, values, strict=True))["evidence"])
+        self.assertEqual([(item["seat"], item["stage2_score"], item["tokens"]) for item in evidence], [
+            (seat, score, tokens) for _, _, _, seat, score, tokens in cases
+        ])
 
     def test_controlling_rank_requires_a_positive_integer(self) -> None:
         values = (None, 0, -1, True, 2.0, "2", 2)

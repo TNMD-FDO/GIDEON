@@ -13,8 +13,14 @@ import test_golddrop_slice
 from test_evaluation_assessments import FIXTURE_MODEL, FIXTURE_PROMPT
 from test_evaluation_run import fixture_judge_retry
 from test_guardrails_slice import _DECLINE, SAMPLE_IDS, JudgingDoorHost, _fixture_turns
-from test_judge import false_refusal_content, passage_relevance_content, valid_content
+from test_judge import (
+    engine_output,
+    false_refusal_content,
+    passage_relevance_content,
+    valid_content,
+)
 from test_judgments_slice import FIGURE_KEYS, _coordinate, _fixture, _judgments_host
+from test_research_qa_slice import RETRIEVAL, SYNTHESIS, ResearchQAHost
 
 from gideon import guardrail
 from gideon.evaluation import command, judge
@@ -236,7 +242,23 @@ def _run_registered(
                     if row.assessment == "primary" and row.query_id in ranked
                 }
                 context = replace(context, ranked=ranked)
+        elif slice_name in {RETRIEVAL, SYNTHESIS}:
+            research_host = ResearchQAHost()
+            content, prompt_tokens, completion_tokens, elapsed = default_reading
+            for case_id in select_cases(loaded, slice_name).counted:
+                research_host.queue_gold_turn(loaded.cases_by_id[case_id])
+                if prompt is not None:
+                    research_host.queue_grade(engine_output(
+                        content, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                        elapsed=elapsed,
+                    ))
+            context = replace(
+                research_host.context(), judge_prompt_id=context.judge_prompt_id,
+                judge_retry=context.judge_retry, served_model_name=context.served_model_name,
+            )
         result = spec.runner(loaded, slice_name, context)
+        if slice_name in {RETRIEVAL, SYNTHESIS}:
+            assert result.verdict, result.report
         if CallSurface.TURNS in spec.surfaces and spec.judge_prompt is not None:
             assert all(
                 row.metrics.get("problem") != "seed-unavailable" for row in result.results
@@ -347,7 +369,7 @@ class Invariance(unittest.TestCase):
                 expected_ids = select_cases(first_loaded, slice_name).counted
                 self.assertEqual(first_result.gated_cases, second_result.gated_cases)
                 expected_count: int | None
-                if slice_name in {"extraction", "judgments", "count-gates"}:
+                if slice_name in {"extraction", "judgments", "count-gates", RETRIEVAL, SYNTHESIS}:
                     expected_count = None
                 elif slice_name == "guardrails":
                     expected_count = sum(

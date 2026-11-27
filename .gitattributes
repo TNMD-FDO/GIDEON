@@ -61,6 +61,8 @@ eval/sets/eval-v1/slices/smoke/harvest.ids export-ignore
 eval/sets/eval-v1/slices/build-gates/harvest.ids export-ignore
 eval/sets/eval-v1/slices/judgments/ export-ignore
 eval/sets/eval-v1/slices/gold-drop/ export-ignore
+eval/sets/eval-v1/slices/research-qa-retrieval/harvest.ids export-ignore
+eval/sets/eval-v1/slices/research-qa-synthesis/harvest.ids export-ignore
 eval/reference/extraction/harvest.json export-ignore
 eval/reference/smoke/harvest.json export-ignore
 .github/workflows/pin-watch.yml export-ignore

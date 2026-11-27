@@ -12,15 +12,22 @@ from typing import cast
 from unittest.mock import Mock, patch
 
 import httpx
-from test_turn_endpoint import RETRIEVE, TurnEndpointFixture
+from test_turn_endpoint import (
+    COMPLETIONS_ROUTE,
+    RETRIEVE,
+    TurnEndpointFixture,
+    scrape_metrics,
+)
 from test_turn_legs import turn_fixture
 
+from gideon import guardrail
 from gideon.extraction import ExactObject
-from gideon.turn import endpoint, rerank
+from gideon.turn import endpoint, measures, rerank
 from gideon.turn.config import RETRIEVAL_CONFIG
 from gideon.turn.fusion import PoolEntry
 from gideon.turn.instruction import RETRIEVAL_INSTRUCTION
 from gideon.turn.passages import Passage
+from gideon.turn.prompt import messages
 from gideon.turn.states import State, TurnFailure
 from gideon.turn.turnlog import record_turn
 
@@ -66,13 +73,14 @@ class TurnRerank(TurnEndpointFixture):
 
         self.rerank_transport = httpx.MockTransport(respond)
         depth = 2
-        payload = {**RETRIEVE, "message": message, "overrides": {"stage2_depth": depth}}
+        final_k = 1
+        overrides = {"stage2_depth": depth, "final_k": final_k, "final_reserved_controlling": 0}
+        payload = {**RETRIEVE, "message": message, "overrides": overrides}
         off = self.request(settings=settings, payload={
-            **payload, "overrides": {"stage2_depth": depth, "rerank.stage2": "off"},
+            **payload, "overrides": {**overrides, "rerank.stage2": "off"},
         })
         self.assertEqual(off.status_code, 200, off.text)
         self.assertEqual(requests, [])
-        self.assertNotIn(self.mget_path, self.requests)
         off_body = off.json()
         fused = off_body["pool"]
         self.assertEqual(off_body["provenance"]["rerank"], {
@@ -89,6 +97,8 @@ class TurnRerank(TurnEndpointFixture):
 
         unpinned = fused_ids[len(pinned):]
         selected = [*pinned, *unpinned[:depth]]
+        self.assertEqual([doc["_id"] for doc in json.loads(self.requests[self.mget_path].content)["docs"]], selected)
+        self.assertEqual([hit["chunk_id"] for hit in off_body["final_set"]], [*pinned, *unpinned[:final_k]])
         scores = dict(zip(selected, (0.0, 1.0, 0.5, 0.25, 0.75), strict=True))
         texts = {
             chunk_id: f"Fictitious passage {'very ' * length}long."
@@ -96,8 +106,10 @@ class TurnRerank(TurnEndpointFixture):
         }
         self.upstream_replies[self.mget_path] = {
             "docs": [
-                {**self.passage_doc, "_id": chunk_id, "_source": {"text": text}}
-                for chunk_id, text in texts.items()
+                {**self.passage_doc, "_id": chunk_id, "_source": {
+                    "text": text, "doc_id": f"fixture-opinion-{index}", "token_count": len(text.split()),
+                }}
+                for index, (chunk_id, text) in enumerate(texts.items())
             ],
         }
         indexed = sorted(enumerate(texts.items()), key=lambda item: scores[item[1][0]], reverse=True)
@@ -107,7 +119,8 @@ class TurnRerank(TurnEndpointFixture):
         ]
         self.assertNotEqual([result["index"] for result in results], list(range(len(results))))
 
-        on = self.request(settings=settings, payload=payload, private_values=(message, KEY))
+        private_values = (message, KEY, *texts.values())
+        on = self.request(settings=settings, payload=payload, private_values=private_values)
 
         self.assertEqual(on.status_code, 200, on.text)
         request, = requests
@@ -128,6 +141,10 @@ class TurnRerank(TurnEndpointFixture):
             {**by_id[chunk_id], "stage2_score": scores.get(chunk_id), "rank": rank}
             for rank, chunk_id in enumerate(expected_order, start=1)
         ])
+        best_unpinned = sorted(unpinned[:depth], key=scores.__getitem__, reverse=True)[:final_k]
+        ordered_ids = sorted([*pinned, *best_unpinned], key=scores.__getitem__, reverse=True)
+        self.assertEqual([hit["chunk_id"] for hit in body["final_set"]], ordered_ids)
+        self.assertEqual([hit["stage2_score"] for hit in body["final_set"]], [scores[chunk_id] for chunk_id in ordered_ids])
         self.assertEqual(body["provenance"]["rerank"], {
             "stage1": RETRIEVAL_CONFIG["rerank.stage1"], "stage2": RETRIEVAL_CONFIG["rerank.stage2"], "depth": depth,
             "scored": len(selected), "pinned_scored": len(pinned), "reserved_scored": 0,
@@ -136,13 +153,30 @@ class TurnRerank(TurnEndpointFixture):
         rerank_ms = [timings[stage] for stage in RERANK_TIMINGS]
         self.assertEqual(rerank_ms, [1000.0] * len(RERANK_TIMINGS))
         self.assertEqual(timings["retrieval"], off_body["timings_ms"]["retrieval"])
-        self.assertGreaterEqual(timings["total"], off_body["timings_ms"]["total"] + sum(rerank_ms))
+        self.assertGreaterEqual(
+            timings["total"], off_body["timings_ms"]["total"] - off_body["timings_ms"]["passages"] + sum(rerank_ms),
+        )
         row = self.turn_row()
         self.assertEqual(json.loads(row["pool"]), body["pool"])
         self.assertEqual(json.loads(row["timings_ms"]), timings)
         self.assertEqual(json.loads(row["provenance"])["rerank"], body["provenance"]["rerank"])
 
-    def test_empty_pool_has_zero_rerank_timings_and_sends_no_request(self) -> None:
+        full_payload = {key: value for key, value in payload.items() if key != "stop_after"}
+        full = self.request(settings=settings, payload=full_payload, private_values=private_values)
+        emitted = self.read_events(full)
+        passage_events = [
+            ("passage", {key: hit[key] for key in ("number", "chunk_id", "pool_rank")}) for hit in body["final_set"]
+        ]
+        self.assertEqual(emitted[:len(passage_events)], passage_events)
+        self.assertEqual(emitted[len(passage_events)][1]["retrieval"]["final_set"], body["final_set"])
+        self.assertEqual(json.loads(self.requests[self.mget_path].content), read)
+        (generation_request,) = [request for request in self.engine_requests if request.url.path == COMPLETIONS_ROUTE]
+        self.assertEqual(json.loads(generation_request.content)["messages"], messages(
+            message, [("", texts[chunk_id]) for chunk_id in ordered_ids],
+        ))
+        self.assertEqual(json.loads(self.turn_row()["evidence"]), body["final_set"])
+
+    def test_empty_pool_has_zero_passage_and_rerank_timings_and_sends_no_request(self) -> None:
         settings = replace(
             self.settings, rerank_url="http://fixture-reranker", rerank_key_file=secret(self.settings.embed_key_file.parent),
         )
@@ -154,12 +188,20 @@ class TurnRerank(TurnEndpointFixture):
         respond = Mock()
         self.rerank_transport = httpx.MockTransport(respond)
 
-        response = self.request(settings=settings)
+        for configuration in (settings, self.settings):
+            with self.subTest(reranker=configuration.rerank_url is not None):
+                response = self.request(settings=configuration, scrape=True)
 
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["pool"], [])
-        self.assertEqual([response.json()["timings_ms"][stage] for stage in RERANK_TIMINGS], [0.0] * len(RERANK_TIMINGS))
-        self.assertNotIn(self.mget_path, self.requests)
+                self.assertEqual(response.status_code, 200, response.text)
+                body = response.json()
+                self.assertEqual(body["pool"], [])
+                self.assertEqual(body["final_set"], [])
+                self.assertEqual(json.loads(self.turn_row()["evidence"]), [])
+                for stage in (*RERANK_TIMINGS, "passages"):
+                    self.assertEqual(body["timings_ms"][stage], 0.0)
+                self.assertNotIn(self.mget_path, self.requests)
+                count = f'{measures.THROUGH_RERANK_METRIC}_count{{source="{guardrail.EVAL_SOURCE}"}}'
+                self.assertEqual(self.metrics_after[count], self.metrics_before[count])
         respond.assert_not_called()
 
     def test_passage_text_is_absent_from_turn_outputs_for_valid_and_invalid_rerank_replies(self) -> None:
@@ -244,40 +286,57 @@ class TurnRerank(TurnEndpointFixture):
                 httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture-api") as client,
                 asyncio.TaskGroup() as tasks,
             ):
-                gate: rerank.Gate = app.state.rerank_gate
+                async def assert_gate(in_flight: int, waiting: int, timeouts: int) -> dict[str, float]:
+                    samples = await scrape_metrics(client)
+                    self.assertEqual((
+                        samples[measures.RERANK_IN_FLIGHT_METRIC], samples[measures.RERANK_WAITING_METRIC],
+                        samples[measures.RERANK_QUEUE_TIMEOUTS_METRIC],
+                    ), (in_flight, waiting, timeouts))
+                    return samples
+
                 headers = self.headers(settings)
                 holders = [tasks.create_task(client.post("/turn", json=payload, headers=headers)) for _ in range(seats)]
                 releases = [await calls.get() for _ in holders]
                 for _ in holders:
                     await reads.get()
-                self.assertEqual((gate.in_flight, gate.waiters, gate.timeouts), (seats, 0, 0))
+                await assert_gate(seats, 0, 0)
 
                 expired = tasks.create_task(client.post("/turn", json=payload, headers=headers))
                 await reads.get()
-                self.assertEqual((gate.in_flight, gate.waiters, gate.timeouts), (seats, 1, 0))
+                before = await assert_gate(seats, 1, 0)
                 self.assertTrue(calls.empty())
                 response = await expired
                 self.assertEqual(response.status_code, 503)
                 self.assertEqual(response.json(), TurnFailure(State.RERANK_QUEUE_TIMEOUT, "rerank").to_body())
-                self.assertEqual((gate.in_flight, gate.waiters, gate.timeouts), (seats, 0, 1))
-                timings = json.loads(self.assert_failed_row("rerank_queue_timeout", "rerank")["timings_ms"])
+                after = await assert_gate(seats, 0, 1)
+                row = self.assert_failed_row("rerank_queue_timeout", "rerank")
+                timings = json.loads(row["timings_ms"])
                 self.assertEqual(timings["rerank_passages"], 1000.0)
                 self.assertEqual(timings["rerank_queue"], 1000.0)
                 self.assertNotIn("rerank", timings)
+                source = f'source="{row["source"]}"'
+                failed = f'{measures.TURNS_METRIC}{{{source},outcome="failed",state="{State.RERANK_QUEUE_TIMEOUT}"}}'
+                self.assertEqual(after[failed], after[measures.RERANK_QUEUE_TIMEOUTS_METRIC])
+                retrieval = f"{measures.RETRIEVAL_METRIC}_count{{{source}}}"
+                retrieval_sum = f"{measures.RETRIEVAL_METRIC}_sum{{{source}}}"
+                through_rerank = f"{measures.THROUGH_RERANK_METRIC}_count{{{source}}}"
+                self.assertEqual(after[retrieval] - before[retrieval], 1)
+                self.assertEqual(after[retrieval_sum] - before[retrieval_sum], timings["retrieval"] / 1000)
+                self.assertEqual(after[through_rerank], before[through_rerank])
 
                 waiter = tasks.create_task(client.post("/turn", json=payload, headers=headers))
                 await reads.get()
-                self.assertEqual((gate.in_flight, gate.waiters, gate.timeouts), (seats, 1, 1))
+                await assert_gate(seats, 1, 1)
                 self.assertTrue(calls.empty())
                 releases.pop().set()
                 waiter_release = await calls.get()
-                self.assertEqual((gate.in_flight, gate.waiters, gate.timeouts), (seats, 0, 1))
+                await assert_gate(seats, 0, 1)
                 for release in (*releases, waiter_release):
                     release.set()
                 for turn in (*holders, waiter):
                     reply = await turn
                     self.assertEqual(reply.status_code, 200, reply.text)
-                self.assertEqual((gate.in_flight, gate.waiters, gate.timeouts), (0, 0, 1))
+                await assert_gate(0, 0, 1)
 
         asyncio.run(run())
 
@@ -427,7 +486,8 @@ class RerankGate(unittest.IsolatedAsyncioTestCase):
         ) as client:
             async def call() -> None:
                 async with self.gate.seat(5):
-                    await rerank.score(client, key_file, QUERY, (Passage("fixture-chunk", 1, "", "Fictitious passage."),))
+                    passage = Passage("fixture-chunk", 1, "", "Fictitious passage.", doc_id="fixture-opinion", token_count=3)
+                    await rerank.score(client, key_file, QUERY, (passage,))
 
             bound = 0.02
             with patch.object(rerank, "RERANK_TIMEOUT_SECONDS", bound):
@@ -456,7 +516,10 @@ class RerankClient(unittest.IsolatedAsyncioTestCase):
         self.key_file = secret(Path(self.enterContext(tempfile.TemporaryDirectory())))
         self.reply = turn_fixture("rerank.json")
         self.passages = tuple(
-            Passage(f"fixture-chunk-{item['index']}", rank, "", item["document"]["text"])
+            Passage(
+                f"fixture-chunk-{item['index']}", rank, "", item["document"]["text"],
+                doc_id=f"fixture-opinion-{rank}", token_count=len(item["document"]["text"].split()),
+            )
             for rank, item in enumerate(self.reply["results"], start=1)
         )
 

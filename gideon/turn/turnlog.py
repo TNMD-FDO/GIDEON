@@ -48,12 +48,36 @@ _PRODUCT_INITIALIZER: Final[Path] = Path(__file__).parent.parent / "__init__.py"
 Outcome = Literal["reply", "complete", "truncated", "tripped", "failed", "disconnected"]
 
 
-class _Passage(Protocol):
+class _EvidenceHit(Protocol):
+    @property
+    def number(self) -> int: ...
+
     @property
     def chunk_id(self) -> str: ...
 
     @property
     def pool_rank(self) -> int: ...
+
+    @property
+    def rank(self) -> int: ...
+
+    @property
+    def stage2_score(self) -> float | None: ...
+
+    @property
+    def authority_tier(self) -> str: ...
+
+    @property
+    def seat(self) -> str: ...
+
+    @property
+    def object(self) -> int | None: ...
+
+    @property
+    def doc_id(self) -> str: ...
+
+    @property
+    def tokens(self) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +108,7 @@ class TurnLog:
     timings_ms: dict[str, float | None] = field(default_factory=dict)
     provenance: Mapping[str, object] | None = None
     pool: Sequence[Mapping[str, object]] | None = None
-    evidence: Sequence[_Passage] | None = None
+    evidence: Sequence[_EvidenceHit] | None = None
     generator_repository: str | None = None
     engine_counters: list[AttemptCounters] = field(default_factory=list)
     outcome: Outcome | None = None
@@ -124,41 +148,56 @@ def _nonnegative_int(value: object) -> int | None:
     return value if type(value) is int and value >= 0 else None
 
 
+def _positive_int(value: object) -> int | None:
+    return value if type(value) is int and value > 0 else None
+
+
+def _stage2_score(value: object) -> float | None:
+    return value if (type(value) is int or type(value) is float) and 0 <= value <= 1 else None
+
+
+def _authority_tier(value: object) -> str | None:
+    return value if isinstance(value, str) and value in AUTHORITY_TIERS else None
+
+
 def _pool_entry(entry: Mapping[str, object]) -> dict[str, object]:
     ranks = entry.get("leg_ranks")
     score = entry.get("score")
-    stage2_score = entry.get("stage2_score")
     boilerplate = entry.get("boilerplate")
     pinned = entry.get("pinned")
-    tier = entry.get("authority_tier")
-    controlling_rank = entry.get("controlling_rank")
     return {
         "chunk_id": guardrail.bounded_id(entry.get("chunk_id")),
         "pool_rank": _nonnegative_int(entry.get("pool_rank")),
         "rank": _nonnegative_int(entry.get("rank")),
         "score": score if type(score) in (int, float) else None,
-        "stage2_score": (
-            stage2_score if (type(stage2_score) is int or type(stage2_score) is float) and 0 <= stage2_score <= 1 else None
-        ),
+        "stage2_score": _stage2_score(entry.get("stage2_score")),
         "leg_ranks": {
             leg: rank for leg, rank in ranks.items()
             if guardrail.bounded_id(leg) is not None and _nonnegative_int(rank) is not None
         } if isinstance(ranks, Mapping) else {},
         "dupe_cluster": guardrail.bounded_id(entry.get("dupe_cluster")),
         "boilerplate": boilerplate if isinstance(boilerplate, bool) else None,
-        "authority_tier": tier if isinstance(tier, str) and tier in AUTHORITY_TIERS else None,
+        "authority_tier": _authority_tier(entry.get("authority_tier")),
         "pinned": pinned if isinstance(pinned, bool) else None,
         "object": _nonnegative_int(entry.get("object")),
         "reserved": "controlling" if entry.get("reserved") == "controlling" else None,
-        "controlling_rank": controlling_rank if type(controlling_rank) is int and controlling_rank > 0 else None,
+        "controlling_rank": _positive_int(entry.get("controlling_rank")),
     }
 
 
-def _evidence_entry(number: int, passage: _Passage) -> dict[str, object]:
+def _evidence_entry(hit: _EvidenceHit) -> dict[str, object]:
+    seat = hit.seat
     return {
-        "number": number,
-        "chunk_id": guardrail.bounded_id(passage.chunk_id),
-        "pool_rank": _nonnegative_int(passage.pool_rank),
+        "number": _positive_int(hit.number),
+        "chunk_id": guardrail.bounded_id(hit.chunk_id),
+        "pool_rank": _nonnegative_int(hit.pool_rank),
+        "rank": _nonnegative_int(hit.rank),
+        "stage2_score": _stage2_score(hit.stage2_score),
+        "authority_tier": _authority_tier(hit.authority_tier),
+        "seat": seat if isinstance(seat, str) and seat in ("pin", "controlling", "score") else None,
+        "object": _nonnegative_int(hit.object),
+        "doc_id": guardrail.bounded_id(hit.doc_id),
+        "tokens": _positive_int(hit.tokens),
     }
 
 
@@ -188,10 +227,7 @@ def record_turn(turn: TurnLog, *, elapsed_ms: Callable[[], float]) -> None:
         provenance = dict(turn.provenance) if turn.provenance is not None else None
         objects = _out_of_corpus(provenance.pop("out_of_corpus_objects", None)) if provenance is not None else None
         pool = [_pool_entry(entry) for entry in turn.pool] if turn.pool is not None else None
-        evidence = (
-            [_evidence_entry(number, passage) for number, passage in enumerate(turn.evidence, start=1)]
-            if turn.evidence is not None else None
-        )
+        evidence = [_evidence_entry(hit) for hit in turn.evidence] if turn.evidence is not None else None
         counters = [_attempt_entry(attempt) for attempt in turn.engine_counters] or None
 
         guardrail.dispatch_event_row(

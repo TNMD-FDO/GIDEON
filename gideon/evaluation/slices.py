@@ -1,7 +1,7 @@
 """Registry of evaluation slice runners."""
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Final
 
@@ -14,6 +14,7 @@ from gideon.evaluation import (
     guardrails_slice,
     judge_slice,
     judgments_slice,
+    research_qa_slice,
     segmenter_slice,
     smoke_slice,
 )
@@ -49,7 +50,8 @@ class SliceSpec:
     answers before the turns are spent.
     ``categories`` are the loader's shape-registry keys this runner runs;
     the ``smoke`` and ``build-gates`` composites name none because they run no
-    case themselves. ``turn_calls`` counts the turns this runner drives over a
+    case themselves. Each composite has one owner per category among its parts.
+    ``turn_calls`` counts the turns this runner drives over a
     slice's counted cases when a composite routes to it, excluding the judge's
     readings.
     A part naming the stores surface runs in every ``smoke`` or ``build-gates``
@@ -58,7 +60,8 @@ class SliceSpec:
     ``accepts_assessments`` is whether ``eval run`` admits ``--assessed``, the
     model assessor's grades file, for the slice. ``accepts_ranked`` admits
     ``--ranked``, a ranked-list file that replaces the Research surface for
-    that run.
+    that run. ``accepts_selection`` admits ``--unsigned`` and ``--tuning`` for
+    a slice naming the Research surface.
     A slice names at least one surface on the box, and the ranked-list file
     alone is not one: a set naming nothing on the box is refused at
     construction.
@@ -85,6 +88,7 @@ class SliceSpec:
     decision: DecisionMetric | None = None
     accepts_assessments: bool = False
     accepts_ranked: bool = False
+    accepts_selection: bool = False
 
     def __post_init__(self) -> None:
         if CallSurface.TURNS in self.surfaces and CallSurface.ENGINE not in self.surfaces:
@@ -103,6 +107,10 @@ class SliceSpec:
             raise ValueError(
                 "a slice accepting a ranked file must name the Research surface: "
                 "the file stands in for Research"
+            )
+        if self.accepts_selection and CallSurface.RESEARCH not in self.surfaces:
+            raise ValueError(
+                "a slice accepting --unsigned and --tuning must name the Research surface"
             )
 
     def run_surfaces(self, *, has_ranked: bool) -> frozenset[CallSurface]:
@@ -183,6 +191,41 @@ _JUDGMENTS: Final[SliceSpec] = SliceSpec(
     turn_calls=None,
     accepts_assessments=True,
     accepts_ranked=True,
+)
+_RETRIEVAL_CATEGORY: Final = ("research-qa", "retrieval")
+_RESEARCH_QA_RETRIEVAL: Final[SliceSpec] = SliceSpec(
+    runner=research_qa_slice.runner_for(_RETRIEVAL_CATEGORY),
+    surfaces=frozenset({CallSurface.ENGINE, CallSurface.RESEARCH, CallSurface.STORES}),
+    repeats=1,
+    judge_prompt=None,
+    compares_reference=False,
+    engine_calls=None,
+    gate_pass=(
+        "every counted case returned a terminal answer over the run's generation and "
+        "configuration with a resolved pool, the gold figures reported and never gated"
+    ),
+    gate_fail=(
+        "the run lacked a valid turn for a counted case, a reply named a different "
+        "generation or configuration, or a pool could not be resolved"
+    ),
+    gate_fix=(
+        "Review the failed turns and unresolved pools lines in the report and check the "
+        "Research service logs, then retry."
+    ),
+    categories=frozenset({_RETRIEVAL_CATEGORY}),
+    turn_calls=None,
+    accepts_selection=True,
+)
+_SYNTHESIS_CATEGORY: Final = ("research-qa", "synthesis")
+_RESEARCH_QA_SYNTHESIS: Final[SliceSpec] = replace(
+    _RESEARCH_QA_RETRIEVAL,
+    runner=research_qa_slice.runner_for(_SYNTHESIS_CATEGORY),
+    judge_prompt="synthesis@1",
+    categories=frozenset({_SYNTHESIS_CATEGORY}),
+    gate_pass=(
+        "every counted case returned a terminal answer over the run's generation and "
+        "configuration with a resolved pool, the gold figures and judge grades reported and never gated"
+    ),
 )
 _GOLD_DROP: Final[SliceSpec] = SliceSpec(
     runner=golddrop_slice.run_gold_drop,
@@ -285,6 +328,8 @@ SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
     "segmenter-300": _SEGMENTER,
     "judge-triples": _JUDGE_TRIPLES,
     "judgments": _JUDGMENTS,
+    "research-qa-retrieval": _RESEARCH_QA_RETRIEVAL,
+    "research-qa-synthesis": _RESEARCH_QA_SYNTHESIS,
     "gold-drop": _GOLD_DROP,
     "count-gates": _COUNT_GATES,
     "guardrails": _GUARDRAILS,

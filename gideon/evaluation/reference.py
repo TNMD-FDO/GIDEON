@@ -8,7 +8,8 @@ text, and other facts that can change without changing the release's verdicts.
 
 This module is the one home of the format vocabulary and its path rule.  Its
 reader reports structural findings through the eval-set loader's ``Finding``
-shape, and its comparison only operates on already-loaded values.  A regression
+shape and admits case IDs through the loader's shape and synthetic patterns.
+Its comparison only operates on already-loaded values. A regression
 is a reference ``pass`` that is a current ``fail``; gains, new cases, and
 dropped cases make a reference stale but never make the gate fail.
 Cases gated by a ceiling leave the regression and gain lists because the
@@ -25,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, cast
 
+from gideon.evaluation import synthetic
 from gideon.evaluation.evalset import SHA256_PATTERN, SHAPE_REGISTRY, Finding
 from gideon.host.render.worker import GENERATION_PATTERN
 from gideon.host.sysio import Host, PathLike, RealHost
@@ -74,6 +76,8 @@ _HEADER_FIELDS: Final[tuple[str, ...]] = tuple(
 )
 _CASE_ID_PATTERNS: Final[tuple[re.Pattern[str], ...]] = tuple(
     spec.id_pattern for spec in SHAPE_REGISTRY.values()
+) + tuple(
+    synthetic.synthetic_id_pattern(spec.category) for spec in SHAPE_REGISTRY.values() if spec.synthetic_keys
 )
 _REFERENCE_FIX: Final[str] = "Restore the reference file from the release checkout, then retry."
 SLICE_REPAIR_FIX: Final[str] = (

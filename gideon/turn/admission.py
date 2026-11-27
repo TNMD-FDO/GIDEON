@@ -1,9 +1,9 @@
-"""Validate research turn requests and admit the configured evaluation caller."""
+"""Parse research turn requests, decide the caller's claim, and settle retrieval."""
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Final, cast
+from dataclasses import dataclass, replace
+from typing import Final, Self, cast
 
 from gideon.api.judged import source_for_header
 from gideon.guardrail.writer import EVAL_SOURCE, bounded_id
@@ -14,9 +14,11 @@ _EVAL_FIELDS: Final = ("stop_after", "evidence", "overrides")
 _REQUEST_FIELDS: Final = frozenset(("message", "message_id", "history", "kb_ids", "session_token", *_EVAL_FIELDS))
 # exempt: a starting bound, corrected by the M1 reading.
 _HISTORY_LIMIT: Final = 6
+# exempt: a starting bound, corrected by the M1 reading.
+_KB_IDS_LIMIT: Final = 16
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, repr=False, slots=True)
 class TurnRequest:
     """A request whose fields have passed shape validation."""
 
@@ -28,6 +30,10 @@ class TurnRequest:
     evidence: tuple[str, ...] | None
     overrides: dict[str, object] | None
     message_id: str | None = None
+
+    def without_token(self) -> Self:
+        """Return a copy with the session token removed."""
+        return replace(self, session_token=None)
 
 
 def _string(fields: dict[str, object], key: RequestWord) -> str | None:
@@ -48,11 +54,22 @@ def _strings(fields: dict[str, object], key: RequestWord) -> tuple[str, ...] | N
     return tuple(value)
 
 
+def _kb_ids(fields: dict[str, object]) -> tuple[str, ...] | None:
+    values = _strings(fields, "kb_ids")
+    if values is None:
+        return None
+    ids = tuple(dict.fromkeys(values))
+    if len(ids) > _KB_IDS_LIMIT or any(bounded_id(value) is None for value in ids):
+        raise TurnFailure(State.INVALID_REQUEST, "kb_ids")
+    return ids
+
+
 def _invalid_constant(_: str) -> None:
     raise TurnFailure(State.INVALID_REQUEST)
 
 
-def _parse(body: bytes | bytearray) -> TurnRequest:
+def parse(body: bytes | bytearray) -> TurnRequest:
+    """Validate the shape of the request before deciding its claim."""
     try:
         fields = json.loads(body, parse_constant=_invalid_constant)
     except (ValueError, RecursionError):
@@ -73,23 +90,23 @@ def _parse(body: bytes | bytearray) -> TurnRequest:
     if "overrides" in fields and not isinstance(overrides, dict):
         raise TurnFailure(State.INVALID_REQUEST, "overrides")
     return TurnRequest(
-        message, history, _strings(fields, "kb_ids"), _string(fields, "session_token"),
+        message, history, _kb_ids(fields), _string(fields, "session_token"),
         _string(fields, "stop_after"), _strings(fields, "evidence"), overrides, message_id=message_id,
     )
 
 
-def admit(
-    body: bytes | bytearray, source_values: Sequence[str], eval_identity: str, *, reranker: bool,
-) -> tuple[TurnRequest, RetrievalConfig]:
-    """Validate the shape, the caller, the overrides, and the requested stage in order."""
-
-    request = _parse(body)
-    if source_for_header(source_values, eval_identity) != EVAL_SOURCE:
+def claim(request: TurnRequest, source_values: Sequence[str], eval_identity: str) -> str:
+    """Decide the claim and enforce the eval-only fields."""
+    source = source_for_header(source_values, eval_identity)
+    if source != EVAL_SOURCE:
         for key in _EVAL_FIELDS:
             if getattr(request, key) is not None:
                 raise TurnFailure(State.EVAL_ONLY_FIELD, key)
-        raise TurnFailure(State.CALLER_NOT_ADMITTED)
+    return source
 
+
+def settle(request: TurnRequest, *, reranker: bool) -> RetrievalConfig:
+    """Validate the overrides and requested stage after caller admission."""
     config = effective_config(request.overrides, reranker=reranker)
     if isinstance(config, OverrideRefusal):
         if config.state == State.OVERRIDE_NOT_ALLOWED:
@@ -102,4 +119,4 @@ def admit(
         raise TurnFailure(State.STAGE_NOT_BUILT, "evidence")
     if request.kb_ids:
         raise TurnFailure(State.KB_IDS_NOT_BUILT, "kb_ids")
-    return request, config
+    return config

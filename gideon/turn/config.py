@@ -23,6 +23,13 @@ RetrievalConfig = TypedDict(
         "stage2_depth": int,
         "rerank.semaphore": int,
         "rerank.timeout_s": int,
+        "final_k": int,
+        "hierarchy.mode": Literal["weighted", "lexicographic", "off"],
+        "hierarchy.weights": Mapping[str, float],
+        "final_reserved_controlling": int,
+        "per_document_cap": int,
+        "per_hit_chunks": int,
+        "context_budget_tokens": int,
     },
 )
 
@@ -43,9 +50,27 @@ RETRIEVAL_CONFIG: Final[Mapping[str, object]] = MappingProxyType({
     "stage2_depth": 40,  # E22 corrects the unpinned depth.
     "rerank.semaphore": 4,  # The service-wide bound on calls in flight, corrected by the M3 reading.
     "rerank.timeout_s": 15,  # The queue wait a turn accepts, corrected by the M3 reading.
+    "final_k": 20,  # E22 and E25 correct the unpinned depth of the final set.
+    "hierarchy.mode": "weighted",  # E23 compares weighted and lexicographic order.
+    "hierarchy.weights": MappingProxyType({  # E23's starting weights, in AUTHORITY_TIERS order.
+        "scotus": 1.0,
+        "circuit_published": 0.92,
+        "circuit_unpublished": 0.70,
+        "district_home": 0.60,
+        "state_home": 0.60,
+        "persuasive": 0.35,
+        "authority": 1.0,
+        "matter": 1.0,
+    }),
+    "final_reserved_controlling": 5,  # E23 corrects the reserved seats.
+    "per_document_cap": 3,  # E24 corrects the cap.
+    "per_hit_chunks": 3,  # E12 governs when neighbour expansion is enabled.
+    "context_budget_tokens": 40_000,  # E25 corrects the retrieved-token budget.
 })
-# The largest depth an override may ask of a leg, the pool, or stage 2.
+# The largest depth an override may ask of a leg, the pool, stage 2, or the final set.
 _HARD_CAP: Final = 500
+# The widest budget an override may ask: E25's widest arm.
+_BUDGET_CEILING: Final = 80_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +83,9 @@ class OverrideRefusal:
 
 def _valid_override(key: str, value: object, *, reranker: bool) -> bool:
     match key:
-        case "leg_limit" | "pool_cap" | "reservations.exact_object" | "reservations.controlling" | "stage2_depth":
+        case (
+            "leg_limit" | "pool_cap" | "reservations.exact_object" | "reservations.controlling" | "stage2_depth" | "final_k"
+        ):
             return type(value) is int and 0 < value <= _HARD_CAP
         case "rrf.k":
             return type(value) is int and value > 0
@@ -70,10 +97,22 @@ def _valid_override(key: str, value: object, *, reranker: bool) -> bool:
             return (type(value) is int or type(value) is float) and 0 <= value <= 1
         case "query_plan" | "rerank.stage1":
             return isinstance(value, str) and value == "off"
-        case "rerank.semaphore":
+        case "rerank.semaphore" | "per_hit_chunks":
             return type(value) is int and value == RETRIEVAL_CONFIG[key]
         case "rerank.timeout_s":
             return type(value) is int and 1 <= value <= 60
+        case "hierarchy.mode":
+            return isinstance(value, str) and value in ("weighted", "lexicographic", "off")
+        case "hierarchy.weights":
+            release_weights = cast(Mapping[str, float], RETRIEVAL_CONFIG[key])
+            return (
+                isinstance(value, Mapping) and value.keys() == release_weights.keys()
+                and all((type(weight) is int or type(weight) is float) and 0 <= weight <= 1 for weight in value.values())
+            )
+        case "final_reserved_controlling" | "per_document_cap":
+            return type(value) is int and 0 <= value <= _HARD_CAP
+        case "context_budget_tokens":
+            return type(value) is int and 0 < value <= _BUDGET_CEILING
         case _:
             return False
 
@@ -93,11 +132,23 @@ def effective_config(
             return OverrideRefusal(key, "override_invalid")
         # One spelling per weight, so 1 and 1.0, or 0 and -0.0, hash alike.
         config[key] = float(cast(float, value)) + 0.0 if key == "boilerplate_weight" else value
-    return cast(RetrievalConfig, config)
+    effective = cast(RetrievalConfig, config)
+    if effective["final_reserved_controlling"] > effective["final_k"]:
+        return OverrideRefusal("final_reserved_controlling", "override_invalid")
+    weights = effective["hierarchy.weights"]
+    release_weights = cast(Mapping[str, float], RETRIEVAL_CONFIG["hierarchy.weights"])
+    effective["hierarchy.weights"] = MappingProxyType({tier: float(weights[tier]) + 0.0 for tier in release_weights})
+    return effective
+
+
+def _mapping_value(value: object) -> dict[object, object]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    raise TypeError(f"{type(value).__name__} is not a JSON value")
 
 
 def config_hash(config: Mapping[str, object]) -> str:
-    """Hash the configuration's compact, sorted-key JSON encoding."""
+    """Hash the configuration's compact, sorted-key JSON encoding, nested mappings included."""
 
-    encoded = json.dumps(dict(config), sort_keys=True, separators=(",", ":"), allow_nan=False)
+    encoded = json.dumps(dict(config), default=_mapping_value, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

@@ -9,6 +9,7 @@ AuthorityTier = Literal[
 ]
 HitSource = Literal["caselaw", "authorities", "matter"]
 AUTHORITY_TIERS: Final[tuple[str, ...]] = get_args(AuthorityTier)
+CONTROLLING_TIERS: Final = frozenset(AUTHORITY_TIERS) - {"persuasive", "matter"}
 # Held equal to the worker's vocabulary by the tier test, across the service boundary.
 PRECEDENTIAL_VALUES: Final = ("published", "unpublished", "unknown")
 

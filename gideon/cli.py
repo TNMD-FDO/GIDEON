@@ -506,6 +506,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="run through /turn with each model-driven stage in its off setting",
     )
     eval_run.add_argument(
+        "--unsigned",
+        action="store_true",
+        help="also run the slice's unsigned cases, marked and counted in no gate",
+    )
+    eval_run.add_argument(
+        "--tuning",
+        action="store_true",
+        help="run the tuning cases alone; a held-out case is never read",
+    )
+    eval_run.add_argument(
         "--assessed",
         metavar="FILE",
         help="model assessor's grades file for the judgments report",

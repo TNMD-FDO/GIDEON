@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from gideon.evaluation.rankmetrics import Coordinates
 from gideon.host.sysio import Host, PathLike
@@ -56,6 +57,7 @@ class CaseResult:
     metrics: Mapping[str, JSONValue]
     judge: Mapping[str, JSONValue] | None = None
     latency_ms: float | None = None
+    provenance_ref: str | None = None
 
     def __repr__(self) -> str:
         """Keep the judge's reason out of diagnostic representations.
@@ -70,7 +72,8 @@ class CaseResult:
             "CaseResult("
             f"case_id={self.case_id!r}, repeat={self.repeat!r}, "
             f"verdict={self.verdict!r}, metrics={self.metrics!r}, "
-            f"judge={judge}, latency_ms={self.latency_ms!r})"
+            f"judge={judge}, latency_ms={self.latency_ms!r}, "
+            f"provenance_ref={self.provenance_ref!r})"
         )
 
 
@@ -126,6 +129,9 @@ class RunContext:
     deadline it raises ``window.WindowOverrun``, so no turn starts after the
     window's end. The command also calls it around every runner call, which
     bounds a runner that never calls it; the default is a no-op.
+    ``unsigned`` opts in to unsigned cases and ``tuning`` selects tuning cases.
+    Runners that read neither flag are unchanged. ``message_id_factory`` mints
+    a message id per call, a random UUID as text by default.
     """
 
     host: Host
@@ -145,3 +151,6 @@ class RunContext:
     generation: GenerationAccess | None = None
     turn_overrides: Mapping[str, JSONValue] | None = field(default=None, kw_only=True)
     expected_config_hash: str | None = field(default=None, kw_only=True)
+    unsigned: bool = field(default=False, kw_only=True)
+    tuning: bool = field(default=False, kw_only=True)
+    message_id_factory: Callable[[], str] = field(default=lambda: str(uuid4()), kw_only=True)

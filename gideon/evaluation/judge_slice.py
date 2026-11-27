@@ -31,7 +31,9 @@ def _figure(value: int | float | None) -> str:
     return "unknown" if value is None else str(value)
 
 
-def _progress_line(case_id: str, repeat: int, grading: judge.Grading) -> str:
+def progress_line(case_id: str, repeat: int, grading: judge.Grading) -> str:
+    """Render a grading's outcome and figures without its reason text."""
+
     if grading.verdict is None:
         assert grading.failure is not None
         outcome = grading.failure.code
@@ -167,7 +169,7 @@ def run_judge_triples(eval_set: LoadedSet, slice_name: str, context: RunContext)
                     latency_ms=latency_ms,
                 )
             )
-            context.progress(_progress_line(case_id, repeat, grading))
+            context.progress(progress_line(case_id, repeat, grading))
 
     results = tuple(case_results)
     passed, report, gated_cases = _report(case_ids, bands, results, context.repeats)

@@ -18,7 +18,7 @@ GIDEON is a public-domain work of the United States government, so any office ma
 
 ## Status
 
-GIDEON is pre-release: it installs, runs the general-purpose assistant, backs up, upgrades, and holds an indexed case-law corpus of the Supreme Court and the Sixth Circuit on its first server, but no staff use it yet. The legal research that will search that corpus is partly built and answers only the project's own evaluation, and another office cannot install until `v1.0.0` publishes the release images, while this tree is `v0.4.3`. [`CHANGELOG.md`](CHANGELOG.md) records what each release changed.
+GIDEON is pre-release: it installs, runs the general-purpose assistant, backs up, upgrades, and holds an indexed case-law corpus of the Supreme Court and the Sixth Circuit on its first server, but no staff use it yet. The legal research that will search that corpus is partly built and answers only the project's own evaluation, and another office cannot install until `v1.0.0` publishes the release images, while this tree is `v0.4.4`. [`CHANGELOG.md`](CHANGELOG.md) records what each release changed.
 
 ## Install
 

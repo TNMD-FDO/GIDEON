@@ -1,4 +1,4 @@
-"""Cut the fused pool and read passage text from the pinned lexical index."""
+"""Read passages and chunk metadata from the pinned lexical index."""
 
 import asyncio
 from collections.abc import Sequence
@@ -9,11 +9,9 @@ from typing import Final
 
 import httpx
 
-from gideon.turn.fusion import FusionResult, PoolEntry
+from gideon.turn.fusion import PoolEntry
 from gideon.turn.states import StageWord, State, TurnFailure
 
-# E25 starts with this pool depth. The final set replaces the cut.
-TRACER_CUT: Final = 20
 # exempt: a starting bound, corrected by the M1 reading.
 PASSAGES_TIMEOUT_SECONDS: Final = 2.0
 
@@ -26,12 +24,8 @@ class Passage:
     pool_rank: int
     caption: str = field(repr=False)
     text: str = field(repr=False)
-
-
-def cut(fusion: FusionResult) -> tuple[PoolEntry, ...]:
-    """Keep the head of the pool in its existing rank order."""
-
-    return fusion.entries[:TRACER_CUT]
+    doc_id: str
+    token_count: int
 
 
 def _parse_reply(reply: object, entries: Sequence[PoolEntry], word: StageWord) -> tuple[Passage, ...]:
@@ -53,9 +47,13 @@ def _parse_reply(reply: object, entries: Sequence[PoolEntry], word: StageWord) -
         text = source.get("text")
         # Older serving copies can lack captions because they predate the case name field.
         caption = source.get("caption", "")
-        if not isinstance(text, str) or not text or not isinstance(caption, str):
+        doc_id, token_count = source.get("doc_id"), source.get("token_count")
+        if (
+            not isinstance(text, str) or not text or not isinstance(caption, str)
+            or not isinstance(doc_id, str) or not doc_id or type(token_count) is not int or token_count <= 0
+        ):
             raise TurnFailure(State.STORE_REPLY_INVALID, word)
-        passages[chunk_id] = Passage(chunk_id, ranks[chunk_id], caption, text)
+        passages[chunk_id] = Passage(chunk_id, ranks[chunk_id], caption, text, doc_id=doc_id, token_count=token_count)
 
     return tuple(passages[entry.chunk_id] for entry in entries)
 
@@ -69,7 +67,7 @@ async def fetch(
     if not entries:
         return ()
 
-    body = {"docs": [{"_id": entry.chunk_id, "_source": ["text", "caption"]} for entry in entries]}
+    body = {"docs": [{"_id": entry.chunk_id, "_source": ["text", "caption", "doc_id", "token_count"]} for entry in entries]}
     try:
         password = password_file.read_text(encoding="utf-8").strip()
         if not password:

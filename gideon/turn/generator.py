@@ -4,6 +4,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
+from gideon.turn.research import RESEARCH_CONFIG
+
 
 @dataclass(frozen=True, slots=True)
 class GeneratorSampling:
@@ -22,8 +24,6 @@ GENERATOR_SAMPLING: Final[Mapping[str, GeneratorSampling]] = {
         fields={"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0},
     ),
 }
-# A starting value E30 corrects: room for the reasoning and the answer in one stream.
-RESEARCH_MAX_TOKENS: Final = 16_384
 
 
 def sampling_for(repository: str) -> GeneratorSampling | None:
@@ -36,10 +36,13 @@ def request_body(
 ) -> dict[str, object]:
     """Build the request with the model's defaults and an optional thinking-off switch."""
 
+    if RESEARCH_CONFIG["tag_grammar"] != "off":
+        raise ValueError("unsupported tag_grammar")
+
     body: dict[str, object] = {
         "model": served_model_name,
         "messages": [dict(message) for message in messages],
-        "max_tokens": RESEARCH_MAX_TOKENS,
+        "max_tokens": RESEARCH_CONFIG["max_tokens"],
         **sampling.fields,
         "stream": True,
         "stream_options": {"include_usage": True, "continuous_usage_stats": True},

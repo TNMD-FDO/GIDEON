@@ -19,6 +19,13 @@ FILE_SOURCE_PARENTS = (
     REPO_ROOT / "gideon/host/__init__.py",
     REPO_ROOT / "gideon/host/index/__init__.py",
 )
+SHARED_TURN_SOURCES = (
+    "gideon/turn/__init__.py", "gideon/turn/instruction.py", "gideon/turn/config.py",
+    "gideon/turn/fusion.py", "gideon/turn/tier.py", "gideon/turn/states.py", "gideon/host/index/serving.py",
+    "gideon/api/errors.py", "gideon/turn/events.py", "gideon/turn/prompt.py",
+    "gideon/turn/generator.py", "gideon/turn/research.py", "gideon/turn/history.py", "gideon/turn/finalset.py",
+    "gideon/turn/measures.py",
+)
 ALLOWED_DEPENDENCIES = frozenset(
     {"starlette", "uvicorn", "httpx", "anyio", "procrastinate", "lxml", "eyecite", "tiktoken",
      guardrail.TRIP_DRIVER_MODULE}
@@ -177,6 +184,30 @@ def import_violations(path: Path, source: str, modules: frozenset[str]) -> list[
     return problems
 
 
+def shared_turn_import_violations(path: Path, source: str) -> list[str]:
+    """Check that shared turn dependencies stay within the standard-library closure."""
+
+    modules = {module_name(REPO_ROOT / relative) for relative in SHARED_TURN_SOURCES}
+    problems: list[str] = []
+    for node, _ in _imports(ast.parse(source, filename=str(path))):
+        if isinstance(node, ast.Import):
+            targets = [alias.name for alias in node.names]
+        else:
+            base = _relative_base(node, path)
+            # A package import can name a submodule, so check each target in that form.
+            targets = (
+                [f"{base}.{alias.name}" for alias in node.names]
+                if any(name.startswith(f"{base}.") for name in modules) else [base]
+            )
+        for name in targets:
+            if name not in modules and name.partition(".")[0] not in sys.stdlib_module_names:
+                problems.append(
+                    f"{_location(path, node)}: `{name}` is outside the shared turn dependencies. "
+                    "Fix: import the standard library or a listed module."
+                )
+    return problems
+
+
 def initializer_violations(path: Path, source: str, *, version_required: bool = True) -> list[str]:
     """Return violations of the inert parent-package initializer contract."""
 
@@ -239,25 +270,23 @@ class ServiceImportBoundary(unittest.TestCase):
         self.assertEqual(import_violations(path, source, modules), [])
 
     def test_shared_turn_modules_only_use_standard_library_dependencies(self) -> None:
-        for relative in (
-            "gideon/turn/__init__.py", "gideon/turn/instruction.py", "gideon/turn/config.py",
-            "gideon/turn/fusion.py", "gideon/turn/tier.py", "gideon/turn/states.py", "gideon/host/index/serving.py",
-            "gideon/api/errors.py", "gideon/turn/events.py", "gideon/turn/prompt.py",
-            "gideon/turn/generator.py",
-        ):
+        for relative in SHARED_TURN_SOURCES:
             path = REPO_ROOT / relative
             with self.subTest(path=relative):
-                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-                for node, _ in _imports(tree):
-                    names = (
-                        [alias.name for alias in node.names] if isinstance(node, ast.Import)
-                        else [_relative_base(node, path)]
-                    )
-                    for name in names:
-                        # States uses the shared error builder, whose imports are checked here too.
-                        if relative == "gideon/turn/states.py" and name == "gideon.api.errors":
-                            continue
-                        self.assertIn(name.partition(".")[0], sys.stdlib_module_names, _location(path, node))
+                self.assertEqual(shared_turn_import_violations(path, path.read_text(encoding="utf-8")), [])
+
+    def test_shared_turn_imports_require_each_gideon_module_to_be_listed(self) -> None:
+        path = REPO_ROOT / "gideon/turn/research.py"
+        self.assertEqual(shared_turn_import_violations(path, "from . import config"), [])
+        for statement in (
+            "import gideon.turn.endpoint",
+            "from gideon.turn.endpoint import TurnEndpoint",
+            "from gideon.turn import endpoint",
+            "from . import config, endpoint",
+        ):
+            with self.subTest(statement=statement):
+                error, = shared_turn_import_violations(path, statement)
+                self.assertIn("`gideon.turn.endpoint` is outside the shared turn dependencies", error)
 
     def test_only_the_image_only_adapter_may_be_imported_where_used(self) -> None:
         self.assertEqual(DEFERRED_MODULES, {"gideon.casecite.adapter"})

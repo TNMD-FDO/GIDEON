@@ -25,8 +25,9 @@ is the split's unit, so that commit removes every listed member of the family,
 a superseded predecessor among them, and the family then loads as tuning; a
 removal that leaves a member listed is refused.
 
-`eval run` runs both halves and its `run` row counts each. A list beside a case
-file that leaves at the export boundary leaves with it. The first lists are
+By default, `eval run` runs both halves and its `run` row counts each.
+For a Research QA slice, `--tuning` runs the tuning half alone. A list beside
+a case file that leaves at the export boundary leaves with it. The first lists are
 written by the synthetic intake: half of each batch's distinct clusters,
 rounded down, under the batch's seed, with existing held-out families forced
 in and chosen families propagated across files. Earlier cases were tuned on
@@ -75,6 +76,20 @@ the research questions: an id list resolving to no case is a loader finding.
 In an exported tree the registry holds a `gold-drop` slice the set does not,
 and `eval run` answers it as any unknown slice.
 
+The `research-qa-retrieval` slice has two lists. `harvest.ids` selects the
+retrieval questions in `../research-qa/harvest.jsonl` and leaves at the
+export boundary with that file. `synthetic.ids` selects the cases in
+`../research-qa/synthetic-retrieval.jsonl` and stays in the export. Each list
+changes only by append, with a superseding case appended after its predecessor.
+The held-out split comes from each case file's `<name>.held-out.ids` sidecar.
+
+The `research-qa-synthesis` slice has two lists. `harvest.ids` selects the
+synthesis questions in `../research-qa/harvest.jsonl` and leaves at the
+export boundary with that file. `synthetic.ids` selects the cases in
+`../research-qa/synthetic-synthesis.jsonl` and stays in the export. Each list
+changes only by append, with a superseding case appended after its predecessor.
+The held-out split comes from each case file's `<name>.held-out.ids` sidecar.
+
 The `smoke` slice is the push gate's, with one list per source list. Its
 guardrails lists name the frontend sample's six cases, each run at the service
 door and through the frontend. Its two extraction lists mirror `extraction`'s
@@ -82,9 +97,10 @@ and change with them. Every list changes only by append; a successor to a
 superseded sample case is appended to the lists and named in the runner's
 `FRONTEND_SAMPLE` constant in `gideon/evaluation/guardrails_slice.py` in the
 same release. The `gold-drop` part has no list: it runs in every smoke over
-the sibling's sample generation, and its verdict is smoke's. The research-qa
-lists join at sign-off intake. `harvest.ids` leaves at the export boundary
-with its cases.
+the sibling's sample generation, and its verdict is smoke's. When the research-qa
+lists join at sign-off intake, the Research QA runners take ownership of their
+categories in `smoke` from `gold-drop`. `harvest.ids` leaves at the export
+boundary with its cases.
 
 The `segmenter-300` slice has one list, `segmenter-300/sample.ids`, with every
 drawn case id, a superseding case's appended after it. A case without a checked

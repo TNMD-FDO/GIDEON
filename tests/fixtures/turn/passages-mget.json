@@ -9,7 +9,9 @@
       "found": true,
       "_source": {
         "caption": "Invented v. Caption, 1 F.4th 1",
-        "text": "An invented passage standing in for the serving copy's text."
+        "text": "An invented passage standing in for the serving copy's text.",
+        "doc_id": "fixture-caption-opinion",
+        "token_count": 13
       }
     },
     {
@@ -21,7 +23,9 @@
       "found": true,
       "_source": {
         "caption": "Invented v. Caption, 1 F.4th 1",
-        "text": "An invented passage standing in for the serving copy's text."
+        "text": "Another invented passage from the same opinion.",
+        "doc_id": "fixture-caption-opinion",
+        "token_count": 9
       }
     },
     {
@@ -33,7 +37,9 @@
       "found": true,
       "_source": {
         "caption": "Invented v. Caption, 1 F.4th 1",
-        "text": "An invented passage standing in for the serving copy's text."
+        "text": "An invented passage from a different opinion.",
+        "doc_id": "fixture-other-opinion",
+        "token_count": 10
       }
     },
     {

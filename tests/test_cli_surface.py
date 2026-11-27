@@ -298,6 +298,8 @@ class Help(unittest.TestCase):
             f"--baseline {choices} run through /turn with each model-driven stage in its off setting",
             run_help,
         )
+        self.assertIn("--unsigned also run the slice's unsigned cases, marked and counted in no gate", run_help)
+        self.assertIn("--tuning run the tuning cases alone; a held-out case is never read", run_help)
         self.assertIn(
             "--generation NAME index generation to score. With /turn, NAME must be the selected stack's live generation",
             run_help,

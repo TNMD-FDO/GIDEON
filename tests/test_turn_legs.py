@@ -11,7 +11,7 @@ import httpx
 
 from gideon.turn import dense, lexical
 from gideon.turn.fusion import LegHit
-from gideon.turn.provenance import RequestSpan, TurnTimings
+from gideon.turn.provenance import RequestSpan, TurnTimings, retrieval_milliseconds
 from gideon.turn.states import State, TurnFailure
 
 FIXTURES = Path(__file__).with_name("fixtures") / "turn"
@@ -238,6 +238,7 @@ class Legs(unittest.TestCase):
         vector = self.reply_transport(self.vector_reply)
         text = self.reply_transport(turn_fixture("lexical-collapsed.json"))
         rerank_timings = {"rerank_passages": 0.25, "rerank_queue": 1.5, "rerank": 0.5}
+        fusion_seconds = 0.25
         total = 12 + sum(rerank_timings.values())
         for dense_ticks, lexical_ticks, controlling_ticks, objects_span, expected in (
             ((5, 9), (3, 7), (6, 8), None, 6250),
@@ -254,15 +255,19 @@ class Legs(unittest.TestCase):
                 metrics = TurnTimings(
                     record=1, extraction=0.75, embedding=5,
                     dense=dense_span, lexical=lexical_span, controlling=controlling_span, objects=objects_span,
-                    fusion=0.25, rerank_passages=rerank_timings["rerank_passages"],
-                    rerank_queue=rerank_timings["rerank_queue"], rerank=rerank_timings["rerank"], total=total,
+                    fusion=fusion_seconds, rerank_passages=rerank_timings["rerank_passages"],
+                    rerank_queue=rerank_timings["rerank_queue"], rerank=rerank_timings["rerank"], passages=0.0, total=total,
                 ).to_milliseconds()
                 self.assertEqual(metrics["dense"], (dense_ticks[1] - dense_ticks[0]) * 1000)
                 self.assertEqual(metrics["lexical"], (lexical_ticks[1] - lexical_ticks[0]) * 1000)
                 self.assertEqual(metrics["controlling"], (controlling_ticks[1] - controlling_ticks[0]) * 1000)
                 self.assertEqual(metrics["objects"], 0 if objects_span is None else objects_span.seconds * 1000)
                 self.assertEqual(metrics["extraction"], 750)
-                self.assertEqual(metrics["retrieval"], expected)
+                self.assertEqual(
+                    retrieval_milliseconds((dense_span, controlling_span, lexical_span, objects_span), fusion_seconds),
+                    expected,
+                )
                 self.assertEqual(metrics["total"], total * 1000)
                 for stage, seconds in rerank_timings.items():
                     self.assertEqual(metrics[stage], seconds * 1000)
+                self.assertEqual(metrics["passages"], 0.0)

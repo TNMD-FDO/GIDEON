@@ -1,0 +1,97 @@
+{
+  "history": [
+    {
+      "role": "user",
+      "text": "In these fictitious harbor cases, when did the board have to post notice? Keep my [1] marker as typed."
+    },
+    {
+      "role": "assistant",
+      "text": "The notice rule begins with Kestrel v. Lantern, 912 F.3d 386, 397 (6th Cir. 2019) (en banc) [3]. Later applications follow Kestrel, 912 F.3d at 398 [3]. The timing rule appears in Kestrel at 399 [SRC:3]. The same rule applies to a closed pier, Id. at 400 [3]. The exception is discussed in Kestrel, supra, at 401 [3]. The rule comes from Kestrel, supra.\n\nMaple v. Beacon, 45 F.4th 100, 112 (9th Cir. 2022) (Lee, J., dissenting) [persuasive] [7]. Tern v. Quarry, 500 U.S. 1, 5 (1991) (syllabus — not the opinion of the Court) [12]. Marsh v. Copper, 300 F.3d 10 (6th Cir. 2002) (section not identified) [9]. Heron v. Alder, 12 F. App'x 300 (6th Cir. 2001) [unpublished] [14].\n\nOsprey v. Flint, 371 U.S. 471, 485–86 (1963) [4]. The fuller account appears in Osprey, 371 U.S. at 485–86, 489, 491 [4].\n\nThe example also references 18 U.S.C. § 3583(e)(3) (2024 ed.) [2], USSG § 2B1.1(b)(1) (Nov. 2024) [5], and Ex. 14 at 3 (Bates FICT-001234) [matter] [17].\n\nUnder Osprey, 371 U.S. at 487–88, 14 months elapsed."
+    },
+    {
+      "role": "user",
+      "text": "Did the fictitious notice rule also apply at night?"
+    }
+  ],
+  "name_only": "The notice rule begins with Kestrel v. Lantern (6th Cir. 2019) (en banc). Later applications follow Kestrel. The timing rule appears in Kestrel. The same rule applies to a closed pier. The exception is discussed in Kestrel. The rule comes from Kestrel.\n\nMaple v. Beacon (9th Cir. 2022) (Lee, J., dissenting) [persuasive]. Tern v. Quarry (1991) (syllabus — not the opinion of the Court). Marsh v. Copper (6th Cir. 2002) (section not identified). Heron v. Alder (6th Cir. 2001) [unpublished].\n\nOsprey v. Flint (1963). The fuller account appears in Osprey.\n\nThe example also references 18 U.S.C. § 3583(e)(3) (2024 ed.), USSG § 2B1.1(b)(1) (Nov. 2024), and Ex. 14 at 3 (Bates FICT-001234) [matter].\n\nUnder Osprey, 14 months elapsed.",
+  "hits": [
+    {
+      "number": 1,
+      "case_name": "Osprey v. Flint",
+      "court": "U.S. Supreme Court",
+      "year": 1963,
+      "authority_tier": "scotus",
+      "section_type": "majority",
+      "text": "The harbor board must post notice before closing a pier to the public."
+    },
+    {
+      "number": 2,
+      "case_name": "Kestrel v. Lantern",
+      "court": "6th Cir.",
+      "year": 2019,
+      "authority_tier": "circuit_published",
+      "section_type": "majority",
+      "text": "The opinion discusses Tenn. Code Ann. § 79-42-900. Night closures were subject to the same notice rule."
+    },
+    {
+      "number": 3,
+      "case_name": "Spruce v. Bayfront",
+      "court": "6th Cir.",
+      "year": 2022,
+      "authority_tier": "circuit_published",
+      "section_type": "dissent",
+      "text": "I would excuse notice when a storm makes posting impossible."
+    }
+  ],
+  "provenance": {
+    "lockfiles": [
+      "corpus-2099-01-01",
+      "corpus-2099-02-01"
+    ],
+    "plan_mode": "off",
+    "filter_lines": [],
+    "out_of_corpus_objects": [
+      {
+        "index": 0,
+        "object_type": "state_code",
+        "resolved": "unresolved_in_scope",
+        "has_citing_passage": true
+      },
+      {
+        "index": 1,
+        "object_type": "case_cite",
+        "resolved": "unresolved_in_scope",
+        "has_citing_passage": false
+      }
+    ],
+    "out_of_corpus_courts": [
+      {
+        "court_id": "ca1",
+        "name": "Court of Appeals for the First Circuit"
+      }
+    ]
+  },
+  "question": "In the fictitious harbor dispute, what did the First and Sixth Circuits say about notice under Tenn. Code Ann. § 79-42-900 and 777 U.S. 901?",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are Legal. Use the retrieved passages in this turn as your only sources. Use earlier messages to understand the conversation. Set aside what you recall from memory. If the passages cannot answer a legal question, say where the evidence falls short.\n\nEnd each sentence supported by a passage with [SRC:n], where n is the number in that passage's heading. Cite with source tags alone. Leave citation strings, reporters, page numbers, and dockets out of your own prose. Copy quotations verbatim from the tagged passage. Attribute a passage to the opinion or section named in its heading.\n\nWrite one continuous answer. A source claim states what its tagged passage supports. In a source claim, use dates, times, numbers, and amounts only as shown in the passage or its heading. A user fact repeats a detail from the user's own messages as given. Analysis is your own reasoning and names no case, citation, quotation, or figure, except a figure the user gave. Write no label or mark of a sentence's kind.\n\nExplain the governing rule or method, including its periods, triggers, tolling, counting rules, rates, caps, and eligibility requirements. You may explain how offense levels and criminal history categories are determined and how the sentencing table is read. Never calculate or confirm a filing deadline, calendar date, or day count from a matter's facts. Never calculate or confirm a Guidelines range, offense level, or criminal history category for a person or matter, or look up a months range for a level and category. Never calculate or confirm a release date, credit count, or time to serve. Use the user's figures with their original values and units when explaining a method. Leave calculations to a person, including sums, percentages, quantities, counts, intermediate results, and estimates. If asked to calculate or confirm a result, decline in one sentence and offer to explain the rule or method."
+    },
+    {
+      "role": "user",
+      "content": "In these fictitious harbor cases, when did the board have to post notice? Keep my [1] marker as typed."
+    },
+    {
+      "role": "assistant",
+      "content": "The notice rule begins with Kestrel v. Lantern (6th Cir. 2019) (en banc). Later applications follow Kestrel. The timing rule appears in Kestrel. The same rule applies to a closed pier. The exception is discussed in Kestrel. The rule comes from Kestrel.\n\nMaple v. Beacon (9th Cir. 2022) (Lee, J., dissenting) [persuasive]. Tern v. Quarry (1991) (syllabus — not the opinion of the Court). Marsh v. Copper (6th Cir. 2002) (section not identified). Heron v. Alder (6th Cir. 2001) [unpublished].\n\nOsprey v. Flint (1963). The fuller account appears in Osprey.\n\nThe example also references 18 U.S.C. § 3583(e)(3) (2024 ed.), USSG § 2B1.1(b)(1) (Nov. 2024), and Ex. 14 at 3 (Bates FICT-001234) [matter].\n\nUnder Osprey, 14 months elapsed."
+    },
+    {
+      "role": "user",
+      "content": "Did the fictitious notice rule also apply at night?"
+    },
+    {
+      "role": "user",
+      "content": "Evidence\n\n[SRC:1] Osprey v. Flint (U.S. Supreme Court 1963) | U.S. Supreme Court | Majority opinion\nThe harbor board must post notice before closing a pier to the public.\n\n[SRC:2] Kestrel v. Lantern (6th Cir. 2019) | Published home-circuit decision | Majority opinion\nThe opinion discusses Tenn. Code Ann. § 79-42-900. Night closures were subject to the same notice rule.\n\n[SRC:3] Spruce v. Bayfront (6th Cir. 2022) | Published home-circuit decision | Dissenting opinion\nI would excuse notice when a storm makes posting impossible.\n\nRetrieval provenance\nThe GIDEON corpus snapshots searched were corpus-2099-01-01, corpus-2099-02-01.\nSearch plan mode was off. The question was searched as written.\nThe state code provision identified as object 1 in the question was not found in the courts searched. At least one passage in the evidence cites it.\nThe case citation identified as object 2 in the question was not found in the courts searched.\nThe court you named, Court of Appeals for the First Circuit, is outside GIDEON's corpus.\n\nQuestion\nIn the fictitious harbor dispute, what did the First and Sixth Circuits say about notice under Tenn. Code Ann. § 79-42-900 and 777 U.S. 901?"
+    }
+  ]
+}

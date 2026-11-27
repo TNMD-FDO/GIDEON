@@ -38,6 +38,11 @@ class AuthorityTiers(unittest.TestCase):
         self.assertEqual(tier.authority_tier("authorities", "", "unknown", self.jurisdiction), "authority")
         self.assertEqual(tier.authority_tier("matter", "", "unknown", self.jurisdiction), "matter")
 
+    def test_controlling_tiers_include_home_states_and_exclude_persuasive_and_matter(self) -> None:
+        self.assertIsInstance(tier.CONTROLLING_TIERS, frozenset)
+        self.assertEqual(tier.CONTROLLING_TIERS, set(tier.AUTHORITY_TIERS) - {"persuasive", "matter"})
+        self.assertIn("state_home", tier.CONTROLLING_TIERS)
+
     def test_caselaw_is_persuasive_exactly_outside_the_controlling_set(self) -> None:
         controlling = self.court_map.controlling_courts("ca11", ("alnd",), ("fx-sup-al",))
         self.assertEqual(self.jurisdiction.controlling_courts, frozenset(controlling))

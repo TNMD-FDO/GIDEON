@@ -1,9 +1,12 @@
-"""Request validation and caller admission for research turns."""
+"""The pure request, claim, and settlement steps for research turns, in their refusal order."""
 
 import json
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import fields
 
-from gideon.turn.admission import admit
+from gideon.turn.admission import _KB_IDS_LIMIT, TurnRequest, claim, parse, settle
 from gideon.turn.config import RETRIEVAL_CONFIG
 from gideon.turn.states import TurnFailure
 
@@ -11,26 +14,28 @@ IDENTITY = "eval@example.invalid"
 MESSAGE = {"message": "Fictitious research question"}
 
 
+def _request(value: object) -> TurnRequest:
+    return parse(json.dumps(value).encode())
+
+
 class Admission(unittest.TestCase):
-    def assert_refused(
-        self, value: object, state: str, word: str | None = None, *, source: tuple[str, ...] = (), reranker: bool = True,
-    ) -> None:
-        body = value if isinstance(value, bytes) else json.dumps(value).encode()
+    @contextmanager
+    def assert_refused(self, state: str, word: str | None = None) -> Iterator[None]:
         with self.assertRaises(TurnFailure) as raised:
-            admit(body, source, IDENTITY, reranker=reranker)
+            yield
         self.assertEqual((raised.exception.state, raised.exception.word), (state, word))
 
-    def test_malformed_json_non_object_and_unknown_key_precede_caller_refusal(self) -> None:
-        for value in (b'{"message":', [MESSAGE], {**MESSAGE, "fixture_unknown": "retrieve"}):
-            with self.subTest(value=value):
-                self.assert_refused(value, "invalid_request")
+    def test_parse_refuses_malformed_json_non_object_and_unknown_keys(self) -> None:
+        for body in (b'{"message":', json.dumps([MESSAGE]).encode(), b'{"fixture_unknown":"retrieve"}'):
+            with self.subTest(body=body), self.assert_refused("invalid_request"):
+                parse(body)
 
-    def test_each_invalid_field_shape_precedes_eval_field_refusal(self) -> None:
+    def test_each_invalid_field_shape_is_refused_during_parse_even_with_an_eval_field(self) -> None:
         invalid_fields: dict[str, tuple[object, ...]] = {
             "message": (None, [], "  "),
             "message_id": ("Fictitious free text", 42, None),
             "history": ("Fictitious history", [False], ["Fictitious history"] * 7),
-            "kb_ids": ("fixture-kb", [False]),
+            "kb_ids": ("fixture-kb", [False], [""], ["fixture/kb"], ["fixture KB"], ["x" * 129]),
             "session_token": (None, []),
             "stop_after": (None, {}),
             "evidence": ("fixture-evidence", [False]),
@@ -38,46 +43,64 @@ class Admission(unittest.TestCase):
         }
         for key, invalid_values in invalid_fields.items():
             for value in invalid_values:
-                with self.subTest(key=key, value=value):
-                    self.assert_refused({**MESSAGE, "stop_after": "retrieve", key: value}, "invalid_request", key)
-        self.assert_refused({"stop_after": "retrieve"}, "invalid_request", "message")
+                with self.subTest(key=key, value=value), self.assert_refused("invalid_request", key):
+                    _request({**MESSAGE, "stop_after": "retrieve", key: value})
+        with self.assert_refused("invalid_request", "message"):
+            _request({"stop_after": "retrieve"})
 
-    def test_non_eval_caller_is_refused_by_field_presence_in_contract_order(self) -> None:
+    def test_parse_folds_knowledge_base_ids_in_first_order_and_bounds_the_distinct_count(self) -> None:
+        ids = [f"fixture-kb_{index}" for index in range(_KB_IDS_LIMIT)]
+        repeated = [ids[0], ids[1], ids[0], *ids[2:], ids[1]]
+        request = _request({**MESSAGE, "kb_ids": repeated})
+        self.assertEqual(request.kb_ids, tuple(ids))
+        with self.assert_refused("invalid_request", "kb_ids"):
+            _request({**MESSAGE, "kb_ids": [*repeated, "fixture-extra_kb"]})
+
+    def test_claim_refuses_the_first_eval_field_for_a_user(self) -> None:
         body: dict[str, object] = {**MESSAGE, "overrides": {"fixture_unknown": True}, "evidence": [], "stop_after": ""}
+        sources = ("reader@example.invalid",)
         for field in ("stop_after", "evidence", "overrides"):
             with self.subTest(field=field):
-                self.assert_refused({**MESSAGE, field: body[field]}, "eval_only_field", field, source=("reader@example.invalid",))
-                self.assert_refused(body, "eval_only_field", field, source=("reader@example.invalid",))
+                for value in ({**MESSAGE, field: body[field]}, body):
+                    request = _request(value)
+                    with self.assert_refused("eval_only_field", field):
+                        claim(request, sources, IDENTITY)
             del body[field]
-        self.assert_refused(body, "caller_not_admitted", source=("reader@example.invalid",))
-        self.assert_refused(
-            {**body, "message_id": "fixture-message_42"}, "caller_not_admitted", source=("reader@example.invalid",),
-        )
+        self.assertEqual(claim(_request(body), sources, IDENTITY), "user")
+        request = _request({**body, "message_id": "fixture-message_42"})
+        self.assertEqual(claim(request, sources, IDENTITY), "user")
 
-    def test_eval_override_validation_precedes_stage_and_knowledge_base_refusals(self) -> None:
+    def test_claim_uses_a_single_matching_source_header(self) -> None:
+        request = _request({**MESSAGE, "kb_ids": ["fixture-kb"]})
+        self.assertEqual(claim(request, (f" {IDENTITY.upper()} ",), IDENTITY), "eval")
+        for values in ((), ("",), (IDENTITY, IDENTITY), ("reader@example.invalid",)):
+            with self.subTest(values=values):
+                self.assertEqual(claim(request, values, IDENTITY), "user")
+
+    def test_settle_checks_overrides_stage_and_evidence_before_knowledge_bases(self) -> None:
         body = {**MESSAGE, "evidence": [], "kb_ids": ["fixture-kb"]}
-        self.assert_refused(
-            {**body, "overrides": {"fixture_unknown": True}}, "override_not_allowed", "overrides", source=(IDENTITY,),
-        )
-        self.assert_refused(
-            {**body, "overrides": {"pool_cap": 0}}, "override_invalid", "pool_cap", source=(IDENTITY,),
-        )
-        self.assert_refused(body, "stage_not_built", "evidence", source=(IDENTITY,))
-        self.assert_refused({**body, "stop_after": "generate"}, "stage_not_built", "stop_after", source=(IDENTITY,))
-        self.assert_refused({**body, "stop_after": "retrieve"}, "stage_not_built", "evidence", source=(IDENTITY,))
-        for fields in ({}, {"stop_after": "retrieve"}):
-            with self.subTest(fields=fields):
-                self.assert_refused(
-                    {**MESSAGE, **fields, "kb_ids": body["kb_ids"]},
-                    "kb_ids_not_built", "kb_ids", source=(IDENTITY,),
-                )
+        for request_fields, state, word in (
+            ({**body, "overrides": {"fixture_unknown": True}}, "override_not_allowed", "overrides"),
+            ({**body, "overrides": {"pool_cap": 0}}, "override_invalid", "pool_cap"),
+            ({**body, "stop_after": "generate"}, "stage_not_built", "stop_after"),
+            ({**body, "stop_after": "retrieve"}, "stage_not_built", "evidence"),
+            (body, "stage_not_built", "evidence"),
+            ({**MESSAGE, "kb_ids": body["kb_ids"]}, "kb_ids_not_built", "kb_ids"),
+            ({**MESSAGE, "kb_ids": body["kb_ids"], "stop_after": "retrieve"}, "kb_ids_not_built", "kb_ids"),
+        ):
+            with self.subTest(request_fields=request_fields):
+                request = _request(request_fields)
+                self.assertEqual(claim(request, (IDENTITY,), IDENTITY), "eval")
+                with self.assert_refused(state, word):
+                    settle(request, reranker=True)
 
-    def test_eval_request_without_a_stop_stage_is_admitted(self) -> None:
-        request, config = admit(json.dumps(MESSAGE).encode(), (IDENTITY,), IDENTITY, reranker=True)
+    def test_eval_request_without_a_stop_stage_settles_to_the_release_config(self) -> None:
+        request = _request(MESSAGE)
         self.assertIsNone(request.stop_after)
         self.assertIsNone(request.message_id)
         self.assertEqual(request.message, MESSAGE["message"])
-        self.assertEqual(config, RETRIEVAL_CONFIG)
+        self.assertEqual(claim(request, (IDENTITY,), IDENTITY), "eval")
+        self.assertEqual(settle(request, reranker=True), RETRIEVAL_CONFIG)
 
     def test_eval_request_keeps_valid_fields_and_uses_the_release_config(self) -> None:
         history = ["Fictitious earlier question"] * 6
@@ -85,20 +108,39 @@ class Admission(unittest.TestCase):
             **MESSAGE, "history": history, "kb_ids": [], "session_token": "fixture-session", "stop_after": "retrieve",
             "message_id": "fixture-message_42",
         }
-        request, config = admit(json.dumps(body).encode(), (f" {IDENTITY.upper()} ",), IDENTITY, reranker=True)
+        request = _request(body)
         self.assertEqual(request.message, MESSAGE["message"])
         self.assertEqual(request.message_id, body["message_id"])
         self.assertEqual(request.history, tuple(history))
         self.assertEqual(request.kb_ids, ())
         self.assertEqual(request.session_token, body["session_token"])
         self.assertEqual(request.stop_after, body["stop_after"])
-        self.assertEqual(config, RETRIEVAL_CONFIG)
+        self.assertEqual(claim(request, (IDENTITY,), IDENTITY), "eval")
+        self.assertEqual(settle(request, reranker=True), RETRIEVAL_CONFIG)
 
     def test_stage2_override_requires_a_reranker(self) -> None:
-        body = {**MESSAGE, "overrides": {"rerank.stage2": "on"}}
-        _, config = admit(json.dumps(body).encode(), (IDENTITY,), IDENTITY, reranker=True)
-        self.assertEqual(config["rerank.stage2"], "on")
-        self.assert_refused(body, "override_invalid", "rerank.stage2", source=(IDENTITY,), reranker=False)
+        request = _request({**MESSAGE, "overrides": {"rerank.stage2": "on"}})
+        self.assertEqual(settle(request, reranker=True)["rerank.stage2"], "on")
+        with self.assert_refused("override_invalid", "rerank.stage2"):
+            settle(request, reranker=False)
+        self.assertEqual(settle(_request(MESSAGE), reranker=False)["rerank.stage2"], "off")
 
-        _, config = admit(json.dumps(MESSAGE).encode(), (IDENTITY,), IDENTITY, reranker=False)
-        self.assertEqual(config["rerank.stage2"], "off")
+    def test_repr_has_no_fields_and_the_copy_has_no_token(self) -> None:
+        token = "fixture.session.token"
+        request = _request({
+            **MESSAGE, "history": ["Fictitious earlier question"], "kb_ids": ["fixture-kb"],
+            "session_token": token, "stop_after": "retrieve", "evidence": ["fixture-evidence"],
+            "overrides": {"pool_cap": 5}, "message_id": "fixture-message_42",
+        })
+        stripped = request.without_token()
+        self.assertIsNot(stripped, request)
+        self.assertIsNone(stripped.session_token)
+        self.assertEqual(request.session_token, token)
+        for field in fields(request):
+            with self.subTest(field=field.name):
+                value = getattr(request, field.name)
+                for rendered in (repr(request), str(request), repr(stripped)):
+                    self.assertNotIn(field.name, rendered)
+                    self.assertNotIn(str(value), rendered)
+                if field.name != "session_token":
+                    self.assertEqual(getattr(stripped, field.name), value)

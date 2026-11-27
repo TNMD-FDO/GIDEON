@@ -28,9 +28,12 @@ from gideon.api.sse import (
 )
 from gideon.api.upstream import EngineClient
 from gideon.turn import (
+    denial,
     dense,
     events,
+    finalset,
     lexical,
+    measures,
     objectleg,
     objects,
     passages,
@@ -38,8 +41,9 @@ from gideon.turn import (
     rerank,
     scope,
 )
-from gideon.turn.admission import admit
+from gideon.turn.admission import claim, parse, settle
 from gideon.turn.answer import AnswerMechanics, AnswerStep, stream_state
+from gideon.turn.caller import CallerRefusal, admit_caller
 from gideon.turn.config import RetrievalConfig, config_hash
 from gideon.turn.embedder import (
     EmbeddingSpace,
@@ -47,7 +51,7 @@ from gideon.turn.embedder import (
     embed_query,
     listing_repository,
 )
-from gideon.turn.fusion import FusionResult, LegHit, PinnedHit, fuse
+from gideon.turn.fusion import LegHit, PinnedHit, fuse
 from gideon.turn.generation import (
     TURN_COLLECTION,
     Connect,
@@ -61,6 +65,7 @@ from gideon.turn.provenance import (
     RequestSpan,
     TurnTimings,
     reply_body,
+    retrieval_milliseconds,
 )
 from gideon.turn.scope import LockfileOutsideRelease
 from gideon.turn.states import LegWord, State, TurnFailure
@@ -79,6 +84,7 @@ class TurnClients:
     embedder: httpx.AsyncClient
     dense: httpx.AsyncClient
     lexical: httpx.AsyncClient
+    frontend: httpx.AsyncClient
     reranker: httpx.AsyncClient | None = None
 
 
@@ -168,10 +174,12 @@ class TurnEndpoint:
     """Serve retrieval and generation as an ASGI endpoint instance."""
 
     def __init__(
-        self, settings: Settings, *, connect: Connect | None = None, clock: Callable[[], float] = time.monotonic,
+        self, settings: Settings, *, connect: Connect | None = None, denial_connect: Connect | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._settings = settings
         self._read_generation = read_generation if connect is None else partial(read_generation, connect=connect)
+        self._write_denial = denial.write_denial if denial_connect is None else partial(denial.write_denial, connect=denial_connect)
         self._clock = clock
         self._space = EmbeddingSpace(
             settings.embed_model, settings.embed_repository, settings.embed_space, settings.embed_dimensions,
@@ -188,11 +196,15 @@ class TurnEndpoint:
         request = Request(scope, receive)
         settings = self._settings
         started = self._clock()
+        claimed: str | None = None
         refusal: TurnFailure | None
         try:
-            body = await _read_body(request)
-            source_values = request.headers.getlist(settings.source_header)
-            turn, config = admit(body, source_values, settings.eval_identity, reranker=settings.rerank_url is not None)
+            turn = parse(await _read_body(request))
+            claimed = claim(turn, request.headers.getlist(settings.source_header), settings.eval_identity)
+            clients: TurnClients = request.app.state.turn_clients
+            caller = await admit_caller(claimed, turn.session_token, turn.kb_ids, clients.frontend)
+            config = settle(turn, reranker=settings.rerank_url is not None)
+            turn = turn.without_token()
         except ClientDisconnect:
             return
         except TurnFailure as error:
@@ -203,16 +215,23 @@ class TurnEndpoint:
         else:
             refusal = None
         if refusal is not None:
-            # A request refused at admission ran no turn and writes no row.
+            # A request refused at admission ran no turn and writes no turn_log row; an
+            # incident's row is audit_log's, awaited before the refusal is answered.
+            if isinstance(refusal, CallerRefusal) and (incident := refusal.denial) is not None:
+                assert claimed is not None
+                chat_id = judged.id_for_header(request.headers.getlist(settings.chat_header))
+                # An outcome other than kept leaves the write's own error line.
+                await self._write_denial(denial.build_row(incident, claimed, chat_id))
             await JSONResponse(refusal.to_body(), status_code=refusal.status)(scope, receive, send)
             return
 
         turn_log = TurnLog(
-            source=judged.source_for_header(source_values, settings.eval_identity),
+            source=caller.kind,
             chat_id=judged.id_for_header(request.headers.getlist(settings.chat_header)),
             message_id=turn.message_id, stop_after=turn.stop_after, retrieval_config_hash=config_hash(config),
             overrides=turn.overrides, plan_mode=config["query_plan"],
         )
+        through_rerank_ms: float | None = None
 
         async def send_message(message: Message) -> None:
             try:
@@ -221,6 +240,7 @@ class TurnEndpoint:
                 raise ClientDisconnect() from None
 
         async def work() -> None:
+            nonlocal through_rerank_ms
             generation: PinnedGeneration | None = None
             stream = None
             with suppress(ClientDisconnect):
@@ -259,8 +279,7 @@ class TurnEndpoint:
                         stated_scope = self._court_file.resolve(named, generation.lockfiles)
                     except LockfileOutsideRelease:
                         raise TurnFailure(State.LOCKFILE_OUTSIDE_RELEASE) from None
-                    clients: TurnClients = request.app.state.turn_clients
-                    retrieval, fusion = await self._retrieve(
+                    retrieval, selected, through_rerank_ms = await self._retrieve(
                         clients, generation, turn.message, extracted, config, started, record_seconds,
                         extraction_seconds, turn_log, rerank_gate=request.app.state.rerank_gate,
                         stated_scope=stated_scope,
@@ -269,7 +288,7 @@ class TurnEndpoint:
                         response = JSONResponse(retrieval)
                     else:
                         stream = await self._prepare_answer(
-                            request, clients, generation, turn.message, fusion, retrieval, started, send_message, turn_log,
+                            request, generation, turn.message, selected, retrieval, started, send_message, turn_log,
                         )
                 except ClientDisconnect:
                     raise
@@ -296,13 +315,20 @@ class TurnEndpoint:
             await run_with_disconnect(work, receive)
         finally:
             record_turn(turn_log, elapsed_ms=lambda: (self._clock() - started) * 1000)
+            try:
+                measures.observe_turn(
+                    request.app.state.turn_measures, turn_log.source, turn_log.outcome or "disconnected",
+                    turn_log.failure_state, turn_log.timings_ms, through_rerank_ms,
+                )
+            except Exception as error:  # noqa: BLE001 - observation cannot affect the response.
+                _LOG.error("Turn metrics observation failed: %s", type(error).__name__)
 
     async def _retrieve(
         self, clients: TurnClients, generation: PinnedGeneration, message: str,
         extracted: tuple[objects.TurnObject, ...], config: RetrievalConfig, started: float, record_seconds: float,
         extraction_seconds: float, turn_log: TurnLog, *, rerank_gate: rerank.Gate,
         stated_scope: scope.StatedScope | None,
-    ) -> tuple[dict[str, object], FusionResult]:
+    ) -> tuple[dict[str, object], tuple[passages.Passage, ...], float | None]:
         settings = self._settings
         limit = config["leg_limit"]
         reservation = config["reservations.exact_object"]
@@ -394,41 +420,63 @@ class TurnEndpoint:
         )
         fusion_seconds = self._clock() - fusion_started
         turn_log.timings_ms["fusion"] = fusion_seconds * 1000
+        turn_log.timings_ms["retrieval"] = retrieval_milliseconds(
+            (dense_span, controlling_span, lexical_span, object_leg.span), fusion_seconds,
+        )
 
         ranked = fusion
-        rerank_passages = rerank_queue = rerank_seconds = 0.0
-        if config["rerank.stage2"] == "on":
+        rerank_passages = rerank_queue = rerank_seconds = passages_seconds = 0.0
+        stage_scored = config["rerank.stage2"] == "on"
+        candidates = rerank.select(fusion.entries, config["stage2_depth"])
+        run_rerank = stage_scored and bool(candidates)
+        passages_started = self._clock() if candidates else None
+        try:
+            documents = await passages.fetch(
+                clients.lexical, settings.opensearch_user, settings.opensearch_password_file,
+                generation.stores.lexical_index, candidates, word="rerank" if stage_scored else "passages",
+            )
+        finally:
+            if passages_started is not None:
+                read_seconds = self._clock() - passages_started
+                if stage_scored:
+                    rerank_passages = read_seconds
+                    turn_log.timings_ms["rerank_passages"] = read_seconds * 1000
+                else:
+                    passages_seconds = read_seconds
+                    turn_log.timings_ms["passages"] = read_seconds * 1000
+
+        if run_rerank:
             # Admission and the lifespan both use the configured reranker URL.
             reranker = cast(httpx.AsyncClient, clients.reranker)
-            selected = rerank.select(fusion.entries, config["stage2_depth"])
-            if selected:
-                passages_started = self._clock()
+
+            def record_queue(seconds: float) -> None:
+                turn_log.timings_ms["rerank_queue"] = seconds * 1000
+
+            async with rerank_gate.seat(
+                config["rerank.timeout_s"], clock=self._clock, on_wait=record_queue,
+            ) as rerank_queue:
+                call_started = self._clock()
                 try:
-                    documents = await passages.fetch(
-                        clients.lexical, settings.opensearch_user, settings.opensearch_password_file,
-                        generation.stores.lexical_index, selected, word="rerank",
-                    )
+                    scores = await rerank.score(reranker, settings.rerank_key_file, message, documents)
                 finally:
-                    rerank_passages = self._clock() - passages_started
-                    turn_log.timings_ms["rerank_passages"] = rerank_passages * 1000
+                    rerank_seconds = self._clock() - call_started
+                    turn_log.timings_ms["rerank"] = rerank_seconds * 1000
+            ranked = replace(fusion, entries=rerank.order(fusion.entries, scores))
 
-                def record_queue(seconds: float) -> None:
-                    turn_log.timings_ms["rerank_queue"] = seconds * 1000
-
-                async with rerank_gate.seat(
-                    config["rerank.timeout_s"], clock=self._clock, on_wait=record_queue,
-                ) as rerank_queue:
-                    call_started = self._clock()
-                    try:
-                        scores = await rerank.score(reranker, settings.rerank_key_file, message, documents)
-                    finally:
-                        rerank_seconds = self._clock() - call_started
-                        turn_log.timings_ms["rerank"] = rerank_seconds * 1000
-                ranked = replace(fusion, entries=rerank.order(fusion.entries, scores))
+        held_chunk_ids = {
+            obj.index: frozenset(
+                hit.chunk_id for result in object_leg.by_object.get(obj.index, ())
+                if result.search.name == "held" for hit in result.hits
+            )
+            for obj in extracted if obj.exact.type == "case_cite"
+        }
+        by_chunk_id = {document.chunk_id: document for document in documents}
+        final_set = finalset.choose(ranked.entries, by_chunk_id, config, held_chunk_ids, stage_scored=stage_scored)
+        turn_log.evidence = final_set.hits
 
         finished = self._clock()
         body = reply_body(
-            generation, ranked, config=config,
+            generation, ranked, final_set, config=config,
             legs={
                 "dense": LegRun("qdrant", limit, len(dense_hits)),
                 "lexical": LegRun("opensearch", limit, len(lexical_hits)),
@@ -442,42 +490,24 @@ class TurnEndpoint:
                 record=record_seconds, extraction=extraction_seconds, embedding=embedding_seconds,
                 dense=dense_span, lexical=lexical_span, objects=object_leg.span, controlling=controlling_span,
                 fusion=fusion_seconds, rerank_passages=rerank_passages, rerank_queue=rerank_queue,
-                rerank=rerank_seconds, total=finished - started,
+                rerank=rerank_seconds, passages=passages_seconds, total=finished - started,
             ),
         )
         # A copy: later stages add their timings here, never to the reply's own mapping.
-        turn_log.timings_ms = dict(cast(dict[str, float | None], body["timings_ms"]))
+        timings_ms = cast(dict[str, float], body["timings_ms"])
+        turn_log.timings_ms = dict(timings_ms)
         turn_log.provenance = cast(dict[str, object], body["provenance"])
         turn_log.pool = cast(list[dict[str, object]], body["pool"])
-        # The tracer's passage cut uses the fused order.
-        return body, fusion
+        through_rerank_ms = timings_ms["total"] if run_rerank else None
+        return body, tuple(by_chunk_id[hit.chunk_id] for hit in final_set.hits), through_rerank_ms
 
     async def _prepare_answer(
-        self, request: Request, clients: TurnClients, generation: PinnedGeneration, question: str,
-        fusion: FusionResult, retrieval: dict[str, object], started: float, send: Send, turn_log: TurnLog,
+        self, request: Request, generation: PinnedGeneration, question: str,
+        selected: tuple[passages.Passage, ...], retrieval: dict[str, object], started: float, send: Send, turn_log: TurnLog,
     ) -> Callable[[], Awaitable[None]]:
         settings = self._settings
         engine: EngineClient = request.app.state.engine
-        entries = passages.cut(fusion)
-
-        async def fetch_passages() -> tuple[passages.Passage, ...]:
-            fetching = self._clock()
-            selected = await passages.fetch(
-                clients.lexical, settings.opensearch_user, settings.opensearch_password_file,
-                generation.stores.lexical_index, entries,
-            )
-            turn_log.timings_ms["passages"] = (self._clock() - fetching) * 1000
-            return selected
-
-        fetching = asyncio.create_task(fetch_passages())
-        listing = asyncio.create_task(_generator_sampling(engine, settings.engine_model))
-        try:
-            selected, (sampling, repository) = await asyncio.gather(fetching, listing)
-        finally:
-            with anyio.CancelScope(shield=True):
-                await _cancel_pending(fetching, listing)
-
-        turn_log.evidence = selected
+        sampling, repository = await _generator_sampling(engine, settings.engine_model)
         turn_log.generator_repository = repository
         messages = prompt.messages(question, [(passage.caption, passage.text) for passage in selected])
 

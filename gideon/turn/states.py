@@ -11,6 +11,9 @@ class State(StrEnum):
     INVALID_REQUEST = "invalid_request"
     EVAL_ONLY_FIELD = "eval_only_field"
     CALLER_NOT_ADMITTED = "caller_not_admitted"
+    SESSION_NOT_VERIFIED = "session_not_verified"
+    FRONTEND_UNAVAILABLE = "frontend_unavailable"
+    KB_ACCESS_DENIED = "kb_access_denied"
     OVERRIDE_NOT_ALLOWED = "override_not_allowed"
     OVERRIDE_INVALID = "override_invalid"
     STAGE_NOT_BUILT = "stage_not_built"
@@ -45,7 +48,9 @@ RequestWord = Literal[
     "message", "message_id", "history", "kb_ids", "session_token", "stop_after", "evidence", "overrides",
     "leg_limit", "pool_cap", "reservations.exact_object", "reservations.controlling",
     "rrf.k", "collapse", "boilerplate_weight", "query_plan",
-    "rerank.stage1", "rerank.stage2", "stage2_depth", "rerank.semaphore", "rerank.timeout_s",
+    "rerank.stage1", "rerank.stage2", "stage2_depth", "rerank.semaphore", "rerank.timeout_s", "final_k",
+    "hierarchy.mode", "hierarchy.weights", "final_reserved_controlling", "per_document_cap", "per_hit_chunks",
+    "context_budget_tokens",
 ]
 type FailureWord = StageWord | LegWord | ReasonWord | RequestWord
 
@@ -54,6 +59,9 @@ _ERRORS: Final[dict[State, tuple[HTTPStatus, str]]] = {
     State.INVALID_REQUEST: (HTTPStatus.BAD_REQUEST, "The turn request is invalid."),
     State.EVAL_ONLY_FIELD: (HTTPStatus.FORBIDDEN, "This field is reserved for evaluation."),
     State.CALLER_NOT_ADMITTED: (HTTPStatus.FORBIDDEN, "The caller is not admitted to this turn."),
+    State.SESSION_NOT_VERIFIED: (HTTPStatus.UNAUTHORIZED, "The session could not be verified."),
+    State.FRONTEND_UNAVAILABLE: (HTTPStatus.SERVICE_UNAVAILABLE, "The frontend is unavailable."),
+    State.KB_ACCESS_DENIED: (HTTPStatus.FORBIDDEN, "Knowledge-base access was denied."),
     State.OVERRIDE_NOT_ALLOWED: (HTTPStatus.BAD_REQUEST, "The retrieval override is not allowed."),
     State.OVERRIDE_INVALID: (HTTPStatus.BAD_REQUEST, "The retrieval override value is invalid."),
     State.STAGE_NOT_BUILT: (HTTPStatus.NOT_IMPLEMENTED, "The requested turn stage is unavailable."),

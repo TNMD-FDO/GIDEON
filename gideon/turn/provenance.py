@@ -11,6 +11,7 @@ from gideon.turn.fusion import FusionResult
 
 if TYPE_CHECKING:
     from gideon.turn.config import RetrievalConfig
+    from gideon.turn.finalset import FinalSet
     from gideon.turn.objectleg import ObjectLegResult
     from gideon.turn.objects import TurnObject
     from gideon.turn.scope import StatedScope
@@ -58,6 +59,18 @@ class RequestSpan:
         return self.end - self.start
 
 
+def retrieval_milliseconds(spans: Sequence[RequestSpan | None], fusion_seconds: float) -> float:
+    """Return elapsed store time, counting overlap once, plus fusion time."""
+
+    first, *rest = sorted((span for span in spans if span is not None), key=lambda span: span.start)
+    store_seconds = first.seconds
+    covered_until = first.end
+    for span in rest:
+        store_seconds += max(0.0, span.end - max(covered_until, span.start))
+        covered_until = max(covered_until, span.end)
+    return (store_seconds + fusion_seconds) * 1000
+
+
 @dataclass(frozen=True, slots=True)
 class TurnTimings:
     """Elapsed seconds for the turn stages and spans for the store requests."""
@@ -73,17 +86,10 @@ class TurnTimings:
     rerank_passages: float
     rerank_queue: float
     rerank: float
+    passages: float
     total: float
 
     def to_milliseconds(self) -> dict[str, float]:
-        spans = [span for span in (self.dense, self.controlling, self.lexical, self.objects) if span is not None]
-        first, *rest = sorted(spans, key=lambda span: span.start)
-        store_seconds = first.seconds
-        covered_until = first.end
-        for span in rest:
-            store_seconds += max(0.0, span.end - max(covered_until, span.start))
-            covered_until = max(covered_until, span.end)
-
         return {
             "record": self.record * 1000,
             "extraction": self.extraction * 1000,
@@ -96,16 +102,17 @@ class TurnTimings:
             "rerank_passages": self.rerank_passages * 1000,
             "rerank_queue": self.rerank_queue * 1000,
             "rerank": self.rerank * 1000,
-            "retrieval": (store_seconds + self.fusion) * 1000,
+            "passages": self.passages * 1000,
+            "retrieval": retrieval_milliseconds((self.dense, self.controlling, self.lexical, self.objects), self.fusion),
             "total": self.total * 1000,
         }
 
 
 def retrieval_provenance(
     *, config: RetrievalConfig, collection: str, legs: Mapping[str, LegRun], fusion: FusionResult,
-    objects: Sequence[TurnObject], object_leg: ObjectLegResult, stated_scope: StatedScope | None,
+    objects: Sequence[TurnObject], object_leg: ObjectLegResult, stated_scope: StatedScope | None, final_set: FinalSet,
 ) -> dict[str, object]:
-    """Describe how the message's one sub-query produced the pool."""
+    """Describe how the message's one sub-query produced the pool and final set."""
 
     seats = Counter(entry.object for entry in fusion.entries if entry.pinned)
     object_entries: list[dict[str, object]] = []
@@ -141,6 +148,8 @@ def retrieval_provenance(
         out_of_corpus_objects.extend({"type": "court", "resolved": court} for court in stated_scope.out_of_corpus)
 
     scored = [entry for entry in fusion.entries if entry.stage2_score is not None]
+    mode = config["hierarchy.mode"]
+    ordered_by = "rank" if config["rerank.stage2"] == "off" else "score" if mode == "off" else mode
     return {
         "plan_mode": config["query_plan"],
         "sub_queries": [{"source": "message"}],
@@ -175,13 +184,22 @@ def retrieval_provenance(
             "pinned_scored": sum(entry.pinned for entry in scored),
             "reserved_scored": sum(entry.reserved is not None and not entry.pinned for entry in scored),
         },
+        "final_set": {
+            "k": config["final_k"],
+            "mode": mode,
+            "ordered_by": ordered_by,
+            "reserved_controlling": config["final_reserved_controlling"],
+            "per_document_cap": config["per_document_cap"],
+            "budget_tokens": config["context_budget_tokens"],
+            **final_set.counts,
+        },
     }
 
 
 def reply_body(
-    generation: _Generation, fusion: FusionResult, *, config: RetrievalConfig, legs: Mapping[str, LegRun],
-    objects: Sequence[TurnObject], object_leg: ObjectLegResult, stated_scope: StatedScope | None,
-    retrieval_config_hash: str, timings: TurnTimings,
+    generation: _Generation, fusion: FusionResult, final_set: FinalSet, *, config: RetrievalConfig,
+    legs: Mapping[str, LegRun], objects: Sequence[TurnObject], object_leg: ObjectLegResult,
+    stated_scope: StatedScope | None, retrieval_config_hash: str, timings: TurnTimings,
 ) -> dict[str, object]:
     """Build the JSON-ready reply for a turn that reached retrieval."""
 
@@ -194,9 +212,10 @@ def reply_body(
             "embedding_space": generation.embedding_space,
         },
         "pool": [entry.to_wire() for entry in fusion.entries],
+        "final_set": [hit.to_wire() for hit in final_set.hits],
         "provenance": retrieval_provenance(
             config=config, collection=generation.collection, legs=legs, fusion=fusion,
-            objects=objects, object_leg=object_leg, stated_scope=stated_scope,
+            objects=objects, object_leg=object_leg, stated_scope=stated_scope, final_set=final_set,
         ),
         "retrieval_config_hash": retrieval_config_hash,
         "timings_ms": timings.to_milliseconds(),

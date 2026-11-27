@@ -1,4 +1,4 @@
-"""Contract tests for the committed research-qa harvest cases."""
+"""Contract tests for the committed research-qa harvest and frozen lists."""
 
 from __future__ import annotations
 
@@ -108,6 +108,15 @@ class ResearchQAContract(unittest.TestCase):
         text = (ROOT / relative).read_text(encoding="utf-8")
         self.assertEqual(text, "".join(f"{value['id']}\n" for value in self.cases))
 
+    def test_harvest_lists_match_their_category_in_file_order(self) -> None:
+        for category in ("retrieval", "synthesis"):
+            with self.subTest(category=category):
+                path = ROOT / SET_ROOT / "slices" / f"research-qa-{category}" / "harvest.ids"
+                expected = "".join(
+                    f"{case['id']}\n" for case in self.cases if case["category"] == category
+                )
+                self.assertEqual(path.read_bytes(), expected.encode("utf-8"))
+
     def test_seeds_equal_the_judgments_harvest_seeds_in_order(self) -> None:
         query_seeds: list[object] = []
         for value in self._queries():
@@ -187,6 +196,24 @@ class ResearchQAContract(unittest.TestCase):
         self.assertEqual(research_unsigned, case_ids)
         self.assertEqual(result.loaded.signoffs, ())
         self.assertFalse((ROOT / SET_ROOT / signoffs.SIGNOFFS_PATH).exists())
+
+
+class SyntheticListsContract(unittest.TestCase):
+    """The synthetic lists freeze their active cases in source file order."""
+
+    def test_synthetic_lists_match_active_cases_in_file_order(self) -> None:
+        court_map = load_court_map(ROOT / "courts.yaml").court_map
+        assert court_map is not None
+        result = load_set(ROOT / SET_ROOT, court_map.courts)
+        self.assertTrue(result.ok, result.findings)
+        assert result.loaded is not None
+        active_ids = set(result.loaded.active_ids)
+        for category in ("retrieval", "synthesis"):
+            with self.subTest(category=category):
+                cases = result.loaded.cases_by_file[f"research-qa/synthetic-{category}.jsonl"]
+                path = ROOT / SET_ROOT / "slices" / f"research-qa-{category}" / "synthetic.ids"
+                expected = "".join(f"{case['id']}\n" for case in cases if case["id"] in active_ids)
+                self.assertEqual(path.read_bytes(), expected.encode("utf-8"))
 
 
 if __name__ == "__main__":

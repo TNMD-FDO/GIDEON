@@ -61,6 +61,7 @@ SELECTED = (
     "test_segmenter_kit",
     "test_skills_vendored",
     "test_toolchain_pins",
+    "test_turn_frontend_sockets",
     "test_turn_generator",
     "test_turns",
     "test_turns_browser",

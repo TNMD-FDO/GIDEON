@@ -1,4 +1,4 @@
-"""The passage cut, multi-get request, and fixed refusals."""
+"""The passage multi-get request, metadata, and fixed refusals."""
 
 import asyncio
 import base64
@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 
 from gideon.turn import passages
-from gideon.turn.fusion import LegHit, PoolEntry, fuse
+from gideon.turn.fusion import PoolEntry
 from gideon.turn.states import State, TurnFailure
 
 FIXTURE = Path(__file__).with_name("fixtures") / "turn" / "passages-mget.json"
@@ -24,23 +24,15 @@ def pool_entry(chunk_id: str, rank: int) -> PoolEntry:
     return PoolEntry(chunk_id, rank, 1.0, (("lexical", rank),), chunk_id, False, "persuasive", rank=rank)
 
 
-class PassageCut(unittest.TestCase):
-    def test_cut_takes_the_first_twenty_in_pool_order(self) -> None:
-        hits = [
-            LegHit(f"fixture-{rank}", rank, f"cluster-{rank}", False, "fixture-court", "unknown")
-            for rank in range(25, 0, -1)
-        ]
-        fusion = fuse(
-            {"lexical": hits}, tier_for=lambda _: "persuasive",
-            rrf_k=40, boilerplate_weight=0.5, collapse=True, pool_cap=len(hits),
-        )
-        self.assertEqual(passages.cut(fusion), fusion.entries[:20])
-
+class PassageRecord(unittest.TestCase):
     def test_passage_is_frozen_and_repr_excludes_caption_and_text(self) -> None:
-        passage = passages.Passage("fixture-chunk", 4, "Invented v. Caption", "An invented passage.")
+        passage = passages.Passage(
+            "fixture-chunk", 4, "Invented v. Caption", "An invented passage.", doc_id="fixture-opinion", token_count=4,
+        )
         with self.assertRaises(FrozenInstanceError):
             passage.text = "A replacement passage."  # type: ignore[misc]
-        self.assertEqual(repr(passage), "Passage(chunk_id='fixture-chunk', pool_rank=4)")
+        self.assertNotIn(passage.caption, repr(passage))
+        self.assertNotIn(passage.text, repr(passage))
 
 
 class PassageFetch(unittest.TestCase):
@@ -58,9 +50,9 @@ class PassageFetch(unittest.TestCase):
 
         return asyncio.run(run())
 
-    def test_request_uses_current_password_and_returns_passages_in_cut_order(self) -> None:
+    def test_request_uses_current_password_and_returns_passages_in_supplied_order(self) -> None:
         docs = self.docs[:-1]
-        docs[1]["_source"] = {"text": "Another invented passage without a caption."}
+        del docs[1]["_source"]["caption"]
         entries = tuple(replace(entry, pool_rank=entry.pool_rank + 4) for entry in self.entries[:-1])
         requests: list[httpx.Request] = []
 
@@ -79,7 +71,10 @@ class PassageFetch(unittest.TestCase):
                 return first, second
 
         expected = tuple(
-            passages.Passage(entry.chunk_id, entry.pool_rank, doc["_source"].get("caption", ""), doc["_source"]["text"])
+            passages.Passage(
+                entry.chunk_id, entry.pool_rank, doc["_source"].get("caption", ""), doc["_source"]["text"],
+                doc_id=doc["_source"]["doc_id"], token_count=doc["_source"]["token_count"],
+            )
             for entry, doc in zip(entries, docs, strict=True)
         )
         self.assertEqual(asyncio.run(read_twice()), (expected, expected))
@@ -87,18 +82,18 @@ class PassageFetch(unittest.TestCase):
             self.assertEqual((request.method, request.url.path), ("POST", f"/{self.index}/_mget"))
             self.assertEqual(request.headers["Authorization"], "Basic " + base64.b64encode(f"{READER}:{password}".encode()).decode())
             self.assertEqual(json.loads(request.content), {
-                "docs": [{"_id": entry.chunk_id, "_source": ["text", "caption"]} for entry in entries],
+                "docs": [{"_id": entry.chunk_id, "_source": ["text", "caption", "doc_id", "token_count"]} for entry in entries],
             })
 
-    def test_empty_cut_reads_no_password_and_makes_no_request(self) -> None:
+    def test_empty_selection_reads_no_password_and_makes_no_request(self) -> None:
         self.password_file.unlink()
 
         def respond(_: httpx.Request) -> httpx.Response:
-            self.fail("An empty cut must not reach the store.")
+            self.fail("An empty selection must not reach the store.")
 
         self.assertEqual(self.read(httpx.MockTransport(respond), ()), ())
 
-    def test_absent_id_in_the_recorded_reply_refuses_the_whole_cut(self) -> None:
+    def test_absent_id_in_the_recorded_reply_refuses_the_whole_read(self) -> None:
         transport = httpx.MockTransport(lambda _: httpx.Response(200, json={"docs": self.docs}))
         with self.assertRaises(TurnFailure) as raised:
             self.read(transport, self.entries)
@@ -107,6 +102,11 @@ class PassageFetch(unittest.TestCase):
     def test_malformed_multi_get_refusals(self) -> None:
         first, second = self.docs[:2]
         no_found = {key: value for key, value in second.items() if key != "found"}
+        source = second["_source"]
+        bad_fields: tuple[tuple[str, object], ...] = (
+            ("text", ""), ("text", 1), ("caption", []), ("doc_id", ""), ("doc_id", 1),
+            ("token_count", 0), ("token_count", -1), ("token_count", True), ("token_count", 2.0), ("token_count", "2"),
+        )
         cases: tuple[tuple[str, object], ...] = (
             ("nonobject body", []),
             ("no docs", {}),
@@ -121,10 +121,14 @@ class PassageFetch(unittest.TestCase):
             ("missing found", {"docs": [first, no_found]}),
             ("nonboolean found", {"docs": [first, {**second, "found": 1}]}),
             ("nonobject source", {"docs": [first, {**second, "_source": None}]}),
-            ("missing text", {"docs": [first, {**second, "_source": {}}]}),
-            ("empty text", {"docs": [first, {**second, "_source": {"text": ""}}]}),
-            ("nonstring text", {"docs": [first, {**second, "_source": {"text": 1}}]}),
-            ("nonstring caption", {"docs": [first, {**second, "_source": {"text": "Invented text.", "caption": []}}]}),
+            *(
+                (f"missing {field}", {"docs": [first, {**second, "_source": {k: v for k, v in source.items() if k != field}}]})
+                for field in ("text", "doc_id", "token_count")
+            ),
+            *(
+                (f"{field}={value!r}", {"docs": [first, {**second, "_source": {**source, field: value}}]})
+                for field, value in bad_fields
+            ),
         )
         for label, reply in cases:
             with self.subTest(label=label):

@@ -7,9 +7,16 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
-from gideon.evaluation import reference
-from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set
+from gideon.evaluation import reference, synthetic
+from gideon.evaluation.evalset import (
+    GENERAL_SMOKE_ID_PATTERN,
+    SET_ROOT,
+    SHAPE_REGISTRY,
+    LoadedSet,
+    load_set,
+)
 from gideon.evaluation.extraction_slice import run_extraction
 from gideon.evaluation.results import RunContext
 from gideon.host import courts
@@ -290,6 +297,31 @@ class Serialization(unittest.TestCase):
 
 class Reader(unittest.TestCase):
     """The reader collects content-free findings and distinguishes absence."""
+
+    def test_reference_accepts_a_case_id_through_its_synthetic_pattern(self) -> None:
+        case_id = "research-qa-retrieval-999999"
+        slice_name = "research-qa-retrieval"
+        value = replace(_file("synthetic", cases={case_id: "pass"}), slice=slice_name)
+        lists = {value.list: (case_id,)}
+        # The general-smoke pattern overlaps synthetic IDs. Remove it so the
+        # read proves admission through the synthetic pattern itself.
+        base_patterns = tuple(
+            spec.id_pattern for spec in SHAPE_REGISTRY.values() if spec.id_pattern != GENERAL_SMOKE_ID_PATTERN
+        )
+        self.assertFalse(any(pattern.fullmatch(case_id) for pattern in base_patterns))
+        self.assertIsNotNone(synthetic.synthetic_id_pattern("retrieval").fullmatch(case_id))
+        patterns = tuple(pattern for pattern in reference._CASE_ID_PATTERNS if pattern != GENERAL_SMOKE_ID_PATTERN)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write(root, value)
+            with patch.object(reference, "_CASE_ID_PATTERNS", base_patterns):
+                refused = reference.read_reference(root, slice_name, lists, VERSION)
+            self.assertIsNone(refused.reference)
+            self.assertTrue(any(finding.id == case_id and finding.rule == "case id pattern" for finding in refused.findings))
+            with patch.object(reference, "_CASE_ID_PATTERNS", patterns):
+                accepted = reference.read_reference(root, slice_name, lists, VERSION)
+        self.assertEqual(accepted.findings, ())
+        self.assertEqual(accepted.reference, reference.SliceReference((value,)))
 
     def test_format_two_requires_valid_generation_and_run_verdict_headers(self) -> None:
         invalid: tuple[tuple[str, object], ...] = (

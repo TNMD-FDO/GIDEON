@@ -87,8 +87,8 @@ The categories differ in what a gate may demand of them: `lookup`, `edition`,
 categories; `unanswerable` must abstain rather than claim the requested authority
 exists. `retrieval`, `synthesis`, `existence`, `trap`, and `poisoned-premise`
 are read and reported, including jurisdiction errors and premise corrections.
-No `research-qa` runner is registered yet, and no slice of this suite is frozen; the first runner
-decides how these ids partition.
+The frozen `research-qa-retrieval` and `research-qa-synthesis` slices run
+their respective categories. The other categories wait for their own runners.
 
 ## The id series and the seeds
 
@@ -659,8 +659,9 @@ cannot answer from memory.
 
 Gold hashes are also collected when building the next eval sample. At run
 time, a case whose canonical hash is absent from the generation must be
-dropped and reported by id. This suite has no runner yet, and synthetic cases
-belong to no frozen slice.
+dropped and reported by id. The frozen `research-qa-retrieval` and
+`research-qa-synthesis` slices include their synthetic cases. Synthetic
+cases of the other categories wait for their category's slice.
 
 ### The reader checklist
 
@@ -1517,13 +1518,16 @@ pair is the byte pin the first committed-file test will want.
 A case is **unsigned** when its shape takes a sign-off, it carries no expected
 answer of its own, and no sign-off or label names it. Synthetic cases carry
 their expected answer and CSA review in the case and are never unsigned.
-An unsigned case loads: it is a case of the set, it counts in
-the set's case count, and it may sit in a slice. What it never does is reach a
-measurement. A slice's selection hands a runner the counted cases alone and the
-unsigned ones separately; `eval run`'s `run` row says how many were excluded;
-a result naming an unsigned case fails that row before anything is recorded; and
-`eval reference` refuses to write a reference from a run that names one. So no
-figure a gate reads, and no verdict a reference keeps, can rest on an answer no
+An unsigned case loads: it is a case of the set, it counts in the set's case
+count, and it may sit in a slice. What it never does is reach a measurement. A
+slice's selection hands a runner the counted cases alone and the unsigned ones
+separately. A runner sends an unsigned case's turn only when the run asks with
+`--unsigned`, and then its row is marked unsigned, carries no gold figure and no
+grade, and is left out of every figure and of the slice's verdict. `eval run`'s
+`run` row says how many were excluded, or run and marked; any other result
+naming an unsigned case fails that row before anything is recorded; and `eval
+reference` refuses to write a reference from a run that names one. So no figure
+a gate reads, and no verdict a reference keeps, can rest on an answer no
 attorney signed.
 
 Signing a case changes the set's digest, because the sign-offs file's bytes are
