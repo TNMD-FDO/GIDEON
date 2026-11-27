@@ -1,15 +1,20 @@
 """Contracts for the GIDEON API service boundary."""
 
 import asyncio
+import re
 import tempfile
 import unittest
+from itertools import combinations
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 
+from gideon.api import __main__ as api_main
 from gideon.api.app import create_app
 from gideon.api.settings import RecordCoordinates, Settings, load_settings
+from gideon.turn.scope import CourtFileError
 
 API_KEY = "fixture-api-key"
 ENGINE_KEY = "fixture-engine-key"
@@ -33,6 +38,13 @@ EMBED_REPOSITORY = "fixture-owner/fixture-embed"
 EMBED_SPACE = "fixture-space"
 EMBED_DIMENSIONS = 7
 OPENSEARCH_URL = "http://fixture-lexical:7003"
+COURTS_FILE = Path(__file__).with_name("fixtures") / "turn" / "courts.json"
+COURT_ENV = {
+    "GIDEON_API_COURTS_SCOTUS": "fixturescotus",
+    "GIDEON_API_COURTS_CIRCUIT": "fixturecircuit",
+    "GIDEON_API_COURTS_DISTRICTS": "fixturedistrict2,fixturedistrict3",
+    "GIDEON_API_COURTS_STATES": "fx-state13A",
+}
 RECORD = RecordCoordinates(
     "fixture-postgres", 5432, "fixture-db", "fixture-reader", Path("/fixture/reader-password"),
 )
@@ -72,6 +84,11 @@ class ApiService(unittest.TestCase):
             embed_repository=EMBED_REPOSITORY,
             embed_space=EMBED_SPACE,
             embed_dimensions=EMBED_DIMENSIONS,
+            courts_scotus=("fixturescotus",),
+            courts_circuit=("fixturecircuit",),
+            courts_districts=("fixturedistrict2", "fixturedistrict3"),
+            courts_states=("fx-state13A",),
+            courts_file=COURTS_FILE,
         )
 
     def loaded_settings_environment(self, root: Path) -> dict[str, str]:
@@ -84,6 +101,8 @@ class ApiService(unittest.TestCase):
         (root / "embed-key").write_text(EMBED_KEY, encoding="utf-8")
         (root / "lexical-password").write_text(OPENSEARCH_PASSWORD, encoding="utf-8")
         return {
+            **COURT_ENV,
+            "GIDEON_API_COURTS_FILE": str(COURTS_FILE),
             "GIDEON_API_DB_HOST": "fixture-postgres",
             "GIDEON_API_DB_PORT": "5432",
             "GIDEON_API_DB_NAME": "fixture-db",
@@ -334,6 +353,82 @@ class ApiService(unittest.TestCase):
             })
             self.assertEqual(with_reranker.rerank_url, url)
             self.assertEqual(with_reranker.rerank_key_file, key_file)
+
+    def test_court_settings_read_groups_and_accept_an_empty_states_group(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            environment = self.loaded_settings_environment(Path(directory))
+            settings = load_settings(environment)
+            expected = self.settings()
+            self.assertEqual(settings.courts_scotus, expected.courts_scotus)
+            self.assertEqual(settings.courts_circuit, expected.courts_circuit)
+            self.assertEqual(settings.courts_districts, expected.courts_districts)
+            self.assertEqual(settings.courts_states, expected.courts_states)
+            self.assertEqual(settings.courts_file, COURTS_FILE)
+            environment["GIDEON_API_COURTS_STATES"] = ""
+            self.assertEqual(load_settings(environment).courts_states, ())
+
+    def test_court_settings_refuse_missing_empty_or_malformed_groups_by_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            environment = self.loaded_settings_environment(Path(directory))
+            for name in COURT_ENV:
+                malformed: tuple[str, ...] = ("fixture_court", "-fixture", "fixture court", "fixture,", "f" * 33)
+                if name != "GIDEON_API_COURTS_STATES":
+                    malformed += ("",)
+                if name == "GIDEON_API_COURTS_CIRCUIT":
+                    malformed += ("fixtureone,fixturetwo",)
+                missing = {key: value for key, value in environment.items() if key != name}
+                with self.subTest(name=name, case="missing"), self.assertRaisesRegex(ValueError, name):
+                    load_settings(missing)
+                for value in malformed:
+                    with self.subTest(name=name, value=value), self.assertRaisesRegex(ValueError, name):
+                        load_settings({**environment, name: value})
+
+    def test_court_settings_refuse_each_overlapping_pair_by_later_variable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            environment = self.loaded_settings_environment(Path(directory))
+            for first, later in combinations(COURT_ENV, 2):
+                repeated = environment[first].split(",")[0]
+                with self.subTest(first=first, later=later), self.assertRaisesRegex(ValueError, later) as caught:
+                    load_settings({**environment, later: repeated})
+                self.assertNotIn(first, str(caught.exception))
+                self.assertNotIn(repeated, str(caught.exception))
+
+    def test_court_file_setting_refuses_missing_or_empty_variable_and_unusable_paths(self) -> None:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        environment = self.loaded_settings_environment(root)
+        variable = "GIDEON_API_COURTS_FILE"
+        del environment[variable]
+        with self.assertRaisesRegex(ValueError, variable):
+            load_settings(environment)
+        with self.assertRaisesRegex(ValueError, variable):
+            load_settings({**environment, variable: " \t"})
+
+        empty = root / "empty-courts.json"
+        empty.write_text(" \n\t", encoding="utf-8")
+        undecodable = root / "invalid-utf8-courts.json"
+        undecodable.write_bytes(b"\xff")
+        for path in (root / "missing-courts.json", empty, undecodable):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, re.escape(str(path))):
+                load_settings({**environment, variable: str(path)})
+
+    def test_malformed_court_file_refuses_startup_without_quoting_contents(self) -> None:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        path = root / "malformed-courts.json"
+        content = "Fictitious malformed court file sentinel"
+        path.write_text(content, encoding="utf-8")
+        settings = load_settings({**self.loaded_settings_environment(root), "GIDEON_API_COURTS_FILE": str(path)})
+        with self.assertRaisesRegex(CourtFileError, re.escape(str(path))) as app_failure:
+            create_app(settings)
+        self.assertNotIn(content, str(app_failure.exception))
+
+        with (
+            patch.object(api_main, "load_settings", return_value=settings),
+            patch.object(api_main.uvicorn, "run") as serve,
+            self.assertRaisesRegex(SystemExit, re.escape(str(path))) as process_failure,
+        ):
+            api_main.main()
+        self.assertNotIn(content, str(process_failure.exception))
+        serve.assert_not_called()
 
     def test_reranker_settings_refuse_a_partial_pair_by_missing_name(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

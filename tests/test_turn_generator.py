@@ -53,6 +53,7 @@ class TurnGenerator(unittest.TestCase):
                     "max_tokens": 16_384,
                     **sampling.fields,
                     "stream": True,
+                    "stream_options": {"include_usage": True, "continuous_usage_stats": True},
                 }
                 self.assertEqual(request_body(served_name, prompt, sampling), expected)
                 self.assertEqual(

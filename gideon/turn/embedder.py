@@ -96,7 +96,9 @@ def _json(response: httpx.Response) -> object:
         raise TurnFailure(State.EMBEDDER_UNAVAILABLE) from None
 
 
-def _outside_window(reply: object) -> bool:
+def outside_window(reply: object) -> bool:
+    """Read a pooling server's 400 body as the context-window refusal, the embedder's and the reranker's."""
+
     if not isinstance(reply, dict):
         return False
     error = reply.get("error", reply)
@@ -119,7 +121,7 @@ async def _embed(
         "input": [instructed(message)],
         "dimensions": space.width,
     })
-    if response.status_code == HTTPStatus.BAD_REQUEST and _outside_window(_json(response)):
+    if response.status_code == HTTPStatus.BAD_REQUEST and outside_window(_json(response)):
         raise TurnFailure(State.MESSAGE_OUTSIDE_WINDOW)
     if response.status_code != HTTPStatus.OK:
         raise TurnFailure(State.EMBEDDER_UNAVAILABLE)

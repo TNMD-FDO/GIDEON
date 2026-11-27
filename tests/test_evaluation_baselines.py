@@ -34,24 +34,37 @@ def assert_import_boundary(test: unittest.TestCase, module: ModuleType, allowed:
 class Baselines(unittest.TestCase):
     def test_every_named_baseline_is_accepted_and_hashed_by_the_turn(self) -> None:
         self.assertEqual(set(baselines.BASELINES), {"off"})
-        self.assertEqual(baselines.BASELINES["off"]["query_plan"], "off")
+        self.assertEqual(baselines.BASELINES["off"], {
+            "query_plan": "off", "rerank.stage1": "off", "rerank.stage2": "off",
+        })
         for name, overrides in baselines.BASELINES.items():
-            with self.subTest(name=name):
-                self.assertLessEqual(overrides.keys(), RETRIEVAL_CONFIG.keys())
-                effective = effective_config(overrides)
-                assert not isinstance(effective, OverrideRefusal)
-                self.assertEqual(baselines.expected_config_hash(overrides), config_hash(effective))
+            for reranker in (True, False):
+                with self.subTest(name=name, reranker=reranker):
+                    self.assertLessEqual(overrides.keys(), RETRIEVAL_CONFIG.keys())
+                    effective = effective_config(overrides, reranker=reranker)
+                    assert not isinstance(effective, OverrideRefusal)
+                    self.assertEqual(baselines.expected_config_hash(overrides, reranker=reranker), config_hash(effective))
 
-    def test_no_overrides_uses_the_shipped_configuration(self) -> None:
-        self.assertEqual(baselines.expected_config_hash(None), config_hash(RETRIEVAL_CONFIG))
+    def test_no_overrides_uses_the_configuration_shipped_for_the_stack(self) -> None:
+        self.assertEqual(baselines.expected_config_hash(None, reranker=True), config_hash(RETRIEVAL_CONFIG))
+        off = {**RETRIEVAL_CONFIG, "rerank.stage2": "off"}
+        self.assertEqual(baselines.expected_config_hash(None, reranker=False), config_hash(off))
+        self.assertIsInstance(baselines.expected_config_hash({"rerank.stage2": "on"}, reranker=False), Problem)
+
+    def test_controlling_reservation_override_is_hashed_with_the_shipped_configuration(self) -> None:
+        overrides = {"reservations.controlling": 1}
+        self.assertEqual(baselines.expected_config_hash(overrides, reranker=True), config_hash({**RETRIEVAL_CONFIG, **overrides}))
 
     def test_refused_override_does_not_leak_its_key_or_value(self) -> None:
         sentinel = "Fictitious private override text"
-        for overrides in ({sentinel: True}, {"query_plan": sentinel}, {"reservations.exact_object": sentinel}):
+        for overrides in (
+            {sentinel: True}, {"query_plan": sentinel},
+            {"reservations.exact_object": sentinel}, {"reservations.controlling": sentinel},
+        ):
             with self.subTest(overrides=overrides):
-                refusal = effective_config(overrides)
+                refusal = effective_config(overrides, reranker=True)
                 assert isinstance(refusal, OverrideRefusal)
-                problem = baselines.expected_config_hash(overrides)
+                problem = baselines.expected_config_hash(overrides, reranker=True)
                 assert isinstance(problem, Problem)
                 self.assertIn(refusal.state, problem.problem)
                 self.assertIn("whitelist", problem.fix)

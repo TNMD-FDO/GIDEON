@@ -42,6 +42,7 @@ def request_body(
         "max_tokens": RESEARCH_MAX_TOKENS,
         **sampling.fields,
         "stream": True,
+        "stream_options": {"include_usage": True, "continuous_usage_stats": True},
     }
     if thinking_off:
         body["chat_template_kwargs"] = {"enable_thinking": False}

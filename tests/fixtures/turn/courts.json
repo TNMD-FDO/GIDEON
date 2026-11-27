@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "courts": {
+    "alnd": {"level": "district", "circuit": "ca11", "state": "AL", "name": "District Court, N.D. Alabama"},
+    "ca1": {"level": "circuit", "circuit": "ca1", "state": null, "name": "Court of Appeals for the First Circuit"},
+    "ca11": {"level": "circuit", "circuit": "ca11", "state": null, "name": "Court of Appeals for the Eleventh Circuit"},
+    "fx-sup-al": {"level": "state_supreme", "circuit": "ca11", "state": "AL", "name": "Fixture Alabama Supreme Court"},
+    "scotus": {"level": "scotus", "circuit": null, "state": null, "name": "Supreme Court of the United States"}
+  },
+  "lockfiles": {
+    "corpus-2099-01-01": ["ca11", "scotus"]
+  }
+}

@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from string import Template
 
+from gideon.host.courts import CourtMap
 from gideon.host.egress import EgressAllowlist
 from gideon.host.images import ImageLock
 from gideon.host.lock import HostLock
@@ -27,6 +28,8 @@ class RenderInputs:
     checkout: str = ""
     source_digests: Mapping[str, str] = field(default_factory=dict)
     egress: EgressAllowlist | None = None
+    courts: CourtMap | None = None
+    lockfile_courts: Mapping[str, tuple[str, ...]] | None = None
     no_gpu: bool = False
     build_box: bool = False
 
@@ -168,6 +171,7 @@ def render_all(inputs: RenderInputs) -> RenderedSet:
 def _registered_artifacts() -> tuple[Artifact, ...]:
     from gideon.host.render.caddy import CaddyfileArtifact
     from gideon.host.render.compose import ComposeArtifact
+    from gideon.host.render.courts import ApiCourtsArtifact
     from gideon.host.render.egress import EgressEnvArtifact
     from gideon.host.render.grafana import (
         GrafanaBackupArtifact,
@@ -256,6 +260,7 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         OwuiEnvArtifact(),
         ApplyManifestArtifact(),
         ApiInstructionArtifact(),
+        ApiCourtsArtifact(),
         RouteGuardArtifact(),
         ScoreTemplateArtifact(),
         SearxngSettingsArtifact(),

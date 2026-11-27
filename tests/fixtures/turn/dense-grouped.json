@@ -11,7 +11,9 @@
             "payload": {
               "chunk_id": "fixture-chunk-shared",
               "dupe_cluster": "fixture-cluster-shared",
-              "boilerplate": false
+              "boilerplate": false,
+              "court": "scotus",
+              "precedential": "published"
             }
           }
         ]
@@ -26,7 +28,9 @@
             "payload": {
               "chunk_id": "fixture-chunk-dense",
               "dupe_cluster": "fixture-cluster-duplicate",
-              "boilerplate": false
+              "boilerplate": false,
+              "court": "ca11",
+              "precedential": "published"
             }
           }
         ]
@@ -41,7 +45,9 @@
             "payload": {
               "chunk_id": "fixture-chunk-boilerplate",
               "dupe_cluster": "fixture-cluster-boilerplate",
-              "boilerplate": true
+              "boilerplate": true,
+              "court": "ca11",
+              "precedential": "unknown"
             }
           }
         ]

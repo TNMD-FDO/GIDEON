@@ -32,6 +32,7 @@ from gideon.host.render.compose import (
     network_name,
     with_memory_limit,
 )
+from gideon.host.render.courts import ApiCourtsArtifact
 from gideon.host.render.engine import (
     EMBED,
     EMBED_SECRET_NAME,
@@ -99,9 +100,9 @@ RELAY_SOURCE: Final[str] = "tools/cistack/relay.py"
 RELAY_CONTAINER_PATH: Final[str] = "/relay/relay.py"
 RELAY_MEMORY_LIMIT: Final[int] = 128 * 1024 * 1024
 # The sibling has no recreate rule, only Compose's config diff at ``up -d``, so
-# its API block carries the instruction's digest: a changed text moves the block
-# and the service never keeps a startup text its mounted file no longer holds.
+# its API block carries digests of the mounted files the service reads at startup.
 CI_INSTRUCTION_DIGEST_LABEL: Final[str] = "org.gideon.instruction-digest"
+CI_COURTS_DIGEST_LABEL: Final[str] = "org.gideon.courts-digest"
 # The sibling's Postgres ceiling in the memory table's unit, decimal gigabytes,
 # sized as the table's rows are: the smallest whole gigabyte at least four times
 # the service's working-set peak, floor 1. The peak is the maximum by Compose
@@ -284,6 +285,9 @@ def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
         **api_labels,
         CI_INSTRUCTION_DIGEST_LABEL: hashlib.sha256(
             ci_instruction(inputs).encode("utf-8")
+        ).hexdigest(),
+        CI_COURTS_DIGEST_LABEL: hashlib.sha256(
+            ApiCourtsArtifact().emit(inputs).encode("utf-8")
         ).hexdigest(),
     }
     api_environment = api["environment"]

@@ -7,8 +7,9 @@ are:
 
 * ``head``: the HTTP status and response media type;
 * ``body``: the complete non-stream response text;
-* ``data``: one event-stream payload and its elapsed offset;
-* ``end``: whether the event stream received ``data: [DONE]``;
+* ``data``: one unnamed event-stream payload and its elapsed offset;
+* ``event``: one named event-stream payload with its name and elapsed offset;
+* ``end``: whether the event stream received the unnamed ``[DONE]`` marker;
 * ``elapsed``: the complete request duration; and
 * ``failure``: the client's exception class, without request or response text.
 
@@ -16,8 +17,11 @@ This module parses both reply forms.  A stream ``data`` line is decoded into
 ordered ``(kind, text)`` deltas by
 :func:`gideon.evaluation.turns.session.parse_stream_payload`;
 the enclosing ``DoorEvent`` keeps those deltas with their seconds-from-request
-start offset, and the ``end`` line keeps the ``[DONE]`` flag.  A successful
-reply is converted to the stored assistant-message shape consumed by
+start offset, and by default the ``end`` line must carry the ``[DONE]`` flag.
+With ``named_events=True``, the door returns ordered ``NamedEvent`` values
+with their raw payloads and requires only the ``end`` line.  Each mode
+refuses payload records of the other kind.  A successful General reply is
+converted to the stored assistant-message shape consumed by
 :mod:`gideon.evaluation.turns.classify`.
 The door addresses General's id with a client's prompt alone; the API service
 addresses the engine's served name.
@@ -27,6 +31,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -55,6 +60,7 @@ _CLIENT_INTERPRETER: Final[str] = "python3"
 _COMPLETIONS_PATH: Final[str] = "/chat/completions"
 _MODELS_PATH: Final[str] = "/models"
 EVENT_STREAM_MEDIA_TYPE: Final[str] = "text/event-stream"
+_EVENT_NAME: Final = re.compile(r"[a-z]+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +77,20 @@ class DoorEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class NamedEvent:
+    """One named payload and its seconds-from-request-start offset."""
+
+    name: str
+    offset: float
+    payload: str
+
+    def __repr__(self) -> str:
+        """Keep the payload out of diagnostic representations."""
+
+        return f"NamedEvent(name={self.name!r}, offset={self.offset!r})"
+
+
+@dataclass(frozen=True, slots=True)
 class DoorReply:
     """The parsed API-door envelope, with response text redacted in reprs."""
 
@@ -81,6 +101,7 @@ class DoorReply:
     done: bool
     elapsed: float | None
     problem: Problem | None
+    named_events: tuple[NamedEvent, ...] = ()
 
     @property
     def is_stream(self) -> bool:
@@ -96,7 +117,7 @@ class DoorReply:
             f"status={self.status!r}, media_type={self.media_type!r}, "
             "body_text=<redacted>, "
             f"events={len(self.events)}, done={self.done!r}, elapsed={self.elapsed!r}, "
-            f"problem={self.problem!r})"
+            f"problem={self.problem!r}, named_events={len(self.named_events)})"
         )
 
 
@@ -177,7 +198,10 @@ def _finite_number(value: object) -> float | None:
 
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
     return number if math.isfinite(number) and number >= 0 else None
 
 
@@ -207,7 +231,8 @@ def _failure_reply(
 
 
 def _parse_envelope(
-    stdout: str, rendered_dir: PathLike, *, returncode: int, keep_failure_detail: bool,
+    stdout: str, rendered_dir: PathLike, *,
+    returncode: int, keep_failure_detail: bool, named_events: bool,
 ) -> DoorReply:
     """Parse the client's envelope, requiring a failure record on a failure exit."""
 
@@ -237,6 +262,7 @@ def _parse_envelope(
     is_stream = media_type.casefold() == EVENT_STREAM_MEDIA_TYPE
     body_text: str | None = None
     events: list[DoorEvent] = []
+    named: list[NamedEvent] = []
     done = False
     ended = False
     stream_problem: Problem | None = None
@@ -247,16 +273,24 @@ def _parse_envelope(
             if is_stream or body_text is not None or not isinstance(text, str):
                 return _invalid_envelope(rendered_dir)
             body_text = text
-        elif kind == "data":
+        elif kind in ("data", "event"):
             offset = _finite_number(record.get("offset"))
             payload = record.get("payload")
             if not is_stream or ended or offset is None or not isinstance(payload, str):
                 return _invalid_envelope(rendered_dir)
-            parsed = session.parse_stream_payload(payload)
-            if parsed.problem is not None:
-                stream_problem = _problem(rendered_dir, parsed.problem)
+            if kind == "event":
+                name = record.get("name")
+                if not isinstance(name, str) or _EVENT_NAME.fullmatch(name) is None:
+                    return _invalid_envelope(rendered_dir)
+                named.append(NamedEvent(name, offset, payload))
+            elif named_events:
+                stream_problem = _problem(rendered_dir, "door stream carried unnamed data")
             else:
-                events.append(DoorEvent(offset, parsed.deltas))
+                parsed = session.parse_stream_payload(payload)
+                if parsed.problem is not None:
+                    stream_problem = _problem(rendered_dir, parsed.problem)
+                else:
+                    events.append(DoorEvent(offset, parsed.deltas))
         elif kind == "end":
             done_value = record.get("done")
             if not is_stream or ended or type(done_value) is not bool:
@@ -284,14 +318,18 @@ def _parse_envelope(
             _problem(rendered_dir, f"door returned HTTP {status}", key=status == 401),
         )
     if is_stream:
-        if not ended or not done:
-            return _empty_reply(_problem(rendered_dir, "door stream ended without its end marker"))
+        if named and not named_events:
+            stream_problem = _problem(rendered_dir, "door stream carried named events")
+        elif not ended or (not named_events and not done):
+            missing = "record" if named_events else "marker"
+            return _empty_reply(_problem(rendered_dir, f"door stream ended without its end {missing}"))
         body_text = ""
     elif body_text is None:
         return _invalid_envelope(rendered_dir)
 
     reply = DoorReply(
-        status, media_type, body_text, tuple(events), done, seconds, stream_problem
+        status, media_type, body_text, tuple(events), done, seconds, stream_problem,
+        tuple(named) if stream_problem is None else (),
     )
     return reply
 
@@ -304,8 +342,9 @@ def request(
     body: Mapping[str, object] | None,
     max_time: float,
     keep_failure_detail: bool = False,
+    named_events: bool = False,
 ) -> DoorReply:
-    """Send one keyed API request with optional HTTP body and client failure detail."""
+    """Send one keyed API request, with opt-ins for failure detail and named events."""
 
     try:
         source = _client_source()
@@ -351,6 +390,7 @@ def request(
     return _parse_envelope(
         result.stdout, rendered_dir,
         returncode=result.returncode, keep_failure_detail=keep_failure_detail,
+        named_events=named_events,
     )
 
 

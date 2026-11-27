@@ -6,12 +6,12 @@ from dataclasses import dataclass
 from typing import Final, cast
 
 from gideon.api.judged import source_for_header
-from gideon.guardrail.writer import EVAL_SOURCE
+from gideon.guardrail.writer import EVAL_SOURCE, bounded_id
 from gideon.turn.config import OverrideRefusal, RetrievalConfig, effective_config
 from gideon.turn.states import RequestWord, State, TurnFailure
 
 _EVAL_FIELDS: Final = ("stop_after", "evidence", "overrides")
-_REQUEST_FIELDS: Final = frozenset(("message", "history", "kb_ids", "session_token", *_EVAL_FIELDS))
+_REQUEST_FIELDS: Final = frozenset(("message", "message_id", "history", "kb_ids", "session_token", *_EVAL_FIELDS))
 # exempt: a starting bound, corrected by the M1 reading.
 _HISTORY_LIMIT: Final = 6
 
@@ -27,6 +27,7 @@ class TurnRequest:
     stop_after: str | None
     evidence: tuple[str, ...] | None
     overrides: dict[str, object] | None
+    message_id: str | None = None
 
 
 def _string(fields: dict[str, object], key: RequestWord) -> str | None:
@@ -62,6 +63,9 @@ def _parse(body: bytes | bytearray) -> TurnRequest:
     message = _string(fields, "message")
     if message is None or not message.strip():
         raise TurnFailure(State.INVALID_REQUEST, "message")
+    message_id = _string(fields, "message_id")
+    if message_id is not None and bounded_id(message_id) is None:
+        raise TurnFailure(State.INVALID_REQUEST, "message_id")
     history = _strings(fields, "history")
     if history is not None and len(history) > _HISTORY_LIMIT:
         raise TurnFailure(State.INVALID_REQUEST, "history")
@@ -70,12 +74,12 @@ def _parse(body: bytes | bytearray) -> TurnRequest:
         raise TurnFailure(State.INVALID_REQUEST, "overrides")
     return TurnRequest(
         message, history, _strings(fields, "kb_ids"), _string(fields, "session_token"),
-        _string(fields, "stop_after"), _strings(fields, "evidence"), overrides,
+        _string(fields, "stop_after"), _strings(fields, "evidence"), overrides, message_id=message_id,
     )
 
 
 def admit(
-    body: bytes | bytearray, source_values: Sequence[str], eval_identity: str,
+    body: bytes | bytearray, source_values: Sequence[str], eval_identity: str, *, reranker: bool,
 ) -> tuple[TurnRequest, RetrievalConfig]:
     """Validate the shape, the caller, the overrides, and the requested stage in order."""
 
@@ -86,7 +90,7 @@ def admit(
                 raise TurnFailure(State.EVAL_ONLY_FIELD, key)
         raise TurnFailure(State.CALLER_NOT_ADMITTED)
 
-    config = effective_config(request.overrides)
+    config = effective_config(request.overrides, reranker=reranker)
     if isinstance(config, OverrideRefusal):
         if config.state == State.OVERRIDE_NOT_ALLOWED:
             raise TurnFailure(State.OVERRIDE_NOT_ALLOWED, "overrides")

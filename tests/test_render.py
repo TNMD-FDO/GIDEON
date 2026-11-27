@@ -5,6 +5,7 @@ import ast
 import contextlib
 import hashlib
 import io
+import json
 import os
 import stat as stat_module
 import subprocess
@@ -18,8 +19,11 @@ from unittest import mock
 from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
+from regenerate_render_fixtures import fixture_lockfile_courts
 
 from gideon.host import gpus, nogpu, report, secrets, weights
+from gideon.host.corpus.lockfile import read_lockfile_directory
+from gideon.host.courts import load_court_map
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import (
     ImageLock,
@@ -37,6 +41,7 @@ from gideon.host.models import (
 )
 from gideon.host.render import ARTIFACTS, RenderInputs, compose, render_all, systemd
 from gideon.host.render.api import (
+    API_COURTS_PATH,
     API_JOB_NAME,
     API_SERVICE_NAME,
     api_base_url,
@@ -271,6 +276,8 @@ def site(path: Path = EXAMPLE) -> SiteConfig:
 
 def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
     egress = load_egress_allowlist(ROOT / "config/egress.yaml").allowlist
+    courts = load_court_map(ROOT / "courts.yaml").court_map
+    assert courts is not None
     lock = load_host_lock(ROOT / "host.lock").lock
     images = load_image_lock(ROOT / "images.lock").lock
     models = load_models_lock(ROOT / "models.lock").lock
@@ -305,6 +312,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
         checkout="/opt/gideon",
         source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
         egress=egress,
+        courts=courts,
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 
@@ -466,6 +474,7 @@ class Registry(unittest.TestCase):
                 "open-webui/env",
                 "open-webui/manifest.yaml",
                 "gideon-api/instruction.txt",
+                API_COURTS_PATH,
                 "model-servers/gideon_route_guard.py",
                 SCORE_TEMPLATE_PATH,
                 "searxng/settings.yml",
@@ -530,26 +539,29 @@ class Registry(unittest.TestCase):
         self.assertEqual(ARTIFACTS[20].owners, (API_SERVICE_NAME,))
         self.assertEqual(ARTIFACTS[20].mode, 0o644)
         self.assertFalse(ARTIFACTS[20].secret)
+        self.assertEqual(ARTIFACTS[21].owners, (API_SERVICE_NAME,))
+        self.assertEqual(ARTIFACTS[21].mode, 0o644)
+        self.assertFalse(ARTIFACTS[21].secret)
         self.assertEqual(
-            ARTIFACTS[21].owners,
+            ARTIFACTS[22].owners,
             tuple(member.service_name for member in MODEL_SERVERS),
         )
-        self.assertEqual(ARTIFACTS[21].mode, 0o644)
-        self.assertEqual(ARTIFACTS[22].owners, (RERANK.service_name,))
         self.assertEqual(ARTIFACTS[22].mode, 0o644)
-        self.assertEqual(ARTIFACTS[23].owners, ("searxng",))
+        self.assertEqual(ARTIFACTS[23].owners, (RERANK.service_name,))
         self.assertEqual(ARTIFACTS[23].mode, 0o644)
         self.assertEqual(ARTIFACTS[24].owners, ("searxng",))
-        self.assertTrue(ARTIFACTS[24].secret)
-        self.assertEqual(ARTIFACTS[24].mode, 0o600)
-        self.assertEqual(ARTIFACTS[25].relative_path, "gideon-egress/env")
-        self.assertEqual(ARTIFACTS[25].owners, ("gideon-egress",))
+        self.assertEqual(ARTIFACTS[24].mode, 0o644)
+        self.assertEqual(ARTIFACTS[25].owners, ("searxng",))
         self.assertTrue(ARTIFACTS[25].secret)
         self.assertEqual(ARTIFACTS[25].mode, 0o600)
-        self.assertEqual(ARTIFACTS[26].relative_path, "searxng/logging.json")
-        self.assertEqual(ARTIFACTS[26].owners, ("searxng",))
-        self.assertFalse(ARTIFACTS[26].secret)
-        self.assertEqual(ARTIFACTS[26].mode, 0o644)
+        self.assertEqual(ARTIFACTS[26].relative_path, "gideon-egress/env")
+        self.assertEqual(ARTIFACTS[26].owners, ("gideon-egress",))
+        self.assertTrue(ARTIFACTS[26].secret)
+        self.assertEqual(ARTIFACTS[26].mode, 0o600)
+        self.assertEqual(ARTIFACTS[27].relative_path, "searxng/logging.json")
+        self.assertEqual(ARTIFACTS[27].owners, ("searxng",))
+        self.assertFalse(ARTIFACTS[27].secret)
+        self.assertEqual(ARTIFACTS[27].mode, 0o644)
         self.assertEqual(ARTIFACTS[-1].owners, ("dcgm-exporter",))
         self.assertEqual(ARTIFACTS[-1].mode, 0o644)
         self.assertTrue(
@@ -1383,7 +1395,7 @@ class Core(unittest.TestCase):
         )
         self.assertEqual(
             [artifact.name for artifact in ARTIFACTS if not artifact.applies(no_gpu)],
-            ["grafana-gpu", "grafana-eval", "api-instruction", "model-servers-route-guard", "model-servers-score-template", "gideon-egress-env", "gideon-eval-nightly-service", "gideon-eval-nightly-timer", "gideon-archive-push-service", "gideon-archive-push-timer", "dcgm-counters"],
+            ["grafana-gpu", "grafana-eval", "api-instruction", "api-courts", "model-servers-route-guard", "model-servers-score-template", "gideon-egress-env", "gideon-eval-nightly-service", "gideon-eval-nightly-timer", "gideon-archive-push-service", "gideon-archive-push-timer", "dcgm-counters"],
         )
         build_box = inputs(build_box=True)
         self.assertEqual(
@@ -1711,6 +1723,7 @@ class Core(unittest.TestCase):
                 "open-webui/env",
                 "open-webui/manifest.yaml",
                 "gideon-api/instruction.txt",
+                API_COURTS_PATH,
                 "model-servers/gideon_route_guard.py",
                 SCORE_TEMPLATE_PATH,
                 "searxng/settings.yml",
@@ -1822,6 +1835,9 @@ class DirHost(FakeHost):
             raise FileNotFoundError(key)
         return self.files[key]
 
+    def read_bytes(self, path: PathLike) -> bytes:
+        return self.read_text(path).encode("utf-8")
+
     def write_text(self, path: PathLike, text: str, *, encoding: str = "utf-8", mode: int = 0o644) -> None:
         key = os.fspath(path)
         self.files[key] = text
@@ -1867,6 +1883,7 @@ def checkout_files() -> dict[str, str]:
         str(ROOT / "images.lock"): (ROOT / "images.lock").read_text(),
         str(ROOT / "models.lock"): (ROOT / "models.lock").read_text(),
         str(ROOT / "config/egress.yaml"): (ROOT / "config/egress.yaml").read_text(),
+        str(ROOT / "courts.yaml"): (ROOT / "courts.yaml").read_text(),
         **{
             str(ROOT / "compose" / path): (ROOT / "compose" / path).read_text()
             for path in TEMPLATE_PATHS
@@ -1944,6 +1961,49 @@ class RenderCommand(unittest.TestCase):
         code, _, err = render(DirHost(checkout_files(), euid=1000))
         self.assertEqual(code, 1)
         self.assertIn("Fix:", err)
+
+    def test_missing_or_invalid_court_map_refuses_before_writing(self) -> None:
+        path = str(ROOT / "courts.yaml")
+        for content in (None, "[]"):
+            with self.subTest(content=content):
+                files = checkout_files()
+                if content is None:
+                    del files[path]
+                else:
+                    files[path] = content
+                host = DirHost(files)
+                code, _, error = render(host)
+                self.assertEqual(code, 1)
+                self.assertIn("Fix: Restore courts.yaml from the release checkout", error)
+                self.assertEqual(host.writes, [])
+
+    def test_court_file_uses_the_checkout_lockfiles_and_requires_their_companions(self) -> None:
+        directory = ROOT / "corpus/lockfiles"
+        loaded = read_lockfile_directory(directory)
+        self.assertFalse(loaded.errors)
+        self.assertTrue(loaded.lockfiles)
+        expected = {item.label: list(item.courts) for item in loaded.lockfiles}
+        files = checkout_files()
+        artifact_path = f"{RENDERED}/{API_COURTS_PATH}"
+        host = DirHost(files)
+        code, _, error = render(host)
+        self.assertEqual(code, 0, error)
+        self.assertEqual(json.loads(host.files[artifact_path])["lockfiles"], {})
+
+        committed = {str(path): path.read_bytes().decode("utf-8") for path in directory.rglob("*") if path.is_file()}
+        host = DirHost({**files, **committed})
+        code, _, error = render(host)
+        self.assertEqual(code, 0, error)
+        self.assertEqual(json.loads(host.files[artifact_path])["lockfiles"], expected)
+
+        missing = next(path for path in committed if path.endswith(".sha256"))
+        del committed[missing]
+        host = DirHost({**files, **committed})
+        code, _, error = render(host)
+        self.assertEqual(code, 1)
+        self.assertIn(missing, error)
+        self.assertIn("Fix: Restore the lockfile and its companion files", error)
+        self.assertEqual(host.writes, [])
 
     def test_registry_gather_matches_each_service_source_digest(self) -> None:
         host = DirHost(checkout_files())
@@ -2855,8 +2915,9 @@ class ByteStableFixtures(unittest.TestCase):
 
     def test_every_fixture_matches_committed_bytes(self) -> None:
         lock_text = (ROOT / "host.lock").read_text()
+        lockfile_courts = fixture_lockfile_courts()
         for name, site_path, no_gpu, build_box in FIXTURE_CASES:
-            rendered_inputs = inputs(site_path, no_gpu=no_gpu, build_box=build_box)
+            rendered_inputs = inputs(site_path, no_gpu=no_gpu, build_box=build_box, lockfile_courts=lockfile_courts)
             rendered = render_all(rendered_inputs)
             expected_dir = FIXTURES / name
             with self.subTest(fixture=name):

@@ -14,7 +14,7 @@ from datetime import date, timedelta
 from itertools import combinations
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import yaml  # type: ignore[import-untyped]
 from test_engine_verify import completed, models_text
@@ -55,8 +55,10 @@ from gideon.host.corpus.lockfile import (
     render_lockfile,
 )
 from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK
-from gideon.host.render.engine import GENERATOR
+from gideon.host.render.engine import GENERATOR, RERANK
 from gideon.host.sysio import ReadBytesHost
+
+_ENGINE_RESEARCH_SURFACES = frozenset({CallSurface.ENGINE, CallSurface.RESEARCH, CallSurface.STORES})
 
 
 class SliceSurfaces(unittest.TestCase):
@@ -136,6 +138,7 @@ def _invoke_planted(
     generation_name: str | None = None,
     generation_reply: str | None = None,
     flags: tuple[str, ...] = (),
+    research_probe: Mock | None = None,
 ) -> tuple[tuple[int, str, str], list[RunContext], command.engine.EngineTarget]:
     """Run one surface set through the command with observable seams."""
 
@@ -168,9 +171,12 @@ def _invoke_planted(
     if supplied_set is not None:
         argv.extend(("--set", str(supplied_set)))
     kwargs = _run_kwargs(host, checkout=checkout, court_path=checkout / "courts.yaml")
+    kwargs["models_path"] = ROOT / "models.lock"
     kwargs["clock"] = lambda: NOW
     if site_path is not None:
         kwargs["site_path"] = site_path
+    if research_probe is None:
+        research_probe = Mock(return_value=None)
     with (
         patch.object(command, "SLICE_RUNNERS", replacement),
         patch.object(command.engine, "resolve_engine_target", return_value=target),
@@ -184,7 +190,7 @@ def _invoke_planted(
             "probe",
             return_value=command.door.ProbeResult(True, "door ready", None),
         ),
-        patch.object(command.research_door, "probe", return_value=None),
+        patch.object(command.research_door, "probe", new=research_probe),
         patch.object(command.stacks.secrets, "select_directory") as select_directory,
     ):
         outcome = _invoke(argv, **kwargs)
@@ -395,16 +401,35 @@ class PreparationRoutes(unittest.TestCase):
             site_result = command.site.load_site(ROOT / "config/site.example.yaml")
             self.assertIsNotNone(site_result.config)
             assert site_result.config is not None
-            for surfaces, use_ranked in _admissible_surfaces():
-                with self.subTest(surfaces=surfaces, use_ranked=use_ranked):
+            lock = models.load_models_lock(ROOT / "models.lock").lock
+            assert lock is not None
+            profile = lock.profile(site_result.config.hardware_profile)
+            assert profile is not None
+            reranker = profile.model(RERANK.role) is not None
+            shipped = ((surfaces, use_ranked, None) for surfaces, use_ranked in _admissible_surfaces())
+            for surfaces, use_ranked, baseline in (*shipped, (_ENGINE_RESEARCH_SURFACES, False, "off")):
+                with self.subTest(surfaces=surfaces, use_ranked=use_ranked, baseline=baseline):
                     host = EvalHost()
+                    research_probe = Mock(return_value=None)
+                    flags = () if baseline is None else ("--baseline", baseline)
                     (code, stdout, stderr), contexts, target = _invoke_planted(
-                        host, checkout, ranked_path, surfaces, use_ranked=use_ranked,
+                        host, checkout, ranked_path, surfaces, use_ranked=use_ranked, flags=flags,
+                        research_probe=research_probe,
                     )
                     self.assertEqual((code, stderr), (0, ""), stdout)
                     self.assertEqual(len(contexts), 1)
                     context = contexts[0]
-                    self.assertIsNone(context.turn_overrides)
+                    turn_overrides = None if baseline is None else baselines.BASELINES[baseline]
+                    self.assertEqual(context.turn_overrides, turn_overrides)
+                    has_research = CallSurface.RESEARCH in surfaces and not use_ranked
+                    if has_research:
+                        research_probe.assert_called_once_with(host, context.turns_dir, sibling=False)
+                        expected_hash = baselines.expected_config_hash(turn_overrides, reranker=reranker)
+                        self.assertIsInstance(expected_hash, str)
+                        self.assertEqual(context.expected_config_hash, expected_hash)
+                    else:
+                        research_probe.assert_not_called()
+                        self.assertIsNone(context.expected_config_hash)
                     self.assertEqual(
                         context.served_model_name is None,
                         CallSurface.ENGINE not in surfaces,
@@ -451,6 +476,22 @@ class PreparationRoutes(unittest.TestCase):
                         if CallSurface.ENGINE in surfaces
                         else site_result.config.hardware_profile,
                     )
+                    if has_research:
+                        overrides_line = next(line for line in sql.splitlines() if line.startswith("\\set overrides "))
+                        facts: dict[str, object] = {
+                            "door": "turn", "config_hash": context.expected_config_hash,
+                        }
+                        if turn_overrides is not None:
+                            facts.update(baseline=baseline, turn_overrides=dict(turn_overrides))
+                        if CallSurface.ENGINE in surfaces:
+                            self.assertEqual(json.loads(read_psql_set(overrides_line, "overrides")), {"research": facts})
+                        else:
+                            self.assertEqual(json.loads(read_psql_set(overrides_line, "overrides"))["judgments"]["config_hash"],
+                                             context.expected_config_hash)
+                        preconditions, = (line for line in stdout.splitlines() if line.startswith("preconditions:"))
+                        self.assertTrue(preconditions.endswith(
+                            f", door {command.research_door.TURN_PATH} probed, baseline {baseline or 'shipped'}"
+                        ), preconditions)
 
     def test_image_only_skips_engine_guards_while_smoke_keeps_them(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -991,12 +1032,45 @@ class ResearchPreparation(unittest.TestCase):
 
     def setUp(self) -> None:
         self.checkout, _ = _fixture(self.enterContext(tempfile.TemporaryDirectory()), {1: RELEVANT_GRADE})
+        self.models_path = ROOT / "models.lock"
+        self.site_path = ROOT / "config/site.example.yaml"
+        lock = models.load_models_lock(self.models_path).lock
+        config = command.site.load_site(self.site_path).config
+        assert lock is not None and config is not None
+        self.profiles = lock.profiles
+        profile = lock.profile(config.hardware_profile)
+        assert profile is not None
+        self.production_reranker = profile.model(RERANK.role) is not None
 
     def run_judgments(self, host: EvalHost, *flags: str) -> tuple[int, str, str]:
         return _invoke(
             ["eval", "run", "--slice", "judgments", *flags],
+            models_path=self.models_path,
             **_run_kwargs(host, checkout=self.checkout, court_path=self.checkout / "courts.yaml"),
         )
+
+    def test_production_without_a_reranker_and_ci_prepare_the_off_stage_hash(self) -> None:
+        profile = next(profile for profile in self.profiles if profile.model(RERANK.role) is None)
+        site_document = yaml.safe_load(self.site_path.read_text(encoding="utf-8"))
+        path = self.checkout / "fictitious-site.yaml"
+        site_document["hardware_profile"] = profile.name
+        path.write_text(yaml.safe_dump(site_document), encoding="utf-8")
+        row = _generation_row()
+        surfaces = _ENGINE_RESEARCH_SURFACES - {CallSurface.ENGINE}
+        expected_hash = baselines.expected_config_hash(None, reranker=False)
+        assert isinstance(expected_hash, str)
+        for stack_name, site_path in ((PRODUCTION_STACK, path), (CI_STACK, self.site_path)):
+            with self.subTest(stack=stack_name), patch.object(
+                baselines, "expected_config_hash", wraps=baselines.expected_config_hash,
+            ) as config_hash:
+                (code, stdout, stderr), contexts, _ = _invoke_planted(
+                    EvalHost(), self.checkout, self.checkout / "fictitious-ranked.json", surfaces,
+                    site_path=site_path, stack_name=stack_name, generation_name=row["gen_id"],
+                )
+                self.assertEqual((code, stderr), (0, ""), stdout)
+                config_hash.assert_called_once_with(None, reranker=False)
+                context, = contexts
+                self.assertEqual(context.expected_config_hash, expected_hash)
 
     def test_built_generation_refusal_names_promotion_and_a_ranked_retry_on_the_same_stack(self) -> None:
         _copy_sibling_artifacts(self.checkout)
@@ -1044,7 +1118,7 @@ class ResearchPreparation(unittest.TestCase):
     def test_expected_hash_refusal_precedes_the_research_probe(self) -> None:
         host = EvalHost()
         host.generation_output = json.dumps(_generation_row()) + "\n"
-        refused = baselines.expected_config_hash({"fictitious-override": True})
+        refused = baselines.expected_config_hash({"fictitious-override": True}, reranker=self.production_reranker)
         assert isinstance(refused, command.Problem)
         for baseline in (None, *baselines.BASELINES):
             with (
@@ -1054,7 +1128,9 @@ class ResearchPreparation(unittest.TestCase):
             ):
                 flags = () if baseline is None else ("--baseline", baseline)
                 code, stdout, stderr = self.run_judgments(host, *flags)
-                expected_hash.assert_called_once_with(None if baseline is None else baselines.BASELINES[baseline])
+                expected_hash.assert_called_once_with(
+                    None if baseline is None else baselines.BASELINES[baseline], reranker=self.production_reranker,
+                )
                 probe.assert_not_called()
                 self.assertEqual((code, stderr), (1, ""), stdout)
                 self.assertIn(refused.problem, stdout)
@@ -1076,6 +1152,102 @@ class ResearchPreparation(unittest.TestCase):
         code, stdout, stderr = self.run_judgments(host, *flags)
         self.assertEqual((code, stderr), (1, ""), stdout)
         self.assertIn(report.command(f"eval run --slice judgments --baseline off --generation {name}") + " again.", stdout)
+
+    def test_engine_checks_research_under_the_lock_after_target_and_generation(self) -> None:
+        host = EvalHost()
+        generation = _generation_row()
+        checks: list[str] = []
+        shipped_hash = baselines.expected_config_hash(None, reranker=False)
+        assert isinstance(shipped_hash, str)
+
+        def marker(io: EvalHost) -> bool:
+            self.assertIs(io, host)
+            if not checks:
+                self.assertEqual(host.locks, {})
+                checks.append("engine marker")
+            else:
+                self.assertIn(backuplock.ENGINE_LOCK.path, host.locks)
+                cast(Mock, command.engine.resolve_engine_target).assert_called_once()
+                self.assertTrue(any("FROM public.index_generations" in (sql or "") for _, sql in host.calls))
+                checks.append("Research marker")
+            return False
+
+        def config_hash(turn_overrides: object, *, reranker: bool) -> str:
+            self.assertIsNone(turn_overrides)
+            self.assertIs(reranker, False)
+            self.assertIn(backuplock.ENGINE_LOCK.path, host.locks)
+            checks.append("config hash")
+            return shipped_hash
+
+        def probe(io: EvalHost, rendered_dir: Path, *, sibling: bool) -> None:
+            self.assertIs(io, host)
+            self.assertIn(backuplock.ENGINE_LOCK.path, host.locks)
+            self.assertEqual(rendered_dir, Path(command.stacks.CI_ROOT))
+            self.assertTrue(sibling)
+            self.assertFalse(any(argv[0] == "git" or sql == "SELECT 1;\n" for argv, sql in host.calls))
+            checks.append("Research probe")
+
+        research_probe = Mock(side_effect=probe)
+        with (
+            patch.object(command.nogpu, "is_no_gpu_host", side_effect=marker),
+            patch.object(baselines, "expected_config_hash", side_effect=config_hash),
+        ):
+            (code, stdout, stderr), contexts, _ = _invoke_planted(
+                host, self.checkout, self.checkout / "fictitious-ranked.json", _ENGINE_RESEARCH_SURFACES,
+                stack_name=CI_STACK, generation_name=generation["gen_id"], research_probe=research_probe,
+            )
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        self.assertEqual(checks, ["engine marker", "Research marker", "config hash", "Research probe"])
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(contexts[0].expected_config_hash, shipped_hash)
+        self.assertTrue(any(sql == "SELECT 1;\n" for _, sql in host.calls))
+        self.assertEqual(host.locks, {})
+
+    def test_engine_research_refusals_stop_before_the_runner_and_release_the_lock(self) -> None:
+        built, live = _generation_row(state="built"), _generation_row()
+        built_name = built["gen_id"]
+        bad_hash = baselines.expected_config_hash({"fictitious-override": True}, reranker=self.production_reranker)
+        shipped_hash = baselines.expected_config_hash(None, reranker=self.production_reranker)
+        assert isinstance(bad_hash, command.Problem) and isinstance(shipped_hash, str)
+        probe_refusal = command.Problem("Fictitious Research probe refused.", "Retry the fictitious service.")
+        cases = (
+            ("no-GPU", built, command.Problem(
+                "this host carries the no-GPU marker and serves no /turn",
+                "Run the evaluation on a GPU host, then retry.",
+            )),
+            ("built", built, command.Problem(
+                f"generation {built_name} is built and /turn requires a live generation",
+                f"Run {report.command(f'index promote {built_name}')}, then retry.",
+            )),
+            ("hash", live, bad_hash),
+            ("probe", live, probe_refusal),
+        )
+        for refusal, generation, problem in cases:
+            with self.subTest(refusal=refusal):
+                host = EvalHost()
+                research_probe = Mock(return_value=probe_refusal)
+                flags = ("--baseline", "off") if refusal == "hash" else ()
+                with (
+                    patch.object(command.nogpu, "is_no_gpu_host", side_effect=(False, refusal == "no-GPU")),
+                    patch.object(
+                        baselines, "expected_config_hash", return_value=bad_hash if refusal == "hash" else shipped_hash,
+                    ) as expected_hash,
+                ):
+                    (code, stdout, stderr), contexts, _ = _invoke_planted(
+                        host, self.checkout, self.checkout / "fictitious-ranked.json", _ENGINE_RESEARCH_SURFACES,
+                        generation_reply=json.dumps(generation) + "\n", flags=flags, research_probe=research_probe,
+                    )
+                self.assertEqual((code, stderr, contexts), (1, "", []), stdout)
+                load, row = stdout.splitlines()
+                self.assertTrue(load.startswith("load: ok"), load)
+                self.assertEqual(row, f"preconditions: refuse — {problem.problem} Fix: {problem.fix}")
+                self.assertEqual(expected_hash.call_count, int(refusal in {"hash", "probe"}))
+                if refusal == "hash":
+                    expected_hash.assert_called_once_with(baselines.BASELINES["off"], reranker=self.production_reranker)
+                self.assertEqual(research_probe.call_count, int(refusal == "probe"))
+                self.assertFalse(any(argv[0] == "git" or sql == "SELECT 1;\n" for argv, sql in host.calls))
+                self.assertEqual([key for key, _ in host.lock_records], [backuplock.ENGINE_LOCK.path])
+                self.assertEqual(host.locks, {})
 
 
 class PreparationBoundaries(unittest.TestCase):

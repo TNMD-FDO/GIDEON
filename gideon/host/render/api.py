@@ -15,7 +15,9 @@ through its relays.
 
 from typing import Final
 
+from gideon.host.courts import CourtMap
 from gideon.host.render.engine import ENGINE_PORT
+from gideon.host.site import Jurisdiction
 
 API_SERVICE_NAME: Final[str] = "gideon-api"
 API_IMAGE_NAME: Final[str] = "gideon"
@@ -30,6 +32,10 @@ API_EMBED_MODEL_ENV: Final[str] = "GIDEON_API_EMBED_MODEL"
 API_EMBED_REPOSITORY_ENV: Final[str] = "GIDEON_API_EMBED_REPOSITORY"
 API_EMBED_SPACE_ENV: Final[str] = "GIDEON_API_EMBED_SPACE"
 API_EMBED_DIMENSIONS_ENV: Final[str] = "GIDEON_API_EMBED_DIMENSIONS"
+API_COURTS_SCOTUS_ENV: Final[str] = "GIDEON_API_COURTS_SCOTUS"
+API_COURTS_CIRCUIT_ENV: Final[str] = "GIDEON_API_COURTS_CIRCUIT"
+API_COURTS_DISTRICTS_ENV: Final[str] = "GIDEON_API_COURTS_DISTRICTS"
+API_COURTS_STATES_ENV: Final[str] = "GIDEON_API_COURTS_STATES"
 API_RERANK_URL_ENV: Final[str] = "GIDEON_API_RERANK_URL"
 API_RERANK_KEY_FILE_ENV: Final[str] = "GIDEON_API_RERANK_KEY_FILE"
 API_JOB_NAME: Final[str] = "api"
@@ -44,6 +50,9 @@ API_MOUNT_TARGET: Final[str] = "/opt/gideon-src/gideon"
 API_WORKING_DIRECTORY: Final[str] = "/opt/gideon-src"
 API_INSTRUCTION_PATH: Final[str] = "gideon-api/instruction.txt"
 API_INSTRUCTION_MOUNT: Final[str] = "/etc/gideon/instruction.txt"
+API_COURTS_PATH: Final[str] = "gideon-api/courts.json"
+API_COURTS_MOUNT: Final[str] = "/etc/gideon/courts.json"
+API_COURTS_FILE_ENV: Final[str] = "GIDEON_API_COURTS_FILE"
 
 
 def api_base_url() -> str:
@@ -62,3 +71,34 @@ def api_enabled(no_gpu: bool) -> bool:
     """Return whether the API belongs in this host's rendered stack."""
 
     return not no_gpu
+
+
+def jurisdiction_environment(jurisdiction: Jurisdiction, court_map: CourtMap) -> dict[str, str]:
+    """Resolve the site's court groups for the API service environment."""
+
+    state_courts: set[str] = set()
+    for leaf, identifiers, level in (
+        ("jurisdiction.circuit", (jurisdiction.circuit,), "circuit"),
+        ("jurisdiction.districts", jurisdiction.districts, "district"),
+        ("jurisdiction.states", jurisdiction.states, "state_supreme"),
+    ):
+        for identifier in identifiers:
+            court = court_map.court(identifier)
+            if court is None:
+                raise ValueError(
+                    f"{leaf} court {identifier!r} is absent from courts.yaml. "
+                    f"Correct {leaf}, then re-run preflight."
+                )
+            if court.level != level:
+                raise ValueError(
+                    f"{leaf} court {identifier!r} has level {court.level!r}, expected {level!r}. "
+                    f"Correct {leaf}, then re-run preflight."
+                )
+            if level == "state_supreme" and court.state is not None:
+                state_courts.update(court_map.appellate_courts(court.state))
+    return {
+        API_COURTS_SCOTUS_ENV: ",".join(court_map.ids_at_level("scotus")),
+        API_COURTS_CIRCUIT_ENV: jurisdiction.circuit,
+        API_COURTS_DISTRICTS_ENV: ",".join(sorted(set(jurisdiction.districts))),
+        API_COURTS_STATES_ENV: ",".join(sorted(state_courts)),
+    }

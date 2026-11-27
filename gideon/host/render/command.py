@@ -14,7 +14,9 @@ from typing import ClassVar, Final, cast
 import yaml  # type: ignore[import-untyped]
 
 import gideon
-from gideon.host import nogpu, report
+from gideon.host import courts, nogpu, report
+from gideon.host.corpus import lockfile
+from gideon.host.corpus.sources import SOURCES
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.egress import render_errors as render_egress_errors
 from gideon.host.images import load_image_lock
@@ -41,7 +43,7 @@ from gideon.host.report import Problem, refusal
 from gideon.host.secrets import is_generated, read_secret, secret_path
 from gideon.host.site import load_site
 from gideon.host.site import render_errors as render_site_errors
-from gideon.host.sysio import Host, PathLike, RealHost
+from gideon.host.sysio import Host, PathLike, ReadBytesHost, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
@@ -768,6 +770,19 @@ def load_render_inputs(
     models_result = load_models_lock(models_path, host=io)
     egress_path = root / "config/egress.yaml"
     egress_result = load_egress_allowlist(egress_path, host=io)
+    courts_result = courts.load_court_map(root / "courts.yaml", host=io)
+    lockfiles_path = root / "corpus/lockfiles"
+    if isinstance(io, ReadBytesHost):
+        lockfiles_result = lockfile.read_lockfile_directory(
+            lockfiles_path, known_sources={source.name: source for source in SOURCES}, host=io,
+        )
+    elif io.exists(lockfiles_path):
+        lockfiles_result = lockfile.LockfileDirectoryResult(errors=(lockfile.LockfileError(
+            None, f"Corpus lockfiles at {lockfiles_path} require byte reads.",
+            "Run render with a host that can read the lockfiles and their companion files.",
+        ),))
+    else:
+        lockfiles_result = lockfile.LockfileDirectoryResult()
     if site_result.errors:
         print(render_site_errors(site_result.errors), file=sys.stderr)
     if lock_result.errors:
@@ -778,17 +793,24 @@ def load_render_inputs(
         print(render_models_errors(models_result.errors), file=sys.stderr)
     if egress_result.errors:
         print(render_egress_errors(egress_result.errors), file=sys.stderr)
+    if courts_result.errors:
+        print(courts.render_errors(courts_result.errors), file=sys.stderr)
+    if lockfiles_result.errors:
+        print(lockfile.render_errors(lockfiles_result.errors), file=sys.stderr)
     if (
         site_result.config is None
         or lock_result.lock is None
         or images_result.lock is None
         or models_result.lock is None
         or egress_result.allowlist is None
+        or courts_result.court_map is None
         or site_result.errors
         or lock_result.errors
         or images_result.errors
         or models_result.errors
         or egress_result.errors
+        or courts_result.errors
+        or lockfiles_result.errors
     ):
         return None
     profile = select_profile(models_result.lock, site_result.config.hardware_profile)
@@ -868,6 +890,8 @@ def load_render_inputs(
             checkout=os.fspath(root),
             source_digests=source_digests,
             egress=egress_result.allowlist,
+            courts=courts_result.court_map,
+            lockfile_courts={item.label: item.courts for item in lockfiles_result.lockfiles},
             no_gpu=no_gpu,
             build_box=build_box,
         ),

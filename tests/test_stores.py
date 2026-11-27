@@ -52,6 +52,7 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0030_generation_gold.sql": (ROOT / "migrations/0030_generation_gold.sql").read_text(),
     f"{ROOT}/migrations/0032_chunk_embeddings_header.sql": (ROOT / "migrations/0032_chunk_embeddings_header.sql").read_text(),
     f"{ROOT}/migrations/0033_turn_reader.sql": (ROOT / "migrations/0033_turn_reader.sql").read_text(),
+    f"{ROOT}/migrations/0034_turn_log.sql": (ROOT / "migrations/0034_turn_log.sql").read_text(),
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -193,6 +194,7 @@ class Converge(unittest.TestCase):
                 "0030_generation_gold",
                 "0032_chunk_embeddings_header",
                 "0033_turn_reader",
+                "0034_turn_log",
             ),
         )
 
@@ -372,6 +374,7 @@ class Converge(unittest.TestCase):
                 "0030_generation_gold",
                 "0032_chunk_embeddings_header",
                 "0033_turn_reader",
+                "0034_turn_log",
             ),
         )
 
@@ -822,3 +825,20 @@ class Migration0033(unittest.TestCase):
             "GRANT SELECT ON TABLE index_generations, documents, opinions, anchors, citations, "
             "cluster_treatment TO gideon_ro_turn;",
         )
+
+
+class Migration0034(unittest.TestCase):
+    def test_turn_log_partition_function_and_append_only_grants(self) -> None:
+        sql = MIGRATIONS[f"{ROOT}/migrations/0034_turn_log.sql"]
+        self.assertIn("CREATE TABLE IF NOT EXISTS turn_log", sql)
+        self.assertIn("PARTITION BY RANGE (at)", sql)
+        self.assertIn("CREATE OR REPLACE FUNCTION turn_log_ensure_partition", sql)
+        self.assertIn("SECURITY DEFINER", sql)
+        self.assertIn("SET search_path = pg_catalog, public", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS public.%I PARTITION OF public.turn_log", sql)
+        self.assertIn("REVOKE ALL ON FUNCTION turn_log_ensure_partition(timestamptz) FROM PUBLIC;", sql)
+        self.assertEqual(re.findall(r"^GRANT .*;", sql, re.MULTILINE), [
+            "GRANT EXECUTE ON FUNCTION turn_log_ensure_partition(timestamptz) TO gideon_audit;",
+            "GRANT INSERT ON TABLE turn_log TO gideon_audit;",
+            "GRANT SELECT ON TABLE turn_log TO gideon_ro_metrics;",
+        ])

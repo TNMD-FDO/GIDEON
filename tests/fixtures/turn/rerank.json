@@ -1,0 +1,9 @@
+{
+  "id": "fixture-rerank-reply",
+  "model": "fixture-reranker",
+  "results": [
+    {"document": {"text": "Fictitious longer passage about the invented Harbor Court.", "multi_modal": null}, "index": 1, "relevance_score": 0.8},
+    {"document": {"text": "Fictitious short passage.", "multi_modal": null}, "index": 0, "relevance_score": 0.2}
+  ],
+  "usage": {"prompt_tokens": 35, "total_tokens": 35}
+}

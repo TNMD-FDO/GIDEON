@@ -226,10 +226,22 @@ class ServiceImportBoundary(unittest.TestCase):
     def test_turn_collection_is_registered(self) -> None:
         self.assertIn(TURN_COLLECTION, {collection.name for collection in COLLECTIONS})
 
+    def test_reranker_imports_httpx_within_the_api_source_boundary(self) -> None:
+        path = REPO_ROOT / "gideon/turn/rerank.py"
+        modules = api_modules()
+        self.assertIn(module_name(path), modules)
+        source = path.read_text()
+        imports = {
+            name.partition(".")[0] for node, _ in _imports(ast.parse(source))
+            for name in ([alias.name for alias in node.names] if isinstance(node, ast.Import) else [_relative_base(node, path)])
+        }
+        self.assertIn("httpx", imports)
+        self.assertEqual(import_violations(path, source, modules), [])
+
     def test_shared_turn_modules_only_use_standard_library_dependencies(self) -> None:
         for relative in (
             "gideon/turn/__init__.py", "gideon/turn/instruction.py", "gideon/turn/config.py",
-            "gideon/turn/fusion.py", "gideon/turn/states.py", "gideon/host/index/serving.py",
+            "gideon/turn/fusion.py", "gideon/turn/tier.py", "gideon/turn/states.py", "gideon/host/index/serving.py",
             "gideon/api/errors.py", "gideon/turn/events.py", "gideon/turn/prompt.py",
             "gideon/turn/generator.py",
         ):

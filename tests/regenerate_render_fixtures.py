@@ -30,7 +30,23 @@ def _loaded[T](value: T | None, errors: object) -> T:
     return value
 
 
+def fixture_lockfile_courts() -> dict[str, tuple[str, ...]]:
+    """Use the complete corpus samples alongside the deliberately broken ones."""
+
+    from test_corpus_lockfile import CAPTURED, DERIVED, KNOWN, LINED, VALID
+
+    from gideon.host.corpus.lockfile import load_lockfile, render_errors
+
+    courts = {}
+    for path in (CAPTURED, DERIVED, LINED, VALID):
+        result = load_lockfile(path, known_sources=KNOWN)
+        item = _loaded(result.lockfile, render_errors(result.errors))
+        courts[item.label] = item.courts
+    return courts
+
+
 def main() -> None:
+    from gideon.host.courts import load_court_map
     from gideon.host.egress import load_egress_allowlist
     from gideon.host.images import load_image_lock
     from gideon.host.lock import load_host_lock
@@ -63,6 +79,9 @@ def main() -> None:
     egress_text = host.read_text(ROOT / "config/egress.yaml")
     egress_result = load_egress_allowlist(ROOT / "config/egress.yaml", host=host)
     egress = _loaded(egress_result.allowlist, egress_result.errors)
+    courts_result = load_court_map(ROOT / "courts.yaml", host=host)
+    courts = _loaded(courts_result.court_map, courts_result.errors)
+    lockfile_courts = fixture_lockfile_courts()
 
     sites = (
         ("example", ROOT / "config/site.example.yaml", False, True),
@@ -95,6 +114,8 @@ def main() -> None:
             checkout="/opt/gideon",
             source_digests=dict.fromkeys(declared_sources(), FIXED_SOURCES_DIGEST),
             egress=egress,
+            courts=courts,
+            lockfile_courts=lockfile_courts,
             no_gpu=no_gpu,
             build_box=build_box,
         )

@@ -1,6 +1,7 @@
 """The API service, probes, alert, and service-source digest contracts."""
 
 import hashlib
+import json
 import tempfile
 import unittest
 from collections import UserDict
@@ -9,15 +10,33 @@ from pathlib import Path
 from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
-from test_render import DirHost, checkout_files, inputs, trial_inputs
+from regenerate_render_fixtures import fixture_lockfile_courts
+from test_courtmap import _generate
+from test_render import (
+    RENDERED,
+    SITE,
+    DirHost,
+    checkout_files,
+    inputs,
+    render,
+    trial_inputs,
+)
 
 from gideon.api.settings import load_settings
 from gideon.host.cas import ROOT as CAS_ROOT
+from gideon.host.courts import CourtMap
 from gideon.host.images import parse_registry
 from gideon.host.index import header
 from gideon.host.render import RenderInputs, render_all
 from gideon.host.render.api import (
     API_CHAT_HEADER,
+    API_COURTS_CIRCUIT_ENV,
+    API_COURTS_DISTRICTS_ENV,
+    API_COURTS_FILE_ENV,
+    API_COURTS_MOUNT,
+    API_COURTS_PATH,
+    API_COURTS_SCOTUS_ENV,
+    API_COURTS_STATES_ENV,
     API_EMBED_DIMENSIONS_ENV,
     API_EMBED_MODEL_ENV,
     API_EMBED_REPOSITORY_ENV,
@@ -44,6 +63,7 @@ from gideon.host.render.command import (
     recreate_judgment,
 )
 from gideon.host.render.compose import service_names
+from gideon.host.render.courts import ApiCourtsArtifact, api_courts_text
 from gideon.host.render.engine import (
     EMBED,
     EMBED_SERVICE_NAME,
@@ -61,8 +81,10 @@ from gideon.host.render.qdrant import QDRANT_READ_ONLY_SECRET_NAME, qdrant_rest_
 from gideon.host.render.services import declared_sources
 from gideon.host.render.services.api import api_service
 from gideon.host.render.services.generator import engine_service
+from gideon.host.site import Jurisdiction
 from gideon.host.stores import ROLE_SPECS, RoleSpec
 from gideon.host.sysio import PathLike
+from gideon.turn.scope import read_court_file
 
 ROOT = Path(__file__).resolve().parent.parent
 OTHER_DIGEST = "sha256:" + "1" * 64
@@ -121,6 +143,9 @@ class ApiRender(unittest.TestCase):
         self.assertEqual(api["environment"]["GIDEON_USER_HEADER"], API_USER_ID_HEADER)
         self.assertEqual(api["environment"]["GIDEON_EVAL_IDENTITY"], EVAL_IDENTITY.email)
         self.assertEqual(api["environment"]["GIDEON_INSTRUCTION_FILE"], API_INSTRUCTION_MOUNT)
+        self.assertEqual(api["environment"][API_COURTS_FILE_ENV], API_COURTS_MOUNT)
+        court_file = gpu_rendered.by_path[API_COURTS_PATH]
+        self.assertEqual((court_file.owners, court_file.mode), ((API_SERVICE_NAME,), 0o644))
         generator = gpu.profile.model("generator")
         assert generator is not None
         self.assertEqual(api["environment"]["GIDEON_MODEL_ID"], GENERAL_MODEL_ID)
@@ -135,6 +160,7 @@ class ApiRender(unittest.TestCase):
             [
                 f"{gpu.checkout}/gideon:{API_MOUNT_TARGET}:ro",
                 f"/etc/gideon/rendered/{API_INSTRUCTION_PATH}:{API_INSTRUCTION_MOUNT}:ro",
+                f"/etc/gideon/rendered/{API_COURTS_PATH}:{API_COURTS_MOUNT}:ro",
                 f"{CAS_ROOT}:{CAS_ROOT}:ro",
             ],
         )
@@ -165,6 +191,7 @@ class ApiRender(unittest.TestCase):
         )
         self.assertNotIn(API_SERVICE_NAME, no_gpu_document["services"])
         self.assertNotIn(API_INSTRUCTION_PATH, no_gpu_rendered.by_path)
+        self.assertNotIn(API_COURTS_PATH, no_gpu_rendered.by_path)
         self.assertNotIn(API_SECRET_NAME, no_gpu_document["secrets"])
         self.assertNotIn("postgres_gideon_audit_password", no_gpu_document["secrets"])
         self.assertNotIn(
@@ -201,6 +228,23 @@ class ApiRender(unittest.TestCase):
         self.assertNotIn(RERANK.secret_name, trial_api["secrets"])
         self.assertNotIn(RERANK.secret_name, trial["secrets"])
 
+    def test_api_reranker_pair_reads_the_shared_membership_rule(self) -> None:
+        base = inputs()
+        registry = parse_registry(base.site.registry)
+        assert registry is not None
+        for renders in (False, True):
+            with self.subTest(renders=renders), patch(
+                "gideon.host.render.services.api.has_reranker", return_value=renders,
+            ) as membership:
+                block = api_service(base, registry)
+                membership.assert_called_once_with(base.profile, no_gpu=base.no_gpu)
+                environment = block["environment"]
+                mounted = block["secrets"]
+                assert isinstance(environment, dict) and isinstance(mounted, list)
+                self.assertEqual(API_RERANK_URL_ENV in environment, renders)
+                self.assertEqual(API_RERANK_KEY_FILE_ENV in environment, renders)
+                self.assertEqual(RERANK.secret_name in mounted, renders)
+
     def test_rendered_api_settings_and_loader_reads_match(self) -> None:
         rendered = render_all(inputs())
         document = yaml.safe_load(rendered.by_path["compose.yaml"].content)
@@ -216,7 +260,8 @@ class ApiRender(unittest.TestCase):
             for name, value in values.items():
                 if name.endswith("_FILE"):
                     path = Path(directory) / Path(value).name
-                    path.write_text("fictitious mount contents\n", encoding="utf-8")
+                    contents = rendered.by_path[API_COURTS_PATH].content if name == API_COURTS_FILE_ENV else "fictitious mount contents\n"
+                    path.write_text(contents, encoding="utf-8")
                     values[name] = str(path)
             environment = RecordingEnvironment(values)
             settings = load_settings(environment)
@@ -236,6 +281,66 @@ class ApiRender(unittest.TestCase):
         self.assertEqual(
             settings.opensearch_password_file, Path(values["GIDEON_API_OPENSEARCH_PASSWORD_FILE"]),
         )
+        self.assertEqual(settings.courts_scotus, tuple(values[API_COURTS_SCOTUS_ENV].split(",")))
+        self.assertEqual(settings.courts_circuit, (values[API_COURTS_CIRCUIT_ENV],))
+        self.assertEqual(settings.courts_districts, tuple(values[API_COURTS_DISTRICTS_ENV].split(",")))
+        states = values[API_COURTS_STATES_ENV]
+        self.assertEqual(settings.courts_states, tuple(states.split(",")) if states else ())
+        self.assertEqual(settings.courts_file, Path(values[API_COURTS_FILE_ENV]))
+
+    def test_court_file_is_byte_stable_and_readable_with_fixture_lockfiles(self) -> None:
+        court_map = inputs().courts
+        assert court_map is not None
+        lockfiles = fixture_lockfile_courts()
+        self.assertTrue(lockfiles)
+        fixture = ROOT / "tests/fixtures/render/example" / API_COURTS_PATH
+        text = api_courts_text(court_map, lockfiles)
+        self.assertEqual(text.encode("utf-8"), fixture.read_bytes())
+        reordered = replace(court_map, courts=dict(reversed(tuple(court_map.courts.items()))))
+        self.assertEqual(text, api_courts_text(reordered, dict(reversed(tuple(lockfiles.items())))))
+        self.assertEqual(json.loads(text)["lockfiles"], {label: list(ids) for label, ids in lockfiles.items()})
+        read_court_file(fixture)
+
+    def test_rendered_court_groups_resolve_to_the_controlling_set(self) -> None:
+        court_map = _generate()
+        assert isinstance(court_map, CourtMap)
+        base = inputs(courts=court_map)
+        for states in (["fx-sup-al"], []):
+            with self.subTest(states=states):
+                jurisdiction = Jurisdiction("ca11", ["alsd", "alnd"], states)
+                configured = replace(base, site=replace(base.site, jurisdiction=jurisdiction))
+                document = yaml.safe_load(render_all(configured).by_path["compose.yaml"].content)
+                environment = document["services"][API_SERVICE_NAME]["environment"]
+                groups = tuple(environment[name] for name in (
+                    API_COURTS_SCOTUS_ENV, API_COURTS_CIRCUIT_ENV, API_COURTS_DISTRICTS_ENV, API_COURTS_STATES_ENV,
+                ))
+                self.assertEqual(groups, (
+                    ",".join(court_map.ids_at_level("scotus")), jurisdiction.circuit,
+                    ",".join(sorted(jurisdiction.districts)), ",".join(court_map.appellate_courts("AL")) if states else "",
+                ))
+                self.assertEqual(
+                    {court for group in groups if group for court in group.split(",")},
+                    set(court_map.controlling_courts(jurisdiction.circuit, jurisdiction.districts, states)),
+                )
+
+    def test_render_refuses_unknown_court_and_wrong_level_with_preflight_fix(self) -> None:
+        base = inputs()
+        for leaf, value, identifier, reason in (
+            ("districts", ["fixturemissingcourt"], "fixturemissingcourt", "absent from courts.yaml"),
+            ("circuit", base.site.jurisdiction.districts[0], base.site.jurisdiction.districts[0], "expected 'circuit'"),
+        ):
+            with self.subTest(leaf=leaf):
+                files = checkout_files()
+                site = yaml.safe_load(files[SITE])
+                site["jurisdiction"][leaf] = value
+                files[SITE] = yaml.safe_dump(site)
+                host = DirHost(files)
+                code, _, error = render(host)
+                self.assertEqual(code, 1)
+                line, = error.splitlines()
+                for detail in (f"jurisdiction.{leaf}", repr(identifier), reason, "re-run preflight"):
+                    self.assertIn(detail, line)
+                self.assertEqual([path for path in host.writes if path.startswith(f"{RENDERED}/")], [])
 
     def test_embedding_settings_follow_the_profile_and_release_header(self) -> None:
         for rendered_inputs in (inputs(), trial_inputs()):
@@ -253,18 +358,22 @@ class ApiRender(unittest.TestCase):
                     self.assertEqual(environment[API_EMBED_SPACE_ENV], header.embedding_space(space.id, header_id))
                     self.assertEqual(environment[API_EMBED_DIMENSIONS_ENV], str(space.dimensions))
 
-    def test_empty_checkout_and_digest_refuse(self) -> None:
+    def test_missing_checkout_court_map_or_digest_refuses(self) -> None:
         base = inputs()
         registry = parse_registry(base.site.registry)
         assert registry is not None
         with self.assertRaisesRegex(ValueError, "Re-run render with a checkout\\."):
             api_service(replace(base, checkout=""), registry)
+        with self.assertRaisesRegex(ValueError, r"Restore courts\.yaml and re-run render"):
+            api_service(replace(base, courts=None), registry)
+        with self.assertRaisesRegex(ValueError, r"Restore courts\.yaml and re-run render"):
+            ApiCourtsArtifact().emit(replace(base, courts=None))
         with self.assertRaisesRegex(
             ValueError, "Re-run render from a release checkout, whose loader gathers it\\."
         ):
             api_service(replace(base, source_digests={}), registry)
 
-    def test_instruction_mount_accepts_a_rendered_root(self) -> None:
+    def test_api_file_mounts_accept_a_rendered_root(self) -> None:
         base = inputs()
         registry = parse_registry(base.site.registry)
         assert registry is not None
@@ -274,6 +383,7 @@ class ApiRender(unittest.TestCase):
             [
                 f"{base.checkout}/gideon:{API_MOUNT_TARGET}:ro",
                 f"/tmp/fixture-rendered/{API_INSTRUCTION_PATH}:{API_INSTRUCTION_MOUNT}:ro",
+                f"/tmp/fixture-rendered/{API_COURTS_PATH}:{API_COURTS_MOUNT}:ro",
                 f"{CAS_ROOT}:{CAS_ROOT}:ro",
             ],
         )
@@ -297,6 +407,22 @@ class ApiRender(unittest.TestCase):
             service_names(moved),
             compose_digests(moved),
         )
+        self.assertEqual(judgment.services, (API_SERVICE_NAME,))
+        self.assertEqual(judgment.files, (API_SERVICE_NAME,))
+        self.assertEqual(judgment.block, ())
+        self.assertEqual(judgment.top_level, ())
+
+    def test_moving_a_lockfile_recreates_only_api_for_the_changed_court_file(self) -> None:
+        lockfiles = fixture_lockfile_courts()
+        original = inputs(lockfile_courts=lockfiles)
+        label = next(iter(lockfiles))
+        moved = replace(original, lockfile_courts={key: ids for key, ids in lockfiles.items() if key != label})
+        before = applied_record(original)
+        after = render_all(moved)
+        self.assertNotEqual(before.files[API_COURTS_PATH]["sha256"], hashlib.sha256(
+            after.by_path[API_COURTS_PATH].content.encode(),
+        ).hexdigest())
+        judgment = recreate_judgment(after, before, service_names(moved), compose_digests(moved))
         self.assertEqual(judgment.services, (API_SERVICE_NAME,))
         self.assertEqual(judgment.files, (API_SERVICE_NAME,))
         self.assertEqual(judgment.block, ())

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from test_turn_legs import turn_fixture
+from test_turn_legs import invalid_court_metadata, turn_fixture
 
 from gideon.extraction import ExactObject
 from gideon.turn import lexical, objectleg
@@ -71,6 +71,7 @@ class ObjectLeg(unittest.TestCase):
                 self.assertTrue(body.endswith(b"\n"))
                 head_held, held, head_citing, citing = map(json.loads, body.splitlines())
                 self.assertEqual((head_held, head_citing), ({}, {}))
+                self.assertEqual(objectleg.query_body(searches, MESSAGE, RESERVATION, collapse=collapse, courts=None), body)
                 for search, clauses in (
                     (held, [{"match_phrase": {"caption": value}} for value in searches[0].values]),
                     (citing, [
@@ -86,6 +87,11 @@ class ObjectLeg(unittest.TestCase):
                         "_source": lexical.query_body(MESSAGE, RESERVATION, collapse=collapse)["_source"],
                         **({"collapse": {"field": "dupe_cluster"}} if collapse else {}),
                     })
+                courts = ("fx-court-b", "fx-court-a")
+                scoped = objectleg.query_body(searches, MESSAGE, RESERVATION, collapse=collapse, courts=courts)
+                for search in (held, citing):
+                    search["query"]["bool"]["filter"].append({"terms": {"court": sorted(courts)}})
+                self.assertEqual(list(map(json.loads, scoped.splitlines())), [head_held, held, head_citing, citing])
 
     def test_a_request_past_its_byte_bound_is_refused_before_it_grows(self) -> None:
         whole = objectleg.query_body(self.searches, MESSAGE, RESERVATION, collapse=True)
@@ -104,11 +110,20 @@ class ObjectLeg(unittest.TestCase):
                 self.assertEqual(tuple(result.search.name for result in results), ("held", "citing"))
                 self.assertEqual(tuple(result.hits for result in results), tuple(
                     tuple(
-                        LegHit(row["_id"], rank, row["_source"]["dupe_cluster"], row["_source"]["boilerplate"])
+                        LegHit(row["_id"], rank, **row["_source"])
                         for rank, row in enumerate(item["hits"]["hits"], start=1)
                     )
                     for item in reply["responses"]
                 ))
+
+    def test_parser_refuses_missing_or_invalid_court_metadata_as_objects(self) -> None:
+        row = self.reply["responses"][0]["hits"]["hits"][0]
+        for label, bad_fields in invalid_court_metadata(row["_source"]).items():
+            with self.subTest(label=label):
+                row["_source"] = bad_fields
+                with self.assertRaises(TurnFailure) as raised:
+                    objectleg.parse_reply(self.reply, self.searches)
+                self.assertEqual((raised.exception.state, raised.exception.word), (State.STORE_REPLY_INVALID, "objects"))
 
     def test_client_shares_equal_legs_and_reads_the_password_each_time(self) -> None:
         requests: list[httpx.Request] = []

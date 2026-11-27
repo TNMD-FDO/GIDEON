@@ -626,6 +626,7 @@ services:
       GIDEON_ENGINE_API_KEY_FILE: "/run/secrets/engine_api_key"
       GIDEON_API_KEY_FILE: "/run/secrets/gideon_api_key"
       GIDEON_INSTRUCTION_FILE: "/etc/gideon/instruction.txt"
+      GIDEON_API_COURTS_FILE: "/etc/gideon/courts.json"
       GIDEON_API_PORT: "8000"
       GIDEON_SOURCE_HEADER: "X-OpenWebUI-User-Email"
       GIDEON_EVAL_IDENTITY: "gideon-eval@gideon.invalid"
@@ -655,6 +656,10 @@ services:
       GIDEON_API_OPENSEARCH_URL: "http://opensearch:9200"
       GIDEON_API_OPENSEARCH_USER: "turn"
       GIDEON_API_OPENSEARCH_PASSWORD_FILE: "/run/secrets/opensearch_turn_password"
+      GIDEON_API_COURTS_SCOTUS: "scotus"
+      GIDEON_API_COURTS_CIRCUIT: "ca6"
+      GIDEON_API_COURTS_DISTRICTS: "tnmd"
+      GIDEON_API_COURTS_STATES: "tenn,tenncrimapp,tennctapp,tennsuperct"
       GIDEON_API_RERANK_URL: "http://gideon-rerank-2:8000"
       GIDEON_API_RERANK_KEY_FILE: "/run/secrets/rerank_2_api_key"
       TZ: "America/Chicago"
@@ -666,6 +671,7 @@ services:
     volumes:
       - "/opt/gideon/gideon:/opt/gideon-src/gideon:ro"
       - "/etc/gideon/rendered/gideon-api/instruction.txt:/etc/gideon/instruction.txt:ro"
+      - "/etc/gideon/rendered/gideon-api/courts.json:/etc/gideon/courts.json:ro"
       - "/data/bulk/cas:/data/bulk/cas:ro"
     group_add:
       - "4242"

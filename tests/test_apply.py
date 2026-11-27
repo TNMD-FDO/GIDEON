@@ -553,6 +553,7 @@ def base_files(site: Path = EXAMPLE) -> dict[str, str]:
         str(ROOT / "images.lock"): (ROOT / "images.lock").read_text(),
         str(ROOT / "models.lock"): (ROOT / "models.lock").read_text(),
         str(ROOT / "config/egress.yaml"): (ROOT / "config/egress.yaml").read_text(),
+        str(ROOT / "courts.yaml"): (ROOT / "courts.yaml").read_text(),
         **{
             str(ROOT / "compose" / path): (ROOT / "compose" / path).read_text()
             for path in TEMPLATE_PATHS

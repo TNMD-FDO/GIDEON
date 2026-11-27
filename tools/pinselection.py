@@ -82,9 +82,12 @@ EXCLUDED = {
     "test_evaluation_sampling": "The module names a fictitious pin file as one input of the sampling hold.",
     "test_index_build": "The module reads a pin file as one input of a command test.",
     "test_judgments_pool": "The module reads a pin file as one input of a command test.",
+    "test_judgments_slice": "The module reads a pin file as one input of a command test.",
     "test_office_values": "The module walks the whole tree and reads no pinned value.",
+    "test_render_api": "The module imports the fixture lockfiles' courts as one input of the court file's render.",
     "test_smoke_slice": "The module reads a pin file as one input of a command test.",
     "test_synthetic_kit": "The module reads a pin file as one input of a command test.",
+    "test_turn_scope": "The module imports the fixture lockfiles' courts as one input of the scope's tests.",
 }
 
 

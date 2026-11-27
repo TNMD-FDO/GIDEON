@@ -39,6 +39,7 @@ from gideon.host.render.ci import CI_ROOT
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_MODEL_ID
 from gideon.host.report import Problem, Timeout
 from gideon.host.sysio import Command, Host, PathLike
+from gideon.turn import events
 from tools.turns import cli
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -107,6 +108,7 @@ class _LoopbackServer(http.server.ThreadingHTTPServer):
         self.requests: list[dict[str, object]] = []
         self.release = threading.Event()
         self.block_response = False
+        self.turn_stream = b""
 
 
 class _LoopbackHandler(http.server.BaseHTTPRequestHandler):
@@ -131,6 +133,9 @@ class _LoopbackHandler(http.server.BaseHTTPRequestHandler):
         if self.server.block_response:
             self.server.release.wait(1.0)
             return
+        if self.path == "/turn":
+            self._write_stream(self.server.turn_stream)
+            return
         if cast(dict[str, object], json.loads(body)).get("stream"):
             self._stream_reply()
             return
@@ -143,7 +148,9 @@ class _LoopbackHandler(http.server.BaseHTTPRequestHandler):
         ]
         encoded = "".join(f"data: {payload}\n\n" for payload in payloads)
         encoded += "data: [DONE]\n\n"
-        data = encoded.encode("utf-8")
+        self._write_stream(encoded.encode("utf-8"))
+
+    def _write_stream(self, data: bytes) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(data)))
@@ -228,6 +235,7 @@ class ClientOverLoopback(unittest.TestCase):
         self.server.requests.clear()
         self.server.release.clear()
         self.server.block_response = False
+        self.server.turn_stream = b""
 
     def url(self, path: str) -> str:
         return f"http://127.0.0.1:{self.server.server_port}{path}"
@@ -301,6 +309,57 @@ class ClientOverLoopback(unittest.TestCase):
         self.assertTrue(records[1]["payload"].startswith('{"choices"'))
         self.assertLessEqual(records[1]["offset"], records[2]["offset"])
         self.assertEqual(records[3], {"kind": "end", "done": True})
+
+    def _read_turn(self, stream: bytes) -> list[dict[str, Any]]:
+        self.server.turn_stream = stream
+        with tempfile.TemporaryDirectory() as directory:
+            key_path = Path(directory) / "api-key"
+            key_path.write_text(KEY_VALUE, encoding="utf-8")
+            code, stdout, stderr = _run_client(
+                [str(key_path), self.url("/turn"), "2"],
+                {"headers": {}, "body": {"message": "Fictitious question."}},
+            )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(stderr, "")
+        return [json.loads(line) for line in stdout.splitlines()]
+
+    def test_turn_stream_keeps_event_names_payloads_and_offsets_in_order(self) -> None:
+        """The client preserves the named wire events, their payloads, and their order."""
+
+        answer = "A fictitious answer."
+        timings = {"total": 15.0}
+        records = self._read_turn(
+            events.phase("generate", 1) + events.answer(answer, "complete", timings)
+        )
+
+        self.assertEqual(
+            [record["kind"] for record in records], ["head", "event", "event", "end", "elapsed"],
+        )
+        self.assertEqual([record["name"] for record in records[1:3]], ["phase", "answer"])
+        self.assertEqual(json.loads(records[1]["payload"]), {"stage": "generate", "attempt": 1})
+        self.assertEqual(
+            json.loads(records[2]["payload"]),
+            {"text": answer, "end": "complete", "timings_ms": timings},
+        )
+        self.assertGreaterEqual(records[1]["offset"], 0.0)
+        self.assertLessEqual(records[1]["offset"], records[2]["offset"])
+        self.assertLessEqual(records[2]["offset"], records[4]["seconds"])
+        self.assertEqual(records[3], {"kind": "end", "done": False})
+
+    def test_blank_line_clears_the_event_name(self) -> None:
+        """The next block starts unnamed after the encoder's blank line."""
+
+        unnamed = "Fictitious unnamed payload."
+        records = self._read_turn(
+            events.text("Fictitious named payload.") + events.text(unnamed).partition(b"\n")[2]
+        )
+
+        self.assertEqual(
+            [record["kind"] for record in records], ["head", "event", "data", "end", "elapsed"],
+        )
+        self.assertEqual(records[1]["name"], "text")
+        self.assertNotIn("name", records[2])
+        self.assertEqual(json.loads(records[2]["payload"]), {"text": unnamed})
 
     def test_refused_connection_is_named_by_exception_without_request_text(self) -> None:
         probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1508,6 +1567,124 @@ class DoorBody(unittest.TestCase):
                     self.assertEqual(stderr, "")
                     self.assertIn("preconditions: refuse", stdout)
                     self.assertEqual(host.exec_inputs, [])
+
+
+class NamedEventsDoor(unittest.TestCase):
+    """The door returns the research stream's named events by opt-in."""
+
+    def setUp(self) -> None:
+        self.answer = "A fictitious answer retained only in the payload."
+        self.head = {"kind": "head", "status": 200, "media_type": door.EVENT_STREAM_MEDIA_TYPE}
+        self.records = [
+            {
+                "kind": "event",
+                "name": name,
+                "offset": offset,
+                "payload": encoded.splitlines()[1].removeprefix(b"data: ").decode("utf-8"),
+            }
+            for name, offset, encoded in (
+                ("phase", 0.1, events.phase("generate", 1)),
+                ("answer", 0.2, events.answer(self.answer, "complete", {"total": 15.0})),
+            )
+        ]
+        self.end = {"kind": "end", "done": False}
+        self.elapsed = {"kind": "elapsed", "seconds": 0.3}
+
+    def _request(
+        self, *records: Mapping[str, object], named_events: bool = True, returncode: int = 0,
+    ) -> door.DoorReply:
+        host = FakeHost()
+        result = subprocess.CompletedProcess(
+            ("fixture",), returncode, "\n".join(json.dumps(record) for record in records), "",
+        )
+        with patch.object(host, "run", return_value=result):
+            return door.request(
+                host, RENDERED_COMPOSE.parent, url="http://fixture.invalid/turn",
+                body={"message": "Fictitious question."}, max_time=1.0,
+                keep_failure_detail=True, named_events=named_events,
+            )
+
+    def test_opted_reply_keeps_events_in_order_and_redacts_their_payloads(self) -> None:
+        reply = self._request(self.head, *self.records, self.end, self.elapsed)
+
+        self.assertIsNone(reply.problem)
+        self.assertTrue(reply.is_stream)
+        self.assertFalse(reply.done)
+        self.assertEqual(reply.elapsed, self.elapsed["seconds"])
+        self.assertEqual(reply.events, ())
+        self.assertEqual(
+            [(event.name, event.offset, event.payload) for event in reply.named_events],
+            [(record["name"], record["offset"], record["payload"]) for record in self.records],
+        )
+        self.assertIn(f"named_events={len(self.records)}", repr(reply))
+        for event in reply.named_events:
+            self.assertIn(repr(event.name), repr(event))
+            self.assertIn(repr(event.offset), repr(event))
+            self.assertNotIn(event.payload, repr(event))
+        self.assertNotIn(self.answer, repr(reply.named_events))
+        self.assertNotIn(self.answer, repr(reply))
+
+    def test_unopted_reply_refuses_named_events(self) -> None:
+        reply = self._request(
+            self.head, *self.records, self.end, self.elapsed, named_events=False,
+        )
+
+        self.assertEqual(reply.named_events, ())
+        assert reply.problem is not None
+        self.assertEqual(reply.problem.problem, "door stream carried named events")
+        self.assertNotIn(self.answer, repr(reply))
+
+    def test_opted_reply_refuses_unnamed_data_and_discards_the_named_prefix(self) -> None:
+        unnamed = {
+            "kind": "data", "offset": self.records[-1]["offset"],
+            "payload": self.records[-1]["payload"],
+        }
+        reply = self._request(self.head, *self.records, unnamed, self.end, self.elapsed)
+
+        self.assertEqual(reply.named_events, ())
+        assert reply.problem is not None
+        self.assertEqual(reply.problem.problem, "door stream carried unnamed data")
+        self.assertNotIn(self.answer, repr(reply))
+
+    def test_malformed_event_record_refuses_the_envelope(self) -> None:
+        last_event = self.records[-1]
+        for field, value in (
+            ("name", ""), ("name", "Answer"), ("name", "two words"), ("name", "event2"),
+            ("offset", -1), ("offset", True), ("offset", float("inf")), ("offset", 10**400),
+            ("payload", 1),
+        ):
+            with self.subTest(field=field, value=value):
+                reply = self._request(self.head, {**last_event, field: value}, self.end, self.elapsed)
+                assert reply.problem is not None
+                self.assertEqual(reply.problem.problem, "door response envelope is invalid")
+                self.assertEqual(reply.named_events, ())
+                self.assertNotIn(self.answer, repr(reply))
+        for label, prefix in (
+            ("after end", (self.head, self.end)),
+            ("outside stream", ({**self.head, "media_type": "application/json"},)),
+        ):
+            with self.subTest(location=label):
+                reply = self._request(*prefix, last_event, self.elapsed)
+                assert reply.problem is not None
+                self.assertEqual(reply.problem.problem, "door response envelope is invalid")
+                self.assertEqual(reply.named_events, ())
+
+    def test_opted_stream_requires_the_end_record(self) -> None:
+        reply = self._request(self.head, *self.records, self.elapsed)
+
+        assert reply.problem is not None
+        self.assertEqual(reply.problem.problem, "door stream ended without its end record")
+        self.assertEqual(reply.named_events, ())
+
+    def test_failed_opted_stream_discards_its_events(self) -> None:
+        reply = self._request(
+            self.head, *self.records, {"kind": "failure", "exception": "TimeoutError"},
+            returncode=doorclient.FAILURE_EXIT_CODE,
+        )
+
+        self.assertIsInstance(reply.problem, Timeout)
+        self.assertEqual(reply.named_events, ())
+        self.assertNotIn(self.answer, repr(reply))
 
 
 class ImportBoundary(unittest.TestCase):

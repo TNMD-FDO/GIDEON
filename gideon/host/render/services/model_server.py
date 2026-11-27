@@ -12,6 +12,7 @@ from gideon.host.render.engine import (
     GENERATOR,
     INTEGRATION_NETWORK_NAME,
     MODEL_SERVERS,
+    RERANK,
     ModelServerMember,
 )
 from gideon.host.render.routeguard import (
@@ -61,6 +62,12 @@ def model_server_members(inputs: RenderInputs) -> tuple[ModelServerMember, ...]:
     return tuple(
         member for member in MODEL_SERVERS if _member_renderable(inputs.profile, member)
     )
+
+
+def has_reranker(profile: HardwareProfile, *, no_gpu: bool) -> bool:
+    """Return whether this host renders the profile's reranker service."""
+
+    return not no_gpu and _member_renderable(profile, RERANK)
 
 
 def model_healthcheck(member: ModelServerMember) -> Mapping[str, object]:

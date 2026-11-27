@@ -61,6 +61,7 @@ from gideon.host import (
     courts,
     engine,
     images,
+    models,
     nogpu,
     report,
     site,
@@ -70,6 +71,7 @@ from gideon.host import (
 from gideon.host.index.lexical import live_index_job
 from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK
 from gideon.host.render.owui import GENERAL_MODEL_ID
+from gideon.host.render.services.model_server import has_reranker
 from gideon.host.report import Problem, StageResult, print_stage, refusal
 from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
@@ -289,6 +291,7 @@ class _Prepared:
     assessments: Assessments | None = None
     judge_retry: sampling.HeldSet | None = None
     turn_overrides: Mapping[str, JSONValue] | None = None
+    expected_config_hash: str | None = None
 
 
 @dataclass(slots=True)
@@ -1039,7 +1042,7 @@ def _generation_detail(resolved: GenerationAccess | None) -> str:
 
 def _prepare_research(
     request: _Request, seams: _Seams, slice_spec: SliceSpec, resolved: GenerationAccess | None,
-    turn_overrides: Mapping[str, JSONValue] | None,
+    turn_overrides: Mapping[str, JSONValue] | None, *, profile_name: str,
 ) -> str | Problem:
     """Check the Research door and return the retrieval configuration hash to record."""
 
@@ -1057,11 +1060,40 @@ def _prepare_research(
             retry = report.command(request_with_file.retry_command(slice_spec=slice_spec, flags=flags))
             fix = f"Run {promote}, then retry, or score a ranked file with {retry}."
         return Problem(f"generation {resolved.name} is {resolved.state} and /turn requires a live generation", fix)
-    expected_hash = baselines.expected_config_hash(turn_overrides)
+    # The CI sibling reaches no reranker, so its turns run the stage off. The
+    # no-GPU marker was refused above, so production's membership is the profile's.
+    reranker = False
+    if request.paths.name == PRODUCTION_STACK:
+        loaded_models = models.load_models_lock(seams.models_path, host=seams.host)
+        if loaded_models.errors:
+            return Problem(models.render_errors(loaded_models.errors), loaded_models.errors[0].fix)
+        assert loaded_models.lock is not None
+        profile = models.select_profile(loaded_models.lock, profile_name)
+        if isinstance(profile, Problem):
+            return profile
+        reranker = has_reranker(profile, no_gpu=False)
+    expected_hash = baselines.expected_config_hash(turn_overrides, reranker=reranker)
     if isinstance(expected_hash, Problem):
         return expected_hash
     problem = research_door.probe(seams.host, request.paths.turns_dir, sibling=request.paths.name == CI_STACK)
     return expected_hash if problem is None else problem
+
+
+def _research_preconditions(
+    request: _Request, seams: _Seams, slice_spec: SliceSpec, resolved: GenerationAccess | None,
+    door_overrides: Mapping[str, object], *, profile_name: str,
+) -> tuple[Mapping[str, JSONValue] | None, str, dict[str, object], str] | Problem:
+    """Check the Research door and prepare its run facts and stage detail."""
+
+    turn_overrides = None if request.baseline is None else baselines.BASELINES[request.baseline]
+    expected_hash = _prepare_research(request, seams, slice_spec, resolved, turn_overrides, profile_name=profile_name)
+    if isinstance(expected_hash, Problem):
+        return expected_hash
+    facts: dict[str, object] = {**door_overrides, "door": "turn", "config_hash": expected_hash}
+    if turn_overrides is not None:
+        facts.update(baseline=request.baseline, turn_overrides=dict(turn_overrides))
+    detail = f", door {research_door.TURN_PATH} probed, baseline {request.baseline or 'shipped'}"
+    return turn_overrides, expected_hash, facts, detail
 
 
 def _on_box_record_facts(
@@ -1141,6 +1173,9 @@ def _prepare_on_box(
             ))
             return None
         image = resolved_image
+    door_detail = ""
+    turn_overrides: Mapping[str, JSONValue] | None = None
+    expected_config_hash: str | None = None
     if CallSurface.ENGINE not in surfaces:
         if request.paths.name == CI_STACK and CallSurface.STORES in surfaces:
             job_problem = _sibling_index_job_problem(request, seams, slice_spec)
@@ -1153,31 +1188,19 @@ def _prepare_on_box(
         if isinstance(resolved_generation, StageResult):
             print_stage(resolved_generation)
             return None
-        door_detail = ""
-        turn_overrides: Mapping[str, JSONValue] | None = None
         if CallSurface.RESEARCH in surfaces:
-            if request.baseline is not None:
-                turn_overrides = baselines.BASELINES[request.baseline]
-            expected_hash = _prepare_research(request, seams, slice_spec, resolved_generation, turn_overrides)
-            if isinstance(expected_hash, Problem):
-                print_stage(StageResult("preconditions", False, expected_hash.problem, expected_hash.fix))
-                return None
             judgments_overrides = overrides.get("judgments", {})
             assert isinstance(judgments_overrides, Mapping)
-            overrides = {
-                **overrides,
-                "judgments": {
-                    **judgments_overrides,
-                    "definition": rankmetrics2.DEFINITION_ID,
-                    "door": "turn",
-                    "config_hash": expected_hash,
-                    **({} if turn_overrides is None else {
-                        "baseline": request.baseline,
-                        "turn_overrides": dict(turn_overrides),
-                    }),
-                },
-            }
-            door_detail = f", door {research_door.TURN_PATH} probed, baseline {request.baseline or 'shipped'}"
+            research = _research_preconditions(
+                request, seams, slice_spec, resolved_generation,
+                {**judgments_overrides, "definition": rankmetrics2.DEFINITION_ID},
+                profile_name=config.hardware_profile,
+            )
+            if isinstance(research, Problem):
+                print_stage(StageResult("preconditions", False, research.problem, research.fix))
+                return None
+            turn_overrides, expected_config_hash, door_facts, door_detail = research
+            overrides = {**overrides, "judgments": door_facts}
         elif CallSurface.RANKED_FILE in surfaces:
             door_detail = ", door ranked-file"
         record_facts = _on_box_record_facts(request, seams, config.hardware_profile)
@@ -1208,6 +1231,7 @@ def _prepare_on_box(
             image=image,
             generation=resolved_generation,
             turn_overrides=turn_overrides,
+            expected_config_hash=expected_config_hash,
         )
     judgement = request.mode.judgement(started, config.office.timezone)
     engine_call_count = (
@@ -1393,6 +1417,17 @@ def _prepare_on_box(
     if isinstance(resolved_generation, StageResult):
         print_stage(resolved_generation)
         return None
+    if CallSurface.RESEARCH in surfaces:
+        research_overrides = overrides.get("research", {})
+        assert isinstance(research_overrides, Mapping)
+        research = _research_preconditions(
+            request, seams, slice_spec, resolved_generation, research_overrides, profile_name=config.hardware_profile,
+        )
+        if isinstance(research, Problem):
+            print_stage(StageResult("preconditions", False, research.problem, research.fix))
+            return None
+        turn_overrides, expected_config_hash, door_facts, door_detail = research
+        overrides = {**overrides, "research": door_facts}
     record_facts = _on_box_record_facts(request, seams, target.profile_name)
     if isinstance(record_facts, StageResult):
         print_stage(record_facts)
@@ -1422,7 +1457,7 @@ def _prepare_on_box(
                 if CallSurface.TURNS in surfaces
                 else ""
             ) + (", image present" if image is not None else "")
-            + _generation_detail(resolved_generation),
+            + _generation_detail(resolved_generation) + door_detail,
             "",
         )
     )
@@ -1439,6 +1474,8 @@ def _prepare_on_box(
         image=image,
         generation=resolved_generation,
         judge_retry=judge_retry,
+        turn_overrides=turn_overrides,
+        expected_config_hash=expected_config_hash,
     )
 
 
@@ -1821,6 +1858,7 @@ def _run_body(
         progress=print,
         ranked=prepared.ranked,
         turn_overrides=prepared.turn_overrides,
+        expected_config_hash=prepared.expected_config_hash,
         assessments=prepared.assessments,
         turns=prepared.turns,
         checkout=seams.checkout,

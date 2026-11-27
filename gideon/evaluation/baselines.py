@@ -12,13 +12,15 @@ from typing import Final
 from gideon.host.report import Problem
 from gideon.turn.config import OverrideRefusal, config_hash, effective_config
 
-BASELINES: Final = MappingProxyType({"off": MappingProxyType({"query_plan": "off"})})
+BASELINES: Final = MappingProxyType({"off": MappingProxyType({
+    "query_plan": "off", "rerank.stage1": "off", "rerank.stage2": "off",
+})})
 
 
-def expected_config_hash(overrides: Mapping[str, object] | None) -> str | Problem:
+def expected_config_hash(overrides: Mapping[str, object] | None, *, reranker: bool) -> str | Problem:
     """Return the hash the checkout expects, or a content-free override refusal."""
 
-    effective = effective_config(overrides)
+    effective = effective_config(overrides, reranker=reranker)
     if isinstance(effective, OverrideRefusal):
         return Problem(
             f"the checkout's retrieval configuration refused the overrides ({effective.state})",

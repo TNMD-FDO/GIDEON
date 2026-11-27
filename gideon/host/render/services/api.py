@@ -11,6 +11,9 @@ from gideon.host.render.api import (
     API_CHAT_HEADER,
     API_CORPUS_DATABASE_HOST_ENV,
     API_CORPUS_PASSWORD_FILE_ENV,
+    API_COURTS_FILE_ENV,
+    API_COURTS_MOUNT,
+    API_COURTS_PATH,
     API_EMBED_DIMENSIONS_ENV,
     API_EMBED_MODEL_ENV,
     API_EMBED_REPOSITORY_ENV,
@@ -32,6 +35,7 @@ from gideon.host.render.api import (
     TURN_READER_ROLE,
     TURN_READER_SECRET_NAME,
     api_enabled,
+    jurisdiction_environment,
 )
 from gideon.host.render.engine import (
     EMBED,
@@ -49,7 +53,7 @@ from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_MODEL_ID
 from gideon.host.render.qdrant import QDRANT_READ_ONLY_SECRET_NAME, qdrant_rest_url
 from gideon.host.render.services import ServiceDefinition, image_pin, source_digest
 from gideon.host.render.services.generator import generator_pin
-from gideon.host.render.services.model_server import model_pin, model_server_members
+from gideon.host.render.services.model_server import has_reranker, model_pin
 from gideon.host.render.worker import (
     WORKER_DATABASE_HOST,
     WORKER_DATABASE_NAME,
@@ -95,6 +99,11 @@ def api_service(
             "Render input checkout is empty; the gideon-api service needs the "
             "release checkout's absolute path. Re-run render with a checkout."
         )
+    if inputs.courts is None:
+        raise ValueError(
+            "Render input court map is missing. Restore courts.yaml and re-run render from a release checkout."
+        )
+    court_environment = jurisdiction_environment(inputs.site.jurisdiction, inputs.courts)
     embed = model_pin(inputs, EMBED)
     space = inputs.profile.embedding_space
     if space is None:
@@ -105,7 +114,7 @@ def api_service(
     password_file = f"/run/secrets/{TURN_READER_SECRET_NAME}"
     rerank_environment: dict[str, str] = {}
     rerank_secrets: list[str] = []
-    if RERANK in model_server_members(inputs):
+    if has_reranker(inputs.profile, no_gpu=inputs.no_gpu):
         rerank_environment = {
             API_RERANK_URL_ENV: f"http://{RERANK.service_name}:{RERANK.port}",
             API_RERANK_KEY_FILE_ENV: f"/run/secrets/{RERANK.secret_name}",
@@ -119,6 +128,7 @@ def api_service(
             "GIDEON_ENGINE_API_KEY_FILE": f"/run/secrets/{ENGINE_SECRET_NAME}",
             "GIDEON_API_KEY_FILE": f"/run/secrets/{API_SECRET_NAME}",
             "GIDEON_INSTRUCTION_FILE": API_INSTRUCTION_MOUNT,
+            API_COURTS_FILE_ENV: API_COURTS_MOUNT,
             "GIDEON_API_PORT": str(ENGINE_PORT),
             "GIDEON_SOURCE_HEADER": API_SOURCE_HEADER,
             "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY.email,
@@ -148,6 +158,7 @@ def api_service(
             "GIDEON_API_OPENSEARCH_URL": opensearch_rest_url(),
             "GIDEON_API_OPENSEARCH_USER": OPENSEARCH_TURN_USER,
             "GIDEON_API_OPENSEARCH_PASSWORD_FILE": f"/run/secrets/{OPENSEARCH_TURN_SECRET_NAME}",
+            **court_environment,
             **rerank_environment,
             "TZ": inputs.site.office.timezone,
         },
@@ -156,6 +167,7 @@ def api_service(
         "volumes": [
             f"{inputs.checkout}/gideon:{API_MOUNT_TARGET}:ro",
             f"{rendered_root}/{API_INSTRUCTION_PATH}:{API_INSTRUCTION_MOUNT}:ro",
+            f"{rendered_root}/{API_COURTS_PATH}:{API_COURTS_MOUNT}:ro",
             f"{CAS_ROOT}:{CAS_ROOT}:ro",
         ],
         "group_add": [str(inputs.facts.service_gid)],

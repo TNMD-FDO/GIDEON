@@ -64,17 +64,18 @@ def _filter(search: ObjectSearch) -> dict[str, object]:
 
 def query_body(
     searches: Sequence[ObjectSearch], message: str, reservation: int, *, collapse: bool,
-    max_bytes: int = OBJECT_REQUEST_MAX_BYTES,
+    courts: Sequence[str] | None = None, max_bytes: int = OBJECT_REQUEST_MAX_BYTES,
 ) -> bytes:
     """Encode the searches as NDJSON for the generation's multi-search endpoint.
 
     A request past ``max_bytes`` is refused as an invalid message before it grows further.
     """
 
+    court_filters = [] if courts is None else [lexical.court_filter(courts)]
     encoded = bytearray()
     for search in searches:
         body = lexical.query_body(message, reservation, collapse=collapse)
-        body["query"] = {"bool": {"filter": [_filter(search)], "should": [body["query"]]}}
+        body["query"] = {"bool": {"filter": [_filter(search), *court_filters], "should": [body["query"]]}}
         body["sort"] = [{"_score": "desc"}, {"doc_id": "asc"}, {"ordinal": "asc"}]
         line = b"{}\n" + json.dumps(body, separators=(",", ":")).encode("utf-8") + b"\n"
         if len(encoded) + len(line) > max_bytes:
@@ -103,7 +104,7 @@ def parse_reply(reply: object, searches: Sequence[ObjectSearch]) -> tuple[Search
 
 async def search(
     client: httpx.AsyncClient, user: str, password_file: Path, index: str, message: str,
-    objects: Sequence[TurnObject], reservation: int, *, collapse: bool,
+    objects: Sequence[TurnObject], reservation: int, *, collapse: bool, courts: Sequence[str] | None = None,
     clock: Callable[[], float] = time.monotonic, timeout: float = OBJECT_LEG_TIMEOUT_SECONDS,
 ) -> ObjectLegResult:
     """Send each distinct leg once and return the ordered searches for each object."""
@@ -121,7 +122,7 @@ async def search(
     owners = {position: first_object[leg] for position, leg in legs.items()}
     unique_legs = dict.fromkeys(legs.values())
     searches = tuple(search for leg in unique_legs for search in leg)
-    body = query_body(searches, message, reservation, collapse=collapse)
+    body = query_body(searches, message, reservation, collapse=collapse, courts=courts)
     try:
         password = password_file.read_text(encoding="utf-8").strip()
         if not password:

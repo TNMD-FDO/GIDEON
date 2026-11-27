@@ -16,13 +16,14 @@ from types import ModuleType
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
+import anyio
 import httpx
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.types import Message, Receive, Scope, Send
 from test_api_completions import ASGISession, FixtureStream, GatedStream
 from test_lock_coupling import MODELS_LOCK_PATH
-from test_turn_answer import ENGINE_ERROR, payload, recorded_answer
+from test_turn_answer import ENGINE_ERROR, payload, recorded_answer, with_usage
 from test_turn_generation import LiveRow, record_with_rows
 from test_turn_generator import generator_pin
 from test_turn_legs import FIXTURES, turn_fixture
@@ -35,17 +36,22 @@ from gideon.api.settings import RecordCoordinates, Settings
 from gideon.api.sse import DONE_EVENT, SSE_EVENT_BUFFER_LIMIT_BYTES, EventReassembler
 from gideon.extraction import ExactObject, extract
 from gideon.host.models import load_models_lock
-from gideon.turn import lexical, objectleg, objects
+from gideon.turn import endpoint, lexical, objectleg, objects, provenance
 from gideon.turn.answer import LEGAL_BRANCH
-from gideon.turn.config import RETRIEVAL_CONFIG, config_hash
-from gideon.turn.generation import TURN_COLLECTION
+from gideon.turn.config import (
+    RETRIEVAL_CONFIG,
+    OverrideRefusal,
+    config_hash,
+    effective_config,
+)
+from gideon.turn.generation import TURN_COLLECTION, read_generation
 from gideon.turn.generator import GENERATOR_SAMPLING, RESEARCH_MAX_TOKENS
 from gideon.turn.objects import CaseExtractor
 from gideon.turn.prompt import messages
 
 MESSAGE = "Fictitious turn sentinel Cobalt Widget Q7"
 FULL_TURN: dict[str, object] = {"message": MESSAGE}
-RETRIEVE = {"message": MESSAGE, "stop_after": "retrieve"}
+RETRIEVE: dict[str, object] = {"message": MESSAGE, "stop_after": "retrieve"}
 MODELS_ROUTE = "/v1/models"
 COMPLETIONS_ROUTE = "/v1/chat/completions"
 CHAT_ID = "fixture-research-chat"
@@ -56,6 +62,12 @@ OPEN_TEXT = NEUTRAL_SENTENCE * (guardrail.LAG_CHARS // len(NEUTRAL_SENTENCE) + 1
 
 def sse(data: str) -> bytes:
     return f"data: {data}\n\n".encode()
+
+
+def with_finishing_usage(capture: bytes, usage: dict[str, object]) -> bytes:
+    *opening, finishing, done = EventReassembler().feed(capture)
+    assert done == DONE_EVENT and json.loads(finishing)["choices"][0]["finish_reason"] is not None
+    return b"".join(sse(item) for item in (*opening, with_usage(finishing, usage), done))
 
 
 def completion(stream: httpx.AsyncByteStream, *, status: int = 200, content_type: str = "text/event-stream") -> httpx.Response:
@@ -79,14 +91,16 @@ class WaitingStream(FixtureStream):
         await super().aclose()
 
 
-class TurnEndpoint(unittest.TestCase):
+class TurnEndpointFixture(unittest.TestCase):
     def setUp(self) -> None:
         listing = turn_fixture("embed-listing.json")
         embedding = turn_fixture("embedding.json")
         dense = turn_fixture("dense-grouped.json")
+        controlling = turn_fixture("controlling-grouped.json")
         lexical = turn_fixture("lexical-collapsed.json")
         self.lexical_hits = lexical["hits"]["hits"]
         self.groups = dense["result"]["groups"]
+        self.controlling_groups = controlling["result"]["groups"]
         self.generation = self.lexical_hits[0]["_index"]
         self.lockfile, embedding_space = self.generation.split("__")[1:]
         self.dense_path = f"/collections/{self.generation}/points/query/groups"
@@ -105,13 +119,16 @@ class TurnEndpoint(unittest.TestCase):
             MODELS_ROUTE: listing,
             "/v1/embeddings": embedding,
             self.dense_path: dense,
+            "controlling": controlling,
             self.lexical_path: lexical,
         }
         self.requests: dict[str, httpx.Request] = {}
         self.engine_requests: list[httpx.Request] = []
+        self.rerank_transport: httpx.AsyncBaseTransport | None = None
         self.case_extractor: CaseExtractor | None = lambda _: ()
         self.trips: list[guardrail.TripRow] = []
         self.enterContext(patch.object(guardrail.writer, "dispatch_trip_row", self.trips.append))
+        self.dispatch = self.enterContext(patch.object(guardrail, "dispatch_event_row"))
         self.live_rows: tuple[LiveRow, ...] = ((self.generation, TURN_COLLECTION, embedding_space, [self.lockfile]),)
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         for name in ("record", "dense", "embedder", "lexical"):
@@ -128,19 +145,31 @@ class TurnEndpoint(unittest.TestCase):
             opensearch_url="http://fixture-opensearch:7003", opensearch_user="fixture-turn-reader",
             opensearch_password_file=root / "lexical", embed_model=model["id"], embed_repository=model["root"],
             embed_space=embedding_space, embed_dimensions=len(embedding["data"][0]["embedding"]),
+            courts_scotus=("scotus",), courts_circuit=("ca11",), courts_districts=("alnd",), courts_states=("fx-sup-al",),
+            courts_file=FIXTURES / "courts.json",
         )
 
-    def upstream(self, request: httpx.Request) -> httpx.Response:
+    def store_key(self, request: httpx.Request) -> str:
         path = request.url.path
-        self.assertNotIn(path, self.requests)
-        self.requests[path] = request
-        if path == self.mget_path:
+        # The mock keeps the dense limit fixed and allows the controlling reservation to vary.
+        if (
+            path in (self.dense_path, self.dense_path.removesuffix("/groups"))
+            and json.loads(request.content)["limit"] != RETRIEVAL_CONFIG["leg_limit"]
+        ):
+            return "controlling"
+        return path
+
+    def upstream(self, request: httpx.Request) -> httpx.Response:
+        key = self.store_key(request)
+        self.assertNotIn(key, self.requests)
+        self.requests[key] = request
+        if key == self.mget_path and key not in self.upstream_replies:
             docs = [
                 {**self.passage_doc, "_index": self.generation, "_id": item["_id"]}
                 for item in json.loads(request.content)["docs"]
             ]
             return httpx.Response(200, json={"docs": list(reversed(docs))})
-        reply = self.upstream_replies[path]
+        reply = self.upstream_replies[key]
         if isinstance(reply, Exception):
             raise reply
         if isinstance(reply, httpx.Response):
@@ -170,12 +199,15 @@ class TurnEndpoint(unittest.TestCase):
         self.requests.clear()
         self.engine_requests.clear()
         self.trips.clear()
+        self.dispatch.reset_mock()
+        self.clock = count()
         self.connection, self.cursor = record_with_rows(self.live_rows if rows is None else rows)
         self.connect = AsyncMock(return_value=self.connection)
         return create_app(
             settings, transport=httpx.MockTransport(self.engine_upstream), embed_transport=httpx.MockTransport(self.upstream),
             qdrant_transport=httpx.MockTransport(self.upstream), opensearch_transport=httpx.MockTransport(self.upstream),
-            record_connect=self.connect, case_extractor=self.case_extractor, turn_clock=count().__next__,
+            rerank_transport=self.rerank_transport,
+            record_connect=self.connect, case_extractor=self.case_extractor, turn_clock=self.clock.__next__,
         )
 
     def headers(self, settings: Settings, *, eval_caller: bool = True) -> dict[str, str]:
@@ -187,7 +219,7 @@ class TurnEndpoint(unittest.TestCase):
 
     def request(
         self, *, settings: Settings | None = None, rows: Sequence[LiveRow] | None = None,
-        payload: dict[str, object] | None = None, eval_caller: bool = True,
+        payload: dict[str, object] | bytes | None = None, eval_caller: bool = True, chat_id: str = CHAT_ID,
         on_send: Callable[[Message], None] | None = None, private_values: tuple[str, ...] = (),
     ) -> httpx.Response:
         configuration = self.settings if settings is None else settings
@@ -205,9 +237,12 @@ class TurnEndpoint(unittest.TestCase):
             async with app.router.lifespan_context(app), httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=observe), base_url="http://fixture-api",
             ) as client:
+                headers = self.headers(configuration, eval_caller=eval_caller)
+                headers[configuration.chat_header] = chat_id
+                if isinstance(payload, bytes):
+                    return await client.post("/turn", content=payload, headers=headers)
                 return await client.post(
-                    "/turn", json=RETRIEVE if payload is None else payload,
-                    headers=self.headers(configuration, eval_caller=eval_caller),
+                    "/turn", json=RETRIEVE if payload is None else payload, headers=headers,
                 )
 
         with self.assertLogs(level="DEBUG") as captured:
@@ -218,6 +253,8 @@ class TurnEndpoint(unittest.TestCase):
             for record in captured.records:
                 self.assertNotIn(value, record.getMessage())
                 self.assertNotIn(value, repr(vars(record)))
+            for dispatched in self.dispatch.call_args_list:
+                self.assertNotIn(value, repr(dispatched.args))
         return response
 
     def assert_refused(
@@ -235,15 +272,50 @@ class TurnEndpoint(unittest.TestCase):
         self.assertIn(line.getMessage().partition(" generation=")[2].partition(" ")[0], generations)
         self.assertIsNone(line.exc_info)
 
+    def turn_row(self) -> dict[str, Any]:
+        self.dispatch.assert_called_once()
+        self.assertNotIn(MESSAGE, repr(self.dispatch.call_args.args))
+        _, _, columns, values = self.dispatch.call_args.args
+        return dict(zip(columns, values, strict=True))
+
+    def assert_failed_row(self, state: str, word: str | None = None) -> dict[str, Any]:
+        row = self.turn_row()
+        self.assertEqual((row["outcome"], row["failure_state"], row["failure_word"]), ("failed", state, word))
+        return row
+
+    def retrieve_session(self) -> ASGISession:
+        return ASGISession(
+            self.app(self.settings), "POST", "/turn", json.dumps(RETRIEVE).encode(), self.headers(self.settings), "2.4",
+        )
+
+
+class TurnEndpoint(TurnEndpointFixture):
     def test_eval_retrieve_returns_the_fused_pool_and_provenance(self) -> None:
+        reranker = Mock()
+        self.rerank_transport = httpx.MockTransport(reranker)
         response = self.request()
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(self.requests.keys(), self.upstream_replies.keys())
+        self.assertNotIn(self.mget_path, self.requests)
+        reranker.assert_not_called()
         self.assertEqual(self.engine_requests, [])
         self.assertEqual(self.requests["/v1/models"].method, "GET")
         self.assertEqual(self.requests["/v1/embeddings"].method, "POST")
         self.assertEqual(self.requests[self.dense_path].method, "POST")
         self.assertEqual(self.requests[self.lexical_path].method, "POST")
+        controlling_request = self.requests["controlling"]
+        self.assertEqual((controlling_request.method, controlling_request.url.path), ("POST", self.dense_path))
+        self.assertEqual(controlling_request.headers["api-key"], self.requests[self.dense_path].headers["api-key"])
+        courts = sorted({
+            *self.settings.courts_scotus, *self.settings.courts_circuit,
+            *self.settings.courts_districts, *self.settings.courts_states,
+        })
+        dense_body = json.loads(self.requests[self.dense_path].content)
+        self.assertNotIn("filter", dense_body)
+        self.assertEqual(json.loads(controlling_request.content), {
+            **dense_body, "limit": RETRIEVAL_CONFIG["reservations.controlling"],
+            "filter": {"must": [{"key": "court", "match": {"any": courts}}]},
+        })
         self.connect.assert_awaited_once()
         self.cursor.execute.assert_awaited_once()
         self.connection.close.assert_awaited_once()
@@ -251,12 +323,26 @@ class TurnEndpoint(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["stage"], "retrieve")
         self.assertEqual(body["timings_ms"]["objects"], 0)
+        for stage in ("rerank_passages", "rerank_queue", "rerank"):
+            self.assertEqual(body["timings_ms"][stage], 0.0)
         self.assertGreater(body["timings_ms"]["extraction"], 0)
+        self.assertGreater(body["timings_ms"]["controlling"], 0)
         self.assertEqual(body["generation"], {
             "gen_id": self.generation, "collection": TURN_COLLECTION, "lockfiles": [self.lockfile],
             "embedding_space": self.settings.embed_space,
         })
-        self.assertEqual(body["retrieval_config_hash"], config_hash(RETRIEVAL_CONFIG))
+        config = effective_config(reranker=False)
+        assert not isinstance(config, OverrideRefusal)
+        self.assertEqual(body["retrieval_config_hash"], config_hash(config))
+        row = self.turn_row()
+        self.assertEqual(row["outcome"], "reply")
+        self.assertEqual(row["retrieval_config_hash"], body["retrieval_config_hash"])
+        self.assertEqual(json.loads(row["timings_ms"]), body["timings_ms"])
+        self.assertEqual(json.loads(row["pool"]), body["pool"])
+        provenance_without_objects = dict(body["provenance"])
+        objects = provenance_without_objects.pop("out_of_corpus_objects")
+        self.assertEqual(json.loads(row["provenance"]), provenance_without_objects)
+        self.assertEqual(json.loads(row["out_of_corpus_objects"]), objects)
         pool = body["pool"]
         groups = self.groups
         lexical_hits = self.lexical_hits
@@ -267,7 +353,20 @@ class TurnEndpoint(unittest.TestCase):
         self.assertEqual({entry["chunk_id"] for entry in pool[2:]}, {boilerplate, lexical_hits[2]["_id"]})
         self.assertEqual(pool[0]["leg_ranks"], {"dense": 1, "lexical": 1})
         self.assertEqual(pool[1]["leg_ranks"], {"dense": 2})
+        self.assertEqual({entry["chunk_id"]: entry["authority_tier"] for entry in pool}, {
+            shared: "scotus", duplicate: "circuit_published", boilerplate: "circuit_unpublished",
+            lexical_hits[2]["_id"]: "persuasive",
+        })
+        seat_ranks = {
+            group["hits"][0]["payload"]["chunk_id"]: rank
+            for rank, group in enumerate(self.controlling_groups, start=1)
+        }
+        self.assertEqual({entry["chunk_id"]: entry["controlling_rank"] for entry in pool if entry["reserved"]}, seat_ranks)
+        for entry in pool:
+            rank = seat_ranks.get(entry["chunk_id"])
+            self.assertEqual((entry["reserved"], entry["controlling_rank"]), ("controlling" if rank is not None else None, rank))
         self.assertTrue(all(entry["pinned"] is False and entry["object"] is None for entry in pool))
+        self.assertTrue(all(entry["stage2_score"] is None and entry["rank"] == entry["pool_rank"] for entry in pool))
         self.assertEqual(len({entry["dupe_cluster"] for entry in pool}), len(pool))
         self.assertEqual(
             body["provenance"], {
@@ -285,16 +384,174 @@ class TurnEndpoint(unittest.TestCase):
                     "lexical": {
                         "store": "opensearch", "limit": RETRIEVAL_CONFIG["leg_limit"], "returned": len(lexical_hits),
                     },
+                    "controlling": {
+                        "store": "qdrant", "limit": RETRIEVAL_CONFIG["reservations.controlling"],
+                        "returned": len(self.controlling_groups), "courts": courts,
+                    },
                     "objects": {
                         "store": "opensearch", "limit": RETRIEVAL_CONFIG["reservations.exact_object"],
                         "returned": 0, "searches": 0,
                     },
                 },
                 "tools": [],
-                "fusion": {"union": len(groups) + len(lexical_hits) - 1, "after_collapse": len(pool),
-                           "weighted": 1, "cut": 0, "pinned": 0, "pinned_cut": 0},
+                "fusion": {
+                    "union": len(groups) + len(lexical_hits) - 1, "after_collapse": len(pool),
+                    "weighted": 1, "cut": 0, "pinned": 0, "pinned_cut": 0,
+                    "reserved": len(seat_ranks), "reserved_only": 0, "reserved_promoted": 0,
+                    "reserved_inherited": 0, "reserved_cut": 0,
+                },
+                "rerank": {
+                    "stage1": RETRIEVAL_CONFIG["rerank.stage1"], "stage2": "off",
+                    "depth": RETRIEVAL_CONFIG["stage2_depth"], "scored": 0, "pinned_scored": 0, "reserved_scored": 0,
+                },
             },
         )
+
+    def test_service_without_a_reranker_refuses_on_override_before_retrieval(self) -> None:
+        reranker = Mock()
+        self.rerank_transport = httpx.MockTransport(reranker)
+        response = self.request(payload={**RETRIEVE, "overrides": {"rerank.stage2": "on"}})
+
+        self.assert_refused(response, 400, "override_invalid", "rerank.stage2")
+        self.assertEqual(self.requests, {})
+        reranker.assert_not_called()
+        self.connect.assert_not_awaited()
+        self.dispatch.assert_not_called()
+
+    def test_eval_retrieve_filters_each_leg_only_when_the_user_names_a_scope(self) -> None:
+        unscoped_message = "Fictitious appeal under 18 U.S.C. § 9999"
+        exact, = extract(unscoped_message)
+        empty = turn_fixture("objects-msearch-empty.json")
+        self.upstream_replies[self.msearch_path] = {**empty, "responses": empty["responses"][:1]}
+        baseline = self.request(payload={**RETRIEVE, "message": unscoped_message})
+        self.assertEqual(baseline.status_code, 200, baseline.text)
+        expected = baseline.json()
+        self.assertIsNone(expected["provenance"]["filters"]["user_stated_scope"])
+
+        home_courts = sorted({
+            *self.settings.courts_scotus, *self.settings.courts_circuit,
+            *self.settings.courts_districts, *self.settings.courts_states,
+        })
+        lexical_body = {
+            "query": {"match": {"text": unscoped_message}}, "size": RETRIEVAL_CONFIG["leg_limit"],
+            "_source": list(self.lexical_hits[0]["_source"]), "collapse": {"field": "dupe_cluster"},
+        }
+        object_clause = {"term": {"cites": {"value": exact.key, "case_insensitive": True}}}
+        object_body = {
+            **lexical_body, "size": RETRIEVAL_CONFIG["reservations.exact_object"],
+            "query": {"bool": {"filter": [object_clause], "should": [lexical_body["query"]]}},
+            "sort": [{"_score": "desc"}, {"doc_id": "asc"}, {"ordinal": "asc"}],
+        }
+        dense_body = {
+            "query": turn_fixture("embedding.json")["data"][0]["embedding"], "limit": RETRIEVAL_CONFIG["leg_limit"],
+            "with_payload": list(self.groups[0]["hits"][0]["payload"]), "with_vector": False,
+            "group_by": "dupe_cluster", "group_size": 1,
+        }
+        controlling_body = {
+            **dense_body, "limit": RETRIEVAL_CONFIG["reservations.controlling"],
+            "filter": {"must": [{"key": "court", "match": {"any": home_courts}}]},
+        }
+        for path, body in ((self.lexical_path, lexical_body), (self.dense_path, dense_body), ("controlling", controlling_body)):
+            self.assertEqual(self.requests[path].content, json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode())
+        self.assertEqual(
+            self.requests[self.msearch_path].content, b"{}\n" + json.dumps(object_body, separators=(",", ":")).encode() + b"\n",
+        )
+
+        home_name, absent_name = "Eleventh Circuit", "First Circuit"
+        message = f"{unscoped_message} in the {home_name} or the {absent_name}?"
+        home, = self.settings.courts_circuit
+        absent = self.lexical_hits[2]["_source"]["court"]
+        home_start, absent_start = message.index(home_name), message.index(absent_name)
+        response = self.request(payload={**RETRIEVE, "message": message}, private_values=(home_name, absent_name))
+        self.assertEqual(response.status_code, 200, response.text)
+        courts = sorted((home, absent, *self.settings.courts_districts, *self.settings.courts_scotus))
+        intersection = sorted(set(home_courts).intersection(courts))
+        match = {"match": {"text": message}}
+        terms = {"terms": {"court": courts}}
+        self.assertEqual(json.loads(self.requests[self.lexical_path].content), {
+            **lexical_body, "query": match, "post_filter": terms,
+        })
+        self.assertEqual(list(map(json.loads, self.requests[self.msearch_path].content.splitlines())), [{}, {
+            **object_body, "query": {"bool": {"filter": [object_clause, terms], "should": [match]}},
+        }])
+        self.assertEqual(json.loads(self.requests[self.dense_path].content), {
+            **dense_body, "filter": {"must": [{"key": "court", "match": {"any": courts}}]},
+        })
+        self.assertEqual(json.loads(self.requests["controlling"].content), {
+            **controlling_body, "filter": {"must": [{"key": "court", "match": {"any": intersection}}]},
+        })
+
+        expected["provenance"]["filters"]["user_stated_scope"] = {
+            "named": [
+                {"court": home, "start": home_start, "end": home_start + len(home_name)},
+                {"court": absent, "start": absent_start, "end": absent_start + len(absent_name)},
+            ],
+            "courts": courts,
+            "out_of_corpus": [absent],
+        }
+        expected["provenance"]["legs"]["controlling"]["courts"] = intersection
+        missing = expected["provenance"]["out_of_corpus_objects"]
+        missing[0]["resolved"] = "unresolved_in_scope"
+        missing.append({"type": "court", "resolved": absent})
+        self.assertEqual(response.json(), expected)
+
+    def test_absent_circuit_is_filtered_and_projected_into_the_turn_row(self) -> None:
+        court_name = "First Circuit"
+        message = f"How would the {court_name} hear a fictitious appeal?"
+        court_file = turn_fixture("courts.json")
+        absent, = (
+            identifier for identifier, court in court_file["courts"].items()
+            if court["name"] == f"Court of Appeals for the {court_name}"
+        )
+        self.assertNotIn(absent, court_file["lockfiles"][self.lockfile])
+        supreme = list(self.settings.courts_scotus)
+        for path, fixture in (
+            (self.dense_path, "dense-grouped.json"), ("controlling", "controlling-grouped.json"),
+        ):
+            reply = turn_fixture(fixture)
+            reply["result"]["groups"] = [
+                group for group in reply["result"]["groups"] if group["hits"][0]["payload"]["court"] in supreme
+            ]
+            self.upstream_replies[path] = reply
+        lexical_reply = turn_fixture("lexical-collapsed.json")
+        lexical_reply["hits"]["hits"] = [row for row in self.lexical_hits if row["_source"]["court"] in supreme]
+        self.upstream_replies[self.lexical_path] = lexical_reply
+
+        with patch.object(provenance, "retrieval_provenance", wraps=provenance.retrieval_provenance) as build:
+            response = self.request(payload={**RETRIEVE, "message": message}, private_values=(court_name, message))
+        self.assertEqual(response.status_code, 200, response.text)
+        build.assert_called_once()
+        self.assertNotIn(court_name, repr(build.call_args.kwargs["stated_scope"]))
+
+        start = message.index(court_name)
+        reply_provenance = response.json()["provenance"]
+        self.assertEqual(reply_provenance["filters"]["user_stated_scope"], {
+            "named": [{"court": absent, "start": start, "end": start + len(court_name)}],
+            "courts": sorted((absent, *supreme)),
+            "out_of_corpus": [absent],
+        })
+        self.assertEqual(reply_provenance["legs"]["controlling"]["courts"], supreme)
+        self.assertEqual(json.loads(self.requests["controlling"].content)["filter"], {
+            "must": [{"key": "court", "match": {"any": supreme}}],
+        })
+        row = self.turn_row()
+        missing = [{"type": "court", "resolved": absent}]
+        self.assertEqual(reply_provenance.pop("out_of_corpus_objects"), missing)
+        self.assertEqual(json.loads(row["provenance"]), reply_provenance)
+        self.assertEqual(json.loads(row["out_of_corpus_objects"]), missing)
+
+    def test_empty_scope_intersection_skips_the_controlling_request(self) -> None:
+        settings = replace(self.settings, courts_scotus=(), courts_circuit=(), courts_districts=())
+        response = self.request(settings=settings, payload={
+            **RETRIEVE, "message": "Fictitious appeal in the Eleventh Circuit or First Circuit?",
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.requests.keys(), self.upstream_replies.keys() - {"controlling"})
+        reply = response.json()
+        self.assertEqual(reply["provenance"]["legs"]["controlling"], {
+            "store": "qdrant", "limit": RETRIEVAL_CONFIG["reservations.controlling"], "returned": 0, "courts": [],
+        })
+        self.assertEqual(reply["timings_ms"]["controlling"], 0)
 
     def test_eval_reporter_cite_pins_the_held_chunk_at_rank_one(self) -> None:
         citation = "444 U. S. 987"  # Fictitious reporter cite.
@@ -321,6 +578,7 @@ class TurnEndpoint(unittest.TestCase):
         self.assertEqual(first["pool_rank"], 1)
         self.assertIs(first["pinned"], True)
         self.assertEqual(first["object"], 0)
+        self.assertEqual(first["authority_tier"], "scotus")
         self.assertEqual(body["provenance"]["out_of_corpus_objects"], [])
         self.assertIs(body["provenance"]["objects"][0]["out_of_corpus"], False)
 
@@ -349,10 +607,17 @@ class TurnEndpoint(unittest.TestCase):
         self.assertEqual(provenance["fusion"]["pinned"], 0)
         self.assertTrue(all(entry["object"] is None and entry["pinned"] is False for entry in body["pool"]))
         self.assertGreater(body["timings_ms"]["objects"], 0)
+        row = self.turn_row()
+        self.assertEqual(json.loads(row["out_of_corpus_objects"]), [{"type": "statute", "resolved": "unresolved"}])
+        self.assertEqual(json.loads(row["provenance"])["objects"], provenance["objects"])
+        self.assertEqual(json.loads(row["pool"]), body["pool"])
+        self.assertEqual(json.loads(row["timings_ms"]), body["timings_ms"])
 
         with patch.dict(self.upstream_replies, {self.msearch_path: httpx.ConnectError(message)}):
             refused = self.request(payload=payload, private_values=private_values)
         self.assert_refused(refused, 503, "store_unavailable", "objects", pinned=True)
+        timings = json.loads(self.assert_failed_row("store_unavailable", "objects")["timings_ms"])
+        self.assertTrue({"record", "extraction", "embedding"} <= timings.keys())
 
     def test_citing_hits_seat_an_unresolved_citation_and_a_shared_leg_counts_once(self) -> None:
         citation, indexed = "444 U. S. 987", "444 U.S. 987"  # Fictitious reporter cite.
@@ -414,6 +679,35 @@ class TurnEndpoint(unittest.TestCase):
         self.assertEqual(first["pool_rank"], 1)
         self.assertIs(first["pinned"], True)
         self.assertEqual(first["object"], 0)
+
+    def test_reporter_cite_with_only_citing_hits_distinguishes_a_scoped_miss(self) -> None:
+        citation = "444 U. S. 987"  # Fictitious reporter cite.
+        exact = ExactObject("case_cite", 0, len(citation), citation)
+        self.case_extractor = Mock(return_value=((exact, None),))
+        reply = turn_fixture("objects-msearch.json")
+        empty_held = turn_fixture("objects-msearch-empty.json")["responses"][0]
+        citing = reply["responses"][1]
+        kept = [row for row in citing["hits"]["hits"] if row["_source"]["court"] in self.settings.courts_circuit]
+        citing["hits"]["hits"] = kept
+        citing["hits"]["total"]["value"] = len(kept)
+        self.assertTrue(kept)
+        self.upstream_replies[self.msearch_path] = {**reply, "responses": [empty_held, citing]}
+
+        for suffix, resolved in (("", "unresolved"), (" under the Eleventh Circuit", "unresolved_in_scope")):
+            with self.subTest(resolved=resolved):
+                response = self.request(
+                    payload={**RETRIEVE, "message": f"{citation} and a fictitious appeal{suffix}"},
+                    private_values=(citation,),
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                reply_body = response.json()
+                (entry,) = reply_body["provenance"]["objects"]
+                self.assertIs(entry["out_of_corpus"], True)
+                self.assertEqual(entry["seats"], len(kept))
+                self.assertEqual(reply_body["provenance"]["out_of_corpus_objects"], [
+                    {"type": "case_cite", "index": 0, "resolved": resolved, "citing_hits": len(kept)},
+                ])
+                self.assertEqual([hit["chunk_id"] for hit in reply_body["pool"] if hit["pinned"]], [row["_id"] for row in kept])
 
     def test_missing_adapter_logs_one_startup_warning_and_refuses_extraction(self) -> None:
         self.case_extractor = None
@@ -526,18 +820,66 @@ class TurnEndpoint(unittest.TestCase):
         self.assertEqual(cancelled, [self.msearch_path, self.lexical_path])
 
     def test_eval_pool_cap_updates_pool_provenance_and_config_hash(self) -> None:
-        cap = 2
-        response = self.request(payload={**RETRIEVE, "overrides": {"pool_cap": cap}})
+        cap = 3
+        reservation = len(self.controlling_groups)
+        overrides = {"pool_cap": cap, "reservations.controlling": reservation}
+        lexical = turn_fixture("lexical-collapsed.json")
+        # Put the out-of-circuit hit first in the lexical leg so it takes the unmarked place.
+        *home_hits, outsider = lexical["hits"]["hits"]
+        lexical["hits"]["hits"] = [outsider, *home_hits]
+        with patch.dict(self.upstream_replies, {self.lexical_path: lexical}):
+            uncapped = self.request()
+            self.assertEqual(uncapped.status_code, 200, uncapped.text)
+            original = uncapped.json()
+            response = self.request(payload={**RETRIEVE, "overrides": overrides})
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
-        expected = [group["hits"][0]["payload"]["chunk_id"] for group in self.groups[:cap]]
-        self.assertEqual([entry["chunk_id"] for entry in body["pool"]], expected)
-        self.assertEqual(body["retrieval_config_hash"], config_hash({**RETRIEVAL_CONFIG, "pool_cap": cap}))
+        self.assertLess(cap, len(original["pool"]))
+        seats = {
+            group["hits"][0]["payload"]["chunk_id"]: rank
+            for rank, group in enumerate(self.controlling_groups, start=1)
+        }
+        kept = {*seats, outsider["_id"]}
+        self.assertFalse(seats.keys() <= {entry["chunk_id"] for entry in original["pool"][:cap]})
+        self.assertEqual([entry["chunk_id"] for entry in body["pool"]], [
+            entry["chunk_id"] for entry in original["pool"] if entry["chunk_id"] in kept
+        ])
+        self.assertEqual({
+            entry["chunk_id"]: entry["controlling_rank"] for entry in body["pool"] if entry["reserved"] == "controlling"
+        }, seats)
+        (persuasive,) = [entry for entry in body["pool"] if entry["chunk_id"] == outsider["_id"]]
+        self.assertEqual((persuasive["authority_tier"], persuasive["reserved"], persuasive["controlling_rank"]),
+                         ("persuasive", None, None))
+        self.assertEqual(json.loads(self.requests["controlling"].content)["limit"], reservation)
+        self.assertEqual(body["provenance"]["legs"]["controlling"]["limit"], reservation)
+        config = effective_config(overrides, reranker=False)
+        assert not isinstance(config, OverrideRefusal)
+        self.assertEqual(body["retrieval_config_hash"], config_hash(config))
+        row = self.turn_row()
+        self.assertEqual(json.loads(row["pool"]), body["pool"])
+        self.assertEqual(row["retrieval_config_hash"], body["retrieval_config_hash"])
+        self.assertNotEqual(row["retrieval_config_hash"], original["retrieval_config_hash"])
+        self.assertEqual(json.loads(row["overrides"]), overrides)
         clusters = {group["id"] for group in self.groups} | {
             row["_source"]["dupe_cluster"] for row in self.lexical_hits
         }
         self.assertEqual(body["provenance"]["fusion"]["after_collapse"], len(clusters))
         self.assertEqual(body["provenance"]["fusion"]["cut"], len(clusters) - cap)
+        self.assertEqual(body["provenance"]["fusion"]["reserved_cut"], 0)
+
+    def test_both_vector_requests_follow_the_collapse_override(self) -> None:
+        path = self.dense_path.removesuffix("/groups")
+        replies = {
+            key: {"status": "ok", "result": {"points": [group["hits"][0] for group in groups]}}
+            for key, groups in ((path, self.groups), ("controlling", self.controlling_groups))
+        }
+        with patch.dict(self.upstream_replies, replies):
+            response = self.request(payload={**RETRIEVE, "overrides": {"collapse": "off"}})
+        self.assertEqual(response.status_code, 200, response.text)
+        for key in (path, "controlling"):
+            request = self.requests[key]
+            self.assertEqual(request.url.path, path)
+            self.assertTrue({"group_by", "group_size"}.isdisjoint(json.loads(request.content)))
 
     def test_space_mismatches_name_the_reason_without_a_dense_request(self) -> None:
         cases: tuple[tuple[str, Settings, dict[str, object]], ...] = (
@@ -549,6 +891,12 @@ class TurnEndpoint(unittest.TestCase):
         for reason, settings, replies in cases:
             with self.subTest(reason=reason), patch.dict(self.upstream_replies, replies):
                 self.assert_refused(self.request(settings=settings), 503, "embedder_outside_space", reason, pinned=True)
+                timings = json.loads(self.assert_failed_row("embedder_outside_space", reason)["timings_ms"])
+                self.assertGreater(timings["record"], 0)
+                self.assertGreater(timings["embedding"], 0)
+                self.assertNotIn("dense", timings)
+                self.assertNotIn("controlling", timings)
+                self.assertNotIn("fusion", timings)
                 self.assertNotIn(httpx.URL(settings.qdrant_url).host, {request.url.host for request in self.requests.values()})
 
     def test_missing_or_ambiguous_generation_refuses_without_a_pool(self) -> None:
@@ -558,18 +906,273 @@ class TurnEndpoint(unittest.TestCase):
         for state, live_rows in (("no_live_generation", ()), ("ambiguous_generation", rows)):
             with self.subTest(state=state):
                 self.assert_refused(self.request(rows=live_rows), 503, state)
+                self.assert_failed_row(state)
                 self.assertEqual(self.requests, {})
+
+    def test_lockfile_outside_release_refuses_only_the_scoped_turn(self) -> None:
+        missing = "corpus-2099-04-13"
+        rows: tuple[LiveRow, ...] = ((self.generation, TURN_COLLECTION, self.settings.embed_space, [missing]),)
+        court = "Eleventh Circuit"
+        response = self.request(
+            rows=rows, payload={**RETRIEVE, "message": f"A fictitious appeal in the {court}"}, private_values=(court,),
+        )
+        self.assert_refused(response, 503, "lockfile_outside_release", pinned=True)
+        self.assertEqual(response.json()["error"]["message"], "The generation's corpus lockfile is outside the release.")
+        self.assertEqual(self.requests, {})
+        row = self.assert_failed_row("lockfile_outside_release")
+        self.assertEqual(row["generation_id"], self.generation)
+        self.assertIsNone(row["provenance"])
+        self.assertIsNone(row["pool"])
+
+        response = self.request(rows=rows)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["generation"]["lockfiles"], [missing])
+        self.assertIsNone(response.json()["provenance"]["filters"]["user_stated_scope"])
+        self.assertEqual(self.turn_row()["outcome"], "reply")
+
+    def test_record_read_and_deadline_refusals_write_failed_rows(self) -> None:
+        missing_password = replace(self.settings.record, password_file=self.settings.record.password_file.with_suffix(".absent"))
+        settings = replace(self.settings, record=missing_password)
+        self.assert_refused(self.request(settings=settings), 503, "record_unavailable")
+        self.assert_failed_row("record_unavailable")
+
+        async def pending_read(_: str) -> None:
+            await asyncio.Future()
+
+        connection, cursor = record_with_rows(self.live_rows)
+        cursor.execute.side_effect = pending_read
+        with (
+            patch.object(endpoint, "read_generation", partial(read_generation, timeout=0)),
+            patch(f"{__name__}.record_with_rows", return_value=(connection, cursor)),
+        ):
+            self.assert_refused(self.request(), 504, "retrieval_timeout", "record")
+        self.assert_failed_row("retrieval_timeout", "record")
+
+    def test_embedder_refusals_write_failed_rows(self) -> None:
+        cases: tuple[tuple[object, int, str], ...] = (
+            ({}, 503, "embedder_unavailable"),
+            (httpx.Response(400, json={"error": {"message": "Fictitious maximum context length error"}}),
+             400, "message_outside_window"),
+        )
+        for reply, status, state in cases:
+            with self.subTest(state=state), patch.dict(self.upstream_replies, {"/v1/embeddings": reply}):
+                self.assert_refused(self.request(), status, state, pinned=True)
+                self.assert_failed_row(state)
+
+    def test_each_store_refusal_writes_one_failed_row(self) -> None:
+        for word, path, body in (
+            ("dense", self.dense_path, RETRIEVE), ("lexical", self.lexical_path, RETRIEVE),
+            ("controlling", "controlling", RETRIEVE), ("passages", self.mget_path, FULL_TURN),
+        ):
+            for reply, status, state in (
+                (httpx.ConnectError("Fictitious store connection failure"), 503, "store_unavailable"),
+                ({}, 502, "store_reply_invalid"),
+                (httpx.ReadTimeout("Fictitious store read timeout"), 504, "retrieval_timeout"),
+            ):
+                with self.subTest(word=word, state=state), patch.dict(self.upstream_replies, {path: reply}):
+                    self.assert_refused(self.request(payload=body), status, state, word, pinned=True)
+                    row = self.assert_failed_row(state, word)
+                    if word == "controlling":
+                        self.assertIsNone(row["pool"])
+                        self.assertNotIn("controlling", json.loads(row["timings_ms"]))
+
+    def test_either_vector_leg_failure_cancels_its_pending_peer(self) -> None:
+        upstream = self.upstream
+        for failed, other, word in (
+            ("controlling", self.dense_path, "controlling"), (self.dense_path, "controlling", "dense"),
+        ):
+            started = asyncio.Event()
+            cancelled: list[str] = []
+
+            async def fail_while_peer_is_pending(
+                request: httpx.Request, failed: str = failed, other: str = other,
+                started: asyncio.Event = started, cancelled: list[str] = cancelled,
+            ) -> httpx.Response:
+                key = self.store_key(request)
+                if key == other:
+                    started.set()
+                    try:
+                        await asyncio.Future()
+                    except asyncio.CancelledError:
+                        cancelled.append(key)
+                        raise
+                    self.fail("Fictitious store unexpectedly resumed.")
+                if key == failed:
+                    await started.wait()
+                    return httpx.Response(503)
+                return upstream(request)
+
+            with self.subTest(leg=word), patch.object(self, "upstream", fail_while_peer_is_pending):
+                self.assert_refused(self.request(), 503, "store_unavailable", word, pinned=True)
+                self.assertEqual(cancelled, [other])
 
     def test_caller_refusal_never_reaches_the_record_stores_or_generator(self) -> None:
         self.assert_refused(self.request(payload={"message": MESSAGE}, eval_caller=False), 403, "caller_not_admitted")
         self.assertEqual(self.requests, {})
         self.assertEqual(self.engine_requests, [])
         self.connect.assert_not_awaited()
+        self.dispatch.assert_not_called()
+
+    def test_admission_refusals_never_write_a_turn_row(self) -> None:
+        cases: tuple[tuple[dict[str, object] | bytes, bool, int, str, str | None], ...] = (
+            (b'{"message":', True, 400, "invalid_request", None),
+            ({**FULL_TURN, "message_id": "Fictitious free text"}, True, 400, "invalid_request", "message_id"),
+            (RETRIEVE, False, 403, "eval_only_field", "stop_after"),
+            ({**FULL_TURN, "evidence": []}, False, 403, "eval_only_field", "evidence"),
+            ({**FULL_TURN, "overrides": {}}, False, 403, "eval_only_field", "overrides"),
+            ({**FULL_TURN, "overrides": {"fixture-unknown": True}}, True, 400, "override_not_allowed", "overrides"),
+            ({**FULL_TURN, "overrides": {"pool_cap": 0}}, True, 400, "override_invalid", "pool_cap"),
+            ({**FULL_TURN, "stop_after": "generate"}, True, 501, "stage_not_built", "stop_after"),
+            ({**FULL_TURN, "evidence": []}, True, 501, "stage_not_built", "evidence"),
+            ({**FULL_TURN, "kb_ids": ["fixture-kb"]}, True, 501, "kb_ids_not_built", "kb_ids"),
+        )
+        for body, eval_caller, status, state, word in cases:
+            with self.subTest(state=state, word=word):
+                self.assert_refused(self.request(payload=body, eval_caller=eval_caller), status, state, word)
+                self.dispatch.assert_not_called()
+                self.connect.assert_not_awaited()
 
     def test_unexpected_exception_returns_a_fixed_error_and_logs_only_the_exception_class(self) -> None:
         self.upstream_replies["/v1/embeddings"] = RuntimeError(MESSAGE)
         self.assert_refused(self.request(), 500, "internal_error", pinned=True)
+        row = self.assert_failed_row("internal_error")
+        self.assertNotIn(MESSAGE, repr(row))
         self.assertIn("exception=RuntimeError", self.turn_logs[0].getMessage())
+
+    def test_retrieval_row_keeps_shaped_ids_and_discards_a_free_text_header(self) -> None:
+        message_id = "fixture-research-message_17"
+        for chat_id, expected in ((CHAT_ID, CHAT_ID), ("Fictitious free text", None)):
+            with self.subTest(chat_id=chat_id):
+                response = self.request(payload={**RETRIEVE, "message_id": message_id}, chat_id=chat_id)
+                self.assertEqual(response.status_code, 200)
+                row = self.turn_row()
+                self.assertEqual((row["chat_id"], row["message_id"]), (expected, message_id))
+
+    def test_unresolved_provenance_entry_is_projected_in_the_row(self) -> None:
+        entry = {"index": 0, "type": "reporter", "resolved": "unresolved", "hits": 1}
+
+        def with_unresolved(**kwargs: Any) -> dict[str, object]:
+            return {**build_provenance(**kwargs), "out_of_corpus_objects": [entry]}
+
+        build_provenance = provenance.retrieval_provenance
+        with patch.object(provenance, "retrieval_provenance", side_effect=with_unresolved):
+            response = self.request()
+        self.assertEqual(response.json()["provenance"]["out_of_corpus_objects"], [entry])
+        row = self.turn_row()
+        self.assertNotIn("out_of_corpus_objects", json.loads(row["provenance"]))
+        self.assertEqual(json.loads(row["out_of_corpus_objects"]), [{"type": entry["type"], "resolved": entry["resolved"]}])
+
+    def test_dispatch_failure_leaves_retrieval_response_bytes_unchanged(self) -> None:
+        baseline = self.request()
+        self.assertEqual(baseline.status_code, 200)
+        self.dispatch.side_effect = RuntimeError("Fictitious dispatch failure")
+        response = self.request()
+        self.dispatch.assert_called_once()
+        self.assertEqual((response.status_code, response.content), (baseline.status_code, baseline.content))
+
+    def test_disconnect_during_retrieval_cancels_the_pending_store_and_writes_one_row(self) -> None:
+        async def run() -> None:
+            pending = asyncio.Event()
+            cancelled = asyncio.Event()
+            upstream = self.upstream
+
+            async def wait_in_store(request: httpx.Request) -> httpx.Response:
+                if self.store_key(request) != self.dense_path:
+                    return upstream(request)
+                pending.set()
+                try:
+                    return await asyncio.Future()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+            with patch.object(self, "upstream", wait_in_store):
+                async with self.retrieve_session() as session:
+                    await asyncio.wait_for(pending.wait(), timeout=1)
+                    session.disconnect()
+                    await session.wait_for_application()
+                    self.assertTrue(cancelled.is_set())
+                    self.assertTrue(session.outgoing.empty())
+
+        asyncio.run(run())
+        row = self.turn_row()
+        self.assertEqual(row["outcome"], "disconnected")
+        timings = json.loads(row["timings_ms"])
+        self.assertTrue({"record", "embedding", "lexical", "total"} <= timings.keys())
+        self.assertNotIn("dense", timings)
+
+    def test_disconnect_after_the_last_reply_byte_keeps_reply_and_its_total(self) -> None:
+        async def run() -> None:
+            session = self.retrieve_session()
+            last_byte = asyncio.Event()
+            delivered = asyncio.Event()
+            sent: list[Message] = []
+            clock_after_send: list[int] = []
+
+            async def receive() -> Message:
+                if not session.incoming.empty():
+                    return session.incoming.get_nowait()
+                await last_byte.wait()
+                delivered.set()
+                return {"type": "http.disconnect"}
+
+            async def send(message: Message) -> None:
+                sent.append(message)
+                if message["type"] == "http.response.body" and not message.get("more_body", False):
+                    clock_after_send.append(next(self.clock))
+                    last_byte.set()
+                    # The transport has accepted the last byte. Let its send return even if the watch sees EOF.
+                    with anyio.CancelScope(shield=True):
+                        await delivered.wait()
+
+            async with session.app.router.lifespan_context(session.app):
+                await asyncio.wait_for(session.app(session.scope, receive, send), timeout=1)
+
+            self.assertTrue(delivered.is_set())
+            start, final = sent
+            self.assertEqual(start["status"], 200)
+            body_timings = json.loads(final["body"])["timings_ms"]
+            observed_tick, = clock_after_send
+            self.assertGreater(observed_tick * 1000, body_timings["total"])
+            row = self.turn_row()
+            self.assertEqual(row["outcome"], "reply")
+            self.assertEqual(json.loads(row["timings_ms"]), body_timings)
+
+        asyncio.run(run())
+
+    def test_json_send_disconnect_writes_one_row_while_receive_is_pending(self) -> None:
+        self.assert_json_send_disconnect("disconnected")
+
+    def test_failure_body_send_disconnect_keeps_the_known_failure(self) -> None:
+        with patch.dict(self.upstream_replies, {self.dense_path: {}}):
+            row = self.assert_json_send_disconnect("failed")
+        self.assertEqual((row["failure_state"], row["failure_word"]), ("store_reply_invalid", "dense"))
+
+    def assert_json_send_disconnect(self, outcome: str) -> dict[str, Any]:
+        async def run() -> None:
+            session = self.retrieve_session()
+            watching = asyncio.Event()
+            failed_sends: list[Message] = []
+
+            async def receive() -> Message:
+                if session.incoming.empty():
+                    watching.set()
+                return await session.incoming.get()
+
+            async def send(message: Message) -> None:
+                if message["type"] == "http.response.body":
+                    await watching.wait()
+                    failed_sends.append(message)
+                    raise OSError("Fictitious closed transport")
+
+            async with session.app.router.lifespan_context(session.app):
+                await asyncio.wait_for(session.app(session.scope, receive, send), timeout=1)
+            self.assertEqual(len(failed_sends), 1)
+
+        asyncio.run(run())
+        row = self.turn_row()
+        self.assertEqual(row["outcome"], outcome)
+        return row
 
     def read_events(self, response: httpx.Response) -> list[tuple[str, dict[str, Any]]]:
         self.assertEqual(response.status_code, 200, response.text)
@@ -586,7 +1189,16 @@ class TurnEndpoint(unittest.TestCase):
     def test_full_turn_streams_passages_phases_text_and_the_complete_answer_in_order(self) -> None:
         retrieval = self.request()
         pool = retrieval.json()["pool"]
-        response = self.request(payload={"message": MESSAGE})
+        usage = {"prompt_tokens": 48, "completion_tokens": 23, "completion_tokens_details": {"reasoning_tokens": 5}}
+        self.generator_stream = FixtureStream(with_finishing_usage(self.capture, usage))
+        self.completions = [completion(self.generator_stream, content_type="text/event-stream; charset=utf-8")]
+        clock_after_answer: list[int] = []
+
+        def observe(message: Message) -> None:
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                clock_after_answer.append(next(self.clock))
+
+        response = self.request(payload=FULL_TURN, on_send=observe)
         emitted = self.read_events(response)
         source_count = len(pool)
         self.assertGreater(source_count, 0)
@@ -624,6 +1236,16 @@ class TurnEndpoint(unittest.TestCase):
             "passages": 1000, "first_text": retrieval_phase["timings_ms"]["total"] + 4000,
             "generation": 2000, "total": retrieval_phase["timings_ms"]["total"] + 5000,
         })
+        tick, = clock_after_answer
+        self.assertGreater(tick * 1000, timings["total"])
+        row = self.assert_answer_row(emitted, "complete")
+        self.assertEqual(json.loads(row["pool"]), retrieval_phase["pool"])
+        self.assertEqual(json.loads(row["evidence"]), [data for kind, data in emitted if kind == "passage"])
+        self.assertEqual(row["generator_repository"], self.generator_listing["data"][0]["root"])
+        self.assertEqual(json.loads(row["engine_counters"]), [{
+            "thinking": True, "finish_reason": finish_reason,
+            "prompt_tokens": 48, "completion_tokens": 23, "reasoning_tokens": 5,
+        }])
 
         hidden = "".join(
             choice["delta"].get(key) or ""
@@ -651,7 +1273,18 @@ class TurnEndpoint(unittest.TestCase):
             "max_tokens": RESEARCH_MAX_TOKENS,
             **sampling.fields,
             "stream": True,
+            "stream_options": {"include_usage": True, "continuous_usage_stats": True},
         })
+
+    def test_length_with_visible_text_writes_one_truncated_row(self) -> None:
+        text = "The fictitious harbor stayed open."
+        stream = FixtureStream(sse(payload({"content": text}, finish_reason="length")))
+        self.completions = [completion(stream)]
+        emitted = self.read_events(self.request(payload=FULL_TURN))
+        self.assertEqual(emitted[-1][1]["text"], text)
+        self.assert_answer_row(emitted, "truncated")
+        self.assertTrue(stream.closed)
+        self.assertEqual(self.engine_paths(), [MODELS_ROUTE, COMPLETIONS_ROUTE])
 
     def test_failed_or_malformed_generator_listings_are_json_refusals(self) -> None:
         cases: tuple[tuple[str, object], ...] = (
@@ -670,6 +1303,7 @@ class TurnEndpoint(unittest.TestCase):
             with self.subTest(label=label), patch.object(self, "listing_reply", listing):
                 response = self.request(payload={"message": MESSAGE})
                 self.assert_refused(response, 503, "generator_unavailable", "generate", pinned=True)
+                self.assert_failed_row("generator_unavailable", "generate")
                 self.assertEqual(self.engine_paths(), [MODELS_ROUTE])
 
     def test_generator_listing_without_one_supported_repository_is_a_json_refusal(self) -> None:
@@ -689,6 +1323,7 @@ class TurnEndpoint(unittest.TestCase):
             with self.subTest(label=label), patch.object(self, "listing_reply", {"data": entries}):
                 response = self.request(payload={"message": MESSAGE})
                 self.assert_refused(response, 503, "generator_outside_release", "generate", pinned=True)
+                self.assert_failed_row("generator_outside_release", "generate")
                 self.assertEqual(self.engine_paths(), [MODELS_ROUTE])
 
         trial_entry = {**entry, "id": trial.serve.served_name, "root": trial.repo}
@@ -696,7 +1331,16 @@ class TurnEndpoint(unittest.TestCase):
             settings = replace(self.settings, engine_model=trial.serve.served_name)
             response = self.request(settings=settings, payload={"message": MESSAGE})
             self.assert_refused(response, 503, "generator_outside_release", "generate", pinned=True)
+            self.assert_failed_row("generator_outside_release", "generate")
             self.assertEqual(self.engine_paths(), [MODELS_ROUTE])
+
+    def assert_answer_row(self, emitted: list[tuple[str, dict[str, Any]]], end: str) -> dict[str, Any]:
+        kind, body = emitted[-1]
+        self.assertEqual((kind, body["end"]), ("answer", end))
+        row = self.turn_row()
+        self.assertEqual((row["outcome"], row["trip_family"]), (end, body.get("family")))
+        self.assertEqual(json.loads(row["timings_ms"]), body["timings_ms"])
+        return row
 
     def assert_stream_failure(self, emitted: list[tuple[str, dict[str, Any]]], state: str, *, word: str | None = "generate") -> None:
         kind, body = emitted[-1]
@@ -708,6 +1352,7 @@ class TurnEndpoint(unittest.TestCase):
         self.assertIn(f"state={state} word={word or '-'} generation={self.generation}", line.getMessage())
         self.assertIsNone(line.exc_info)
         self.assertEqual(self.trips, [])
+        self.assert_failed_row(state, word)
 
     def assert_trip(self, emitted: list[tuple[str, dict[str, Any]]], expected: guardrail.Trip) -> None:
         self.assertEqual([kind for kind, _ in emitted if kind in {"answer", "failure"}], ["answer"])
@@ -716,6 +1361,7 @@ class TurnEndpoint(unittest.TestCase):
         self.assertEqual(kind, "answer")
         self.assertEqual((answer["end"], answer["family"], answer["text"]), ("tripped", expected.family, text))
         self.assertEqual(self.trips, [guardrail.TripRow(LEGAL_BRANCH, expected.family, expected.pattern_id, guardrail.EVAL_SOURCE, CHAT_ID)])
+        self.assert_answer_row(emitted, "tripped")
 
     def test_trip_closes_the_engine_before_sending_the_refusal_and_records_one_row(self) -> None:
         stream = FixtureStream(sse(payload({"content": OPEN_TEXT})) + sse(payload({"content": DEADLINE_TEXT}, finish_reason="stop")))
@@ -740,7 +1386,10 @@ class TurnEndpoint(unittest.TestCase):
         self.assertTrue(any(kind == "text" and not closed for (kind, _), (_, closed) in zip(emitted, bodies, strict=True)))
 
     def test_length_without_text_retries_once_with_thinking_off_and_a_fresh_window(self) -> None:
-        first = FixtureStream((FIXTURES / "generator-truncated.sse").read_bytes())
+        first = FixtureStream(with_finishing_usage(
+            (FIXTURES / "generator-truncated.sse").read_bytes(),
+            {"prompt_tokens": 51, "completion_tokens": 44, "completion_tokens_details": {"reasoning_tokens": 39}},
+        ))
         second = FixtureStream((FIXTURES / "generator-thinking-off.sse").read_bytes())
         self.completions = [completion(first), completion(second)]
         retry_closed: list[bool] = []
@@ -766,6 +1415,11 @@ class TurnEndpoint(unittest.TestCase):
         self.assertEqual("".join(body["text"] for kind, body in emitted if kind == "text"), expected)
         self.assertEqual([kind for kind, _ in emitted if kind in {"answer", "failure"}], ["answer"])
         self.assertEqual((emitted[-1][1]["text"], emitted[-1][1]["end"]), (expected, "complete"))
+        row = self.assert_answer_row(emitted, "complete")
+        self.assertEqual(json.loads(row["engine_counters"]), [
+            {"thinking": True, "finish_reason": "length", "prompt_tokens": 51, "completion_tokens": 44, "reasoning_tokens": 39},
+            {"thinking": False, "finish_reason": finish, "prompt_tokens": None, "completion_tokens": None, "reasoning_tokens": None},
+        ])
         self.assertEqual(self.turn_logs, [])
         self.assertEqual(self.trips, [])
 
@@ -863,9 +1517,39 @@ class TurnEndpoint(unittest.TestCase):
         self.assert_stream_failure(emitted, "internal_error", word=None)
         self.assertIn("exception=RuntimeError", self.turn_logs[0].getMessage())
 
+    def test_failed_answer_send_writes_disconnected_while_receive_is_pending(self) -> None:
+        async def run() -> None:
+            session = ASGISession(
+                self.app(self.settings), "POST", "/turn", json.dumps(FULL_TURN).encode(), self.headers(self.settings), "2.4",
+            )
+            watching = asyncio.Event()
+            failed_sends: list[Message] = []
+
+            async def receive() -> Message:
+                if session.incoming.empty():
+                    watching.set()
+                return await session.incoming.get()
+
+            async def send(message: Message) -> None:
+                if message.get("body", b"").startswith(b"event: answer\n"):
+                    await watching.wait()
+                    failed_sends.append(message)
+                    raise OSError("Fictitious closed transport")
+
+            async with session.app.router.lifespan_context(session.app):
+                await asyncio.wait_for(session.app(session.scope, receive, send), timeout=1)
+
+            self.assertEqual(len(failed_sends), 1)
+            self.assertTrue(self.generator_stream.closed)
+
+        asyncio.run(run())
+        self.assertEqual(self.turn_row()["outcome"], "disconnected")
+
     def test_hang_up_cancels_the_stream_and_waits_for_shielded_close(self) -> None:
         async def run(spec_version: str) -> None:
-            stream = WaitingStream(sse(payload({"content": OPEN_TEXT})))
+            stream = WaitingStream(sse(with_usage(
+                payload({"content": OPEN_TEXT}), {"prompt_tokens": 48, "completion_tokens": 16},
+            )))
             self.completions = [completion(stream)]
             async with ASGISession(
                 self.app(self.settings), "POST", "/turn", json.dumps(FULL_TURN).encode(),
@@ -883,6 +1567,12 @@ class TurnEndpoint(unittest.TestCase):
                 await session.wait_for_application()
                 self.assertTrue(stream.closed)
                 self.assertTrue(session.outgoing.empty())
+                row = self.turn_row()
+                self.assertEqual(row["outcome"], "disconnected")
+                self.assertEqual(json.loads(row["engine_counters"]), [{
+                    "thinking": True, "finish_reason": None,
+                    "prompt_tokens": 48, "completion_tokens": 16, "reasoning_tokens": None,
+                }])
 
         for spec_version in ("2.0", "2.4"):
             with self.subTest(spec_version=spec_version):

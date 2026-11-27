@@ -12,6 +12,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import asdict, replace
 from http import HTTPStatus
+from itertools import product
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -44,10 +45,12 @@ from gideon.evaluation.rankmetrics import (
 from gideon.evaluation.rankmetrics2 import DEFINITION_ID
 from gideon.evaluation.record import POSTGRES_SERVICE
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
-from gideon.host import report, secrets, stack
+from gideon.host import models, report, secrets, site, stack
 from gideon.host.index.sample import sample_name
 from gideon.host.render.api import API_SERVICE_NAME
 from gideon.host.render.ci import CI_ROOT, CI_STACK, PRODUCTION_STACK
+from gideon.host.render.engine import RERANK
+from gideon.turn.config import OverrideRefusal, config_hash, effective_config
 from gideon.turn.states import State, TurnFailure
 
 SENTINEL = "[FICTIONAL TEST ONLY] this question must never enter a stream"
@@ -780,7 +783,10 @@ class ResearchRunner(unittest.TestCase):
         loaded = load_set(self.checkout / SET_ROOT).loaded
         assert loaded is not None
         self.reply = turn_pool_reply()
-        self.pool = sorted(self.reply["pool"], key=lambda entry: entry["pool_rank"])
+        fused = sorted(self.reply["pool"], key=lambda entry: entry["pool_rank"])
+        first, second, *tail = fused
+        self.pool = [{**entry, "rank": rank} for rank, entry in enumerate((second, first, *tail), start=1)]
+        self.reply["pool"] = self.pool[1:] + self.pool[:1]
         self.generation = GenerationAccess(
             self.reply["generation"]["gen_id"], self.reply["generation"]["lockfiles"][0], "live",
         )
@@ -804,6 +810,7 @@ class ResearchRunner(unittest.TestCase):
         self.context = replace(
             _context(self.host), generation=self.generation, progress=self.progress.append,
             checkpoint=lambda: self.events.append("checkpoint"),
+            expected_config_hash=self.reply["retrieval_config_hash"],
         )
 
     @contextmanager
@@ -896,6 +903,7 @@ class ResearchRunner(unittest.TestCase):
         baseline: str | None = None,
     ) -> tuple[int, str, str]:
         kwargs = _run_kwargs(self.host, checkout=self.checkout, court_path=self.checkout / "courts.yaml")
+        kwargs["models_path"] = ROOT / "models.lock"
         sibling = stack_name == CI_STACK
         name = sample_name(self.generation.name) if sibling else self.generation.name
         self.host.generation_output = json.dumps({
@@ -918,20 +926,34 @@ class ResearchRunner(unittest.TestCase):
         )
         refused = TurnFailure(State.OVERRIDE_NOT_ALLOWED, "overrides")
         probe_reply = envelope(refused.to_body(), refused.status)
-        for baseline in (None, *baselines.BASELINES):
-            with self.subTest(baseline=baseline):
+        lock = models.load_models_lock(ROOT / "models.lock").lock
+        site_config = site.load_site(ROOT / "config/site.example.yaml").config
+        assert lock is not None and site_config is not None
+        profile = lock.profile(site_config.hardware_profile)
+        assert profile is not None
+        for stack_name, baseline in product((PRODUCTION_STACK, CI_STACK), (None, *baselines.BASELINES)):
+            with self.subTest(stack=stack_name, baseline=baseline):
                 self.host.calls.clear()
                 self.events.clear()
-                wire_reply = self.reply
+                reranker = stack_name == PRODUCTION_STACK and profile.model(RERANK.role) is not None
+                name = sample_name(self.generation.name) if stack_name == CI_STACK else self.generation.name
+                overrides = None if baseline is None else baselines.BASELINES[baseline]
+                effective = effective_config(overrides, reranker=reranker)
+                assert not isinstance(effective, OverrideRefusal)
+                expected_hash = config_hash(effective)
+                wire_reply = turn_pool_reply(overrides, reranker=reranker)
+                if effective["rerank.stage2"] == "on":
+                    wire_reply["pool"] = self.reply["pool"]
+                wire_reply["generation"]["gen_id"] = name
                 additional: dict[str, object] = {}
-                if baseline is not None:
-                    overrides = baselines.BASELINES[baseline]
-                    expected_hash = baselines.expected_config_hash(overrides)
-                    assert isinstance(expected_hash, str)
-                    wire_reply = {**self.reply, "retrieval_config_hash": expected_hash}
+                if overrides is not None:
                     additional = {"baseline": baseline, "turn_overrides": dict(overrides)}
                 reply = envelope(wire_reply, HTTPStatus.OK)
-                code, stdout, stderr = self._command(probe_reply, dict.fromkeys(self.ids, reply), baseline=baseline)
+                with patch.object(baselines, "expected_config_hash", wraps=baselines.expected_config_hash) as prepare_hash:
+                    code, stdout, stderr = self._command(
+                        probe_reply, dict.fromkeys(self.ids, reply), stack_name=stack_name, baseline=baseline,
+                    )
+                prepare_hash.assert_called_once_with(overrides, reranker=reranker)
                 self.assertEqual((code, stderr), (0, ""), stdout)
                 self.assertEqual(self.events, ["probe", *self.ids, "pool chunks", "pool manifest", "scoring manifest"])
                 self.assertEqual(
@@ -944,7 +966,7 @@ class ResearchRunner(unittest.TestCase):
                     _summary_line(stdout, "preconditions: ok"),
                 )
                 self.assertIn(
-                    f"config hash {wire_reply['retrieval_config_hash']}, baseline {baseline or 'shipped'}",
+                    f"config hash {expected_hash}, baseline {baseline or 'shipped'}",
                     _summary_line(stdout, "judged queries "),
                 )
                 # The turn door takes no engine lock.
@@ -954,10 +976,10 @@ class ResearchRunner(unittest.TestCase):
                 sql = _write_sql(self.host)
                 self.assertEqual(sql.count("INSERT INTO eval_runs"), 1)
                 self.assertEqual(sql.count("INSERT INTO eval_results"), len(self.ids))
-                self.assertEqual(_binding(sql, "generation_id"), self.generation.name)
+                self.assertEqual(_binding(sql, "generation_id"), name)
                 self.assertEqual(_binding(sql, "corpus_lockfile"), self.generation.corpus_lockfile)
                 self.assertEqual(json.loads(_binding(sql, "overrides")), {"judgments": {
-                    "definition": DEFINITION_ID, "door": "turn", "config_hash": wire_reply["retrieval_config_hash"],
+                    "definition": DEFINITION_ID, "door": "turn", "config_hash": expected_hash,
                     **additional,
                 }})
                 for index, case_id in enumerate(self.ids):
@@ -966,6 +988,20 @@ class ResearchRunner(unittest.TestCase):
                     self.assertEqual(float(_binding(sql, f"result_{index}_latency_ms")), self.reply["timings_ms"]["total"])
                     self.assertEqual(_result_metrics(sql, index)["ranked_passages"], len(self.pool))
                 self.assertNotIn(SENTINEL, stdout + stderr + sql)
+
+                if baseline is None:
+                    self.host.calls.clear()
+                    self.events.clear()
+                    wrong_hash = hashlib.sha256(b"Fictitious mismatched retrieval config").hexdigest()
+                    replies = dict.fromkeys(self.ids, reply)
+                    replies[self.ids[-1]] = envelope({**wire_reply, "retrieval_config_hash": wrong_hash}, HTTPStatus.OK)
+                    with patch.object(baselines, "expected_config_hash", wraps=baselines.expected_config_hash) as prepare_hash:
+                        code, stdout, stderr = self._command(probe_reply, replies, stack_name=stack_name)
+                    prepare_hash.assert_called_once_with(None, reranker=reranker)
+                    self.assertEqual((code, stderr), (1, ""), stdout)
+                    self.assertEqual(_summary_line(stdout, "failed turns:"), f"failed turns: {self.ids[-1]}")
+                    sql = _write_sql(self.host)
+                    self.assertEqual(_result_metrics(sql, len(self.ids) - 1)["problem"], "config-differs")
 
     def test_command_routes_refused_probes_to_the_sibling_and_prints_their_fixes(self) -> None:
         for status, fix in (
@@ -1004,13 +1040,15 @@ class ResearchRunner(unittest.TestCase):
         for baseline, overrides in options:
             with self.subTest(baseline=baseline):
                 self.events.clear()
-                expected_hash = baselines.expected_config_hash(overrides)
+                expected_hash = baselines.expected_config_hash(overrides, reranker=True)
                 assert isinstance(expected_hash, str)
                 replies = {
                     case_id: envelope({**body, "retrieval_config_hash": expected_hash}, HTTPStatus.OK)
                     for case_id, body in ((first, self.reply), (second, empty))
                 }
-                run = self._run(loaded, replace(context, turn_overrides=overrides), replies)
+                run = self._run(loaded, replace(
+                    context, turn_overrides=overrides, expected_config_hash=expected_hash,
+                ), replies)
                 self.assertTrue(run.verdict, run.report)
                 self.assertEqual([event for event in self.events if event != "checkpoint"], [
                     first, second, "pool chunks", "pool manifest", "scoring manifest",
@@ -1032,9 +1070,7 @@ class ResearchRunner(unittest.TestCase):
     def test_turn_refusals_fail_the_named_queries_without_figures(self) -> None:
         good, failed, cut, invalid, generation, lockfile, config, unresolved = self.ids
         del self.chunks[self.pool[-1]["chunk_id"]]
-        expected_hash = baselines.expected_config_hash(None)
-        assert isinstance(expected_hash, str)
-        reply = {**self.reply, "retrieval_config_hash": expected_hash}
+        reply = self.reply
         refused = TurnFailure(State.OVERRIDE_INVALID, "overrides")
         error = refused.to_body()
         error["error"]["message"] = SENTINEL
@@ -1076,9 +1112,7 @@ class ResearchRunner(unittest.TestCase):
         self.assertEqual(_summary_line(run.report, "unresolved pools:"), f"unresolved pools: {unresolved}")
 
     def test_failed_coordinate_read_fails_every_counted_query_with_its_fix(self) -> None:
-        expected_hash = baselines.expected_config_hash(None)
-        assert isinstance(expected_hash, str)
-        reply = envelope({**self.reply, "retrieval_config_hash": expected_hash}, HTTPStatus.OK)
+        reply = envelope(self.reply, HTTPStatus.OK)
         exit_code = 23
         run = self._run(self.loaded, self.context, dict.fromkeys(self.ids, reply), chunk_exit=exit_code)
         self.assertFalse(run.verdict)

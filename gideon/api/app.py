@@ -4,6 +4,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
+from typing import cast
 
 import httpx
 from starlette.applications import Starlette
@@ -13,8 +14,10 @@ from starlette.routing import BaseRoute, Match, Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from gideon.turn import objects
+from gideon.turn.config import RETRIEVAL_CONFIG
 from gideon.turn.endpoint import TurnClients, TurnEndpoint
 from gideon.turn.generation import Connect
+from gideon.turn.rerank import Gate
 
 from .auth import BearerAuthMiddleware
 from .model import model_listing
@@ -125,6 +128,7 @@ def create_app(
     embed_transport: httpx.AsyncBaseTransport | None = None,
     qdrant_transport: httpx.AsyncBaseTransport | None = None,
     opensearch_transport: httpx.AsyncBaseTransport | None = None,
+    rerank_transport: httpx.AsyncBaseTransport | None = None,
     record_connect: Connect | None = None,
     case_extractor: objects.CaseExtractor | None = None,
     turn_clock: Callable[[], float] = time.monotonic,
@@ -159,7 +163,9 @@ def create_app(
                 await turn_client(settings.embed_url, embed_transport),
                 await turn_client(settings.qdrant_url, qdrant_transport),
                 await turn_client(settings.opensearch_url, opensearch_transport),
+                reranker=await turn_client(settings.rerank_url, rerank_transport) if settings.rerank_url is not None else None,
             )
+            application.state.rerank_gate = Gate(cast(int, RETRIEVAL_CONFIG["rerank.semaphore"]))
             yield
 
     routes = [

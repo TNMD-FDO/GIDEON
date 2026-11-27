@@ -21,13 +21,19 @@ PASSWORD = "fictitious-store-password"
 
 
 def pool_entry(chunk_id: str, rank: int) -> PoolEntry:
-    return PoolEntry(chunk_id, rank, 1.0, (("lexical", rank),), chunk_id, False)
+    return PoolEntry(chunk_id, rank, 1.0, (("lexical", rank),), chunk_id, False, "persuasive", rank=rank)
 
 
 class PassageCut(unittest.TestCase):
     def test_cut_takes_the_first_twenty_in_pool_order(self) -> None:
-        hits = [LegHit(f"fixture-{rank}", rank, f"cluster-{rank}", False) for rank in range(25, 0, -1)]
-        fusion = fuse({"lexical": hits}, rrf_k=40, boilerplate_weight=0.5, collapse=True, pool_cap=len(hits))
+        hits = [
+            LegHit(f"fixture-{rank}", rank, f"cluster-{rank}", False, "fixture-court", "unknown")
+            for rank in range(25, 0, -1)
+        ]
+        fusion = fuse(
+            {"lexical": hits}, tier_for=lambda _: "persuasive",
+            rrf_k=40, boilerplate_weight=0.5, collapse=True, pool_cap=len(hits),
+        )
         self.assertEqual(passages.cut(fusion), fusion.entries[:20])
 
     def test_passage_is_frozen_and_repr_excludes_caption_and_text(self) -> None:

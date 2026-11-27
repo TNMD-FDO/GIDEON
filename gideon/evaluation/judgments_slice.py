@@ -316,15 +316,14 @@ def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
     generation = context.generation
     ranked_lists = context.ranked
     uses_turn = ranked_lists is None
-    expected_hash: str | Problem | None = None
+    expected_hash = context.expected_config_hash
     door_detail = "door ranked-file"
     if uses_turn:
-        expected_hash = baselines.expected_config_hash(context.turn_overrides)
         baseline = next(
             (word for word, overrides in baselines.BASELINES.items() if overrides == context.turn_overrides),
             "shipped",
         )
-        hash_text = expected_hash if isinstance(expected_hash, str) else "unavailable"
+        hash_text = expected_hash if expected_hash is not None else "unavailable"
         door_detail = f"door {research_door.TURN_PATH}, config hash {hash_text}, baseline {baseline}"
     if generation is None:
         ranked_flag = "" if uses_turn else " --ranked <file>"
@@ -340,9 +339,11 @@ def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
     failures: dict[str, dict[str, JSONValue]] = {}
     latencies: dict[str, float] = {}
     if ranked_lists is None:
-        if isinstance(expected_hash, Problem):
-            return _failed(case_ids, len(selected.unsigned), "config-differs", expected_hash, door_detail=door_detail)
-        assert expected_hash is not None
+        if expected_hash is None:
+            return _failed(case_ids, len(selected.unsigned), "config-differs", Problem(
+                "the expected retrieval configuration hash was not prepared",
+                "Run the judgments slice through the command's Research preconditions, then retry.",
+            ), door_detail=door_detail)
         # A supplied set may count another suite's case in this slice's list; it
         # carries no question, so the run stops before its first turn.
         foreign_cases = tuple(

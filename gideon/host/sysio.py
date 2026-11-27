@@ -17,7 +17,7 @@ import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 type PathLike = str | os.PathLike[str]
 type Command = Sequence[str]
@@ -84,6 +84,7 @@ class LockingHost(Host, Protocol):
         """Release *path* by closing its descriptor; never unlink the file."""
 
 
+@runtime_checkable
 class ReadBytesHost(Host, Protocol):
     """The host operations including read-only byte access."""
 

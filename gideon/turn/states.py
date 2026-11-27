@@ -18,6 +18,7 @@ class State(StrEnum):
     NO_LIVE_GENERATION = "no_live_generation"
     AMBIGUOUS_GENERATION = "ambiguous_generation"
     RECORD_UNAVAILABLE = "record_unavailable"
+    LOCKFILE_OUTSIDE_RELEASE = "lockfile_outside_release"
     EXTRACTION_UNAVAILABLE = "extraction_unavailable"
     EXTRACTION_FAILED = "extraction_failed"
     EMBEDDER_UNAVAILABLE = "embedder_unavailable"
@@ -26,6 +27,10 @@ class State(StrEnum):
     STORE_UNAVAILABLE = "store_unavailable"
     STORE_REPLY_INVALID = "store_reply_invalid"
     RETRIEVAL_TIMEOUT = "retrieval_timeout"
+    RERANKER_UNAVAILABLE = "reranker_unavailable"
+    RERANKER_REPLY_INVALID = "reranker_reply_invalid"
+    RERANK_QUEUE_TIMEOUT = "rerank_queue_timeout"
+    PAIR_OUTSIDE_WINDOW = "pair_outside_window"
     GENERATOR_UNAVAILABLE = "generator_unavailable"
     GENERATOR_OUTSIDE_RELEASE = "generator_outside_release"
     GENERATOR_REPLY_INVALID = "generator_reply_invalid"
@@ -33,12 +38,14 @@ class State(StrEnum):
     INTERNAL_ERROR = "internal_error"
 
 
-StageWord = Literal["admission", "record", "extraction", "embedding", "fusion", "retrieve", "passages", "generate"]
-LegWord = Literal["dense", "lexical", "objects"]
+StageWord = Literal["admission", "record", "extraction", "embedding", "fusion", "rerank", "retrieve", "passages", "generate"]
+LegWord = Literal["dense", "lexical", "objects", "controlling"]
 ReasonWord = Literal["generation", "repository", "width", "listing"]
 RequestWord = Literal[
-    "message", "history", "kb_ids", "session_token", "stop_after", "evidence", "overrides",
-    "leg_limit", "pool_cap", "reservations.exact_object", "rrf.k", "collapse", "boilerplate_weight", "query_plan",
+    "message", "message_id", "history", "kb_ids", "session_token", "stop_after", "evidence", "overrides",
+    "leg_limit", "pool_cap", "reservations.exact_object", "reservations.controlling",
+    "rrf.k", "collapse", "boilerplate_weight", "query_plan",
+    "rerank.stage1", "rerank.stage2", "stage2_depth", "rerank.semaphore", "rerank.timeout_s",
 ]
 type FailureWord = StageWord | LegWord | ReasonWord | RequestWord
 
@@ -54,6 +61,7 @@ _ERRORS: Final[dict[State, tuple[HTTPStatus, str]]] = {
     State.NO_LIVE_GENERATION: (HTTPStatus.SERVICE_UNAVAILABLE, "The collection has no live generation."),
     State.AMBIGUOUS_GENERATION: (HTTPStatus.SERVICE_UNAVAILABLE, "The collection has multiple live generations."),
     State.RECORD_UNAVAILABLE: (HTTPStatus.SERVICE_UNAVAILABLE, "The generation record is unavailable."),
+    State.LOCKFILE_OUTSIDE_RELEASE: (HTTPStatus.SERVICE_UNAVAILABLE, "The generation's corpus lockfile is outside the release."),
     State.EXTRACTION_UNAVAILABLE: (HTTPStatus.SERVICE_UNAVAILABLE, "Exact-object extraction is unavailable."),
     State.EXTRACTION_FAILED: (HTTPStatus.INTERNAL_SERVER_ERROR, "Exact-object extraction failed."),
     State.EMBEDDER_UNAVAILABLE: (HTTPStatus.SERVICE_UNAVAILABLE, "The embedder is unavailable."),
@@ -62,6 +70,10 @@ _ERRORS: Final[dict[State, tuple[HTTPStatus, str]]] = {
     State.STORE_UNAVAILABLE: (HTTPStatus.SERVICE_UNAVAILABLE, "The retrieval store is unavailable."),
     State.STORE_REPLY_INVALID: (HTTPStatus.BAD_GATEWAY, "The retrieval store returned an invalid reply."),
     State.RETRIEVAL_TIMEOUT: (HTTPStatus.GATEWAY_TIMEOUT, "The retrieval deadline expired."),
+    State.RERANKER_UNAVAILABLE: (HTTPStatus.SERVICE_UNAVAILABLE, "The reranker is unavailable."),
+    State.RERANKER_REPLY_INVALID: (HTTPStatus.BAD_GATEWAY, "The reranker returned an invalid reply."),
+    State.RERANK_QUEUE_TIMEOUT: (HTTPStatus.SERVICE_UNAVAILABLE, "The rerank queue deadline expired."),
+    State.PAIR_OUTSIDE_WINDOW: (HTTPStatus.BAD_REQUEST, "The message and a passage exceed the reranker context window."),
     State.GENERATOR_UNAVAILABLE: (HTTPStatus.SERVICE_UNAVAILABLE, "The generator is unavailable."),
     State.GENERATOR_OUTSIDE_RELEASE: (HTTPStatus.SERVICE_UNAVAILABLE, "The generator is outside the release."),
     State.GENERATOR_REPLY_INVALID: (HTTPStatus.BAD_GATEWAY, "The generator returned an invalid reply."),

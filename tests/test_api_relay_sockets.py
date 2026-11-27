@@ -334,6 +334,11 @@ class ApiRelaySockets(unittest.TestCase):
             embed_repository="fixture-owner/fixture-embed",
             embed_space="fixture-space",
             embed_dimensions=7,
+            courts_scotus=("fixturescotus",),
+            courts_circuit=("fixturecircuit",),
+            courts_districts=("fixturedistrict",),
+            courts_states=(),
+            courts_file=Path(__file__).with_name("fixtures") / "turn" / "courts.json",
         )
         self.service_server = StartedServer(
             uvicorn.Config(

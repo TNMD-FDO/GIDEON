@@ -116,7 +116,8 @@ class RunContext:
     ``image`` is present for a slice that runs code in the pinned service image.
     ``generation`` is present for a slice that names the stores surface.
     ``turn_overrides`` is the mapping sent to the Research turn, or None for
-    the shipped configuration.
+    the shipped configuration. ``expected_config_hash`` is prepared for the
+    selected Research stack, or None for a slice without a Research surface.
     ``assessments`` is the optional judge-derived input with grades by query
     and coordinates, the prompt, and the model. Runners may put facts derived
     from it under ``judge`` alone in case results.
@@ -143,3 +144,4 @@ class RunContext:
     image: ImageAccess | None = None
     generation: GenerationAccess | None = None
     turn_overrides: Mapping[str, JSONValue] | None = field(default=None, kw_only=True)
+    expected_config_hash: str | None = field(default=None, kw_only=True)

@@ -35,6 +35,7 @@ import stackguard
 
 import gideon.host.secrets as secret_files
 from gideon.host import owui, owuiturn, stores
+from gideon.host.courts import load_court_map
 from gideon.host.images import load_image_lock, parse_registry, reference
 from gideon.host.lock import load_host_lock
 from gideon.host.models import HardwareProfile, load_models_lock, select_profile
@@ -148,6 +149,8 @@ def render_inputs() -> RenderInputs:
     lock = load_host_lock(ROOT / "host.lock").lock
     images = load_image_lock(ROOT / "images.lock").lock
     models = load_models_lock(ROOT / "models.lock").lock
+    courts = load_court_map(ROOT / "courts.yaml").court_map
+    assert courts is not None
     assert site is not None and lock is not None and images is not None and models is not None
     profile = select_profile(models, site.hardware_profile)
     assert isinstance(profile, HardwareProfile)
@@ -178,6 +181,7 @@ def render_inputs() -> RenderInputs:
         },
         checkout="/opt/gideon",
         source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
+        courts=courts,
     )
 
 

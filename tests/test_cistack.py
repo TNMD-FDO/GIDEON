@@ -2,6 +2,7 @@
 
 import ast
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -16,14 +17,20 @@ from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
 from derivedstores_fake import opensearch_authinfo_result
+from regenerate_render_fixtures import fixture_lockfile_courts
 from test_render import artifact_source_files
 from test_render_ci import inputs
 
 from gideon.host import nogpu, owui
 from gideon.host import stack as host_stack
 from gideon.host.render import ARTIFACTS, RenderInputs
-from gideon.host.render.api import API_INSTRUCTION_PATH, API_SERVICE_NAME
+from gideon.host.render.api import (
+    API_COURTS_PATH,
+    API_INSTRUCTION_PATH,
+    API_SERVICE_NAME,
+)
 from gideon.host.render.ci import (
+    CI_COURTS_DIGEST_LABEL,
     CI_OPENSEARCH_DATA_ROOT,
     CI_OPENSEARCH_RENDERED_DIR,
     CI_PORT,
@@ -389,6 +396,7 @@ class Preconditions(unittest.TestCase):
         host = FakeHost()
         host.directories.add(f"{CI_ROOT}/{API_SERVICE_NAME}")
         host.files[f"{CI_ROOT}/{API_INSTRUCTION_PATH}"] = "fixture instruction\n"
+        host.files[f"{CI_ROOT}/{API_COURTS_PATH}"] = "fixture court file\n"
         host.files[f"{CI_ROOT}/{API_SERVICE_NAME}/notes.txt"] = "hand-written\n"
 
         result = cistack_run._render_stage(ci_stack(), host, inputs())
@@ -396,6 +404,7 @@ class Preconditions(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn(f"{API_SERVICE_NAME}/notes.txt", result.detail)
         self.assertNotIn(API_INSTRUCTION_PATH, result.detail)
+        self.assertNotIn(API_COURTS_PATH, result.detail)
         self.assertEqual(host.writes, [])
 
     def test_foreign_file_in_opensearch_directories_refuses_before_writing(self) -> None:
@@ -416,7 +425,8 @@ class Preconditions(unittest.TestCase):
 
     def test_render_writes_store_files_and_creates_data_roots(self) -> None:
         host = FakeHost()
-        render_inputs = inputs()
+        render_inputs = inputs(lockfile_courts=fixture_lockfile_courts())
+        court_artifact, = (artifact for artifact in ARTIFACTS if artifact.relative_path == API_COURTS_PATH)
         opensearch_artifacts = tuple(
             artifact
             for artifact in ARTIFACTS
@@ -428,6 +438,7 @@ class Preconditions(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIn(f"{CI_ROOT}/{API_SERVICE_NAME}", host.directories)
         self.assertIn("API instruction", result.detail)
+        self.assertIn("court file", result.detail)
         self.assertIn("OpenSearch settings and security files", result.detail)
         self.assertIn("Qdrant and OpenSearch data roots", result.detail)
         self.assertEqual(len(opensearch_artifacts), 7)
@@ -438,6 +449,7 @@ class Preconditions(unittest.TestCase):
                 (f"{CI_ROOT}/open-webui/env", 0o600),
                 (f"{CI_ROOT}/open-webui/manifest.yaml", 0o644),
                 (f"{CI_ROOT}/{API_INSTRUCTION_PATH}", 0o644),
+                (f"{CI_ROOT}/{API_COURTS_PATH}", 0o644),
             ]
             + [
                 (f"{CI_ROOT}/{artifact.relative_path}", 0o644)
@@ -455,6 +467,14 @@ class Preconditions(unittest.TestCase):
             host.files[f"{CI_ROOT}/{API_INSTRUCTION_PATH}"],
             ci_instruction(render_inputs),
         )
+        self.assertEqual(court_artifact.owners, (API_SERVICE_NAME,))
+        court_text = host.files[f"{CI_ROOT}/{API_COURTS_PATH}"]
+        self.assertEqual(court_text, court_artifact.emit(render_inputs))
+        compose = yaml.safe_load(host.files[f"{CI_ROOT}/compose.yaml"])
+        self.assertEqual(
+            compose["services"][API_SERVICE_NAME]["labels"][CI_COURTS_DIGEST_LABEL],
+            hashlib.sha256(court_text.encode("utf-8")).hexdigest(),
+        )
         self.assertIn((CI_QDRANT_DATA_ROOT, 0o750), host.mkdirs)
         self.assertIn((CI_OPENSEARCH_DATA_ROOT, 0o700), host.mkdirs)
         self.assertIn((CI_OPENSEARCH_RENDERED_DIR, 0o755), host.mkdirs)
@@ -468,7 +488,7 @@ class Preconditions(unittest.TestCase):
         self.assertEqual([entry for entry in host.chmods if entry[0] == CI_WORK_ROOT], [(CI_WORK_ROOT, DIR_MODE)])
         host.writes.clear()
         self.assertTrue(cistack_run._render_stage(ci_stack(), host, render_inputs).ok)
-        self.assertEqual(len(host.writes), 4 + len(opensearch_artifacts))
+        self.assertEqual(len(host.writes), 5 + len(opensearch_artifacts))
         self.assertEqual([entry for entry in host.mkdirs if entry[0] == CI_WORK_ROOT], [(CI_WORK_ROOT, DIR_MODE)])
         self.assertEqual([entry for entry in host.chowns if entry[0] == CI_WORK_ROOT], [(CI_WORK_ROOT, 0, service_gid)])
         self.assertEqual([entry for entry in host.chmods if entry[0] == CI_WORK_ROOT], [(CI_WORK_ROOT, DIR_MODE)])
@@ -1112,10 +1132,13 @@ class DownAndSecrets(unittest.TestCase):
             host.files[path] = "value\n"
         instruction_path = f"{CI_ROOT}/{API_INSTRUCTION_PATH}"
         host.files[instruction_path] = "fixture instruction\n"
+        court_path = f"{CI_ROOT}/{API_COURTS_PATH}"
+        host.files[court_path] = "fixture court file\n"
         host.directories.add(f"{CI_ROOT}/{API_SERVICE_NAME}")
 
         self.assertEqual(cistack_run.down(ci_stack(), host), 0)
         self.assertIn(generated, host.files)
+        self.assertIn(court_path, host.files)
         self.assertTrue(set(store_paths) <= host.directories)
         self.assertTrue(any(command[:2] == ("docker", "compose") for command in host.commands))
         host.commands.clear()
@@ -1124,6 +1147,7 @@ class DownAndSecrets(unittest.TestCase):
         self.assertNotIn(admin_key, host.files)
         self.assertNotIn(eval_key, host.files)
         self.assertNotIn(instruction_path, host.files)
+        self.assertNotIn(court_path, host.files)
         self.assertNotIn(f"{CI_ROOT}/{API_SERVICE_NAME}", host.directories)
         self.assertFalse(set(store_paths) & host.directories)
         self.assertNotIn(settings_path, host.files)

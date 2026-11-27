@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from test_evaluation_baselines import assert_import_boundary
 from test_evaluation_record import read_psql_set
-from test_research_door import turn_pool_fixture
+from test_research_door import turn_pool_fixture, turn_pool_reply
 from test_turns_door import FakeHost
 
 from gideon.evaluation import pool_coordinates, record
@@ -37,10 +37,10 @@ class CoordinateReads(unittest.TestCase):
         data = turn_pool_fixture("coordinates.json")
         self.chunks: dict[str, dict[str, Any]] = {row["chunk_id"]: row for row in data["chunks"]}
         self.manifest: dict[str, dict[str, Any]] = {row["doc_id"]: row for row in data["manifest"]}
-        reply = turn_pool_fixture("reply.json")
+        reply = turn_pool_reply()
         self.name = reply["generation"]["gen_id"]
         self.ordered_ids = tuple(
-            entry["chunk_id"] for entry in sorted(reply["pool"], key=lambda entry: entry["pool_rank"])
+            entry["chunk_id"] for entry in sorted(reply["pool"], key=lambda entry: entry["rank"])
         )
 
     def respond(self, argv: list[str], *, input: str) -> subprocess.CompletedProcess[str]:

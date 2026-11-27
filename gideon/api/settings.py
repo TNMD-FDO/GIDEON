@@ -1,6 +1,7 @@
 """The startup settings for the GIDEON API service."""
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -8,6 +9,14 @@ from urllib.parse import urlsplit
 
 _RERANK_URL_ENV = "GIDEON_API_RERANK_URL"
 _RERANK_KEY_FILE_ENV = "GIDEON_API_RERANK_KEY_FILE"
+# The rendered names are held to these by the render round-trip test.
+_COURTS_SCOTUS_ENV = "GIDEON_API_COURTS_SCOTUS"
+_COURTS_CIRCUIT_ENV = "GIDEON_API_COURTS_CIRCUIT"
+_COURTS_DISTRICTS_ENV = "GIDEON_API_COURTS_DISTRICTS"
+_COURTS_STATES_ENV = "GIDEON_API_COURTS_STATES"
+_COURTS_FILE_ENV = "GIDEON_API_COURTS_FILE"
+# The court map's ids: CourtListener's, mixed case in places (txctapp13A), hyphenated in fixtures.
+_COURT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,31}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +59,11 @@ class Settings:
     embed_repository: str
     embed_space: str
     embed_dimensions: int
+    courts_scotus: tuple[str, ...]
+    courts_circuit: tuple[str, ...]
+    courts_districts: tuple[str, ...]
+    courts_states: tuple[str, ...]
+    courts_file: Path
     rerank_url: str | None = None
     rerank_key_file: Path | None = None
 
@@ -64,8 +78,8 @@ def _required_environment(environ: Mapping[str, str], name: str) -> str:
 def _read_file(path: Path, kind: str) -> str:
     try:
         value = path.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ValueError(f"{kind} file {path} is missing or empty.") from exc
+    except (OSError, UnicodeDecodeError):
+        raise ValueError(f"{kind} file {path} is missing or empty.") from None
     if not value:
         raise ValueError(f"{kind} file {path} is missing or empty.")
     return value
@@ -119,6 +133,29 @@ def _record_coordinates(environ: Mapping[str, str], prefix: str) -> RecordCoordi
     return RecordCoordinates(host, port, database_name, role, password_file)
 
 
+def _court_groups(environ: Mapping[str, str]) -> dict[str, tuple[str, ...]]:
+    groups: dict[str, tuple[str, ...]] = {}
+    seen: set[str] = set()
+    for name in (_COURTS_SCOTUS_ENV, _COURTS_CIRCUIT_ENV, _COURTS_DISTRICTS_ENV, _COURTS_STATES_ENV):
+        if name == _COURTS_STATES_ENV:
+            raw = environ.get(name)
+            if raw is None:
+                raise ValueError(f"Environment variable {name} is missing.")
+            value = raw.strip()
+        else:
+            value = _required_environment(environ, name)
+        courts = tuple(value.split(",")) if value else ()
+        if any(_COURT_ID.fullmatch(court) is None for court in courts):
+            raise ValueError(f"Environment variable {name} must contain comma-separated court ids.")
+        if name == _COURTS_CIRCUIT_ENV and len(courts) != 1:
+            raise ValueError(f"Environment variable {name} must contain exactly one court id.")
+        if seen.intersection(courts):
+            raise ValueError(f"Environment variable {name} overlaps an earlier court group.")
+        groups[name] = courts
+        seen.update(courts)
+    return groups
+
+
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     """Read the service environment, mounted secrets, and rendered instruction."""
 
@@ -131,6 +168,9 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     embed_dimensions = _integer_environment(values, dimensions_name)
     if embed_dimensions <= 0:
         raise ValueError(f"Environment variable {dimensions_name} must be positive.")
+    court_groups = _court_groups(values)
+    courts_file = Path(_required_environment(values, _COURTS_FILE_ENV))
+    _read_file(courts_file, "Court")
     rerank_url = None
     rerank_key_file = None
     if _RERANK_URL_ENV in values or _RERANK_KEY_FILE_ENV in values:
@@ -168,6 +208,11 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         embed_repository=_required_environment(values, "GIDEON_API_EMBED_REPOSITORY"),
         embed_space=_required_environment(values, "GIDEON_API_EMBED_SPACE"),
         embed_dimensions=embed_dimensions,
+        courts_scotus=court_groups[_COURTS_SCOTUS_ENV],
+        courts_circuit=court_groups[_COURTS_CIRCUIT_ENV],
+        courts_districts=court_groups[_COURTS_DISTRICTS_ENV],
+        courts_states=court_groups[_COURTS_STATES_ENV],
+        courts_file=courts_file,
         rerank_url=rerank_url,
         rerank_key_file=rerank_key_file,
     )

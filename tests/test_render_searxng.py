@@ -15,6 +15,7 @@ from pathlib import Path
 import yaml  # type: ignore[import-untyped]
 from test_render import render_templates, trial_inputs
 
+from gideon.host.courts import load_court_map
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock
@@ -77,6 +78,8 @@ SECRETS = {
 
 def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
     egress = load_egress_allowlist(ROOT / "config/egress.yaml").allowlist
+    courts = load_court_map(ROOT / "courts.yaml").court_map
+    assert courts is not None
     site = load_site(site_path).config
     lock = load_host_lock(ROOT / "host.lock").lock
     images = load_image_lock(ROOT / "images.lock").lock
@@ -96,6 +99,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
         checkout="/opt/gideon",
         source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
         egress=egress,
+        courts=courts,
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 

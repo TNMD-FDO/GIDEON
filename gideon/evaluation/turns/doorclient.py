@@ -9,11 +9,12 @@ omitted or null body is a keyed ``GET``.
 Successful stdout is a line-delimited JSON envelope.  The first line is
 ``{"kind":"head","status":<int>,"media_type":<str>}``.  A non-stream
 response has one ``body`` line with its decoded UTF-8 text.  An event-stream
-response has one ``data`` line for every received ``data:`` payload, with the
-payload text and its elapsed offset, followed by an ``end`` line whose
-``done`` value says whether ``data: [DONE]`` arrived.  The final successful
-line is ``elapsed`` with the total seconds from the request start.  A network,
-decode, or protocol failure ends with a ``failure`` line containing only the
+response has one line per payload with its text and elapsed offset.  Named
+payloads use an ``event`` line with the name, and unnamed payloads use a
+``data`` line.  The following ``end`` line's ``done`` value says whether the
+unnamed ``[DONE]`` marker arrived.  The final successful line is ``elapsed``
+with the total seconds from the request start.  A network, decode, or
+protocol failure ends with a ``failure`` line containing only the
 exception class name instead of response or request text.  The client exits
 non-zero for such failures.  A missing or empty key file is the one refusal
 before an envelope: it prints the fixed refusal on stderr and exits 99.
@@ -212,30 +213,34 @@ def _read_stream(
     started: float,
     deadline: float,
 ) -> None:
-    """Emit every received SSE data payload, then the end line and its flag."""
+    """Emit named and unnamed SSE payloads, then the end line and its flag."""
 
     done = False
+    name: str | None = None
     while True:
         _arm(response, sock, started, deadline)
         line = response.readline()
         if not line:
             break
         text = line.decode("utf-8").rstrip("\r\n")
+        if not text:
+            name = None
+        elif text.startswith("event:"):
+            name = text[6:].removeprefix(" ")
         if not text.startswith("data:"):
             continue
-        payload = text[5:]
-        if payload.startswith(" "):
-            payload = payload[1:]
-        if payload == "[DONE]":
+        payload = text[5:].removeprefix(" ")
+        if name is None and payload == "[DONE]":
             done = True
             break
-        _write_line(
-            {
-                "kind": "data",
-                "offset": time.monotonic() - started,
-                "payload": payload,
-            }
-        )
+        record: dict[str, object] = {
+            "kind": "data" if name is None else "event",
+            "offset": time.monotonic() - started,
+            "payload": payload,
+        }
+        if name is not None:
+            record["name"] = name
+        _write_line(record)
     _remaining(started, deadline)
     _write_line({"kind": "end", "done": done})
 

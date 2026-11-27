@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": 400,
+    "message": "The fictitious Harbor Court pair exceeds the maximum context length.",
+    "param": null,
+    "type": "BadRequestError"
+  }
+}

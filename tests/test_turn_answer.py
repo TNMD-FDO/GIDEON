@@ -13,7 +13,13 @@ from test_api_judged import seed_cases, seed_chunks, seed_documents
 from gideon import guardrail
 from gideon.api.progress import REASONING_KEYS
 from gideon.api.sse import DONE_EVENT, EventReassembler, SSEEventTooLargeError
-from gideon.turn.answer import LEGAL_BRANCH, AnswerMechanics, AnswerStep, stream_state
+from gideon.turn.answer import (
+    LEGAL_BRANCH,
+    AnswerMechanics,
+    AnswerStep,
+    TokenUsage,
+    stream_state,
+)
 from gideon.turn.prompt import messages
 
 FIXTURES = Path(__file__).with_name("fixtures") / "turn"
@@ -23,6 +29,10 @@ ENGINE_ERROR = '{"error":{"message":"Fictitious generator diagnostics"}}'
 
 def payload(delta: dict[str, object], *, finish_reason: str | None = None) -> str:
     return json.dumps({"choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]})
+
+
+def with_usage(item: str, usage: object) -> str:
+    return json.dumps({**json.loads(item), "usage": usage})
 
 
 def event_data(encoded: bytes, kind: str) -> dict[str, Any]:
@@ -115,6 +125,75 @@ class TurnAnswer(unittest.TestCase):
                 for representation in (repr(step), repr(mechanics)):
                     self.assertNotIn(reasoning, representation)
                     self.assertNotIn(text, representation)
+
+    def test_finishing_chunk_records_usage_with_optional_reasoning(self) -> None:
+        text = "The fictitious harbor stayed open."
+        for details, reasoning_tokens in (({}, None), ({"reasoning_tokens": 233}, 233), ({"reasoning_tokens": True}, None)):
+            with self.subTest(details=details):
+                mechanics = AnswerMechanics(stream_state(QUESTION, guardrail.EVAL_SOURCE))
+                usage: dict[str, object] = {"prompt_tokens": 4127, "completion_tokens": 831}
+                if details:
+                    usage["completion_tokens_details"] = details
+                step = mechanics.process(with_usage(payload({"content": text}, finish_reason="stop"), usage))
+                self.assert_answer(step, step.events, text, "complete")
+                self.assertEqual(mechanics.usage, TokenUsage(4127, 831, reasoning_tokens))
+                for value in ("prompt_tokens", "completion_tokens", "reasoning_tokens", "4127", "831", "233"):
+                    self.assertNotIn(value, repr(mechanics))
+
+    def test_usage_only_chunk_records_counts_and_invalid_usage_preserves_them(self) -> None:
+        mechanics = AnswerMechanics(stream_state(QUESTION, guardrail.EVAL_SOURCE))
+        self.assertEqual(mechanics.process(payload({})), AnswerStep())
+        self.assertIsNone(mechanics.usage)
+
+        usage = {"prompt_tokens": 48, "completion_tokens": 19, "completion_tokens_details": {"reasoning_tokens": 12}}
+        self.assertEqual(mechanics.process(with_usage('{"choices":[]}', usage)), AnswerStep())
+        last = TokenUsage(48, 19, 12)
+        self.assertEqual(mechanics.usage, last)
+
+        for invalid in (
+            None, "fictitious usage", {**usage, "prompt_tokens": -1}, {**usage, "completion_tokens": True},
+            {**usage, "prompt_tokens": "48"}, {"prompt_tokens": 48},
+        ):
+            with self.subTest(usage=invalid):
+                self.assertEqual(mechanics.process(with_usage(payload({}), invalid)), AnswerStep())
+                self.assertEqual(mechanics.usage, last)
+                self.assertIsNone(mechanics.failure)
+                self.assertEqual(self.trips, [])
+
+        text = "The fictitious harbor stayed open."
+        step = mechanics.process(payload({"content": text}, finish_reason="stop"))
+        self.assert_answer(step, step.events, text, "complete")
+        self.assertEqual(mechanics.usage, last)
+
+    def test_tripping_chunk_keeps_its_usage(self) -> None:
+        mechanics = AnswerMechanics(stream_state(QUESTION, guardrail.EVAL_SOURCE))
+        self.assertEqual(mechanics.process(with_usage(payload({}), {"prompt_tokens": 48, "completion_tokens": 1})), AnswerStep())
+        step = mechanics.process(with_usage(
+            payload({"content": "The deadline is April 7, 2034."}, finish_reason="stop"),
+            {"prompt_tokens": 48, "completion_tokens": 23, "completion_tokens_details": {"reasoning_tokens": 5}},
+        ))
+        self.assert_tripped(step, step.events, guardrail.DEADLINE_FAMILY.name)
+        self.assertEqual(step.finish_reason, "stop")
+        self.assertEqual(mechanics.usage, TokenUsage(48, 23, 5))
+
+    def test_retry_mechanics_starts_without_usage_and_keeps_its_own_counts(self) -> None:
+        first = AnswerMechanics(stream_state(QUESTION, guardrail.EVAL_SOURCE))
+        cut = first.process(with_usage(
+            payload({}, finish_reason="length"),
+            {"prompt_tokens": 48, "completion_tokens": 23, "completion_tokens_details": {"reasoning_tokens": 21}},
+        ))
+        self.assertEqual((cut.outcome, cut.finish_reason, cut.events), ("empty", "length", ()))
+        self.assertEqual(first.usage, TokenUsage(48, 23, 21))
+
+        retry = AnswerMechanics(stream_state(QUESTION, guardrail.EVAL_SOURCE))
+        self.assertIsNone(retry.usage)
+        text = "The fictitious harbor stayed open."
+        finish = retry.process(with_usage(
+            payload({"content": text}, finish_reason="stop"), {"prompt_tokens": 51, "completion_tokens": 8},
+        ))
+        self.assert_answer(finish, finish.events, text, "complete")
+        self.assertEqual(retry.usage, TokenUsage(51, 8, None))
+        self.assertEqual(first.usage, TokenUsage(48, 23, 21))
 
     def test_length_with_content_ends_truncated_after_releasing_its_tail(self) -> None:
         mechanics = AnswerMechanics(stream_state(QUESTION, guardrail.EVAL_SOURCE))

@@ -1,0 +1,42 @@
+{
+  "result": {
+    "groups": [
+      {
+        "id": "fixture-cluster-boilerplate",
+        "hits": [
+          {
+            "id": "00000000-0000-4000-8000-000000000003",
+            "version": 1,
+            "score": 0.9,
+            "payload": {
+              "chunk_id": "fixture-chunk-boilerplate",
+              "dupe_cluster": "fixture-cluster-boilerplate",
+              "boilerplate": true,
+              "court": "ca11",
+              "precedential": "unknown"
+            }
+          }
+        ]
+      },
+      {
+        "id": "fixture-cluster-shared",
+        "hits": [
+          {
+            "id": "00000000-0000-4000-8000-000000000001",
+            "version": 1,
+            "score": 0.85,
+            "payload": {
+              "chunk_id": "fixture-chunk-shared",
+              "dupe_cluster": "fixture-cluster-shared",
+              "boilerplate": false,
+              "court": "scotus",
+              "precedential": "published"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "status": "ok",
+  "time": 0.003
+}

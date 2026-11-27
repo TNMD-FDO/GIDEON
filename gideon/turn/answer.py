@@ -36,6 +36,15 @@ class AnswerStep:
         return events.answer(self._displayed, self.end, timings_ms, family=self.family)
 
 
+@dataclass(frozen=True, slots=True)
+class TokenUsage:
+    """Token counts reported by the generator for an attempt so far."""
+
+    prompt_tokens: int
+    completion_tokens: int
+    reasoning_tokens: int | None
+
+
 def stream_state(question: str, source: str, chat_id: str | None = None) -> guardrail.StreamState:
     """Build a fresh lag window context from the question's supplied figures."""
 
@@ -53,11 +62,18 @@ class AnswerMechanics:
         # Whitespace the window released before any visible answer text: held back, so an
         # attempt whose answer is blank finishes empty and the retry never follows sent text.
         self._held = ""
+        self._usage: TokenUsage | None = None
         self.failure: str | None = None
 
     def __repr__(self) -> str:
         state = self._check.state
         return f"AnswerMechanics(released_deltas={len(self._released)}, finished={state.finished}, tripped={state.trip is not None})"
+
+    @property
+    def usage(self) -> TokenUsage | None:
+        """The last well-formed usage from this attempt, if any."""
+
+        return self._usage
 
     def process(self, payload: str) -> AnswerStep:
         """Process one reassembled payload and release any text the judge approved."""
@@ -71,11 +87,30 @@ class AnswerMechanics:
             if payload == DONE_EVENT:
                 return self._finish()
             chunk = json.loads(payload)
-            if isinstance(chunk, dict) and "error" in chunk and "choices" not in chunk:
-                return self._finish(unfinished="engine-error")
+            if isinstance(chunk, dict):
+                self._read_usage(chunk.get("usage"))
+                if "error" in chunk and "choices" not in chunk:
+                    return self._finish(unfinished="engine-error")
             return self._process_chunk(chunk)
         except Exception as error:  # noqa: BLE001 - unjudgeable payloads fail closed with the exception class alone.
             return self.fail_closed(error)
+
+    def _read_usage(self, usage: object) -> None:
+        if not isinstance(usage, dict):
+            return
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        if (
+            type(prompt_tokens) is not int or prompt_tokens < 0
+            or type(completion_tokens) is not int or completion_tokens < 0
+        ):
+            return
+        details = usage.get("completion_tokens_details")
+        reasoning_tokens = details.get("reasoning_tokens") if isinstance(details, dict) else None
+        self._usage = TokenUsage(
+            prompt_tokens, completion_tokens,
+            reasoning_tokens if type(reasoning_tokens) is int and reasoning_tokens >= 0 else None,
+        )
 
     def _process_chunk(self, chunk: object) -> AnswerStep:
         choices = chunk.get("choices") if isinstance(chunk, dict) else None
@@ -107,7 +142,7 @@ class AnswerMechanics:
 
         released = self._check.append(content) if content else ""
         if (trip := self._check.state.trip) is not None:
-            return self._trip_step(trip, released)
+            return self._trip_step(trip, released, finish_reason=finish_reason)
         if finish_reason is not None:
             return self._finish(released, finish_reason=finish_reason)
         return AnswerStep(events=self._answer(released))
@@ -142,7 +177,7 @@ class AnswerMechanics:
     ) -> AnswerStep:
         tail = self._check.finish()
         if (trip := self._check.state.trip) is not None:
-            return self._trip_step(trip, released)
+            return self._trip_step(trip, released, finish_reason=finish_reason)
         emitted = self._answer(released, tail)
         if finish_reason is None:
             step = AnswerStep(events=emitted, outcome=unfinished)
@@ -156,7 +191,7 @@ class AnswerMechanics:
         self._check.state.finished = True
         return step
 
-    def _trip_step(self, trip: guardrail.Trip, released: str = "") -> AnswerStep:
+    def _trip_step(self, trip: guardrail.Trip, released: str = "", *, finish_reason: str | None = None) -> AnswerStep:
         prefix = self._answer(released)
         refusal = guardrail.refusal_for(trip.family)
         # Held whitespace is no released answer, so a refusal after it stands alone.
@@ -165,7 +200,8 @@ class AnswerMechanics:
         emitted = prefix + self._release(refusal)
         self._check.state.finished = True
         return AnswerStep(
-            events=emitted, outcome="tripped", end="tripped", family=trip.family, _displayed="".join(self._released),
+            events=emitted, outcome="tripped", finish_reason=finish_reason, end="tripped", family=trip.family,
+            _displayed="".join(self._released),
         )
 
     def _answer(self, *deltas: str) -> tuple[bytes, ...]:

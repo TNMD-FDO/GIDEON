@@ -32,6 +32,7 @@ from gideon.host.lock import load_host_lock
 from gideon.host.models import load_models_lock
 from gideon.host.render import ARTIFACTS
 from gideon.host.render.api import (
+    API_COURTS_PATH,
     API_HEALTH_PATH,
     API_INSTRUCTION_PATH,
     API_SERVICE_NAME,
@@ -61,6 +62,7 @@ from gideon.host.render.compose import (
     container_name,
     network_name,
 )
+from gideon.host.render.courts import ApiCourtsArtifact
 from gideon.host.render.engine import ENGINE_PORT, INTEGRATION_NETWORK_NAME
 from gideon.host.render.opensearch import (
     OPENSEARCH_GID,
@@ -145,7 +147,7 @@ _PERSISTENT_DIRECTORY_NAMES: Final[frozenset[str]] = frozenset(
 # Each rendered directory and the names the render stage writes inside it.
 _RENDERED_DIRECTORY_NAMES: Final[Mapping[str, frozenset[str]]] = {
     "open-webui": frozenset({"env", "manifest.yaml"}),
-    API_SERVICE_NAME: frozenset({PurePosixPath(API_INSTRUCTION_PATH).name}),
+    API_SERVICE_NAME: frozenset(PurePosixPath(path).name for path in (API_INSTRUCTION_PATH, API_COURTS_PATH)),
     **{
         str(directory): frozenset(
             path.relative_to(directory).parts[0]
@@ -458,6 +460,8 @@ def _render_stage(
         env_text = ci_env_file(inputs)
         manifest_text = ci_manifest(inputs)
         instruction_text = ci_instruction(inputs)
+        court_file = ApiCourtsArtifact()
+        courts_text = court_file.emit(inputs)
         open_webui = ci_stack.project_dir / "open-webui"
         api_directory = ci_stack.project_dir / API_SERVICE_NAME
         io.mkdir(open_webui, mode=0o755, parents=True, exist_ok=True)
@@ -466,6 +470,7 @@ def _render_stage(
         io.write_text(open_webui / "env", env_text, mode=0o600)
         io.write_text(open_webui / "manifest.yaml", manifest_text, mode=0o644)
         io.write_text(ci_stack.project_dir / API_INSTRUCTION_PATH, instruction_text, mode=0o644)
+        io.write_text(ci_stack.project_dir / court_file.relative_path, courts_text, mode=court_file.mode)
         for directory in _OPENSEARCH_DIRECTORIES:
             io.mkdir(ci_stack.project_dir / directory, mode=0o755, parents=True, exist_ok=True)
         for artifact in _OPENSEARCH_ARTIFACTS:
@@ -498,7 +503,7 @@ def _render_stage(
     return StageResult(
         "render",
         True,
-        "wrote the CI Compose document, Open WebUI env file and manifest, API instruction, "
+        "wrote the CI Compose document, Open WebUI env file and manifest, API instruction and court file, "
         "and OpenSearch settings and security files; prepared Qdrant and OpenSearch data roots and worker work root",
         "",
     )

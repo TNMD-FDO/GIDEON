@@ -42,11 +42,14 @@ from gideon.host.render.services import image_pin
 from gideon.host.render.services.model_server import (
     ENGINE_ACCESS_LOG_EXCLUDED_PATHS,
     ModelServerService,
+    has_reranker,
     model_command,
     model_flag_arguments,
+    model_server_members,
     model_service,
 )
 from gideon.host.render.yamlout import dump_fragment
+from gideon.turn.rerank import RERANK_SERVED_NAME
 
 
 class Family(unittest.TestCase):
@@ -105,6 +108,26 @@ class Family(unittest.TestCase):
 class RerankRender(unittest.TestCase):
     def test_the_family_has_three_members_in_serving_order(self) -> None:
         self.assertEqual(MODEL_SERVERS, (GENERATOR, EMBED, RERANK))
+
+    def test_client_served_name_matches_every_profile_with_a_reranker(self) -> None:
+        loaded = load_models_lock(ROOT / "models.lock")
+        self.assertTrue(loaded.ok, loaded.errors)
+        assert loaded.lock is not None
+        served_names = {
+            profile.name: pin.serve.served_name
+            for profile in loaded.lock.profiles if (pin := profile.model(RERANK.role)) is not None
+        }
+        self.assertTrue(served_names)
+        for profile, served_name in served_names.items():
+            with self.subTest(profile=profile):
+                self.assertEqual(RERANK_SERVED_NAME, served_name)
+
+    def test_reranker_membership_matches_the_model_server_family(self) -> None:
+        for base in (inputs(), inputs(no_gpu=True), trial_inputs()):
+            with self.subTest(profile=base.profile.name, no_gpu=base.no_gpu):
+                renders = has_reranker(base.profile, no_gpu=base.no_gpu)
+                self.assertEqual(renders, RERANK in model_server_members(base))
+                self.assertEqual(renders, not base.no_gpu and base.profile.model(RERANK.role) is not None)
 
     def test_reranker_block_follows_the_reference_pin_on_gpu_hosts(self) -> None:
         for host, site, no_gpu, build_box in FIXTURE_CASES:

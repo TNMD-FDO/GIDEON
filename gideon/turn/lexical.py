@@ -2,7 +2,7 @@
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from http import HTTPStatus
 from pathlib import Path
 from typing import Final
@@ -12,19 +12,35 @@ import httpx
 from gideon.turn.fusion import LegHit
 from gideon.turn.provenance import RequestSpan
 from gideon.turn.states import LegWord, State, TurnFailure
+from gideon.turn.tier import PRECEDENTIAL_VALUES
 
 # exempt: a starting bound, corrected by the M1 reading.
 LEXICAL_TIMEOUT_SECONDS: Final = 2.0
 
 
-def query_body(message: str, limit: int, *, collapse: bool) -> dict[str, object]:
-    """Build the lexical match query with the requested cluster collapse."""
+def court_filter(courts: Sequence[str]) -> dict[str, dict[str, list[str]]]:
+    """Build the OpenSearch terms filter shared by lexical and object searches."""
+
+    return {"terms": {"court": sorted(courts)}}
+
+
+def query_body(
+    message: str, limit: int, *, collapse: bool, courts: Sequence[str] | None = None,
+) -> dict[str, object]:
+    """Build the lexical match query with the requested court filter and cluster collapse.
+
+    The court filter is a ``post_filter``: it returns the hits and scores a filter inside the
+    query's ``bool`` returns, collapse included, while the match keeps its top-k skipping, which
+    an in-query filter over most of the index costs about six times over.
+    """
 
     body: dict[str, object] = {
         "query": {"match": {"text": message}},
         "size": limit,
-        "_source": ["dupe_cluster", "boilerplate"],
+        "_source": ["dupe_cluster", "boilerplate", "court", "precedential"],
     }
+    if courts is not None:
+        body["post_filter"] = court_filter(courts)
     if collapse:
         body["collapse"] = {"field": "dupe_cluster"}
     return body
@@ -34,13 +50,16 @@ def _hit(row: object, rank: int, *, leg: LegWord = "lexical") -> LegHit:
     if not isinstance(row, dict) or not isinstance(source := row.get("_source"), dict):
         raise TurnFailure(State.STORE_REPLY_INVALID, leg)
     chunk_id, cluster, boilerplate = row.get("_id"), source.get("dupe_cluster"), source.get("boilerplate")
+    court, precedential = source.get("court"), source.get("precedential")
     if not (
         isinstance(chunk_id, str) and chunk_id
         and isinstance(cluster, str) and cluster
         and isinstance(boilerplate, bool)
+        and isinstance(court, str) and court
+        and precedential in PRECEDENTIAL_VALUES
     ):
         raise TurnFailure(State.STORE_REPLY_INVALID, leg)
-    return LegHit(chunk_id, rank, cluster, boilerplate)
+    return LegHit(chunk_id, rank, cluster, boilerplate, court, precedential)
 
 
 def parse_reply(reply: object, *, leg: LegWord = "lexical") -> tuple[LegHit, ...]:
@@ -61,11 +80,12 @@ def parse_reply(reply: object, *, leg: LegWord = "lexical") -> tuple[LegHit, ...
 
 async def search(
     client: httpx.AsyncClient, user: str, password_file: Path, index: str, message: str, limit: int, *,
-    collapse: bool, clock: Callable[[], float] = time.monotonic, timeout: float = LEXICAL_TIMEOUT_SECONDS,
+    collapse: bool, courts: Sequence[str] | None = None,
+    clock: Callable[[], float] = time.monotonic, timeout: float = LEXICAL_TIMEOUT_SECONDS,
 ) -> tuple[tuple[LegHit, ...], RequestSpan]:
     """Send one request with the mounted password and return its hits and request span."""
 
-    body = query_body(message, limit, collapse=collapse)
+    body = query_body(message, limit, collapse=collapse, courts=courts)
     try:
         password = password_file.read_text(encoding="utf-8").strip()
         if not password:

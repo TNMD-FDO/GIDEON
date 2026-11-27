@@ -10,10 +10,12 @@ from unittest.mock import patch
 from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
+from regenerate_render_fixtures import fixture_lockfile_courts
 from test_render import render_templates
 from test_secrets import FakeHost
 
 from gideon.host.cas import ROOT as CAS_ROOT
+from gideon.host.courts import load_court_map
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import load_image_lock, parse_registry, reference
 from gideon.host.lock import load_host_lock
@@ -27,6 +29,13 @@ from gideon.host.render import RenderInputs, worker
 from gideon.host.render.api import (
     API_CORPUS_DATABASE_HOST_ENV,
     API_CORPUS_PASSWORD_FILE_ENV,
+    API_COURTS_CIRCUIT_ENV,
+    API_COURTS_DISTRICTS_ENV,
+    API_COURTS_FILE_ENV,
+    API_COURTS_MOUNT,
+    API_COURTS_PATH,
+    API_COURTS_SCOTUS_ENV,
+    API_COURTS_STATES_ENV,
     API_EMBED_DIMENSIONS_ENV,
     API_EMBED_MODEL_ENV,
     API_EMBED_REPOSITORY_ENV,
@@ -45,6 +54,7 @@ from gideon.host.render.ci import (
     CI_API_CORPUS_SECRET_NAME,
     CI_BASE_URL,
     CI_CORPUS_SECRET_NAME,
+    CI_COURTS_DIGEST_LABEL,
     CI_INSTRUCTION_DIGEST_LABEL,
     CI_OPENSEARCH_DATA_ROOT,
     CI_OPENSEARCH_MEMORY_GB,
@@ -82,6 +92,7 @@ from gideon.host.render.compose import (
     service_blocks,
     service_names,
 )
+from gideon.host.render.courts import api_courts_text
 from gideon.host.render.engine import (
     EMBED,
     EMBED_SECRET_NAME,
@@ -135,6 +146,8 @@ EXAMPLE = ROOT / "config/site.example.yaml"
 
 def inputs(**overrides: object) -> RenderInputs:
     egress = load_egress_allowlist(ROOT / "config/egress.yaml").allowlist
+    courts = load_court_map(ROOT / "courts.yaml").court_map
+    assert courts is not None
     site = load_site(EXAMPLE).config
     lock = load_host_lock(ROOT / "host.lock").lock
     images = load_image_lock(ROOT / "images.lock").lock
@@ -162,6 +175,7 @@ def inputs(**overrides: object) -> RenderInputs:
         checkout="/opt/gideon",
         source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
         egress=egress,
+        courts=courts,
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 
@@ -509,6 +523,7 @@ class Compose(unittest.TestCase):
             [
                 f"{render_inputs.checkout}/gideon:{API_MOUNT_TARGET}:ro",
                 f"{CI_ROOT}/{API_INSTRUCTION_PATH}:{API_INSTRUCTION_MOUNT}:ro",
+                f"{CI_ROOT}/{API_COURTS_PATH}:{API_COURTS_MOUNT}:ro",
                 f"{CAS_ROOT}:{CAS_ROOT}:ro",
             ],
         )
@@ -516,6 +531,7 @@ class Compose(unittest.TestCase):
             mapping(api["environment"])["GIDEON_INSTRUCTION_FILE"],
             API_INSTRUCTION_MOUNT,
         )
+        self.assertEqual(mapping(api["environment"])[API_COURTS_FILE_ENV], API_COURTS_MOUNT)
         allowed_read_only = {
             str(CAS_ROOT),
             f"{render_inputs.checkout}/gideon",
@@ -612,6 +628,10 @@ class Compose(unittest.TestCase):
         definition = api_service(render_inputs, target)
         self.assertLessEqual(
             {API_EMBED_DIMENSIONS_ENV, API_EMBED_MODEL_ENV, API_EMBED_REPOSITORY_ENV, API_EMBED_SPACE_ENV},
+            environment.keys(),
+        )
+        self.assertLessEqual(
+            {API_COURTS_SCOTUS_ENV, API_COURTS_CIRCUIT_ENV, API_COURTS_DISTRICTS_ENV, API_COURTS_STATES_ENV},
             environment.keys(),
         )
         self.assertEqual(
@@ -821,3 +841,30 @@ class Compose(unittest.TestCase):
             before_labels[CI_INSTRUCTION_DIGEST_LABEL],
             after_labels[CI_INSTRUCTION_DIGEST_LABEL],
         )
+
+    def test_lockfile_change_moves_only_the_api_court_file_digest_label(self) -> None:
+        lockfiles = fixture_lockfile_courts()
+        original = inputs(lockfile_courts=lockfiles)
+        court_map = original.courts
+        assert court_map is not None
+        removed = next(iter(lockfiles))
+        remaining = {label: ids for label, ids in lockfiles.items() if label != removed}
+        moved = replace(original, lockfile_courts=remaining)
+
+        before = ci_compose_document(original)
+        services = mapping(before["services"])
+        api = mapping(services[API_SERVICE_NAME])
+        labels = mapping(api["labels"])
+        after_digest = hashlib.sha256(api_courts_text(court_map, remaining).encode("utf-8")).hexdigest()
+        self.assertEqual(
+            labels[CI_COURTS_DIGEST_LABEL],
+            hashlib.sha256(api_courts_text(court_map, lockfiles).encode("utf-8")).hexdigest(),
+        )
+        self.assertNotEqual(labels[CI_COURTS_DIGEST_LABEL], after_digest)
+        self.assertEqual(ci_compose_document(moved), {
+            **before,
+            "services": {
+                **services,
+                API_SERVICE_NAME: {**api, "labels": {**labels, CI_COURTS_DIGEST_LABEL: after_digest}},
+            },
+        })

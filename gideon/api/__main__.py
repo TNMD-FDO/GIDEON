@@ -5,6 +5,8 @@ from typing import Final
 
 import uvicorn
 
+from gideon.turn.scope import CourtFileError
+
 from .app import create_app
 from .settings import load_settings
 
@@ -17,8 +19,12 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     settings = load_settings()
+    try:
+        app = create_app(settings)
+    except CourtFileError as exc:
+        raise SystemExit(str(exc)) from None
     uvicorn.run(
-        create_app(settings),
+        app,
         host="0.0.0.0",
         port=settings.port,
         access_log=False,
