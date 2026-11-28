@@ -841,6 +841,7 @@ class ResearchRunner(unittest.TestCase):
                 case_id = question.removeprefix(f"{SENTINEL} ")
                 self.assertEqual(question, loaded.cases_by_id[case_id]["question"])
                 self.assertEqual(body.get("overrides"), context.turn_overrides)
+                self.assertEqual(body.get("generation"), context.turn_generation)
                 self.events.append(case_id)
                 response = replies[case_id]
                 if isinstance(response, subprocess.SubprocessError):
@@ -913,6 +914,7 @@ class ResearchRunner(unittest.TestCase):
             self.context, production_dir=kwargs["rendered_dir"],
             turns_dir=CI_ROOT if sibling else kwargs["rendered_dir"],
             turn_overrides=None if baseline is None else baselines.BASELINES[baseline],
+            turn_generation=name,
         )
         argv = ["eval", "run", "--slice", "judgments", "--stack", stack_name, "--generation", name]
         if baseline is not None:
@@ -1026,9 +1028,12 @@ class ResearchRunner(unittest.TestCase):
         loaded = replace(
             self.loaded, slices={"judgments": (unsigned, second, first)}, unsigned_ids=frozenset({unsigned}),
         )
-        context = replace(self.context, assessments=Assessments(
-            {first: {self.ranked[0]: RELEVANT_GRADE, self.ranked[1]: 0}}, FIXTURE_PROMPT, FIXTURE_MODEL,
-        ))
+        context = replace(
+            self.context, turn_generation=self.generation.name,
+            assessments=Assessments(
+                {first: {self.ranked[0]: RELEVANT_GRADE, self.ranked[1]: 0}}, FIXTURE_PROMPT, FIXTURE_MODEL,
+            ),
+        )
         file_run = self._run(loaded, replace(context, ranked={first: self.ranked, second: ()}), {})
         self.assertTrue(file_run.verdict, file_run.report)
         self.assertTrue(file_run.report.splitlines()[0].endswith("door ranked-file"))

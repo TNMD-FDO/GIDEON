@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from http import HTTPStatus
 from typing import Any, Final, cast
+from uuid import uuid4
 
 import anyio
 import httpx
@@ -28,21 +29,24 @@ from gideon.api.sse import (
 )
 from gideon.api.upstream import EngineClient
 from gideon.turn import (
+    auditlog,
     denial,
     dense,
     events,
     finalset,
     lexical,
     measures,
+    notice,
     objectleg,
     objects,
     passages,
     prompt,
     rerank,
     scope,
+    turnaudit,
 )
 from gideon.turn.admission import claim, parse, settle
-from gideon.turn.answer import AnswerMechanics, AnswerStep, stream_state
+from gideon.turn.answer import LEGAL_BRANCH, AnswerMechanics, AnswerStep, stream_state
 from gideon.turn.caller import CallerRefusal, admit_caller
 from gideon.turn.config import RetrievalConfig, config_hash
 from gideon.turn.embedder import (
@@ -70,7 +74,7 @@ from gideon.turn.provenance import (
 from gideon.turn.scope import LockfileOutsideRelease
 from gideon.turn.states import LegWord, State, TurnFailure
 from gideon.turn.tier import Jurisdiction, authority_tier
-from gideon.turn.turnlog import AttemptCounters, TurnLog, record_turn
+from gideon.turn.turnlog import AbstentionMiss, AttemptCounters, TurnLog, record_turn
 
 _LOG = logging.getLogger("gideon.turn")
 # exempt: a starting bound, corrected by the M1 reading.
@@ -174,12 +178,14 @@ class TurnEndpoint:
     """Serve retrieval and generation as an ASGI endpoint instance."""
 
     def __init__(
-        self, settings: Settings, *, connect: Connect | None = None, denial_connect: Connect | None = None,
+        self, settings: Settings, *, connect: Connect | None = None, audit_connect: Connect | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._settings = settings
         self._read_generation = read_generation if connect is None else partial(read_generation, connect=connect)
-        self._write_denial = denial.write_denial if denial_connect is None else partial(denial.write_denial, connect=denial_connect)
+        self._write_audit = (
+            auditlog.write_row if audit_connect is None else partial(auditlog.write_row, connect=audit_connect)
+        )
         self._clock = clock
         self._space = EmbeddingSpace(
             settings.embed_model, settings.embed_repository, settings.embed_space, settings.embed_dimensions,
@@ -221,7 +227,7 @@ class TurnEndpoint:
                 assert claimed is not None
                 chat_id = judged.id_for_header(request.headers.getlist(settings.chat_header))
                 # An outcome other than kept leaves the write's own error line.
-                await self._write_denial(denial.build_row(incident, claimed, chat_id))
+                await self._write_audit(denial.build_row(incident, claimed, chat_id))
             await JSONResponse(refusal.to_body(), status_code=refusal.status)(scope, receive, send)
             return
 
@@ -248,7 +254,7 @@ class TurnEndpoint:
                     async def pin_generation() -> float:
                         nonlocal generation
                         record_started = self._clock()
-                        generation = await self._read_generation(settings.record)
+                        generation = await self._read_generation(settings.record, name=turn.generation)
                         record_seconds = self._clock() - record_started
                         turn_log.timings_ms["record"] = record_seconds * 1000
                         turn_log.generation_id = generation.gen_id
@@ -279,16 +285,24 @@ class TurnEndpoint:
                         stated_scope = self._court_file.resolve(named, generation.lockfiles)
                     except LockfileOutsideRelease:
                         raise TurnFailure(State.LOCKFILE_OUTSIDE_RELEASE) from None
-                    retrieval, selected, through_rerank_ms = await self._retrieve(
+                    retrieval, selected, through_rerank_ms, support_level = await self._retrieve(
                         clients, generation, turn.message, extracted, config, started, record_seconds,
                         extraction_seconds, turn_log, rerank_gate=request.app.state.rerank_gate,
                         stated_scope=stated_scope,
                     )
                     if turn.stop_after == "retrieve":
                         response = JSONResponse(retrieval)
+                    elif support_level == "none":
+                        turn_log.outcome = "abstained"
+                        courts = [
+                            self._court_file.court_name(court_id) for court_id in stated_scope.out_of_corpus
+                        ] if stated_scope is not None else []
+                        text = notice.abstention_notice(generation.lockfiles, courts)
+                        stream = self._abstain(text, retrieval, started, send_message, turn_log)
                     else:
                         stream = await self._prepare_answer(
                             request, generation, turn.message, selected, retrieval, started, send_message, turn_log,
+                            support_level=support_level,
                         )
                 except ClientDisconnect:
                     raise
@@ -302,6 +316,7 @@ class TurnEndpoint:
                         await stream()
                     else:
                         await response(scope, receive, send_message)
+                        turn_log.sent_count = len(selected)
                         turn_log.outcome = "reply"
                     return
 
@@ -314,7 +329,14 @@ class TurnEndpoint:
         try:
             await run_with_disconnect(work, receive)
         finally:
-            record_turn(turn_log, elapsed_ms=lambda: (self._clock() - started) * 1000)
+            row = None
+            with suppress(Exception):
+                values = record_turn(turn_log, elapsed_ms=lambda: (self._clock() - started) * 1000)
+                if values is not None:
+                    row = turnaudit.build_row(
+                        values, sent_count=turn_log.sent_count, claim=caller.kind, branch=LEGAL_BRANCH,
+                        user_id=caller.user_id, kb_ids=caller.floor.granted,
+                    )
             try:
                 measures.observe_turn(
                     request.app.state.turn_measures, turn_log.source, turn_log.outcome or "disconnected",
@@ -322,13 +344,20 @@ class TurnEndpoint:
                 )
             except Exception as error:  # noqa: BLE001 - observation cannot affect the response.
                 _LOG.error("Turn metrics observation failed: %s", type(error).__name__)
+            if row is None:
+                _LOG.error(auditlog.error_line(turnaudit.TURN_KIND, turn_log.outcome or "disconnected", "not_built", uuid4()))
+            else:
+                try:
+                    await self._write_audit(row)
+                except Exception:  # noqa: BLE001 - an unexpected writer failure leaves confirmation unknown.
+                    _LOG.error(auditlog.error_line(row.kind, row.log_reason, "unknown", row.run_id))
 
     async def _retrieve(
         self, clients: TurnClients, generation: PinnedGeneration, message: str,
         extracted: tuple[objects.TurnObject, ...], config: RetrievalConfig, started: float, record_seconds: float,
         extraction_seconds: float, turn_log: TurnLog, *, rerank_gate: rerank.Gate,
         stated_scope: scope.StatedScope | None,
-    ) -> tuple[dict[str, object], tuple[passages.Passage, ...], float | None]:
+    ) -> tuple[dict[str, object], tuple[passages.Passage, ...], float | None, finalset.SupportLevel]:
         settings = self._settings
         limit = config["leg_limit"]
         reservation = config["reservations.exact_object"]
@@ -473,6 +502,13 @@ class TurnEndpoint:
         by_chunk_id = {document.chunk_id: document for document in documents}
         final_set = finalset.choose(ranked.entries, by_chunk_id, config, held_chunk_ids, stage_scored=stage_scored)
         turn_log.evidence = final_set.hits
+        turn_log.support_level = final_set.support_level
+        if final_set.support_level == "none":
+            turn_log.miss = AbstentionMiss(
+                floor=cast(float, final_set.counts["floor"]),
+                best_score=cast(float | None, final_set.counts["best_under_floor"]),
+                chunk_ids=final_set.floor_dropped,
+            )
 
         finished = self._clock()
         body = reply_body(
@@ -499,17 +535,42 @@ class TurnEndpoint:
         turn_log.provenance = cast(dict[str, object], body["provenance"])
         turn_log.pool = cast(list[dict[str, object]], body["pool"])
         through_rerank_ms = timings_ms["total"] if run_rerank else None
-        return body, tuple(by_chunk_id[hit.chunk_id] for hit in final_set.hits), through_rerank_ms
+        selected = tuple(by_chunk_id[hit.chunk_id] for hit in final_set.hits)
+        return body, selected, through_rerank_ms, final_set.support_level
+
+    def _abstain(
+        self, text: str, retrieval: dict[str, object], started: float, send: Send, turn_log: TurnLog,
+    ) -> Callable[[], Awaitable[None]]:
+        async def work() -> None:
+            await send({
+                "type": "http.response.start", "status": HTTPStatus.OK,
+                "headers": [(b"content-type", EVENT_STREAM_MEDIA_TYPE.encode())],
+            })
+            await send({
+                "type": "http.response.body", "body": events.phase("retrieve", retrieval),
+                "more_body": True,
+            })
+            turn_log.timings_ms["total"] = (self._clock() - started) * 1000
+            await send({
+                "type": "http.response.body", "body": events.answer(text, "abstained", turn_log.timings_ms),
+                "more_body": True,
+            })
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+        return work
 
     async def _prepare_answer(
         self, request: Request, generation: PinnedGeneration, question: str,
         selected: tuple[passages.Passage, ...], retrieval: dict[str, object], started: float, send: Send, turn_log: TurnLog,
+        *, support_level: finalset.SupportLevel,
     ) -> Callable[[], Awaitable[None]]:
         settings = self._settings
         engine: EngineClient = request.app.state.engine
         sampling, repository = await _generator_sampling(engine, settings.engine_model)
         turn_log.generator_repository = repository
-        messages = prompt.messages(question, [(passage.caption, passage.text) for passage in selected])
+        messages = prompt.messages(
+            question, [(passage.caption, passage.text) for passage in selected], support_level=support_level,
+        )
 
         def make_attempt(thinking_off: bool) -> tuple[bytes, AnswerMechanics]:
             body = request_body(settings.engine_model, messages, sampling, thinking_off=thinking_off)
@@ -543,6 +604,7 @@ class TurnEndpoint:
         try:
             for number, passage in enumerate(selected, start=1):
                 await send_event(events.passage(number, passage.chunk_id, passage.pool_rank))
+                turn_log.sent_count = number
             await send_event(events.phase("retrieve", retrieval))
             await send_event(events.phase("generate", 1))
             generating = self._clock()

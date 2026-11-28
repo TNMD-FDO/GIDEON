@@ -295,6 +295,7 @@ class _Prepared:
     assessments: Assessments | None = None
     judge_retry: sampling.HeldSet | None = None
     turn_overrides: Mapping[str, JSONValue] | None = None
+    turn_generation: str | None = None
     expected_config_hash: str | None = None
 
 
@@ -642,7 +643,7 @@ def _reference_gate(
 def _decision_gate(
     slice_result: SliceResult,
     slice_spec: SliceSpec,
-    comparison: reference.Comparison,
+    comparison: reference.Comparison | None,
     paired: decision_stats.PairedDecision,
     run_result: _RunRepeats,
     *,
@@ -665,24 +666,26 @@ def _decision_gate(
     """
 
     bounds_ok = slice_result.verdict
-    reference_ok = not comparison.regressed and comparison.outcome not in {
-        "other-version",
-        "malformed",
-    }
+    reference_ok = comparison is None or (
+        not comparison.regressed and comparison.outcome not in {"other-version", "malformed"}
+    )
     loses = paired.verdict == decision_stats.LOSES
     gate_verdict = bounds_ok and reference_ok and not loses and not run_result.partial
 
     bounds_detail = slice_spec.gate_pass if bounds_ok else slice_spec.gate_fail
     if slice_result.gated_cases is not None and not run_result.partial:
         bounds_detail += f"; {bound_text(slice_result.gated_cases, bounds_ok)}"
-    reference_detail = _reference_detail(
-        comparison,
-        slice_name=slice_name,
-        set_version=set_version,
-        reference_version=reference_version,
-        run_id=run_id,
-        written=written,
-    )
+    if comparison is None:
+        reference_detail = f"{slice_name} keeps no reference"
+    else:
+        reference_detail = _reference_detail(
+            comparison,
+            slice_name=slice_name,
+            set_version=set_version,
+            reference_version=reference_version,
+            run_id=run_id,
+            written=written,
+        )
     detail = f"{bounds_detail}; {reference_detail}; decision {paired.verdict}"
     if run_result.partial:
         detail += (
@@ -692,7 +695,7 @@ def _decision_gate(
 
     if not bounds_ok:
         fix = slice_spec.gate_fix
-    elif not reference_ok:
+    elif comparison is not None and not reference_ok:
         fix = _reference_fix(
             comparison,
             run_id=run_id,
@@ -1086,13 +1089,13 @@ def _prepare_generation(
     return resolved
 
 
-def _generation_detail(resolved: GenerationAccess | None) -> str:
+def _generation_detail(resolved: GenerationAccess | None, *, named_to_turn: bool) -> str:
     """The resolved generation's clause in the preconditions row."""
 
-    return (
-        "" if resolved is None
-        else f", generation {resolved.name} ({resolved.corpus_lockfile}, {resolved.state})"
-    )
+    if resolved is None:
+        return ""
+    detail = f", generation {resolved.name} ({resolved.corpus_lockfile}, {resolved.state})"
+    return detail + (", named to /turn" if named_to_turn else "")
 
 
 def _prepare_research(
@@ -1104,7 +1107,7 @@ def _prepare_research(
     if nogpu.is_no_gpu_host(seams.host):
         # A host without GPUs runs no gideon-api, so no /turn answers there.
         return Problem("this host carries the no-GPU marker and serves no /turn", _NO_GPU_FIX)
-    if resolved is not None and resolved.state != "live":
+    if request.generation_name is None and resolved is not None and resolved.state != "live":
         promote = report.command(f"index promote {resolved.name}")
         fix = f"Run {promote}, then retry."
         if slice_spec.accepts_ranked:
@@ -1230,6 +1233,7 @@ def _prepare_on_box(
         image = resolved_image
     door_detail = ""
     turn_overrides: Mapping[str, JSONValue] | None = None
+    turn_generation = cast(str | None, request.generation_name) if CallSurface.RESEARCH in surfaces else None
     expected_config_hash: str | None = None
     if CallSurface.ENGINE not in surfaces:
         if request.paths.name == CI_STACK and CallSurface.STORES in surfaces:
@@ -1271,7 +1275,7 @@ def _prepare_on_box(
             "preconditions", True,
             f"root, site{', image present' if image is not None else ''}, "
             f"profile {config.hardware_profile}, {writer}"
-            + _generation_detail(resolved_generation) + door_detail, "",
+            + _generation_detail(resolved_generation, named_to_turn=turn_generation is not None) + door_detail, "",
         ))
         return _Prepared(
             served_model_name=None,
@@ -1286,6 +1290,7 @@ def _prepare_on_box(
             image=image,
             generation=resolved_generation,
             turn_overrides=turn_overrides,
+            turn_generation=turn_generation,
             expected_config_hash=expected_config_hash,
         )
     judgement = request.mode.judgement(started, config.office.timezone)
@@ -1519,7 +1524,7 @@ def _prepare_on_box(
                 if CallSurface.TURNS in surfaces
                 else ""
             ) + (", image present" if image is not None else "")
-            + _generation_detail(resolved_generation) + door_detail,
+            + _generation_detail(resolved_generation, named_to_turn=turn_generation is not None) + door_detail,
             "",
         )
     )
@@ -1537,6 +1542,7 @@ def _prepare_on_box(
         generation=resolved_generation,
         judge_retry=judge_retry,
         turn_overrides=turn_overrides,
+        turn_generation=turn_generation,
         expected_config_hash=expected_config_hash,
     )
 
@@ -1920,6 +1926,7 @@ def _run_body(
         progress=print,
         ranked=prepared.ranked,
         turn_overrides=prepared.turn_overrides,
+        turn_generation=prepared.turn_generation,
         expected_config_hash=prepared.expected_config_hash,
         assessments=prepared.assessments,
         turns=prepared.turns,
@@ -2059,7 +2066,6 @@ def _run_body(
     record_root_fix = request.record_root_fix(slice_spec)
     if request.mode.pairs:
         assert paired is not None
-        assert comparison is not None
         gate_ok = _decision_gate(
             slice_result,
             slice_spec,

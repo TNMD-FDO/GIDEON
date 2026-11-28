@@ -395,6 +395,32 @@ class Migration0001(unittest.TestCase):
         self.assertNotIn("GRANT SELECT", text)
         self.assertNotIn("schema_migrations", text)
 
+    def test_audit_role_can_only_insert_audit_log_across_all_migrations(self) -> None:
+        audit_table = r"(?:PUBLIC\s*\.\s*)?AUDIT_LOG"
+        grant = re.compile(r"\bGRANT ([^;]+?) ON (?:TABLE )?([^;]+?) TO ([^;]+);")
+        ownership = re.compile(rf"\bALTER TABLE (?:IF EXISTS )?(?:ONLY )?{audit_table} OWNER TO GIDEON_AUDIT\s*;")
+        schema_grant = "ALL TABLES IN SCHEMA "
+        has_insert = False
+        for path in sorted((ROOT / "migrations").glob("*.sql")):
+            with self.subTest(migration=path.name):
+                text = path.read_text(encoding="utf-8")
+                text = re.sub(r"--[^\n]*|/\*.*?\*/", " ", text, flags=re.S)
+                sql = " ".join(text.replace('"', "").upper().split())
+                self.assertNotRegex(sql, ownership, "Fix: keep the audit role from owning audit_log.")
+                for privileges, targets, grantees in grant.findall(sql):
+                    recipients = re.split(r" WITH GRANT OPTION| GRANTED BY ", grantees, maxsplit=1)[0]
+                    roles = {role.strip() for role in recipients.split(",")}
+                    if roles.isdisjoint({"GIDEON_AUDIT", "PUBLIC"}):
+                        continue
+                    if targets.startswith(schema_grant):
+                        applies = "PUBLIC" in {schema.strip() for schema in targets.removeprefix(schema_grant).split(",")}
+                    else:
+                        applies = any(re.fullmatch(audit_table, table.strip()) for table in targets.split(","))
+                    if applies:
+                        self.assertEqual(privileges, "INSERT", "Fix: grant the audit role only INSERT on audit_log.")
+                        has_insert = has_insert or "GIDEON_AUDIT" in roles
+        self.assertTrue(has_insert, "Fix: grant INSERT on audit_log to gideon_audit.")
+
 
 class Migration0002(unittest.TestCase):
     def test_metrics_reader_is_read_only_and_uses_the_runner_version_row(self) -> None:

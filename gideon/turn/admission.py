@@ -10,12 +10,14 @@ from gideon.guardrail.writer import EVAL_SOURCE, bounded_id
 from gideon.turn.config import OverrideRefusal, RetrievalConfig, effective_config
 from gideon.turn.states import RequestWord, State, TurnFailure
 
-_EVAL_FIELDS: Final = ("stop_after", "evidence", "overrides")
+_EVAL_FIELDS: Final = ("stop_after", "evidence", "overrides", "generation")
 _REQUEST_FIELDS: Final = frozenset(("message", "message_id", "history", "kb_ids", "session_token", *_EVAL_FIELDS))
 # exempt: a starting bound, corrected by the M1 reading.
 _HISTORY_LIMIT: Final = 6
 # exempt: a starting bound, corrected by the M1 reading.
 _KB_IDS_LIMIT: Final = 16
+# The record's ASCII generation names fit in fewer than 255 bytes.
+_GENERATION_NAME_LIMIT: Final = 254
 
 
 @dataclass(frozen=True, repr=False, slots=True)
@@ -30,6 +32,7 @@ class TurnRequest:
     evidence: tuple[str, ...] | None
     overrides: dict[str, object] | None
     message_id: str | None = None
+    generation: str | None = None
 
     def without_token(self) -> Self:
         """Return a copy with the session token removed."""
@@ -89,9 +92,13 @@ def parse(body: bytes | bytearray) -> TurnRequest:
     overrides = fields.get("overrides")
     if "overrides" in fields and not isinstance(overrides, dict):
         raise TurnFailure(State.INVALID_REQUEST, "overrides")
+    generation = _string(fields, "generation")
+    if generation is not None and (not generation or len(generation) > _GENERATION_NAME_LIMIT):
+        raise TurnFailure(State.INVALID_REQUEST, "generation")
     return TurnRequest(
         message, history, _kb_ids(fields), _string(fields, "session_token"),
-        _string(fields, "stop_after"), _strings(fields, "evidence"), overrides, message_id=message_id,
+        _string(fields, "stop_after"), _strings(fields, "evidence"), overrides,
+        message_id=message_id, generation=generation,
     )
 
 

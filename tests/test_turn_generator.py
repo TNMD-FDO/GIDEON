@@ -34,7 +34,7 @@ class TurnGenerator(unittest.TestCase):
             trial.repo: "The snapshot was absent from the box at capture time. Read it at trial profile acceptance.",
         }
         covered = set()
-        prompt = messages("What did the fictitious harbor board decide?", ())
+        prompt = messages("What did the fictitious harbor board decide?", (), support_level="ok")
         for profile in self.lock.profiles:
             pin = generator_pin(profile)
             with self.subTest(profile=profile.name, repository=pin.repo):
@@ -69,7 +69,7 @@ class TurnGenerator(unittest.TestCase):
         pin = generator_pin(self.lock.profile(self.lock.reference))
         sampling = sampling_for(pin.repo)
         assert sampling is not None
-        prompt = messages("What did the fictitious harbor board decide?", ())
+        prompt = messages("What did the fictitious harbor board decide?", (), support_level="ok")
         baseline = request_body(pin.serve.served_name, prompt, sampling)
         max_tokens = RESEARCH_CONFIG["max_tokens"]
         assert type(max_tokens) is int
@@ -97,6 +97,7 @@ class TurnPrompt(unittest.TestCase):
             messages(
                 "What did the fictitious harbor board decide?",
                 (("Invented Harbor Board v. Rowan", "The mooring stays open."), ("", "Notice is required.")),
+                support_level="ok",
             ),
             [
                 {
@@ -113,6 +114,6 @@ class TurnPrompt(unittest.TestCase):
 
     def test_empty_passages_leave_only_the_question_in_the_user_message(self) -> None:
         self.assertEqual(
-            messages("What happened at the fictitious harbor?", ())[1],
+            messages("What happened at the fictitious harbor?", (), support_level="ok")[1],
             {"role": "user", "content": "Question: What happened at the fictitious harbor?"},
         )

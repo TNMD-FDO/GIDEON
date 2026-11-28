@@ -35,7 +35,7 @@ class Baselines(unittest.TestCase):
     def test_every_named_baseline_is_accepted_and_hashed_by_the_turn(self) -> None:
         self.assertEqual(set(baselines.BASELINES), {"off"})
         self.assertEqual(baselines.BASELINES["off"], {
-            "query_plan": "off", "rerank.stage1": "off", "rerank.stage2": "off",
+            "query_plan": "off", "rerank.stage1": "off", "rerank.stage2": "off", "abstention.floor": 0,
         })
         for name, overrides in baselines.BASELINES.items():
             for reranker in (True, False):
@@ -47,7 +47,7 @@ class Baselines(unittest.TestCase):
 
     def test_no_overrides_uses_the_configuration_shipped_for_the_stack(self) -> None:
         self.assertEqual(baselines.expected_config_hash(None, reranker=True), config_hash(RETRIEVAL_CONFIG))
-        off = {**RETRIEVAL_CONFIG, "rerank.stage2": "off"}
+        off = {**RETRIEVAL_CONFIG, "rerank.stage2": "off", "abstention.floor": 0.0}
         self.assertEqual(baselines.expected_config_hash(None, reranker=False), config_hash(off))
         self.assertIsInstance(baselines.expected_config_hash({"rerank.stage2": "on"}, reranker=False), Problem)
 

@@ -1,4 +1,4 @@
-"""Read the live generation once and pin both stores to its addresses."""
+"""Read the turn's live or named generation and pin both store addresses."""
 
 import asyncio
 from collections.abc import Awaitable, Callable
@@ -19,16 +19,18 @@ from gideon.turn.states import State, TurnFailure
 TURN_COLLECTION: Final = "caselaw"
 # exempt: a starting bound, corrected by the M1 reading.
 RECORD_TIMEOUT_SECONDS: Final = 2.0
-_LIVE_SQL: Final = (
+_GENERATION_SQL: Final = (
     "SELECT gen_id, collection, embedding_space, lockfiles "
-    "FROM public.index_generations WHERE state = 'live'"
+    "FROM public.index_generations"
 )
+_LIVE_SQL: Final = _GENERATION_SQL + " WHERE state = 'live'"
+_NAMED_SQL: Final = _GENERATION_SQL + " WHERE gen_id = %s AND state IN ('built', 'live')"
 
 type Connect = Callable[..., Awaitable[AsyncConnection[tuple[object, ...]]]]
 
 
 @dataclass(frozen=True, slots=True)
-class _LiveRow:
+class _GenerationRow:
     gen_id: str
     collection: str
     embedding_space: str
@@ -36,13 +38,13 @@ class _LiveRow:
 
 
 @dataclass(frozen=True, slots=True)
-class PinnedGeneration(_LiveRow):
+class PinnedGeneration(_GenerationRow):
     """The generation and its store addresses for this turn."""
 
     stores: StoreNames
 
 
-def _live_row(row: tuple[object, ...]) -> _LiveRow:
+def _generation_row(row: tuple[object, ...]) -> _GenerationRow:
     gen_id, collection, embedding_space, lockfiles = row
     if not (
         isinstance(gen_id, str) and gen_id
@@ -51,18 +53,19 @@ def _live_row(row: tuple[object, ...]) -> _LiveRow:
         and isinstance(lockfiles, (list, tuple)) and lockfiles
         and all(isinstance(label, str) and label for label in lockfiles)
     ):
-        raise ValueError("Invalid live generation row.")
-    return _LiveRow(gen_id, collection, embedding_space, tuple(lockfiles))
+        raise ValueError("Invalid generation row.")
+    return _GenerationRow(gen_id, collection, embedding_space, tuple(lockfiles))
 
 
 async def read_generation(
-    record: RecordCoordinates, *, connect: Connect = AsyncConnection.connect, timeout: float = RECORD_TIMEOUT_SECONDS,
+    record: RecordCoordinates, *, name: str | None = None, connect: Connect = AsyncConnection.connect,
+    timeout: float = RECORD_TIMEOUT_SECONDS,
 ) -> PinnedGeneration:
-    """Read every live row under one deadline and select the turn's collection."""
+    """Select the turn's collection from live rows or a readable named row under one deadline."""
 
     connection: AsyncConnection[tuple[object, ...]] | None = None
 
-    async def read_rows() -> tuple[_LiveRow, ...]:
+    async def read_rows() -> tuple[_GenerationRow, ...]:
         nonlocal connection
         password = record.password_file.read_text(encoding="utf-8").strip()
         if not password:
@@ -72,8 +75,11 @@ async def read_generation(
             user=record.role, password=password, autocommit=True,
         )
         async with connection.cursor() as cursor:
-            await cursor.execute(_LIVE_SQL)
-            return tuple(_live_row(row) for row in await cursor.fetchall())
+            if name is None:
+                await cursor.execute(_LIVE_SQL)
+            else:
+                await cursor.execute(_NAMED_SQL, (name,))
+            return tuple(_generation_row(row) for row in await cursor.fetchall())
 
     task = asyncio.create_task(read_rows())
     try:
@@ -95,7 +101,7 @@ async def read_generation(
 
     selected = select_serving(rows, TURN_COLLECTION)
     if selected is None:
-        raise TurnFailure(State.NO_LIVE_GENERATION)
+        raise TurnFailure(State.NO_LIVE_GENERATION if name is None else State.GENERATION_NOT_READABLE)
     if isinstance(selected, AmbiguousGeneration):
         raise TurnFailure(State.AMBIGUOUS_GENERATION)
     row = next(row for row in rows if (row.gen_id, row.collection) == (selected.gen_id, selected.collection))

@@ -214,6 +214,7 @@ _RESEARCH_QA_RETRIEVAL: Final[SliceSpec] = SliceSpec(
     ),
     categories=frozenset({_RETRIEVAL_CATEGORY}),
     turn_calls=None,
+    decision=research_qa_slice.IN_EVIDENCE,
     accepts_selection=True,
 )
 _SYNTHESIS_CATEGORY: Final = ("research-qa", "synthesis")
@@ -222,6 +223,7 @@ _RESEARCH_QA_SYNTHESIS: Final[SliceSpec] = replace(
     runner=research_qa_slice.runner_for(_SYNTHESIS_CATEGORY),
     judge_prompt="synthesis@1",
     categories=frozenset({_SYNTHESIS_CATEGORY}),
+    decision=research_qa_slice.COMPLETE_IN_EVIDENCE,
     gate_pass=(
         "every counted case returned a terminal answer over the run's generation and "
         "configuration with a resolved pool, the gold figures and judge grades reported and never gated"

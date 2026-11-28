@@ -1,0 +1,11 @@
+{
+  "id": "fixture-rerank-under-floor",
+  "model": "fixture-reranker",
+  "results": [
+    {"index": 2, "relevance_score": 0.35},
+    {"index": 0, "relevance_score": 0.15},
+    {"index": 3, "relevance_score": 0.4},
+    {"index": 1, "relevance_score": 0.25}
+  ],
+  "usage": {"prompt_tokens": 35, "total_tokens": 35}
+}

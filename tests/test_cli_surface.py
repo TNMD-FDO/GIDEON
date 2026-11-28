@@ -36,7 +36,6 @@ TOP_LEVEL = [
 STUBS = [
     (["host", "gpu"], "escape hatch"),
     (["registry", "gc"], "no slice scheduled"),
-    (["audit", "query"], "no slice scheduled"),
 ]
 
 
@@ -301,7 +300,8 @@ class Help(unittest.TestCase):
         self.assertIn("--unsigned also run the slice's unsigned cases, marked and counted in no gate", run_help)
         self.assertIn("--tuning run the tuning cases alone; a held-out case is never read", run_help)
         self.assertIn(
-            "--generation NAME index generation to score. With /turn, NAME must be the selected stack's live generation",
+            "--generation NAME index generation to score. With /turn, "
+            "NAME is a built or live generation of the selected stack, sent by name",
             run_help,
         )
         self.assertIn("nightly also waits for a held engine and stops at 06:00", run_help)
@@ -359,6 +359,20 @@ class Help(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("root", out.getvalue())
         self.assertIn("default: last month", collapsed(out.getvalue()))
+
+    def test_audit_query_help_describes_selectors_window_and_output(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["audit", "query", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        help_text = collapsed(out.getvalue())
+        for phrase in (
+            "match all supplied selectors", "at least one of --kb, --user, or --chat",
+            "--since", "inclusive start in office time", "--until", "exclusive end in office time",
+            "A date includes its whole day", "--json", "full rows as a JSON array",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, help_text)
 
 
 class AnnouncementsCommands(unittest.TestCase):
@@ -420,7 +434,6 @@ class Stubs(unittest.TestCase):
             main(["--help"])
         self.assertEqual(ctx.exception.code, 0)
         top_entries = help_entries(top_help.getvalue())
-        stub_only: set[str] = set()
         mixed: set[str] = set()
         for group in {argv[0] for argv, _ in STUBS}:
             with self.subTest(group=group):
@@ -436,7 +449,6 @@ class Stubs(unittest.TestCase):
                 entry = top_entries[group]
                 landings = {landing for argv, landing in STUBS if argv[0] == group}
                 if stub_names == listed_names:
-                    stub_only.add(group)
                     summary, separator, tail = entry.partition(" (")
                     self.assertTrue(summary)
                     self.assertEqual(separator, " (")
@@ -447,7 +459,6 @@ class Stubs(unittest.TestCase):
                     mixed.add(group)
                     for landing in landings:
                         self.assertNotIn(landing, entry)
-        self.assertTrue(stub_only)
         self.assertTrue(mixed)
 
     def test_pass_deduplicates_landings_and_leaves_mixed_groups_plain(self) -> None:

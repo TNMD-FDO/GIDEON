@@ -12,6 +12,13 @@ entries are met at ranks 1 to 10 and 1 to 50, how many are met in the evidence,
 and the first evidence passage number that meets any. Cases with no held gold
 are listed by id and contribute nothing to the recall denominators.
 
+The retrieval decision metric, ``in-evidence``, is the share of held gold
+entries met in the evidence. The synthesis decision metric,
+``complete-in-evidence``, uses that share for a complete answer and assigns
+zero to a truncated, tripped, or abstained answer. Both favor higher values
+and are undefined for a row with a problem, an unsigned row, or a case with
+no held gold.
+
 A counted case passes with a valid turn and resolved pool, at least one held
 gold entry, and every held entry met in the evidence. A grading slice also
 requires a complete answer. The slice passes when at least one counted case
@@ -40,6 +47,7 @@ from gideon.evaluation import (
     pool_coordinates,
     research_door,
 )
+from gideon.evaluation.decision import DecisionMetric
 from gideon.evaluation.evalset import (
     Case,
     LoadedSet,
@@ -71,10 +79,40 @@ PROBLEMS: Final[frozenset[str]] = frozenset({
     "case-outside-category", "no-cases",
 })
 
-_UNGRADED_ENDS: Final[tuple[EndWord, ...]] = ("truncated", "tripped")
+_UNGRADED_ENDS: Final[tuple[EndWord, ...]] = ("truncated", "tripped", "abstained")
 _UNGRADED_REASONS: Final[tuple[str, ...]] = (*_UNGRADED_ENDS, "problem", "no-reference")
 
 type _Gold = Coordinates | str
+
+
+def _in_evidence(metrics: Mapping[str, JSONValue]) -> float | None:
+    if "problem" in metrics or metrics.get("unsigned") is True:
+        return None
+    held = metrics.get("held_gold_passages")
+    met = metrics.get("met_in_evidence")
+    if type(held) is not int or type(met) is not int or held <= 0 or not 0 <= met <= held:
+        return None
+    return met / held
+
+
+def _complete_in_evidence(metrics: Mapping[str, JSONValue]) -> float | None:
+    share = _in_evidence(metrics)
+    end = metrics.get("end")
+    if share is None or end == "complete":
+        return share
+    return 0.0 if end in _UNGRADED_ENDS else None
+
+
+IN_EVIDENCE: Final[DecisionMetric] = DecisionMetric(
+    name="in-evidence",
+    higher_is_better=True,
+    value=_in_evidence,
+)
+COMPLETE_IN_EVIDENCE: Final[DecisionMetric] = DecisionMetric(
+    name="complete-in-evidence",
+    higher_is_better=True,
+    value=_complete_in_evidence,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +158,7 @@ def _run_turns(
         question = cast(str, case["question"])
         reply = research_door.send_full(
             context.host, context.turns_dir, question, context.turn_overrides, message_id=message_id,
+            generation=context.turn_generation,
         )
         seconds = "unknown"
         if isinstance(reply, research_door.Failure):

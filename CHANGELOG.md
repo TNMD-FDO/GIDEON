@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.4.5](docs/release-notes/v0.4.5.md) — 2026-11-28 — abstention in code and its notice, an audit row per Legal turn and audit query, E11 held at 512, for the eval alone
 - [v0.4.4](docs/release-notes/v0.4.4.md) — 2026-11-27 — the final set, the Legal prompt, a user's caller and KB re-check, /metrics, research-qa's runner, for the eval alone
 - [v0.4.3](docs/release-notes/v0.4.3.md) — 2026-11-26 — the controlling leg and authority tiers, a named court's filter, the rerank stage, and turn_log, for the eval alone
 - [v0.4.2](docs/release-notes/v0.4.2.md) — 2026-11-26 — the turn's candidate pool, exact-object pins, and a judged answer for the eval alone; engine verify checks the reranker

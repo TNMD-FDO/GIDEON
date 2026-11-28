@@ -1,12 +1,16 @@
 """The research turn's event payloads and wire bytes."""
 
 import unittest
+from typing import get_args
 
 from gideon.turn import events
 from gideon.turn.states import State, TurnFailure
 
 
 class TurnEvents(unittest.TestCase):
+    def test_answer_end_vocabulary(self) -> None:
+        self.assertEqual(set(get_args(events.EndWord)), {"complete", "truncated", "tripped", "abstained"})
+
     def test_passage_carries_only_its_number_id_and_rank(self) -> None:
         self.assertEqual(
             events.passage(2, "fixture-chunk", 7),
@@ -34,7 +38,7 @@ class TurnEvents(unittest.TestCase):
         )
 
     def test_answer_carries_the_displayed_text_end_and_timings(self) -> None:
-        for end in ("complete", "truncated"):
+        for end in ("complete", "truncated", "abstained"):
             with self.subTest(end=end):
                 self.assertEqual(
                     events.answer("Fictitious answer", end, {"total": 2500.0}),

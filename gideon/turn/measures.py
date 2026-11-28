@@ -17,7 +17,7 @@ CONTENT_TYPE: Final = "text/plain; version=0.0.4; charset=utf-8"
 
 # Copies of guardrail.writer.SOURCE_VOCABULARY and turnlog.Outcome.
 SOURCE_VOCABULARY: Final = ("user", "eval")
-OUTCOME_VOCABULARY: Final = ("reply", "complete", "truncated", "tripped", "failed", "disconnected")
+OUTCOME_VOCABULARY: Final = ("reply", "complete", "truncated", "tripped", "abstained", "failed", "disconnected")
 
 RETRIEVAL_METRIC: Final = "gideon_turn_retrieval_seconds"
 THROUGH_RERANK_METRIC: Final = "gideon_turn_through_rerank_seconds"

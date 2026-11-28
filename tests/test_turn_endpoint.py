@@ -41,15 +41,20 @@ from gideon.api.sse import DONE_EVENT, SSE_EVENT_BUFFER_LIMIT_BYTES, EventReasse
 from gideon.extraction import ExactObject, extract
 from gideon.host.models import load_models_lock
 from gideon.turn import (
+    auditlog,
     denial,
     endpoint,
     lexical,
     measures,
+    notice,
     objectleg,
     objects,
     provenance,
+    turnaudit,
+    turnlog,
 )
 from gideon.turn.answer import LEGAL_BRANCH
+from gideon.turn.caller import Caller, Floor
 from gideon.turn.config import (
     RETRIEVAL_CONFIG,
     OverrideRefusal,
@@ -59,7 +64,7 @@ from gideon.turn.config import (
 from gideon.turn.generation import TURN_COLLECTION, read_generation
 from gideon.turn.generator import GENERATOR_SAMPLING
 from gideon.turn.objects import CaseExtractor
-from gideon.turn.prompt import messages
+from gideon.turn.prompt import THIN_SUPPORT, TRACER_SYSTEM, messages
 from gideon.turn.research import RESEARCH_CONFIG
 
 MESSAGE = "Fictitious turn sentinel Cobalt Widget Q7"
@@ -168,7 +173,7 @@ class TurnEndpointFixture(unittest.TestCase):
             (root / name).write_text(f"fixture-{name}-secret\n", encoding="utf-8")
         self.enterContext(patch.object(guardrail.writer, "TRIP_PASSWORD_PATH", str(root / "audit")))
         self.audit_connection = Mock(execute=AsyncMock(), close=AsyncMock())
-        self.denial_connect = AsyncMock(return_value=self.audit_connection)
+        self.audit_connect = AsyncMock(return_value=self.audit_connection)
         record = RecordCoordinates("fixture-record", 5432, "fixture-db", "fixture-reader", root / "record")
         model = listing["data"][0]
         self.settings = Settings(
@@ -248,7 +253,7 @@ class TurnEndpointFixture(unittest.TestCase):
         self.trips.clear()
         self.dispatch.reset_mock()
         self.audit_connection.reset_mock()
-        self.denial_connect.reset_mock()
+        self.audit_connect.reset_mock()
         self.clock = count()
         self.connection, self.cursor = record_with_rows(self.live_rows if rows is None else rows)
         self.connect = AsyncMock(return_value=self.connection)
@@ -256,7 +261,7 @@ class TurnEndpointFixture(unittest.TestCase):
             settings, transport=httpx.MockTransport(self.engine_upstream), embed_transport=httpx.MockTransport(self.upstream),
             qdrant_transport=httpx.MockTransport(self.upstream), opensearch_transport=httpx.MockTransport(self.upstream),
             rerank_transport=self.rerank_transport, frontend_transport=httpx.MockTransport(self.frontend_upstream),
-            record_connect=self.connect, denial_connect=self.denial_connect,
+            record_connect=self.connect, audit_connect=self.audit_connect,
             case_extractor=self.case_extractor, turn_clock=self.clock.__next__,
         )
 
@@ -336,15 +341,16 @@ class TurnEndpointFixture(unittest.TestCase):
         self.assertIsNone(line.exc_info)
 
     def audit_row(self) -> dict[str, Any]:
-        self.denial_connect.assert_awaited_once()
+        self.audit_connect.assert_awaited_once()
         self.audit_connection.close.assert_awaited_once()
         partition, insert = self.audit_connection.execute.await_args_list
         query, values = insert.args
-        self.assertTrue(query.startswith(f"INSERT INTO {denial.AUDIT_LOG_TABLE} "))
-        row = dict(zip(denial.AUDIT_LOG_COLUMNS, values, strict=True))
-        self.assertEqual(partition.args, (f"SELECT {denial.AUDIT_LOG_PARTITION_FUNCTION}(%s)", (row["at"],)))
+        self.assertTrue(query.startswith(f"INSERT INTO {auditlog.AUDIT_LOG_TABLE} "))
+        row = dict(zip(auditlog.AUDIT_LOG_COLUMNS, values, strict=True))
+        self.assertEqual(partition.args, (f"SELECT {auditlog.AUDIT_LOG_PARTITION_FUNCTION}(%s)", (row["at"],)))
         self.assertIsInstance(row["detail"], Jsonb)
         row["detail"] = row["detail"].obj
+        self.assertNotIn(MESSAGE, repr(row))
         return row
 
     def turn_row(self) -> dict[str, Any]:
@@ -353,9 +359,34 @@ class TurnEndpointFixture(unittest.TestCase):
         _, _, columns, values = self.dispatch.call_args.args
         return dict(zip(columns, values, strict=True))
 
-    def assert_failed_row(self, state: str, word: str | None = None) -> dict[str, Any]:
+    def assert_research_audit(self, turn: dict[str, Any], *, sent_count: int = 0) -> dict[str, Any]:
+        row = self.audit_row()
+        self.assertEqual((row["kind"], row["chat_id"], row["release"]), (
+            turnaudit.TURN_KIND, turn["chat_id"], turn["product_version"],
+        ))
+        evidence = json.loads(turn["evidence"]) if turn["evidence"] is not None else []
+        self.assertGreaterEqual(len(evidence), sent_count)
+        self.assertEqual(row["detail"], {
+            "result": "allowed",
+            "claim": turn["source"],
+            "branch": LEGAL_BRANCH,
+            "route": "retrieve" if turn["stop_after"] == "retrieve" else "answer",
+            "outcome": turn["outcome"],
+            "failure_state": turn["failure_state"],
+            "message_id": turn["message_id"],
+            "plan_mode": turn["plan_mode"],
+            "corpus_lockfiles": json.loads(turn["corpus_lockfiles"]) if turn["corpus_lockfiles"] is not None else None,
+            "returned": [{key: hit[key] for key in ("chunk_id", "doc_id")} for hit in evidence[:sent_count]],
+            "support_level": turn["support_level"],
+            "gate_counts": None,
+            "latency_ms": json.loads(turn["timings_ms"])["total"],
+        })
+        return row
+
+    def assert_failed_row(self, state: str, word: str | None = None, *, sent_count: int = 0) -> dict[str, Any]:
         row = self.turn_row()
         self.assertEqual((row["outcome"], row["failure_state"], row["failure_word"]), ("failed", state, word))
+        self.assert_research_audit(row, sent_count=sent_count)
         return row
 
     def retrieve_session(self) -> ASGISession:
@@ -469,6 +500,9 @@ class TurnEndpoint(TurnEndpointFixture):
         self.assertEqual(body["retrieval_config_hash"], config_hash(config))
         row = self.turn_row()
         self.assertEqual(row["outcome"], "reply")
+        audit = self.assert_research_audit(row, sent_count=len(body["final_set"]))
+        self.assertIsNone(audit["user_id"])
+        self.assertEqual(audit["kb_ids"], [])
         self.assertEqual(row["retrieval_config_hash"], body["retrieval_config_hash"])
         self.assertEqual(json.loads(row["timings_ms"]), body["timings_ms"])
         self.assertEqual(json.loads(row["pool"]), body["pool"])
@@ -556,6 +590,12 @@ class TurnEndpoint(TurnEndpointFixture):
                     "by_tier": {entry["authority_tier"]: 1 for entry in expected},
                     "tokens": len(expected) * source["token_count"], "document_capped": 0, "exempt_documents": 0,
                     "budget_dropped": 0, "objects_unseated": [],
+                    "floor": config["abstention.floor"], "floor_dropped": 0, "best_under_floor": None,
+                },
+                "support": {
+                    "level": "ok", "count": len(expected), "thin_below": config["abstention.thin_below"],
+                    "floor": config["abstention.floor"], "dropped": 0, "best_under_floor": None,
+                    "question": {"kind": "law", "decided_by": "default"},
                 },
             },
         )
@@ -1043,7 +1083,9 @@ class TurnEndpoint(TurnEndpointFixture):
         )
         for reason, settings, replies in cases:
             with self.subTest(reason=reason), patch.dict(self.upstream_replies, replies):
-                self.assert_refused(self.request(settings=settings), 503, "embedder_outside_space", reason, pinned=True)
+                payload = {**RETRIEVE, "generation": self.generation} if reason == "generation" else RETRIEVE
+                response = self.request(settings=settings, payload=payload)
+                self.assert_refused(response, 503, "embedder_outside_space", reason, pinned=True)
                 timings = json.loads(self.assert_failed_row("embedder_outside_space", reason)["timings_ms"])
                 self.assertGreater(timings["record"], 0)
                 self.assertGreater(timings["embedding"], 0)
@@ -1051,6 +1093,20 @@ class TurnEndpoint(TurnEndpointFixture):
                 self.assertNotIn("controlling", timings)
                 self.assertNotIn("fusion", timings)
                 self.assertNotIn(httpx.URL(settings.qdrant_url).host, {request.url.host for request in self.requests.values()})
+
+    def test_named_generation_is_kept_in_the_reply_and_turn_row(self) -> None:
+        name, collection, space, lockfiles = self.live_rows[0]
+        response = self.request(payload={**RETRIEVE, "generation": name})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.cursor.execute.assert_awaited_once()
+        self.assertEqual(self.cursor.execute.await_args.args[1:], ((name,),))
+        self.assertEqual(response.json()["generation"], {
+            "gen_id": name, "collection": collection, "lockfiles": lockfiles, "embedding_space": space,
+        })
+        row = self.turn_row()
+        self.assertEqual((row["generation_id"], json.loads(row["corpus_lockfiles"]), row["embedding_space"]), (
+            name, lockfiles, space,
+        ))
 
     def test_missing_or_ambiguous_generation_refuses_without_a_pool(self) -> None:
         rows: tuple[LiveRow, ...] = (*self.live_rows, (
@@ -1066,16 +1122,19 @@ class TurnEndpoint(TurnEndpointFixture):
         missing = "corpus-2099-04-13"
         rows: tuple[LiveRow, ...] = ((self.generation, TURN_COLLECTION, self.settings.embed_space, [missing]),)
         court = "Eleventh Circuit"
-        response = self.request(
-            rows=rows, payload={**RETRIEVE, "message": f"A fictitious appeal in the {court}"}, private_values=(court,),
-        )
-        self.assert_refused(response, 503, "lockfile_outside_release", pinned=True)
-        self.assertEqual(response.json()["error"]["message"], "The generation's corpus lockfile is outside the release.")
-        self.assertEqual(self.requests, {})
-        row = self.assert_failed_row("lockfile_outside_release")
-        self.assertEqual(row["generation_id"], self.generation)
-        self.assertIsNone(row["provenance"])
-        self.assertIsNone(row["pool"])
+        scoped = {**RETRIEVE, "message": f"A fictitious appeal in the {court}"}
+        for body in (scoped, {**scoped, "generation": self.generation}):
+            with self.subTest(named="generation" in body):
+                response = self.request(rows=rows, private_values=(court,), payload=body)
+                self.assert_refused(response, 503, "lockfile_outside_release", pinned=True)
+                self.assertEqual(
+                    response.json()["error"]["message"], "The generation's corpus lockfile is outside the release.",
+                )
+                self.assertEqual(self.requests, {})
+                row = self.assert_failed_row("lockfile_outside_release")
+                self.assertEqual(row["generation_id"], self.generation)
+                self.assertIsNone(row["provenance"])
+                self.assertIsNone(row["pool"])
 
         response = self.request(rows=rows)
         self.assertEqual(response.status_code, 200, response.text)
@@ -1188,7 +1247,7 @@ class TurnEndpoint(TurnEndpointFixture):
                     [request.headers.get_list("Authorization") for request in self.frontend_requests], expected,
                 )
                 self.assert_no_turn_work()
-                self.denial_connect.assert_not_called()
+                self.audit_connect.assert_not_called()
 
     def test_frontend_failures_refuse_admission_before_turn_work(self) -> None:
         token = "fixture.session.unavailable"
@@ -1201,7 +1260,7 @@ class TurnEndpoint(TurnEndpointFixture):
                 self.assert_refused(response, 503, "frontend_unavailable", "admission")
                 self.assertEqual(len(self.frontend_requests), 1)
                 self.assert_no_turn_work()
-                self.denial_connect.assert_not_called()
+                self.audit_connect.assert_not_called()
 
     def test_knowledge_refusals_write_one_audit_row_before_the_response(self) -> None:
         token = "fixture.session.knowledge-refusal"
@@ -1209,7 +1268,7 @@ class TurnEndpoint(TurnEndpointFixture):
         order: list[str] = []
 
         async def execute(query: str, values: tuple[object, ...]) -> None:
-            if query.startswith(f"INSERT INTO {denial.AUDIT_LOG_TABLE} "):
+            if query.startswith(f"INSERT INTO {auditlog.AUDIT_LOG_TABLE} "):
                 await asyncio.sleep(0)
                 order.append("insert completed")
 
@@ -1255,7 +1314,7 @@ class TurnEndpoint(TurnEndpointFixture):
         for outcome in ("not_kept", "unknown"):
             with self.subTest(outcome=outcome):
                 self.frontend_replies = {SESSION_ROUTE: session_reply(token), path: httpx.Response(401)}
-                self.denial_connect.side_effect = OperationalError(token) if outcome == "not_kept" else None
+                self.audit_connect.side_effect = OperationalError(token) if outcome == "not_kept" else None
                 self.audit_connection.execute.side_effect = [None, OperationalError(token)] if outcome == "unknown" else None
                 response = self.request(payload=body, eval_caller=False, private_values=(token,))
                 _, error = self.turn_logs
@@ -1268,7 +1327,7 @@ class TurnEndpoint(TurnEndpointFixture):
                     incident_error=f"state={denial.DENIAL_KIND} reason=kb_not_readable outcome={outcome} run_id={run_id}",
                 )
                 self.assertEqual((response.status_code, response.content), (kept.status_code, kept.content))
-                self.denial_connect.assert_awaited_once()
+                self.audit_connect.assert_awaited_once()
                 if outcome == "unknown":
                     row = self.audit_row()
                     self.assertEqual(row["run_id"], run_id)
@@ -1286,15 +1345,29 @@ class TurnEndpoint(TurnEndpointFixture):
             response = self.request(
                 payload={**FULL_TURN, "session_token": token}, eval_caller=False, private_values=(token,),
             )
-        self.assertTrue(any(kind == "answer" for kind, _ in self.read_events(response)))
+        emitted = self.read_events(response)
+        self.assertTrue(any(kind == "answer" for kind, _ in emitted))
         self.connect.assert_awaited_once()
         request, = self.frontend_requests
         self.assertEqual(request.headers.get_list("Authorization"), [f"Bearer {token}"])
         row = self.turn_row()
         self.assertEqual(row["source"], "user")
+        audit = self.assert_research_audit(row, sent_count=sum(kind == "passage" for kind, _ in emitted))
+        self.assertEqual((audit["user_id"], audit["kb_ids"]), (USER_ID, []))
+        self.assertNotIn(token, repr(audit))
         self.assertNotIn(token, repr(row))
         self.assertNotIn(token, repr(response.headers))
         self.assertEqual(self.frontend_cookies, ())
+
+    def test_audit_uses_the_admitted_callers_grants_and_verified_user(self) -> None:
+        grants = frozenset({"fixture-granted-z", "fixture-granted-a"})
+        caller = Caller("eval", USER_ID, Floor(frozenset({TURN_COLLECTION}), grants))
+        with patch.object(endpoint, "admit_caller", return_value=caller):
+            response = self.request()
+        self.assertEqual(response.status_code, 200, response.text)
+        row = self.assert_research_audit(self.turn_row(), sent_count=len(response.json()["final_set"]))
+        self.assertEqual((row["user_id"], row["kb_ids"]), (caller.user_id, sorted(grants)))
+        self.assertEqual(row["detail"]["claim"], caller.kind)
 
     def test_eval_admission_without_knowledge_bases_skips_the_frontend(self) -> None:
         with patch.object(objects, "extract_objects", AsyncMock(return_value=())):
@@ -1327,13 +1400,26 @@ class TurnEndpoint(TurnEndpointFixture):
                 self.assertEqual(self.frontend_requests, [])
                 if state == "caller_not_admitted":
                     row = self.audit_row()
+                    self.assertEqual(row["kind"], denial.DENIAL_KIND)
                     self.assertIsNone(row["user_id"])
                     self.assertEqual(row["detail"], {
                         "reason": "no_session", "result": "denied",
                         "claim": "eval" if eval_caller else "user", "failures": [],
                     })
                 else:
-                    self.denial_connect.assert_not_called()
+                    self.audit_connect.assert_not_called()
+
+    def test_verified_knowledge_bases_are_refused_without_an_audit_row(self) -> None:
+        token = "fixture.session.knowledge-permitted"
+        path = KNOWLEDGE_ROUTE + KB_ID
+        self.frontend_replies = {SESSION_ROUTE: session_reply(token), path: httpx.Response(200, json={"id": KB_ID})}
+        response = self.request(
+            payload={**FULL_TURN, "session_token": token, "kb_ids": [KB_ID]}, eval_caller=False, private_values=(token,),
+        )
+        self.assert_refused(response, 501, "kb_ids_not_built", "kb_ids")
+        self.assertEqual([request.url.path for request in self.frontend_requests], [SESSION_ROUTE, path])
+        self.assert_no_turn_work()
+        self.audit_connect.assert_not_called()
 
     def test_unexpected_exception_returns_a_fixed_error_and_logs_only_the_exception_class(self) -> None:
         self.upstream_replies["/v1/embeddings"] = RuntimeError(MESSAGE)
@@ -1350,6 +1436,8 @@ class TurnEndpoint(TurnEndpointFixture):
                 self.assertEqual(response.status_code, 200)
                 row = self.turn_row()
                 self.assertEqual((row["chat_id"], row["message_id"]), (expected, message_id))
+                audit = self.assert_research_audit(row, sent_count=len(response.json()["final_set"]))
+                self.assertEqual(audit["chat_id"], expected)
 
     def test_unresolved_provenance_entry_is_projected_in_the_row(self) -> None:
         entry = {"index": 0, "type": "reporter", "resolved": "unresolved", "hits": 1}
@@ -1372,6 +1460,61 @@ class TurnEndpoint(TurnEndpointFixture):
         response = self.request()
         self.dispatch.assert_called_once()
         self.assertEqual((response.status_code, response.content), (baseline.status_code, baseline.content))
+        self.assert_research_audit(self.turn_row(), sent_count=len(response.json()["final_set"]))
+
+    def test_unconfirmed_turn_audit_leaves_one_error_and_the_same_reply(self) -> None:
+        baseline = self.request()
+        self.assertEqual(baseline.status_code, 200, baseline.text)
+        for outcome in ("not_kept", "unknown"):
+            with self.subTest(outcome=outcome):
+                self.audit_connect.side_effect = OperationalError(MESSAGE) if outcome == "not_kept" else None
+                self.audit_connection.execute.side_effect = [None, OperationalError(MESSAGE)] if outcome == "unknown" else None
+                response = self.request()
+                self.assertEqual((response.status_code, response.content), (baseline.status_code, baseline.content))
+                self.assertEqual(self.turn_row()["outcome"], "reply")
+                run_id = self.assert_turn_audit_error("reply", outcome)
+                self.audit_connect.assert_awaited_once()
+                if outcome == "unknown":
+                    self.assertEqual(self.audit_row()["run_id"], run_id)
+                else:
+                    self.audit_connection.execute.assert_not_called()
+
+    def test_unbuildable_turn_audit_leaves_one_error_and_the_same_reply(self) -> None:
+        baseline = self.request()
+        self.assertEqual(baseline.status_code, 200, baseline.text)
+        for module, function in ((turnlog, "kept_values"), (turnaudit, "build_row")):
+            with self.subTest(function=function), patch.object(module, function, side_effect=RuntimeError(MESSAGE)):
+                response = self.request()
+                self.assertEqual((response.status_code, response.content), (baseline.status_code, baseline.content))
+                self.assert_turn_audit_error("reply", "not_built")
+                self.audit_connect.assert_not_called()
+                if module is turnaudit:
+                    self.assertEqual(self.turn_row()["outcome"], "reply")
+                else:
+                    self.dispatch.assert_not_called()
+
+    def assert_turn_audit_error(self, reason: str, outcome: str) -> UUID:
+        error, = self.turn_logs
+        run_id = UUID(error.getMessage().rpartition(" run_id=")[2])
+        self.assertEqual(run_id.version, 4)
+        self.assertEqual(error.levelno, logging.ERROR)
+        self.assertIsNone(error.exc_info)
+        self.assertEqual(
+            error.getMessage(), f"state={turnaudit.TURN_KIND} reason={reason} outcome={outcome} run_id={run_id}",
+        )
+        return run_id
+
+    def test_unbuildable_audit_preserves_the_turn_exception(self) -> None:
+        failure = RuntimeError("Fictitious turn exception")
+        with (
+            patch.object(endpoint, "run_with_disconnect", side_effect=failure),
+            patch.object(turnaudit, "build_row", side_effect=ValueError("Fictitious builder exception")),
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            self.request()
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(self.turn_row()["outcome"], "disconnected")
+        self.audit_connect.assert_not_called()
 
     def test_observation_failure_leaves_the_retrieval_response_and_row_unchanged(self) -> None:
         baseline = self.request()
@@ -1437,6 +1580,7 @@ class TurnEndpoint(TurnEndpointFixture):
         asyncio.run(run())
         row = self.turn_row()
         self.assertEqual(row["outcome"], "disconnected")
+        self.assert_research_audit(row)
         timings = json.loads(row["timings_ms"])
         self.assertTrue({"record", "embedding", "lexical", "total"} <= timings.keys())
         self.assertNotIn("dense", timings)
@@ -1464,6 +1608,7 @@ class TurnEndpoint(TurnEndpointFixture):
                     # The transport has accepted the last byte. Let its send return even if the watch sees EOF.
                     with anyio.CancelScope(shield=True):
                         await delivered.wait()
+                    self.audit_connect.assert_not_called()
 
             async with session.app.router.lifespan_context(session.app):
                 await asyncio.wait_for(session.app(session.scope, receive, send), timeout=1)
@@ -1471,24 +1616,60 @@ class TurnEndpoint(TurnEndpointFixture):
             self.assertTrue(delivered.is_set())
             start, final = sent
             self.assertEqual(start["status"], 200)
-            body_timings = json.loads(final["body"])["timings_ms"]
+            body = json.loads(final["body"])
+            body_timings = body["timings_ms"]
             observed_tick, = clock_after_send
             self.assertGreater(observed_tick * 1000, body_timings["total"])
             row = self.turn_row()
             self.assertEqual(row["outcome"], "reply")
             self.assertEqual(json.loads(row["timings_ms"]), body_timings)
+            self.assert_research_audit(row, sent_count=len(body["final_set"]))
 
         asyncio.run(run())
 
-    def test_json_send_disconnect_writes_one_row_while_receive_is_pending(self) -> None:
-        self.assert_json_send_disconnect("disconnected")
+    def test_audit_connect_follows_the_last_body_send(self) -> None:
+        async def run(body: dict[str, object], outcome: str) -> None:
+            session = ASGISession(
+                self.app(self.settings), "POST", "/turn", json.dumps(body).encode(), self.headers(self.settings), "2.4",
+            )
+            order: list[tuple[str, bool]] = []
+
+            async def send(message: Message) -> None:
+                await asyncio.sleep(0)
+                order.append((message["type"], message.get("more_body", False)))
+
+            def connect(**_: object) -> Mock:
+                order.append(("audit_connect", False))
+                return self.audit_connection
+
+            self.audit_connect.side_effect = connect
+            async with session.app.router.lifespan_context(session.app):
+                await asyncio.wait_for(session.app(session.scope, session.incoming.get, send), timeout=1)
+
+            self.assertEqual(order[0], ("http.response.start", False))
+            self.assertEqual(order[-2:], [("http.response.body", False), ("audit_connect", False)])
+            streaming_bodies = order[1:-2]
+            self.assertEqual(bool(streaming_bodies), outcome == "complete")
+            self.assertTrue(all(message == ("http.response.body", True) for message in streaming_bodies))
+            self.assertEqual(self.turn_row()["outcome"], outcome)
+            self.assertEqual(self.audit_row()["detail"]["outcome"], outcome)
+
+        for body, outcome in ((FULL_TURN, "complete"), (RETRIEVE, "reply")):
+            with self.subTest(outcome=outcome):
+                asyncio.run(run(body, outcome))
+
+    def test_retrieve_send_disconnect_keeps_an_audit_row_with_no_returned_hits(self) -> None:
+        row, audit = self.assert_json_send_disconnect("disconnected")
+        self.assertEqual(row["stop_after"], "retrieve")
+        self.assertTrue(json.loads(row["evidence"]))
+        self.assertEqual(audit["detail"]["returned"], [])
 
     def test_failure_body_send_disconnect_keeps_the_known_failure(self) -> None:
         with patch.dict(self.upstream_replies, {self.dense_path: {}}):
-            row = self.assert_json_send_disconnect("failed")
+            row, _ = self.assert_json_send_disconnect("failed")
         self.assertEqual((row["failure_state"], row["failure_word"]), ("store_reply_invalid", "dense"))
 
-    def assert_json_send_disconnect(self, outcome: str) -> dict[str, Any]:
+    def assert_json_send_disconnect(self, outcome: str) -> tuple[dict[str, Any], dict[str, Any]]:
         async def run() -> None:
             session = self.retrieve_session()
             watching = asyncio.Event()
@@ -1512,7 +1693,7 @@ class TurnEndpoint(TurnEndpointFixture):
         asyncio.run(run())
         row = self.turn_row()
         self.assertEqual(row["outcome"], outcome)
-        return row
+        return row, self.assert_research_audit(row)
 
     def test_release_final_set_uses_top_scored_unpinned_hits_with_one_read_per_turn(self) -> None:
         config = effective_config(reranker=True)
@@ -1539,7 +1720,10 @@ class TurnEndpoint(TurnEndpointFixture):
         document_text = "Fictitious full opinion body beyond the candidate passages."
         source = self.passage_doc["_source"]
         private_values = (source["caption"], document_text, *texts.values())
-        scores = {chunk_id: i / (candidate_count + 1) for i, chunk_id in enumerate(chunk_ids, start=1)}
+        floor = config["abstention.floor"]
+        scores = {
+            chunk_id: floor + (1 - floor) * i / (candidate_count + 1) for i, chunk_id in enumerate(chunk_ids, start=1)
+        }
         scores_by_text = {text: scores[chunk_id] for chunk_id, text in texts.items()}
         self.upstream_replies[self.mget_path] = {"docs": [
             {**self.passage_doc, "_id": chunk_id, "_source": {
@@ -1588,6 +1772,7 @@ class TurnEndpoint(TurnEndpointFixture):
             "candidates": candidate_count, "size": limit, "pinned": 0, "controlling_seated": 0,
             "by_tier": {"persuasive": limit}, "tokens": limit * source["token_count"],
             "document_capped": 0, "exempt_documents": 0, "budget_dropped": 0, "objects_unseated": [],
+            "floor": floor, "floor_dropped": 0, "best_under_floor": None,
         })
         self.assertEqual(retrieve_row["stop_after"], "retrieve")
         self.assertEqual(json.loads(retrieve_row["evidence"]), final_set)
@@ -1613,6 +1798,227 @@ class TurnEndpoint(TurnEndpointFixture):
             (measures.COMPLETE_METRIC, measures.ANSWER_BUCKETS, timings["total"]),
         ))
 
+    def reranker_settings(self, respond: Callable[[httpx.Request], httpx.Response]) -> Settings:
+        self.rerank_transport = httpx.MockTransport(respond)
+        key_file = self.settings.embed_key_file.with_name("reranker")
+        key_file.write_text("fictitious-under-floor-rerank-key", encoding="utf-8")
+        return replace(self.settings, rerank_url="http://fixture-reranker", rerank_key_file=key_file)
+
+    def empty_retrieval_legs(self) -> None:
+        for path, fixture in ((self.dense_path, "dense-grouped.json"), ("controlling", "controlling-grouped.json")):
+            reply = turn_fixture(fixture)
+            reply["result"]["groups"] = []
+            self.upstream_replies[path] = reply
+        lexical_reply = turn_fixture("lexical-collapsed.json")
+        lexical_reply["hits"].update({"hits": [], "total": {"value": 0, "relation": "eq"}, "max_score": None})
+        self.upstream_replies[self.lexical_path] = lexical_reply
+
+    def test_retrieve_below_the_floor_keeps_the_ranked_pool_and_records_no_support(self) -> None:
+        fixture = turn_fixture("rerank-under-floor.json")
+        reranker = Mock(return_value=httpx.Response(200, json=fixture))
+        settings = self.reranker_settings(reranker)
+
+        response = self.request(settings=settings, payload=RETRIEVE)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["content-type"], "application/json")
+        reranker.assert_called_once()
+        self.assertEqual(self.engine_requests, [])
+        body = response.json()
+        self.assertEqual(body["support_level"], "none")
+        self.assertEqual(body["final_set"], [])
+        candidates = [doc["_id"] for doc in json.loads(self.requests[self.mget_path].content)["docs"]]
+        scores = [result["relevance_score"] for result in fixture["results"]]
+        self.assertCountEqual([entry["chunk_id"] for entry in body["pool"]], candidates)
+        self.assertEqual([entry["stage2_score"] for entry in body["pool"]], sorted(scores, reverse=True))
+        floor = RETRIEVAL_CONFIG["abstention.floor"]
+        self.assertLess(max(scores), floor)
+        support = {
+            "level": "none", "count": 0, "thin_below": RETRIEVAL_CONFIG["abstention.thin_below"],
+            "floor": floor, "dropped": len(scores), "best_under_floor": max(scores),
+            "question": {"kind": "law", "decided_by": "default"},
+        }
+        self.assertEqual(body["provenance"]["support"], support)
+        row = self.turn_row()
+        self.assertEqual((row["outcome"], row["support_level"]), ("reply", "none"))
+        self.assertEqual(json.loads(row["evidence"]), [])
+        self.assertEqual(json.loads(row["pool"]), body["pool"])
+        self.assertEqual(json.loads(row["provenance"])["support"], support)
+        self.assertEqual(json.loads(row["misses"]), [{
+            "kind": "abstention", "floor": floor, "best_score": max(scores),
+            "chunk_ids": [entry["chunk_id"] for entry in body["pool"]],
+        }])
+
+    def test_abstention_streams_only_retrieval_and_notice_and_keeps_the_row_pool(self) -> None:
+        fixture = turn_fixture("rerank-under-floor.json")
+        settings = self.reranker_settings(lambda _: httpx.Response(200, json=fixture))
+        source = self.passage_doc["_source"]
+        assert settings.rerank_key_file is not None
+        private_values = (source["caption"], source["text"], settings.rerank_key_file.read_text(encoding="utf-8"))
+        sent: list[Message] = []
+
+        def fail_on_engine_request(_: httpx.Request) -> httpx.Response:
+            self.fail("An abstaining turn reached the generator")
+
+        with patch.object(self, "engine_upstream", side_effect=fail_on_engine_request) as engine:
+            retrieved = self.request(settings=settings, payload=RETRIEVE, private_values=private_values)
+            response = self.request(settings=settings, payload=FULL_TURN, on_send=sent.append, private_values=private_values)
+        engine.assert_not_called()
+        self.assertEqual(retrieved.status_code, 200, retrieved.text)
+        retrieval = retrieved.json()
+        self.assertTrue(retrieval["pool"])
+        self.assertEqual(retrieval["final_set"], [])
+        self.assertEqual(retrieval["support_level"], "none")
+        emitted = self.read_events(response)
+        self.assertEqual([kind for kind, _ in emitted], ["phase", "answer"])
+        # The ranked pool stays, as an answering turn's does; only passages and the final set are empty.
+        self.assertEqual(emitted[0][1], {"stage": "retrieve", "retrieval": retrieval})
+        answer = emitted[1][1]
+        total = answer["timings_ms"]["total"]
+        self.assertGreater(total, retrieval["timings_ms"]["total"])
+        self.assertEqual(answer, {
+            "text": notice.abstention_notice((self.lockfile,), ()),
+            "end": "abstained", "timings_ms": {**retrieval["timings_ms"], "total": total},
+        })
+        self.assertEqual(sent[-1], {"type": "http.response.body", "body": b"", "more_body": False})
+
+        row = self.turn_row()
+        self.assertEqual((row["outcome"], row["support_level"]), ("abstained", "none"))
+        audit = self.assert_research_audit(row)
+        self.assertEqual((audit["detail"]["outcome"], audit["detail"]["support_level"], audit["detail"]["returned"]), ("abstained", "none", []))
+        self.assertEqual(json.loads(row["pool"]), retrieval["pool"])
+        self.assertEqual(json.loads(row["evidence"]), [])
+        self.assertEqual(json.loads(row["timings_ms"]), answer["timings_ms"])
+        self.assertEqual(json.loads(row["misses"]), [{
+            "kind": "abstention", "floor": RETRIEVAL_CONFIG["abstention.floor"],
+            "best_score": max(result["relevance_score"] for result in fixture["results"]),
+            "chunk_ids": [entry["chunk_id"] for entry in retrieval["pool"]],
+        }])
+        self.assertIsNone(row["engine_counters"])
+        self.assertIsNone(row["generator_repository"])
+
+    def test_scoped_abstention_names_the_absent_court_from_the_court_file(self) -> None:
+        self.empty_retrieval_legs()
+        typed_court = "FiRsT CiR."
+        message = f"{MESSAGE} in the {typed_court}"
+        court_file = turn_fixture("courts.json")
+        court_id = "ca1"
+        court_name = court_file["courts"][court_id]["name"]
+        self.assertNotIn(court_id, court_file["lockfiles"][self.lockfile])
+
+        response = self.request(payload={"message": message}, private_values=(message, typed_court))
+
+        (phase_kind, phase), (answer_kind, answer) = self.read_events(response)
+        self.assertEqual((phase_kind, answer_kind, answer["end"]), ("phase", "answer", "abstained"))
+        self.assertEqual(phase["retrieval"]["provenance"]["filters"]["user_stated_scope"]["out_of_corpus"], [court_id])
+        self.assertEqual(answer["text"], notice.abstention_notice((self.lockfile,), (court_name,)))
+        self.assertNotIn(court_name, repr(self.turn_row()))
+
+    def test_reporter_pin_answers_even_at_the_maximum_floor(self) -> None:
+        citation = "444 U. S. 987"  # Fictitious reporter cite.
+        exact = ExactObject("case_cite", 0, len(citation), citation)
+        self.case_extractor = Mock(return_value=((exact, "444 U.S. 987"),))
+        reply = turn_fixture("objects-msearch.json")
+        held = reply["responses"][0]
+        empty_citing = turn_fixture("objects-msearch-empty.json")["responses"][1]
+        self.upstream_replies[self.msearch_path] = {**reply, "responses": [held, empty_citing]}
+        held_chunk = held["hits"]["hits"][0]["_id"]
+        score = turn_fixture("rerank-under-floor.json")["results"][0]["relevance_score"]
+
+        def score_candidates(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"results": [
+                {"index": index, "relevance_score": score}
+                for index, _ in enumerate(json.loads(request.content)["documents"])
+            ]})
+
+        settings = self.reranker_settings(score_candidates)
+        response = self.request(settings=settings, payload={"message": citation, "overrides": {"abstention.floor": 1}})
+
+        emitted = self.read_events(response)
+        self.assertEqual(emitted[0][0], "passage")
+        self.assertEqual(emitted[0][1]["chunk_id"], held_chunk)
+        self.assertEqual((emitted[-1][0], emitted[-1][1]["end"]), ("answer", "complete"))
+        self.assertEqual(self.engine_paths(), [MODELS_ROUTE, COMPLETIONS_ROUTE])
+        row = self.turn_row()
+        self.assertEqual(row["outcome"], "complete")
+        pin, = json.loads(row["evidence"])
+        self.assertEqual((pin["chunk_id"], pin["seat"], pin["stage2_score"]), (held_chunk, "pin", score))
+        self.assertIsNone(row["misses"])
+
+    def test_abstention_send_disconnect_keeps_the_decided_outcome(self) -> None:
+        fixture = turn_fixture("rerank-under-floor.json")
+        settings = self.reranker_settings(lambda _: httpx.Response(200, json=fixture))
+
+        async def run() -> None:
+            session = ASGISession(
+                self.app(settings), "POST", "/turn", json.dumps(FULL_TURN).encode(), self.headers(settings), "2.4",
+            )
+            watching = asyncio.Event()
+            failed_sends: list[Message] = []
+
+            async def receive() -> Message:
+                if session.incoming.empty():
+                    watching.set()
+                return await session.incoming.get()
+
+            async def send(message: Message) -> None:
+                if message["type"] == "http.response.start":
+                    await watching.wait()
+                    failed_sends.append(message)
+                    raise OSError("Fictitious closed transport")
+
+            async with session.app.router.lifespan_context(session.app):
+                await asyncio.wait_for(session.app(session.scope, receive, send), timeout=1)
+
+            failed_start, = failed_sends
+            self.assertEqual(failed_start["status"], 200)
+
+        asyncio.run(run())
+        row = self.turn_row()
+        self.assertEqual((row["outcome"], row["support_level"]), ("abstained", "none"))
+
+    def test_empty_pool_abstains_with_a_scoreless_miss(self) -> None:
+        self.empty_retrieval_legs()
+        config = effective_config(reranker=False)
+        assert not isinstance(config, OverrideRefusal)
+
+        response = self.request(payload=FULL_TURN)
+
+        (phase_kind, phase), (answer_kind, answer) = self.read_events(response)
+        self.assertEqual((phase_kind, answer_kind, answer["end"]), ("phase", "answer", "abstained"))
+        self.assertEqual((phase["retrieval"]["pool"], phase["retrieval"]["final_set"]), ([], []))
+        self.assertEqual(self.engine_requests, [])
+        row = self.turn_row()
+        self.assertEqual(row["outcome"], "abstained")
+        self.assertEqual(json.loads(row["pool"]), [])
+        self.assertEqual(json.loads(row["misses"]), [{
+            "kind": "abstention", "floor": config["abstention.floor"], "best_score": None, "chunk_ids": [],
+        }])
+
+    def test_thin_turn_prompts_with_the_thin_instruction_and_keeps_the_above_floor_hit(self) -> None:
+        fixture = turn_fixture("rerank.json")
+        self.empty_retrieval_legs()
+        dense_reply = turn_fixture("dense-grouped.json")
+        dense_reply["result"]["groups"] = self.groups[:len(fixture["results"])]
+        self.upstream_replies[self.dense_path] = dense_reply
+        reranker = Mock(return_value=httpx.Response(200, json=fixture))
+
+        response = self.request(settings=self.reranker_settings(reranker), payload=FULL_TURN)
+
+        reranker.assert_called_once()
+        emitted = self.read_events(response)
+        retrieval = next(data["retrieval"] for kind, data in emitted if kind == "phase" and data["stage"] == "retrieve")
+        scores = [entry["relevance_score"] for entry in fixture["results"]]
+        self.assertEqual(retrieval["support_level"], "thin")
+        self.assertEqual([entry["stage2_score"] for entry in retrieval["pool"]], sorted(scores, reverse=True))
+        hit, = retrieval["final_set"]
+        self.assertEqual(hit["stage2_score"], max(scores))
+        self.assertEqual([data["chunk_id"] for kind, data in emitted if kind == "passage"], [hit["chunk_id"]])
+        self.assertEqual((emitted[-1][0], emitted[-1][1]["end"]), ("answer", "complete"))
+        (request,) = [request for request in self.engine_requests if request.url.path == COMPLETIONS_ROUTE]
+        system = json.loads(request.content)["messages"][0]
+        self.assertEqual(system, {"role": "system", "content": f"{TRACER_SYSTEM}\n\n{THIN_SUPPORT}"})
+
     def test_full_turn_streams_passages_phases_text_and_the_complete_answer_in_order(self) -> None:
         source = self.passage_doc["_source"]
         private_values = (source["caption"], source["text"])
@@ -1625,6 +2031,7 @@ class TurnEndpoint(TurnEndpointFixture):
 
         def observe(message: Message) -> None:
             if message["type"] == "http.response.body" and not message.get("more_body", False):
+                self.audit_connect.assert_not_called()
                 clock_after_answer.append(next(self.clock))
 
         response = self.request(payload=FULL_TURN, on_send=observe, private_values=private_values)
@@ -1697,9 +2104,12 @@ class TurnEndpoint(TurnEndpointFixture):
             ],
         })
         sampling = GENERATOR_SAMPLING[self.generator_listing["data"][0]["root"]]
-        self.assertEqual(json.loads(request.content), {
+        generation_request = json.loads(request.content)
+        self.assertEqual(retrieval_phase["support_level"], "ok")
+        self.assertEqual(generation_request["messages"][0], {"role": "system", "content": TRACER_SYSTEM})
+        self.assertEqual(generation_request, {
             "model": self.settings.engine_model,
-            "messages": messages(MESSAGE, [(source["caption"], source["text"])] * source_count),
+            "messages": messages(MESSAGE, [(source["caption"], source["text"])] * source_count, support_level="ok"),
             "max_tokens": RESEARCH_CONFIG["max_tokens"],
             **sampling.fields,
             "stream": True,
@@ -1770,6 +2180,7 @@ class TurnEndpoint(TurnEndpointFixture):
         row = self.turn_row()
         self.assertEqual((row["outcome"], row["trip_family"]), (end, body.get("family")))
         self.assertEqual(json.loads(row["timings_ms"]), body["timings_ms"])
+        self.assert_research_audit(row, sent_count=sum(kind == "passage" for kind, _ in emitted))
         return row
 
     def assert_stream_failure(
@@ -1784,7 +2195,7 @@ class TurnEndpoint(TurnEndpointFixture):
         self.assertIn(f"state={state} word={word or '-'} generation={self.generation}", line.getMessage())
         self.assertIsNone(line.exc_info)
         self.assertEqual(self.trips, [])
-        return self.assert_failed_row(state, word)
+        return self.assert_failed_row(state, word, sent_count=sum(kind == "passage" for kind, _ in emitted))
 
     def assert_trip(self, emitted: list[tuple[str, dict[str, Any]]], expected: guardrail.Trip) -> dict[str, Any]:
         self.assertEqual([kind for kind, _ in emitted if kind in {"answer", "failure"}], ["answer"])
@@ -1989,6 +2400,35 @@ class TurnEndpoint(TurnEndpointFixture):
 
         asyncio.run(run())
         self.assertEqual(self.turn_row()["outcome"], "disconnected")
+
+    def test_hang_up_during_a_passage_send_keeps_only_the_delivered_prefix(self) -> None:
+        async def run(hang_up_at: int) -> None:
+            session = ASGISession(
+                self.app(self.settings), "POST", "/turn", json.dumps(FULL_TURN).encode(), self.headers(self.settings), "2.4",
+            )
+            attempted: list[str] = []
+
+            async def send(message: Message) -> None:
+                event = message.get("body", b"")
+                if event.startswith(b"event: passage\n"):
+                    data = event.splitlines()[1].removeprefix(b"data: ")
+                    attempted.append(json.loads(data)["chunk_id"])
+                    if len(attempted) == hang_up_at:
+                        session.disconnect()
+                        await asyncio.Future()
+
+            async with session.app.router.lifespan_context(session.app):
+                await asyncio.wait_for(session.app(session.scope, session.incoming.get, send), timeout=1)
+            row = self.turn_row()
+            self.assertEqual(row["outcome"], "disconnected")
+            evidence = json.loads(row["evidence"])
+            self.assertEqual(len(attempted), hang_up_at)
+            self.assertEqual(attempted, [hit["chunk_id"] for hit in evidence[:hang_up_at]])
+            self.assert_research_audit(row, sent_count=hang_up_at - 1)
+
+        for hang_up_at in (1, 2):
+            with self.subTest(hang_up_at=hang_up_at):
+                asyncio.run(run(hang_up_at))
 
     def test_hang_up_cancels_the_stream_and_waits_for_shielded_close(self) -> None:
         async def run(spec_version: str) -> None:

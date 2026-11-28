@@ -6,7 +6,14 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import fields
 
-from gideon.turn.admission import _KB_IDS_LIMIT, TurnRequest, claim, parse, settle
+from gideon.turn.admission import (
+    _GENERATION_NAME_LIMIT,
+    _KB_IDS_LIMIT,
+    TurnRequest,
+    claim,
+    parse,
+    settle,
+)
 from gideon.turn.config import RETRIEVAL_CONFIG
 from gideon.turn.states import TurnFailure
 
@@ -40,6 +47,7 @@ class Admission(unittest.TestCase):
             "stop_after": (None, {}),
             "evidence": ("fixture-evidence", [False]),
             "overrides": (None, []),
+            "generation": (None, [], 42, "", "x" * (_GENERATION_NAME_LIMIT + 1)),
         }
         for key, invalid_values in invalid_fields.items():
             for value in invalid_values:
@@ -57,9 +65,12 @@ class Admission(unittest.TestCase):
             _request({**MESSAGE, "kb_ids": [*repeated, "fixture-extra_kb"]})
 
     def test_claim_refuses_the_first_eval_field_for_a_user(self) -> None:
-        body: dict[str, object] = {**MESSAGE, "overrides": {"fixture_unknown": True}, "evidence": [], "stop_after": ""}
+        body: dict[str, object] = {
+            **MESSAGE, "overrides": {"fixture_unknown": True}, "evidence": [], "stop_after": "",
+            "generation": "fixture-generation",
+        }
         sources = ("reader@example.invalid",)
-        for field in ("stop_after", "evidence", "overrides"):
+        for field in ("stop_after", "evidence", "overrides", "generation"):
             with self.subTest(field=field):
                 for value in ({**MESSAGE, field: body[field]}, body):
                     request = _request(value)
@@ -69,6 +80,13 @@ class Admission(unittest.TestCase):
         self.assertEqual(claim(_request(body), sources, IDENTITY), "user")
         request = _request({**body, "message_id": "fixture-message_42"})
         self.assertEqual(claim(request, sources, IDENTITY), "user")
+
+    def test_parse_keeps_a_generation_name_at_the_length_bound(self) -> None:
+        for name in ("?", "Fictitious generation".ljust(_GENERATION_NAME_LIMIT, "x")):
+            with self.subTest(length=len(name)):
+                request = _request({**MESSAGE, "generation": name})
+                self.assertEqual(request.generation, name)
+                self.assertEqual(claim(request, (IDENTITY,), IDENTITY), "eval")
 
     def test_claim_uses_a_single_matching_source_header(self) -> None:
         request = _request({**MESSAGE, "kb_ids": ["fixture-kb"]})
@@ -98,6 +116,7 @@ class Admission(unittest.TestCase):
         request = _request(MESSAGE)
         self.assertIsNone(request.stop_after)
         self.assertIsNone(request.message_id)
+        self.assertIsNone(request.generation)
         self.assertEqual(request.message, MESSAGE["message"])
         self.assertEqual(claim(request, (IDENTITY,), IDENTITY), "eval")
         self.assertEqual(settle(request, reranker=True), RETRIEVAL_CONFIG)
@@ -131,6 +150,7 @@ class Admission(unittest.TestCase):
             **MESSAGE, "history": ["Fictitious earlier question"], "kb_ids": ["fixture-kb"],
             "session_token": token, "stop_after": "retrieve", "evidence": ["fixture-evidence"],
             "overrides": {"pool_cap": 5}, "message_id": "fixture-message_42",
+            "generation": "fixture-generation",
         })
         stripped = request.without_token()
         self.assertIsNot(stripped, request)
@@ -139,7 +159,7 @@ class Admission(unittest.TestCase):
         for field in fields(request):
             with self.subTest(field=field.name):
                 value = getattr(request, field.name)
-                for rendered in (repr(request), str(request), repr(stripped)):
+                for rendered in (repr(request), str(request), repr(stripped), str(stripped)):
                     self.assertNotIn(field.name, rendered)
                     self.assertNotIn(str(value), rendered)
                 if field.name != "session_token":

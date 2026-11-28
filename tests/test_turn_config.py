@@ -23,21 +23,42 @@ class Config(unittest.TestCase):
             "boilerplate_weight", "query_plan", "rerank.stage1", "rerank.stage2", "stage2_depth",
             "rerank.semaphore", "rerank.timeout_s", "final_k",
             "hierarchy.mode", "hierarchy.weights", "final_reserved_controlling", "per_document_cap", "per_hit_chunks",
-            "context_budget_tokens",
+            "context_budget_tokens", "abstention.floor", "abstention.thin_below",
         })
+        self.assertEqual(RETRIEVAL_CONFIG["abstention.floor"], 0.5)
+        self.assertIs(type(RETRIEVAL_CONFIG["abstention.floor"]), float)
+        self.assertEqual(RETRIEVAL_CONFIG["abstention.thin_below"], 3)
+        self.assertIs(type(RETRIEVAL_CONFIG["abstention.thin_below"]), int)
         self.assertEqual(effective_config(reranker=True), RETRIEVAL_CONFIG)
         self.assertLessEqual(set(RETRIEVAL_CONFIG), set(get_args(RequestWord)))
 
-    def test_stage2_off_default_and_on_refusal_without_a_reranker(self) -> None:
-        off = effective_config(reranker=False)
-        self.assertEqual(off, {**RETRIEVAL_CONFIG, "rerank.stage2": "off"})
-        for reranker in (False, True):
-            with self.subTest(reranker=reranker):
-                self.assertEqual(effective_config({"rerank.stage2": "off"}, reranker=reranker), off)
+    def test_stage2_on_is_refused_without_a_reranker(self) -> None:
         self.assertEqual(
             effective_config({"rerank.stage2": "on"}, reranker=False),
             OverrideRefusal("rerank.stage2", "override_invalid"),
         )
+
+    def test_stage2_off_accepts_only_a_zero_floor(self) -> None:
+        key: Final = "abstention.floor"
+        expected = {**RETRIEVAL_CONFIG, "rerank.stage2": "off", key: 0.0}
+        for reranker, stage_override in (
+            (True, {"rerank.stage2": "off"}),
+            (False, {"rerank.stage2": "off"}),
+            (False, {}),
+        ):
+            with self.subTest(reranker=reranker, stage_override=stage_override):
+                implicit = effective_config(stage_override, reranker=reranker)
+                assert not isinstance(implicit, OverrideRefusal)
+                self.assertEqual(implicit, expected)
+                self.assertEqual(config_hash(implicit), config_hash(expected))
+                for zero in (0, 0.0, -0.0):
+                    explicit = effective_config({key: zero, **stage_override}, reranker=reranker)
+                    assert not isinstance(explicit, OverrideRefusal)
+                    self.assertEqual(config_hash(explicit), config_hash(implicit))
+                self.assertEqual(
+                    effective_config({key: RETRIEVAL_CONFIG[key], **stage_override}, reranker=reranker),
+                    OverrideRefusal(key, "override_invalid"),
+                )
 
     def test_hash_is_stable_across_calls_and_key_order_and_changes_with_an_override(self) -> None:
         first, second = effective_config(reranker=True), effective_config({}, reranker=True)
@@ -59,6 +80,8 @@ class Config(unittest.TestCase):
             ("final_reserved_controlling", 0 if first["final_reserved_controlling"] else 1),
             ("per_document_cap", 0 if first["per_document_cap"] else 1),
             ("context_budget_tokens", 1 if first["context_budget_tokens"] != 1 else _BUDGET_CEILING),
+            ("abstention.floor", 0.0 if first["abstention.floor"] else 1.0),
+            ("abstention.thin_below", 1 if first["abstention.thin_below"] != 1 else _HARD_CAP),
         ):
             with self.subTest(key=key):
                 changed = effective_config({key: value}, reranker=True)
@@ -72,16 +95,20 @@ class Config(unittest.TestCase):
         self.assertEqual(digest, config_hash(same))
         self.assertEqual(config_hash(RETRIEVAL_CONFIG), digest)
 
-    def test_an_equal_weight_in_either_spelling_hashes_alike(self) -> None:
-        for spellings in ((1, 1.0), (0, 0.0, -0.0)):
-            with self.subTest(spellings=spellings):
-                configs = [effective_config({"boilerplate_weight": value}, reranker=True) for value in spellings]
-                digests = {config_hash(config) for config in configs if not isinstance(config, OverrideRefusal)}
-                self.assertEqual(len(digests), 1)
+    def test_an_equal_float_override_in_each_spelling_hashes_alike(self) -> None:
+        for key in ("boilerplate_weight", "abstention.floor"):
+            for canonical, spellings in ((1.0, (1, 1.0)), (0.0, (0, 0.0, -0.0))):
+                digest = config_hash({**RETRIEVAL_CONFIG, key: canonical})
+                for value in spellings:
+                    with self.subTest(key=key, value=value):
+                        config = effective_config({key: value}, reranker=True)
+                        assert not isinstance(config, OverrideRefusal)
+                        self.assertEqual(config_hash(config), digest)
 
     def test_override_boundaries_accept_only_the_supported_values(self) -> None:
         reservation_cases = ((1, _HARD_CAP), (0, -1, _HARD_CAP + 1, True, 1.0, "1"))
         cap_cases = ((0, _HARD_CAP), (-1, _HARD_CAP + 1, True, 1.0, "1"))
+        unit_interval_cases = ((0, 0.25, 1.0), (-0.01, 1.01, False, "0", float("nan"), float("inf")))
         seats = RETRIEVAL_CONFIG["rerank.semaphore"]
         assert type(seats) is int
         per_hit = RETRIEVAL_CONFIG["per_hit_chunks"]
@@ -93,10 +120,10 @@ class Config(unittest.TestCase):
             ("reservations.controlling", *reservation_cases),
             ("rrf.k", (1, 1001), (0, -1, True, 1.0)),
             ("collapse", ("on", "off"), (True, "ON", "fixture-mode")),
-            ("boilerplate_weight", (0, 1.0), (-0.01, 1.01, False, "0", float("nan"), float("inf"))),
+            ("boilerplate_weight", *unit_interval_cases),
             ("query_plan", ("off",), ("on", False, None)),
             ("rerank.stage1", ("off",), ("on", False, None)),
-            ("rerank.stage2", ("on", "off"), (True, "ON", "fixture-mode")),
+            ("rerank.stage2", ("on",), (True, "ON", "fixture-mode")),
             ("stage2_depth", (1, _HARD_CAP), (0, -1, _HARD_CAP + 1, True, 1.0, "1")),
             ("final_k", *reservation_cases),
             ("rerank.semaphore", (seats,), (0, seats + 1, True, float(seats), str(seats))),
@@ -106,6 +133,8 @@ class Config(unittest.TestCase):
             ("per_document_cap", *cap_cases),
             ("per_hit_chunks", (per_hit,), (0, per_hit + 1, True, float(per_hit), str(per_hit))),
             ("context_budget_tokens", (1, _BUDGET_CEILING), (0, -1, _BUDGET_CEILING + 1, True, 1.0, "1")),
+            ("abstention.floor", *unit_interval_cases),
+            ("abstention.thin_below", *reservation_cases),
         )
         for key, accepted, refused in cases:
             supporting: dict[str, object] = {}

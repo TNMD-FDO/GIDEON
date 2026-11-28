@@ -193,6 +193,15 @@ def retrieval_provenance(
             "budget_tokens": config["context_budget_tokens"],
             **final_set.counts,
         },
+        "support": {
+            "level": final_set.support_level,
+            "count": len(final_set.hits),
+            "thin_below": config["abstention.thin_below"],
+            "floor": final_set.counts["floor"],
+            "dropped": final_set.counts["floor_dropped"],
+            "best_under_floor": final_set.counts["best_under_floor"],
+            "question": {"kind": "law", "decided_by": "default"},
+        },
     }
 
 
@@ -213,6 +222,7 @@ def reply_body(
         },
         "pool": [entry.to_wire() for entry in fusion.entries],
         "final_set": [hit.to_wire() for hit in final_set.hits],
+        "support_level": final_set.support_level,
         "provenance": retrieval_provenance(
             config=config, collection=generation.collection, legs=legs, fusion=fusion,
             objects=objects, object_leg=object_leg, stated_scope=stated_scope, final_set=final_set,

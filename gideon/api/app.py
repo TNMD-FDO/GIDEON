@@ -145,7 +145,7 @@ def create_app(
     rerank_transport: httpx.AsyncBaseTransport | None = None,
     frontend_transport: httpx.AsyncBaseTransport | None = None,
     record_connect: Connect | None = None,
-    denial_connect: Connect | None = None,
+    audit_connect: Connect | None = None,
     case_extractor: objects.CaseExtractor | None = None,
     turn_clock: Callable[[], float] = time.monotonic,
 ) -> Starlette:
@@ -199,7 +199,7 @@ def create_app(
         ),
         Route(
             _TURN_PATH,
-            TurnEndpoint(settings, connect=record_connect, denial_connect=denial_connect, clock=turn_clock),
+            TurnEndpoint(settings, connect=record_connect, audit_connect=audit_connect, clock=turn_clock),
             methods=["POST"],
         ),
     ]

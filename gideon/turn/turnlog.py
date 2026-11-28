@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Final, Literal, Protocol
 
 from gideon import guardrail
+from gideon.turn.finalset import SUPPORT_LEVELS, SupportLevel
 from gideon.turn.tier import AUTHORITY_TIERS
 
 TURN_LOG_TABLE: Final[str] = "turn_log"
@@ -41,11 +42,15 @@ TURN_LOG_COLUMNS: Final[tuple[str, ...]] = (
     "gate_report",
     "misses",
 )
+_JSON_COLUMNS: Final = frozenset({
+    "corpus_lockfiles", "overrides", "timings_ms", "provenance", "out_of_corpus_objects",
+    "pool", "evidence", "engine_counters", "gate_report", "misses",
+})
 # Copy of evaluation/evalset.py across the service's mounted-source boundary.
 EVAL_SET_VERSION: Final[str] = "eval-v1"
 _PRODUCT_INITIALIZER: Final[Path] = Path(__file__).parent.parent / "__init__.py"
 
-Outcome = Literal["reply", "complete", "truncated", "tripped", "failed", "disconnected"]
+Outcome = Literal["reply", "complete", "truncated", "tripped", "abstained", "failed", "disconnected"]
 
 
 class _EvidenceHit(Protocol):
@@ -91,6 +96,15 @@ class AttemptCounters:
     reasoning_tokens: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class AbstentionMiss:
+    """The floor and the scored candidates it excluded from an unsupported turn."""
+
+    floor: float
+    best_score: float | None
+    chunk_ids: tuple[str, ...]
+
+
 @dataclass(repr=False, slots=True)
 class TurnLog:
     """Accumulate the admitted request's validated facts as its stages finish."""
@@ -115,6 +129,9 @@ class TurnLog:
     failure_state: StrEnum | None = None
     failure_word: str | None = None
     trip_family: str | None = None
+    support_level: SupportLevel | None = None
+    miss: AbstentionMiss | None = None
+    sent_count: int = 0
 
 
 def product_version() -> str:
@@ -215,53 +232,72 @@ def _json_column(value: object) -> str | None:
     return None if value is None else json.dumps(value, separators=(",", ":"), allow_nan=False)
 
 
-def record_turn(turn: TurnLog, *, elapsed_ms: Callable[[], float]) -> None:
-    """Dispatch the row without affecting the turn's response."""
+def _misses(miss: AbstentionMiss | None) -> list[dict[str, object]] | None:
+    if miss is None:
+        return None
+    return [{
+        "kind": "abstention",
+        "floor": _stage2_score(miss.floor),
+        "best_score": _stage2_score(miss.best_score),
+        "chunk_ids": [
+            identifier for chunk_id in miss.chunk_ids if (identifier := guardrail.bounded_id(chunk_id)) is not None
+        ],
+    }]
 
+
+def kept_values(turn: TurnLog, *, elapsed_ms: Callable[[], float]) -> dict[str, object]:
+    """Project the turn's facts by column name before serialization."""
+
+    outcome = turn.outcome or "disconnected"
+    timings = dict(turn.timings_ms)
+    if outcome in ("failed", "disconnected"):
+        timings["total"] = elapsed_ms()
+
+    provenance = dict(turn.provenance) if turn.provenance is not None else None
+    objects = _out_of_corpus(provenance.pop("out_of_corpus_objects", None)) if provenance is not None else None
+    return {
+        "chat_id": guardrail.bounded_id(turn.chat_id),
+        "message_id": guardrail.bounded_id(turn.message_id),
+        "source": turn.source if turn.source in guardrail.SOURCE_VOCABULARY else guardrail.USER_SOURCE,
+        "stop_after": turn.stop_after,
+        "outcome": outcome,
+        "failure_state": turn.failure_state.value if outcome == "failed" and turn.failure_state is not None else None,
+        "failure_word": turn.failure_word if outcome == "failed" else None,
+        "trip_family": turn.trip_family if outcome == "tripped" and turn.trip_family in guardrail.REFUSAL_BY_FAMILY else None,
+        "product_version": product_version(),
+        "eval_set_version": EVAL_SET_VERSION,
+        "corpus_lockfiles": list(turn.corpus_lockfiles) if turn.corpus_lockfiles is not None else None,
+        "generation_id": turn.generation_id,
+        "embedding_space": turn.embedding_space,
+        "generator_repository": turn.generator_repository,
+        "retrieval_config_hash": turn.retrieval_config_hash,
+        "overrides": turn.overrides,
+        "plan_mode": turn.plan_mode,
+        "timings_ms": timings,
+        "provenance": provenance,
+        "out_of_corpus_objects": objects,
+        "pool": [_pool_entry(entry) for entry in turn.pool] if turn.pool is not None else None,
+        "evidence": [_evidence_entry(hit) for hit in turn.evidence] if turn.evidence is not None else None,
+        "engine_counters": [_attempt_entry(attempt) for attempt in turn.engine_counters] or None,
+        "support_level": turn.support_level if turn.support_level in SUPPORT_LEVELS else None,
+        "gate_report": None,
+        "misses": _misses(turn.miss),
+    }
+
+
+def record_turn(turn: TurnLog, *, elapsed_ms: Callable[[], float]) -> dict[str, object] | None:
+    """Dispatch the row silently and return the kept values if projection succeeded."""
+
+    values: dict[str, object] | None = None
     try:
-        outcome = turn.outcome or "disconnected"
-        timings = dict(turn.timings_ms)
-        if outcome in ("failed", "disconnected"):
-            timings["total"] = elapsed_ms()
-
-        provenance = dict(turn.provenance) if turn.provenance is not None else None
-        objects = _out_of_corpus(provenance.pop("out_of_corpus_objects", None)) if provenance is not None else None
-        pool = [_pool_entry(entry) for entry in turn.pool] if turn.pool is not None else None
-        evidence = [_evidence_entry(hit) for hit in turn.evidence] if turn.evidence is not None else None
-        counters = [_attempt_entry(attempt) for attempt in turn.engine_counters] or None
-
+        values = kept_values(turn, elapsed_ms=elapsed_ms)
+        bound = tuple(
+            _json_column(values[column]) if column in _JSON_COLUMNS else values[column]
+            for column in TURN_LOG_COLUMNS
+        )
         guardrail.dispatch_event_row(
-            TURN_LOG_TABLE,
-            TURN_LOG_PARTITION_FUNCTION,
-            TURN_LOG_COLUMNS,
-            (
-                guardrail.bounded_id(turn.chat_id),
-                guardrail.bounded_id(turn.message_id),
-                turn.source if turn.source in guardrail.SOURCE_VOCABULARY else guardrail.USER_SOURCE,
-                turn.stop_after,
-                outcome,
-                turn.failure_state.value if outcome == "failed" and turn.failure_state is not None else None,
-                turn.failure_word if outcome == "failed" else None,
-                turn.trip_family if outcome == "tripped" and turn.trip_family in guardrail.REFUSAL_BY_FAMILY else None,
-                product_version(),
-                EVAL_SET_VERSION,
-                _json_column(list(turn.corpus_lockfiles)) if turn.corpus_lockfiles is not None else None,
-                turn.generation_id,
-                turn.embedding_space,
-                turn.generator_repository,
-                turn.retrieval_config_hash,
-                _json_column(turn.overrides),
-                turn.plan_mode,
-                _json_column(timings),
-                _json_column(provenance),
-                _json_column(objects),
-                _json_column(pool),
-                _json_column(evidence),
-                _json_column(counters),
-                None,  # support_level
-                None,  # gate_report
-                None,  # misses
-            ),
+            TURN_LOG_TABLE, TURN_LOG_PARTITION_FUNCTION, TURN_LOG_COLUMNS, bound,
         )
     except Exception:  # noqa: BLE001 - recording cannot affect the response.
-        return
+        pass
+    return values

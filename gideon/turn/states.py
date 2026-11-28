@@ -20,6 +20,7 @@ class State(StrEnum):
     KB_IDS_NOT_BUILT = "kb_ids_not_built"
     NO_LIVE_GENERATION = "no_live_generation"
     AMBIGUOUS_GENERATION = "ambiguous_generation"
+    GENERATION_NOT_READABLE = "generation_not_readable"
     RECORD_UNAVAILABLE = "record_unavailable"
     LOCKFILE_OUTSIDE_RELEASE = "lockfile_outside_release"
     EXTRACTION_UNAVAILABLE = "extraction_unavailable"
@@ -45,12 +46,12 @@ StageWord = Literal["admission", "record", "extraction", "embedding", "fusion", 
 LegWord = Literal["dense", "lexical", "objects", "controlling"]
 ReasonWord = Literal["generation", "repository", "width", "listing"]
 RequestWord = Literal[
-    "message", "message_id", "history", "kb_ids", "session_token", "stop_after", "evidence", "overrides",
+    "message", "message_id", "history", "kb_ids", "session_token", "stop_after", "evidence", "overrides", "generation",
     "leg_limit", "pool_cap", "reservations.exact_object", "reservations.controlling",
     "rrf.k", "collapse", "boilerplate_weight", "query_plan",
     "rerank.stage1", "rerank.stage2", "stage2_depth", "rerank.semaphore", "rerank.timeout_s", "final_k",
     "hierarchy.mode", "hierarchy.weights", "final_reserved_controlling", "per_document_cap", "per_hit_chunks",
-    "context_budget_tokens",
+    "context_budget_tokens", "abstention.floor", "abstention.thin_below",
 ]
 type FailureWord = StageWord | LegWord | ReasonWord | RequestWord
 
@@ -68,6 +69,7 @@ _ERRORS: Final[dict[State, tuple[HTTPStatus, str]]] = {
     State.KB_IDS_NOT_BUILT: (HTTPStatus.NOT_IMPLEMENTED, "Knowledge-base retrieval is unavailable."),
     State.NO_LIVE_GENERATION: (HTTPStatus.SERVICE_UNAVAILABLE, "The collection has no live generation."),
     State.AMBIGUOUS_GENERATION: (HTTPStatus.SERVICE_UNAVAILABLE, "The collection has multiple live generations."),
+    State.GENERATION_NOT_READABLE: (HTTPStatus.CONFLICT, "The named generation is not built or live."),
     State.RECORD_UNAVAILABLE: (HTTPStatus.SERVICE_UNAVAILABLE, "The generation record is unavailable."),
     State.LOCKFILE_OUTSIDE_RELEASE: (HTTPStatus.SERVICE_UNAVAILABLE, "The generation's corpus lockfile is outside the release."),
     State.EXTRACTION_UNAVAILABLE: (HTTPStatus.SERVICE_UNAVAILABLE, "Exact-object extraction is unavailable."),

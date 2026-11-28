@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from typing import Literal, Protocol, overload
 
 EventKind = Literal["passage", "phase", "text", "answer", "failure"]
-EndWord = Literal["complete", "truncated", "tripped"]
+EndWord = Literal["complete", "truncated", "tripped", "abstained"]
 
 
 class _FailureBody(Protocol):

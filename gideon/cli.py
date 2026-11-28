@@ -82,7 +82,6 @@ def start_screen(tree_root: Path | None = None) -> str:
 _LANDING: Final = {
     "host gpu": "the escape hatch, pulled only on eval evidence of reranker latency during bulk embedding",
     "registry gc": "in the recorded command surface, no slice scheduled",
-    "audit query": "in the recorded command surface, no slice scheduled",
 }
 
 
@@ -523,7 +522,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run.add_argument(
         "--generation",
         metavar="NAME",
-        help="index generation to score. With /turn, NAME must be the selected stack's live generation",
+        help="index generation to score. With /turn, NAME is a built or live generation of the selected stack, sent by name",
     )
     eval_run.set_defaults(handler=_run_eval, command_path="eval run")
     eval_reference = eval_sub.add_parser(
@@ -644,15 +643,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     audit = commands.add_parser("audit", help="the append-only audit log")
     audit_sub = audit.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
-    query = _stub_parser(
-        audit_sub, "query", "audit query", "query audit rows by kb, user, or chat"
+    query = audit_sub.add_parser(
+        "query",
+        help="read audit rows by knowledge-base, user, or chat ID",
+        description="Read audit rows that match all supplied selectors. Supply at least one of --kb, --user, or --chat.",
     )
     query.add_argument("--kb", metavar="<id>", help="knowledge-base id")
-    query.add_argument("--user", metavar="<id>", help="OWUI user id")
+    query.add_argument("--user", metavar="<id>", help="Open WebUI user id")
     query.add_argument("--chat", metavar="<id>", help="chat id")
-    query.add_argument("--since", metavar="<ts>", help="start of the window")
-    query.add_argument("--until", metavar="<ts>", help="end of the window")
-    query.add_argument("--json", action="store_true", help="machine-readable output")
+    query.add_argument(
+        "--since", metavar="<date or minute>",
+        help="inclusive start in office time (YYYY-MM-DD or YYYY-MM-DD HH:MM)",
+    )
+    query.add_argument(
+        "--until", metavar="<date or minute>",
+        help="exclusive end in office time (YYYY-MM-DD or YYYY-MM-DD HH:MM). A date includes its whole day.",
+    )
+    query.add_argument("--json", action="store_true", help="print the full rows as a JSON array")
+    query.set_defaults(handler=host_cli.run_audit_query, command_path="audit query")
 
     retention = commands.add_parser("retention", help="retention sweeps")
     retention_sub = retention.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)

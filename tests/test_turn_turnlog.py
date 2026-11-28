@@ -8,13 +8,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import get_args
-from unittest.mock import patch
+from typing import cast, get_args
+from unittest.mock import Mock, patch
 
 from gideon import __version__, guardrail
 from gideon.evaluation import evalset
 from gideon.turn import turnlog
-from gideon.turn.finalset import FinalHit
+from gideon.turn.finalset import SUPPORT_LEVELS, FinalHit, SupportLevel
 
 ROOT = Path(__file__).resolve().parent.parent
 MIGRATION = ROOT / "migrations/0034_turn_log.sql"
@@ -38,7 +38,11 @@ class TurnLog(unittest.TestCase):
         self.assertEqual((id_column, at_column), ("id", "at"))
         self.assertEqual(turnlog.TURN_LOG_COLUMNS, tuple(columns))
 
-        turnlog.record_turn(self.turn, elapsed_ms=lambda: 17.0)
+        self.assertEqual(self.turn.sent_count, 0)
+        self.turn.sent_count = 2
+        kept = turnlog.record_turn(self.turn, elapsed_ms=lambda: 17.0)
+        assert kept is not None
+        self.assertEqual(tuple(kept), turnlog.TURN_LOG_COLUMNS)
         self.dispatch.assert_called_once()
         table, function, names, values = self.dispatch.call_args.args
         self.assertEqual((table, function, names), (ddl[1], partition[1], tuple(columns)))
@@ -79,7 +83,8 @@ class TurnLog(unittest.TestCase):
             turnlog.AttemptCounters(False, SENTINEL, -1, 4),
         ]
 
-        turnlog.record_turn(self.turn, elapsed_ms=lambda: 17.0)
+        kept = turnlog.record_turn(self.turn, elapsed_ms=lambda: 17.0)
+        assert kept is not None
         self.dispatch.assert_called_once()
         _, _, columns, values = self.dispatch.call_args.args
         row = dict(zip(columns, values, strict=True))
@@ -99,6 +104,9 @@ class TurnLog(unittest.TestCase):
                     "reserved": None, "controlling_rank": None, "rank": 1, "stage2_score": None},
         ])
         self.assertEqual(json.loads(row["evidence"]), [hit.to_wire(), dict.fromkeys(hit.to_wire())])
+        for column in ("provenance", "out_of_corpus_objects", "pool", "evidence", "engine_counters"):
+            with self.subTest(column=column):
+                self.assertEqual(kept[column], json.loads(row[column]))
         self.assertEqual(json.loads(row["engine_counters"]), [
             {"thinking": True, "finish_reason": "length", "prompt_tokens": 12, "completion_tokens": 7, "reasoning_tokens": 3},
             {"thinking": False, "finish_reason": None, "prompt_tokens": None, "completion_tokens": 4, "reasoning_tokens": None},
@@ -135,24 +143,77 @@ class TurnLog(unittest.TestCase):
         row = dict(zip(columns, values_written, strict=True))
         self.assertEqual([entry["controlling_rank"] for entry in json.loads(row["pool"])], [None] * (len(values) - 1) + [2])
 
+    def test_support_level_is_held_to_the_vocabulary(self) -> None:
+        for level in (*SUPPORT_LEVELS, None, SENTINEL):
+            with self.subTest(level=level):
+                self.dispatch.reset_mock()
+                self.turn.support_level = cast(SupportLevel | None, level)
+                turnlog.record_turn(self.turn, elapsed_ms=lambda: 17.0)
+                self.dispatch.assert_called_once()
+                _, _, columns, values = self.dispatch.call_args.args
+                row = dict(zip(columns, values, strict=True))
+                self.assertEqual(row["support_level"], None if level == SENTINEL else level)
+                self.assertIsNone(row["misses"])
+
+    def test_abstention_miss_writes_only_unit_interval_scores_and_bounded_ids(self) -> None:
+        ids = ("fixture-chunk-z", "fixture-chunk-a")
+        cases = (
+            (turnlog.AbstentionMiss(0.75, 0.25, ids), 0.75, 0.25, ids),
+            (turnlog.AbstentionMiss(1.1, -0.1, (ids[0], SENTINEL, ids[1])), None, None, ids),
+            (turnlog.AbstentionMiss(0.0, None, ()), 0.0, None, ()),
+        )
+        for miss, floor, best_score, chunk_ids in cases:
+            with self.subTest(miss=miss):
+                self.dispatch.reset_mock()
+                self.turn.miss = miss
+                turnlog.record_turn(self.turn, elapsed_ms=lambda: 17.0)
+                self.dispatch.assert_called_once()
+                _, _, columns, values = self.dispatch.call_args.args
+                row = dict(zip(columns, values, strict=True))
+                self.assertEqual(json.loads(row["misses"]), [{
+                    "kind": "abstention", "floor": floor, "best_score": best_score, "chunk_ids": list(chunk_ids),
+                }])
+                self.assertNotIn(SENTINEL, repr(self.dispatch.call_args.args))
+
     def test_outcome_vocabulary_and_unset_outcome(self) -> None:
-        self.assertEqual(set(get_args(turnlog.Outcome)), {"reply", "complete", "truncated", "tripped", "failed", "disconnected"})
-        turnlog.record_turn(self.turn, elapsed_ms=lambda: 17.0)
-        self.dispatch.assert_called_once()
-        _, _, columns, values = self.dispatch.call_args.args
-        row = dict(zip(columns, values, strict=True))
-        self.assertEqual(row["outcome"], "disconnected")
-        self.assertEqual(json.loads(row["timings_ms"]), {"total": 17.0})
+        self.assertEqual(set(get_args(turnlog.Outcome)), {
+            "reply", "complete", "truncated", "tripped", "abstained", "failed", "disconnected",
+        })
+        cases: tuple[tuple[turnlog.Outcome | None, turnlog.Outcome], ...] = (
+            (None, "disconnected"), ("failed", "failed"), ("reply", "reply"),
+        )
+        for outcome, expected in cases:
+            with self.subTest(outcome=outcome):
+                self.turn.outcome = outcome
+                self.turn.timings_ms = {"total": 12.0}
+                elapsed_ms = Mock(return_value=17.0)
+                self.dispatch.reset_mock()
+                kept = turnlog.record_turn(self.turn, elapsed_ms=elapsed_ms)
+                assert kept is not None
+                self.dispatch.assert_called_once()
+                _, _, columns, values = self.dispatch.call_args.args
+                row = dict(zip(columns, values, strict=True))
+                self.assertEqual(row["outcome"], expected)
+                timings = {"total": 12.0 if outcome == "reply" else 17.0}
+                self.assertEqual(kept["timings_ms"], timings)
+                self.assertEqual(json.loads(row["timings_ms"]), timings)
+                self.assertEqual(self.turn.timings_ms, {"total": 12.0})
+                if outcome == "reply":
+                    elapsed_ms.assert_not_called()
+                else:
+                    elapsed_ms.assert_called_once_with()
 
     def test_builder_failure_is_silent_and_dispatches_nothing(self) -> None:
         with patch.object(turnlog, "product_version", side_effect=RuntimeError(SENTINEL)):
-            turnlog.record_turn(self.turn, elapsed_ms=lambda: 17.0)
+            self.assertIsNone(turnlog.record_turn(self.turn, elapsed_ms=lambda: 17.0))
         self.dispatch.assert_not_called()
 
     def test_dispatch_failure_is_silent(self) -> None:
         self.dispatch.side_effect = RuntimeError(SENTINEL)
-        turnlog.record_turn(self.turn, elapsed_ms=lambda: 17.0)
+        kept = turnlog.record_turn(self.turn, elapsed_ms=lambda: 17.0)
         self.dispatch.assert_called_once()
+        assert kept is not None
+        self.assertEqual(tuple(kept), turnlog.TURN_LOG_COLUMNS)
 
 
 class Versions(unittest.TestCase):
@@ -179,7 +240,7 @@ class Versions(unittest.TestCase):
 
 
 class Imports(unittest.TestCase):
-    def test_module_imports_only_standard_library_guardrail_and_tier_vocabulary(self) -> None:
+    def test_module_imports_only_standard_library_guardrail_and_turn_vocabularies(self) -> None:
         path = ROOT / "gideon/turn/turnlog.py"
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
@@ -196,5 +257,8 @@ class Imports(unittest.TestCase):
                     self.assertTrue(
                         name.split(".")[0] in sys.stdlib_module_names
                         or name == "gideon.guardrail" or name.startswith("gideon.guardrail.")
-                        or name == "gideon.turn.tier.AUTHORITY_TIERS",
+                        or name in {
+                            "gideon.turn.finalset.SUPPORT_LEVELS", "gideon.turn.finalset.SupportLevel",
+                            "gideon.turn.tier.AUTHORITY_TIERS",
+                        },
                     )

@@ -1087,6 +1087,7 @@ class ResearchPreparation(unittest.TestCase):
                 context = cast(RunContext, runner.call_args.args[2])
                 assert context.generation is not None
                 self.assertEqual(context.generation.name, generation["gen_id"])
+                self.assertIsNone(context.turn_generation)
                 self.assertEqual(context.expected_config_hash, expected_hash)
                 self.assertEqual(context.served_model_name, target.served_model_name)
                 self.assertEqual(context.judge_prompt_id, spec.judge_prompt)
@@ -1121,33 +1122,31 @@ class ResearchPreparation(unittest.TestCase):
                 context, = contexts
                 self.assertEqual(context.expected_config_hash, expected_hash)
 
-    def test_built_generation_refusal_names_promotion_and_a_ranked_retry_on_the_same_stack(self) -> None:
+    def test_named_built_generation_reaches_research_on_the_selected_stack(self) -> None:
         _copy_sibling_artifacts(self.checkout)
         for stack_name, row in (
             (PRODUCTION_STACK, _generation_row(state="built")),
             (CI_STACK, _sibling_row(self.checkout)),
         ):
-            host = EvalHost()
-            host.generation_output = json.dumps(row) + "\n"
             name = row["gen_id"]
-            with (
-                self.subTest(stack=stack_name),
-                patch.object(command.research_door, "probe") as probe,
-                patch.object(command.stacks.secrets, "select_directory"),
-            ):
-                flags = ("--stack", CI_STACK) if stack_name == CI_STACK else ()
-                code, stdout, stderr = self.run_judgments(host, *flags, "--generation", name)
-                probe.assert_not_called()
-                self.assertEqual((code, stderr), (1, ""), stdout)
-                self.assertIn(f"generation {name} is built and /turn requires a live generation", stdout)
-                self.assertIn(report.command(f"index promote {name}"), stdout)
-                stack_flag = f" --stack {CI_STACK}" if flags else ""
-                self.assertIn(report.command(
-                    f"eval run --slice judgments --ranked <file>{stack_flag} --generation {name}"
-                ), stdout)
-                self.assertEqual([line.split(":", 1)[0] for line in stdout.splitlines()], ["load", "preconditions"])
-                self.assertEqual(host.lock_records, [])
-                self.assertFalse(any(argv[0] == "git" for argv, _ in host.calls))
+            for surfaces in (_ENGINE_RESEARCH_SURFACES, _ENGINE_RESEARCH_SURFACES - {CallSurface.ENGINE}):
+                with self.subTest(stack=stack_name, surfaces=surfaces):
+                    host = EvalHost()
+                    probe = Mock(return_value=None)
+                    (code, stdout, stderr), contexts, _ = _invoke_planted(
+                        host, self.checkout, self.checkout / "fictitious-ranked.json", surfaces,
+                        stack_name=stack_name, generation_name=name,
+                        generation_reply=json.dumps(row) + "\n", research_probe=probe,
+                    )
+                    self.assertEqual((code, stderr), (0, ""), stdout)
+                    context, = contexts
+                    self.assertEqual(context.turn_generation, name)
+                    probe.assert_called_once_with(host, context.turns_dir, sibling=stack_name == CI_STACK)
+                    preconditions, = (line for line in stdout.splitlines() if line.startswith("preconditions: ok"))
+                    self.assertIn(f"generation {name} ({row['corpus_lockfile']}, built), named to /turn", preconditions)
+                    write, = (sql for _, sql in host.calls if sql is not None and "INSERT INTO eval_runs" in sql)
+                    binding = next(line for line in write.splitlines() if line.startswith("\\set generation_id "))
+                    self.assertEqual(read_psql_set(binding, "generation_id"), name)
 
     def test_no_gpu_refuses_after_generation_resolution_and_before_the_probe(self) -> None:
         host = EvalHost()
@@ -1187,20 +1186,34 @@ class ResearchPreparation(unittest.TestCase):
                 self.assertIn("checkout's retrieval whitelist", stdout)
 
     def test_retries_keep_the_baseline_for_research_and_drop_it_for_a_ranked_file(self) -> None:
+        _copy_sibling_artifacts(self.checkout)
         host = EvalHost()
-        row = _generation_row(state="built")
+        row = _sibling_row(self.checkout)
         name = row["gen_id"]
         host.generation_output = json.dumps(row) + "\n"
-        flags = ("--baseline", "off", "--generation", name)
-        code, stdout, stderr = self.run_judgments(host, *flags)
+        flags = ("--stack", CI_STACK, "--baseline", "off")
+        with (
+            patch.object(command.research_door, "probe") as probe,
+            patch.object(command.stacks.secrets, "select_directory"),
+        ):
+            code, stdout, stderr = self.run_judgments(host, *flags)
+        probe.assert_not_called()
         self.assertEqual((code, stderr), (1, ""), stdout)
-        self.assertIn(report.command(f"eval run --slice judgments --ranked <file> --generation {name}"), stdout)
+        self.assertIn(f"generation {name} is built and /turn requires a live generation", stdout)
+        self.assertIn(report.command(f"index promote {name}"), stdout)
+        self.assertIn(report.command(f"eval run --slice judgments --ranked <file> --stack {CI_STACK}"), stdout)
         self.assertNotIn("--baseline", stdout)
+        self.assertNotIn("--generation", stdout)
+        self.assertEqual([line.split(":", 1)[0] for line in stdout.splitlines()], ["load", "preconditions"])
+        self.assertEqual(host.lock_records, [])
+        self.assertFalse(any(argv[0] == "git" for argv, _ in host.calls))
 
         host.generation_code = 23
-        code, stdout, stderr = self.run_judgments(host, *flags)
+        with patch.object(command.stacks.secrets, "select_directory"):
+            code, stdout, stderr = self.run_judgments(host, *flags, "--generation", name)
         self.assertEqual((code, stderr), (1, ""), stdout)
-        self.assertIn(report.command(f"eval run --slice judgments --baseline off --generation {name}") + " again.", stdout)
+        retry = report.command(f"eval run --slice judgments --baseline off --stack {CI_STACK} --generation {name}")
+        self.assertIn(retry + " again.", stdout)
 
     def test_engine_checks_research_under_the_lock_after_target_and_generation(self) -> None:
         host = EvalHost()
@@ -1249,6 +1262,7 @@ class ResearchPreparation(unittest.TestCase):
         self.assertEqual(checks, ["engine marker", "Research marker", "config hash", "Research probe"])
         self.assertEqual(len(contexts), 1)
         self.assertEqual(contexts[0].expected_config_hash, shipped_hash)
+        self.assertEqual(contexts[0].turn_generation, generation["gen_id"])
         self.assertTrue(any(sql == "SELECT 1;\n" for _, sql in host.calls))
         self.assertEqual(host.locks, {})
 

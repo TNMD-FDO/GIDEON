@@ -158,7 +158,7 @@ Before a decision weekend's run starts, silence `Nightly run overdue` for the pl
 
 - Prometheus keeps one year, set by `--storage.tsdb.retention.time=1y` and visible at `http://127.0.0.1:9090/api/v1/status/runtimeinfo` on the box.
 - journald keeps container logs for 90 days or 50 GB, as configured in `/etc/systemd/journald.conf.d/gideon.conf`. Read the usage with `journalctl --disk-usage`; `journalctl CONTAINER_NAME=gideon-grafana-1` reads one service across recreations.
-- Rows live a year in `audit_log`'s monthly partitions.
+- Rows live a year in `audit_log`'s monthly partitions. Each admitted Research turn and each conflicts-wall denial is a row of ids, never text. Read a knowledge base's, a person's, or a chat's rows with `gideon audit query --kb <id>`, `--user <id>`, or `--chat <id>`; `--since` and `--until` take a date or `YYYY-MM-DD HH:MM` in office time, a date-only `--until` taking its whole day, and `--json` prints the rows whole.
 - Chats idle past the site's `retention.chats` (default 90 days from last activity, archived and pinned chats included), the uploads they name, and the feedback rows past the same interval or left on a swept chat are deleted nightly at 02:00. Read the run's counts with `journalctl -u gideon-retention-sweep.service`; its `retention_sweep` and `chat_swept` rows are in `audit_log`.
 - No search-query text reaches a log since `v0.1.35`.
 

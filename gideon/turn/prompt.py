@@ -12,16 +12,19 @@ from gideon.turn.tier import AuthorityTier
 TRACER_SYSTEM: Final = "Use only the numbered passages below as sources for your answer, without relying on memory."
 
 
-def messages(question: str, passages: Sequence[tuple[str, str]]) -> list[dict[str, str]]:
+def messages(question: str, passages: Sequence[tuple[str, str]], *, support_level: str) -> list[dict[str, str]]:
     """Place the ordered (caption, text) pairs before the question in one user message."""
 
+    if support_level not in ("ok", "thin"):
+        raise ValueError("unsupported support level for the tracer prompt")
+    parts = (TRACER_SYSTEM, THIN_SUPPORT) if support_level == "thin" else (TRACER_SYSTEM,)
     blocks = [
         f"[{number}] {caption}\n{text}" if caption else f"[{number}] {text}"
         for number, (caption, text) in enumerate(passages, start=1)
     ]
     blocks.append(f"Question: {question}")
     return [
-        {"role": "system", "content": TRACER_SYSTEM},
+        {"role": "system", "content": "\n\n".join(parts)},
         {"role": "user", "content": "\n\n".join(blocks)},
     ]
 

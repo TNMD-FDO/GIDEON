@@ -62,7 +62,7 @@ def _rank_turns(
         context.checkpoint()
         reply = research_door.send(
             context.host, context.turns_dir, cast(str, eval_set.cases_by_id[case_id]["question"]),
-            context.turn_overrides,
+            context.turn_overrides, generation=context.turn_generation,
         )
         if isinstance(reply, research_door.Failure):
             failure: dict[str, JSONValue] = {"problem": reply.code}

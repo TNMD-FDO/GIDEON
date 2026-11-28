@@ -21,6 +21,7 @@ from gideon.host.report import Problem, Timeout
 from gideon.host.staging import DIGEST_PATTERN, LABEL_PATTERN
 from gideon.host.sysio import Host, PathLike
 from gideon.turn import events
+from gideon.turn.finalset import SUPPORT_LEVELS, SupportLevel
 from gideon.turn.states import State
 
 TURN_PATH: Final = "/turn"
@@ -39,13 +40,14 @@ _END_WORDS: Final = get_args(events.EndWord)
 
 @dataclass(frozen=True, slots=True)
 class Reply:
-    """The checked generation, configuration, ordered chunk ids, and total milliseconds."""
+    """The checked generation, configuration, ordered chunk ids, support, and total milliseconds."""
 
     generation_id: str
     lockfiles: tuple[str, ...]
     config_hash: str
     chunk_ids: tuple[str, ...]
     latency_ms: float
+    support_level: SupportLevel
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,10 +76,13 @@ class Failure:
 
 def _retrieve(
     io: Host, rendered_dir: PathLike, message: str, overrides: Mapping[str, object] | None,
+    *, generation: str | None = None,
 ) -> door.DoorReply:
     body: dict[str, object] = {"message": message, "stop_after": "retrieve"}
     if overrides:
         body["overrides"] = dict(overrides)
+    if generation is not None:
+        body["generation"] = generation
     return door.request(
         io, rendered_dir, url=f"http://{API_SERVICE_NAME}:{ENGINE_PORT}{TURN_PATH}",
         body=body, max_time=TURN_TIMEOUT_SECONDS, keep_failure_detail=True,
@@ -135,19 +140,21 @@ def _parse_reply(body: str | dict[str, object]) -> tuple[Reply, tuple[str, ...]]
         return Failure("turn-reply-invalid")
     gen_id, lockfiles = generation.get("gen_id"), generation.get("lockfiles")
     digest, total = data.get("retrieval_config_hash"), timings.get("total")
+    support_level = data.get("support_level")
     if (
         not isinstance(gen_id, str) or re.fullmatch(GENERATION_PATTERN, gen_id) is None
         or not isinstance(lockfiles, list) or not lockfiles
         or not all(isinstance(label, str) and LABEL_PATTERN.fullmatch(label) for label in lockfiles)
         or not isinstance(digest, str) or DIGEST_PATTERN.fullmatch(digest) is None
         or (type(total) is not int and type(total) is not float) or not 0 <= total <= float_info.max
+        or support_level not in SUPPORT_LEVELS
     ):
         return Failure("turn-reply-invalid")
     chunk_ids = _chunk_ids(data.get("pool"))
     if chunk_ids is None:
         return Failure("turn-reply-invalid")
     ranked, fused = chunk_ids
-    return Reply(gen_id, tuple(lockfiles), digest, ranked, float(total)), fused
+    return Reply(gen_id, tuple(lockfiles), digest, ranked, float(total), cast(SupportLevel, support_level)), fused
 
 
 def _parse_answer(
@@ -158,6 +165,12 @@ def _parse_answer(
     raw_timings = data.get("timings_ms")
     if not isinstance(answer, str) or end not in _END_WORDS or not isinstance(raw_timings, dict):
         return Failure("turn-reply-invalid")
+    if end == "abstained":
+        if retrieval.support_level != "none" or evidence or attempts:
+            return Failure("turn-reply-invalid")
+    elif not attempts or retrieval.support_level == "none":
+        return Failure("turn-reply-invalid")
+
     family: str | None = None
     if end == "tripped":
         raw_family = data.get("family")
@@ -223,7 +236,7 @@ def _parse_full_reply(reply: door.DoorReply) -> FullReply | Failure:
             # The service's catch-all can fail the turn before its phases are sent.
             case "failure" if position == len(reply.named_events) and isinstance(data.get("error"), dict):
                 return Failure("turn-failed", _state(record.payload))
-            case "answer" if retrieval is not None and attempts and position == len(reply.named_events):
+            case "answer" if retrieval is not None and position == len(reply.named_events):
                 evidence = tuple(chunk_id for _, chunk_id in passages)
                 return _parse_answer(data, retrieval, evidence, attempts, text_events, reply.elapsed)
             case _:
@@ -245,10 +258,11 @@ def _refusal(reply: door.DoorReply) -> Failure | None:
 
 def send(
     io: Host, rendered_dir: PathLike, message: str, overrides: Mapping[str, object] | None = None,
+    *, generation: str | None = None,
 ) -> Reply | Failure:
     """Run one retrieval turn and retain only checked facts or a fixed failure."""
 
-    reply = _retrieve(io, rendered_dir, message, overrides)
+    reply = _retrieve(io, rendered_dir, message, overrides, generation=generation)
     refused = _refusal(reply)
     if refused is not None:
         return refused
@@ -258,7 +272,7 @@ def send(
 
 def send_full(
     io: Host, rendered_dir: PathLike, message: str, overrides: Mapping[str, object] | None = None,
-    *, message_id: str | None = None,
+    *, message_id: str | None = None, generation: str | None = None,
 ) -> FullReply | Failure:
     """Run a full Research turn and return its checked terminal outcome."""
 
@@ -267,6 +281,8 @@ def send_full(
         body["message_id"] = message_id
     if overrides:
         body["overrides"] = dict(overrides)
+    if generation is not None:
+        body["generation"] = generation
     reply = door.request(
         io, rendered_dir, url=f"http://{API_SERVICE_NAME}:{ENGINE_PORT}{TURN_PATH}",
         body=body, max_time=FULL_TURN_TIMEOUT_SECONDS, keep_failure_detail=True, named_events=True,

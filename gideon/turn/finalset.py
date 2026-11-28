@@ -6,13 +6,16 @@ import builtins
 from collections import Counter
 from collections.abc import Mapping, Sequence, Set
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Final, Literal, Protocol, get_args
 
 from gideon.turn.tier import AUTHORITY_TIERS, CONTROLLING_TIERS
 
 if TYPE_CHECKING:
     from gideon.turn.config import RetrievalConfig
     from gideon.turn.fusion import PoolEntry
+
+SupportLevel = Literal["none", "thin", "ok"]
+SUPPORT_LEVELS: Final[tuple[SupportLevel, ...]] = get_args(SupportLevel)
 
 
 class _PassageMetadata(Protocol):
@@ -44,10 +47,12 @@ class FinalHit:
 
 @dataclass(frozen=True, slots=True)
 class FinalSet:
-    """Ordered final hits and the counts of their selection."""
+    """Ordered final hits, selection counts, support level, and ids dropped by the floor."""
 
     hits: tuple[FinalHit, ...]
     counts: dict[str, object]
+    support_level: SupportLevel
+    floor_dropped: tuple[str, ...]
 
 
 def choose(
@@ -67,6 +72,19 @@ def choose(
     candidates = sorted(
         (entry for entry in entries if entry.chunk_id in passages), key=lambda entry: (entry.pool_rank, entry.chunk_id),
     )
+    candidate_count = len(candidates)
+    floor = config["abstention.floor"]
+    under_floor: list[PoolEntry] = []
+    if stage_scored:
+        eligible: list[PoolEntry] = []
+        for entry in candidates:
+            if not entry.pinned and raw_score(entry) < floor:
+                under_floor.append(entry)
+            else:
+                eligible.append(entry)
+        candidates = eligible
+        under_floor.sort(key=lambda entry: (-raw_score(entry), entry.chunk_id))
+
     exempt_documents: set[str] = set()
     for held_ids in held_chunk_ids.values():
         held_documents = Counter(passages[entry.chunk_id].doc_id for entry in candidates if entry.chunk_id in held_ids)
@@ -171,9 +189,11 @@ def choose(
             seat="pin" if entry.pinned else "controlling" if entry.chunk_id in seated else "score", object=entry.object,
             doc_id=passage.doc_id, tokens=passage.token_count,
         ))
+    size = len(hits)
+    support_level: SupportLevel = "none" if size == 0 else "thin" if size < config["abstention.thin_below"] else "ok"
     return FinalSet(tuple(hits), {
-        "candidates": len(candidates),
-        "size": len(hits),
+        "candidates": candidate_count,
+        "size": size,
         "pinned": sum(hit.seat == "pin" for hit in hits),
         "controlling_seated": sum(hit.seat == "controlling" for hit in hits),
         "by_tier": dict(Counter(hit.authority_tier for hit in hits)),
@@ -182,4 +202,7 @@ def choose(
         "exempt_documents": len(exempt_documents),
         "budget_dropped": len(dropped),
         "objects_unseated": sorted(index for index, chunk_id in protected.items() if chunk_id in dropped),
-    })
+        "floor": floor,
+        "floor_dropped": len(under_floor),
+        "best_under_floor": raw_score(under_floor[0]) if under_floor else None,
+    }, support_level, tuple(entry.chunk_id for entry in under_floor))

@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from regenerate_render_fixtures import fixture_lockfile_courts
+from test_turn_legs import FIXTURES, turn_fixture
 
 from gideon.extraction import extract
 from gideon.extraction.contract import ExactObject, ObjectType
@@ -84,6 +85,11 @@ class TurnScopeTests(unittest.TestCase):
 
     def test_court_levels_match_the_host_map_vocabulary(self) -> None:
         self.assertEqual(scope._LEVELS, LEVELS)
+
+    def test_court_name_preserves_the_name_from_the_court_file(self) -> None:
+        fixture = turn_fixture("courts.json")
+        court_file = read_court_file(FIXTURES / "courts.json")
+        self.assertEqual(court_file.court_name("fx-sup-al"), fixture["courts"]["fx-sup-al"]["name"])
 
     def test_strict_reader_refusals_name_faults_without_quoting_values(self) -> None:
         for old, new, fault in (

@@ -7,7 +7,7 @@ import unittest
 from itertools import combinations
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 
@@ -15,6 +15,7 @@ from gideon.api import __main__ as api_main
 from gideon.api.app import create_app
 from gideon.api.settings import RecordCoordinates, Settings, load_settings
 from gideon.turn import measures
+from gideon.turn.endpoint import TurnEndpoint
 from gideon.turn.scope import CourtFileError
 
 API_KEY = "fixture-api-key"
@@ -156,6 +157,13 @@ class ApiService(unittest.TestCase):
                 return await client.request(method, path, **kwargs)
 
         return asyncio.run(run())
+
+    def test_create_app_passes_the_audit_connection_to_the_turn_endpoint(self) -> None:
+        audit_connect = AsyncMock()
+        with patch("gideon.api.app.TurnEndpoint", wraps=TurnEndpoint) as turn_endpoint:
+            create_app(self.settings(), audit_connect=audit_connect)
+        turn_endpoint.assert_called_once()
+        self.assertIs(turn_endpoint.call_args.kwargs["audit_connect"], audit_connect)
 
     def test_health_does_not_require_a_key_or_call_the_engine(self) -> None:
         calls: list[httpx.Request] = []

@@ -25,6 +25,7 @@ SHARED_TURN_SOURCES = (
     "gideon/api/errors.py", "gideon/turn/events.py", "gideon/turn/prompt.py",
     "gideon/turn/generator.py", "gideon/turn/research.py", "gideon/turn/history.py", "gideon/turn/finalset.py",
     "gideon/turn/measures.py",
+    "gideon/turn/notice.py",
 )
 ALLOWED_DEPENDENCIES = frozenset(
     {"starlette", "uvicorn", "httpx", "anyio", "procrastinate", "lxml", "eyecite", "tiktoken",

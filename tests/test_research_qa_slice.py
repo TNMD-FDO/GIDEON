@@ -125,6 +125,7 @@ class ResearchQAHost(FakeHost):
                 for rank, chunk_id in enumerate(pool, start=1)
             ],
             "timings_ms": {"total": 18.0},
+            "support_level": "ok",
         }
         frames = (
             *(events.passage(number, chunk_id, fused[chunk_id])
@@ -250,6 +251,37 @@ def _assert_no_text(test: unittest.TestCase, result: SliceResult, host: Research
             test.assertNotIn(sentinel, rendered)
 
 
+class DecisionMetrics(unittest.TestCase):
+    """Paired Research figures read from one case row's metrics."""
+
+    def test_each_metric_reads_the_share_of_held_gold_in_evidence(self) -> None:
+        for met, share in ((0, 0.0), (1, 0.25), (4, 1.0)):
+            with self.subTest(met=met):
+                row: dict[str, JSONValue] = {"held_gold_passages": 4, "met_in_evidence": met, "end": "complete"}
+                self.assertEqual(research_qa_slice.IN_EVIDENCE.value(row), share)
+                self.assertEqual(research_qa_slice.COMPLETE_IN_EVIDENCE.value(row), share)
+
+    def test_both_metrics_skip_problems_unsigned_rows_and_cases_with_no_held_gold(self) -> None:
+        excluded: dict[str, dict[str, JSONValue]] = {
+            "problem": {"problem": "turn-failed"},
+            "unsigned": {"unsigned": True},
+            "no-held-gold": {"held_gold_passages": 0, "met_in_evidence": 0},
+        }
+        for reason, fields in excluded.items():
+            for end in ("complete", "truncated"):
+                with self.subTest(reason=reason, end=end):
+                    row = {"held_gold_passages": 4, "met_in_evidence": 1, "end": end, **fields}
+                    self.assertIsNone(research_qa_slice.IN_EVIDENCE.value(row))
+                    self.assertIsNone(research_qa_slice.COMPLETE_IN_EVIDENCE.value(row))
+
+    def test_only_synthesis_scores_incomplete_answers_as_zero(self) -> None:
+        for end in ("truncated", "tripped", "abstained"):
+            with self.subTest(end=end):
+                row: dict[str, JSONValue] = {"held_gold_passages": 4, "met_in_evidence": 1, "end": end}
+                self.assertEqual(research_qa_slice.IN_EVIDENCE.value(row), 0.25)
+                self.assertEqual(research_qa_slice.COMPLETE_IN_EVIDENCE.value(row), 0.0)
+
+
 class Retrieval(unittest.TestCase):
     """Retrieval reports gold coverage while the slice gates on turn validity."""
 
@@ -300,7 +332,7 @@ class Retrieval(unittest.TestCase):
             "recall@10 2/3",
             "recall@50 2/3",
             "recall in evidence 1/3",
-            "answer ends: complete 3, truncated 0, tripped 0",
+            "answer ends: complete 3, truncated 0, tripped 0, abstained 0",
             "failed turns: none",
             "unresolved pools: none",
             "dropped gold 0 (absent 0, changed 0)",
@@ -368,7 +400,7 @@ class Retrieval(unittest.TestCase):
         self.assertTrue(result.verdict, result.report)
         self.assertEqual(tuple((row.verdict, row.metrics["end"]) for row in result.results),
                          tuple(("pass", end) for end in ends))
-        self.assertIn("answer ends: complete 0, truncated 1, tripped 1", result.report)
+        self.assertIn("answer ends: complete 0, truncated 1, tripped 1, abstained 0", result.report)
         _assert_no_text(self, result, host)
 
     def test_signed_harvest_uses_must_cite_at_document_level(self) -> None:
@@ -609,7 +641,7 @@ class Synthesis(unittest.TestCase):
                 )
         self.assertEqual(len(host.progress), 4)
         self.assertIn("graded 2: grade 0 1, grade 1 0, grade 2 0, grade 3 1", result.report.splitlines())
-        self.assertIn("ungraded 0: truncated 0, tripped 0, problem 0, no-reference 0", result.report.splitlines())
+        self.assertIn("ungraded 0: truncated 0, tripped 0, abstained 0, problem 0, no-reference 0", result.report.splitlines())
         self.assertIn("failed gradings 0: none", result.report.splitlines())
         _assert_no_text(self, result, host)
 
@@ -666,7 +698,7 @@ class Synthesis(unittest.TestCase):
         counts = ", ".join(f"{cause} 1" for cause in sorted(cause for _, cause, _, _ in failures))
         self.assertIn(f"failed gradings {len(failures)}: {counts}", failed.report.splitlines())
         self.assertIn("graded 0: grade 0 0, grade 1 0, grade 2 0, grade 3 0", failed.report.splitlines())
-        self.assertIn("ungraded 0: truncated 0, tripped 0, problem 0, no-reference 0", failed.report.splitlines())
+        self.assertIn("ungraded 0: truncated 0, tripped 0, abstained 0, problem 0, no-reference 0", failed.report.splitlines())
 
     def test_truncated_and_tripped_answers_fail_only_their_rows_and_are_ungraded(self) -> None:
         host = ResearchQAHost()
@@ -682,7 +714,7 @@ class Synthesis(unittest.TestCase):
         self.assertTrue(all(row.metrics["met_in_evidence"] == 1 for row in result.results))
         self.assertEqual(host.judge_requests, [])
         self.assertEqual(len(host.progress), len(cases))
-        self.assertIn("ungraded 2: truncated 1, tripped 1, problem 0, no-reference 0", result.report.splitlines())
+        self.assertIn("ungraded 2: truncated 1, tripped 1, abstained 0, problem 0, no-reference 0", result.report.splitlines())
         _assert_no_text(self, result, host)
 
     def test_turn_problems_skip_grading_and_a_record_refusal_keeps_an_earlier_grade(self) -> None:
@@ -704,7 +736,7 @@ class Synthesis(unittest.TestCase):
         self.assertIsNone(differed.judge)
         self.assertEqual(len(host.judge_requests), 1)
         self.assertIn("graded 1: grade 0 0, grade 1 0, grade 2 0, grade 3 1", result.report.splitlines())
-        self.assertIn("ungraded 2: truncated 0, tripped 0, problem 2, no-reference 0", result.report.splitlines())
+        self.assertIn("ungraded 2: truncated 0, tripped 0, abstained 0, problem 2, no-reference 0", result.report.splitlines())
         _assert_no_text(self, result, host)
 
     def test_complete_turn_without_reference_is_reported_as_ungraded(self) -> None:
@@ -717,7 +749,7 @@ class Synthesis(unittest.TestCase):
         self.assertEqual(row.verdict, "pass")
         self.assertIsNone(row.judge)
         self.assertEqual(host.judge_requests, [])
-        self.assertIn("ungraded 1: truncated 0, tripped 0, problem 0, no-reference 1", result.report.splitlines())
+        self.assertIn("ungraded 1: truncated 0, tripped 0, abstained 0, problem 0, no-reference 1", result.report.splitlines())
 
 
 class CaseSelection(unittest.TestCase):
@@ -742,7 +774,9 @@ class CaseSelection(unittest.TestCase):
                 host.queue_turn((unsigned_chunk,), (unsigned_chunk,), end="tripped")
                 if spec.judge_prompt is not None:
                     host.queue_grade(engine_output(valid_content(reason=REASON)))
-                context = replace(host.context(judge_prompt_id=spec.judge_prompt), unsigned=True)
+                context = replace(
+                    host.context(judge_prompt_id=spec.judge_prompt), unsigned=True, turn_generation=host.generation.name,
+                )
                 result = spec.runner(loaded, slice_name, context)
 
                 self.assertTrue(result.verdict, result.report)
@@ -751,6 +785,8 @@ class CaseSelection(unittest.TestCase):
                     host.turn_questions(),
                     [counted["question"], first["question"], second["question"]],
                 )
+                for request in host.requests:
+                    self.assertEqual(cast(Mapping[str, object], request["body"]).get("generation"), host.generation.name)
                 covered, failed, completed = result.results
                 self.assertEqual((covered.case_id, failed.case_id, completed.case_id),
                                  (counted["id"], first["id"], second["id"]))
@@ -772,11 +808,11 @@ class CaseSelection(unittest.TestCase):
                 self.assertEqual(host.reads[-1], ("gold sources", (_coordinate(1)[0],)))
                 self.assertIn("2 unsigned run", result.report)
                 self.assertIn("recall in evidence 1/1", result.report.splitlines())
-                self.assertIn("answer ends: complete 1, truncated 0, tripped 0", result.report.splitlines())
+                self.assertIn("answer ends: complete 1, truncated 0, tripped 0, abstained 0", result.report.splitlines())
                 self.assertIn("failed turns: none", result.report.splitlines())
                 self.assertIn("unsigned: completed 1, failed 1", result.report.splitlines())
                 if spec.judge_prompt is not None:
-                    self.assertIn("ungraded 0: truncated 0, tripped 0, problem 0, no-reference 0", result.report.splitlines())
+                    self.assertIn("ungraded 0: truncated 0, tripped 0, abstained 0, problem 0, no-reference 0", result.report.splitlines())
                 _assert_no_text(self, result, host)
 
     def test_pool_read_refusal_leaves_unsigned_row_untouched(self) -> None:

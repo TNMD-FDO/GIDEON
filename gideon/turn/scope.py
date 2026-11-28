@@ -155,6 +155,11 @@ class CourtFile:
     _lockfiles: dict[str, tuple[str, ...]] = field(repr=False)
     _forms: dict[str, tuple[_Form, ...]] = field(repr=False)
 
+    def court_name(self, court_id: str) -> str:
+        """Return the court's name as stored in the court file."""
+
+        return self._courts[court_id].name
+
     def match(self, message: str, objects: Sequence[_ExactSpan]) -> tuple[NamedCourt, ...]:
         """Read named courts in message order using the exact objects in extraction order."""
 

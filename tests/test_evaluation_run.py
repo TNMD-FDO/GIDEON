@@ -740,6 +740,59 @@ class Command(unittest.TestCase):
         self.assertEqual(recorded.gated_cases, slice_result.gated_cases)
         self.assertEqual(recorded.decision, decision.to_json(paired))
 
+    def test_decision_run_without_a_reference_reaches_the_gate_and_records_the_pairing(self) -> None:
+        host = EvalHost()
+        slice_name = "research-qa-retrieval"
+        spec = SLICE_RUNNERS[slice_name]
+        loaded = load_set(ROOT / SET_ROOT).loaded
+        assert loaded is not None
+        case_ids = select_cases(loaded, slice_name).counted
+        clusters = {cast(str, loaded.cases_by_id[case_id]["cluster_id"]) for case_id in case_ids}
+        self.assertGreaterEqual(len(clusters), decision.CLUSTER_FLOOR)
+        comparand_id = "22222222-3333-4444-8555-666666666666"
+        comparand = command.record.ComparandRun(
+            comparand_id, slice_name, loaded.version, loaded.digest, 1, "manual", False,
+            tuple((case_id, 1, {"held_gold_passages": 2, "met_in_evidence": 0}) for case_id in case_ids),
+        )
+        slice_result = SliceResult(
+            True, "Fictitious Research QA results\n",
+            tuple(CaseResult(case_id, 1, "fail", {"held_gold_passages": 2, "met_in_evidence": 1}) for case_id in case_ids),
+        )
+        prepared = command._Prepared(
+            served_model_name=None, turns=None, ranked=None, checkpoint=results.no_checkpoint,
+            started=NOW, forced=False, overrides={},
+            record=command._RecordFacts("fictitious-profile", "a" * 40, False),
+        )
+        runner = Mock(return_value=slice_result)
+        with (
+            patch.dict(SLICE_RUNNERS, {slice_name: replace(spec, runner=runner)}),
+            patch.object(command, "_prepare", return_value=prepared),
+            patch.object(command.record, "read_run_metrics", return_value=(comparand, None)),
+        ):
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", slice_name, "--decision", "--against", comparand_id],
+                **_run_kwargs(host),
+            )
+
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        self.assertNotIn("reference:", stdout)
+        self.assertIn(f"decision: ok — in-evidence vs {comparand_id}", stdout)
+        self.assertIn("record: ok", stdout)
+        self.assertIn(f"gate: ok — {spec.gate_pass}; {slice_name} keeps no reference; decision wins", stdout)
+        write, = (sql for _, sql in host.calls if sql is not None and "INSERT INTO eval_runs" in sql)
+        run_bindings = write.partition("INSERT INTO eval_runs")[0]
+        self.assertIn("\\set kind 'decision'", run_bindings)
+        self.assertIn("\\set run_verdict 'pass'", run_bindings)
+        binding = next(line for line in run_bindings.splitlines() if line.startswith("\\set decision "))
+        recorded = json.loads(read_psql_set(binding, "decision"))
+        self.assertEqual(recorded["metric"], "in-evidence")
+        self.assertEqual(recorded["against"], comparand_id)
+        self.assertEqual(recorded["verdict"], decision.WINS)
+        self.assertEqual(recorded["paired"], len(case_ids))
+        self.assertEqual(recorded["clusters"], len(clusters))
+        self.assertEqual(recorded["mean_difference"], 0.5)
+        self.assertEqual(recorded["completed_repeats"], decision.DECISION_REPEATS)
+
     def test_parser_kinds_and_decision_resolve_to_modes(self) -> None:
         parser = build_parser()
         command_action = next(
@@ -1342,6 +1395,8 @@ class Command(unittest.TestCase):
                 _assert_no_verdict_line(self, stdout)
                 if "nightly" in argv:
                     self.assertIn("Remove --kind nightly", stderr)
+                if expected == "no decision metric":
+                    self.assertIn("Choose a decision slice (guardrails, research-qa-retrieval, research-qa-synthesis)", stderr)
                 self.assertEqual(host.calls, [])
 
     def test_generation_flag_refuses_a_slice_without_stores_before_any_stage(self) -> None:
@@ -2572,9 +2627,9 @@ class SliceRegistry(unittest.TestCase):
         self.assertEqual(tuple(SMOKE_PARTS), ("guardrails", "extraction", "gold-drop"))
 
     def test_research_qa_entries_settings(self) -> None:
-        for category, prompt, reported in (
-            ("retrieval", None, "gold figures"),
-            ("synthesis", "synthesis@1", "gold figures and judge grades"),
+        for category, prompt, reported, metric_name, metric in (
+            ("retrieval", None, "gold figures", "in-evidence", research_qa_slice.IN_EVIDENCE),
+            ("synthesis", "synthesis@1", "gold figures and judge grades", "complete-in-evidence", research_qa_slice.COMPLETE_IN_EVIDENCE),
         ):
             with self.subTest(category=category):
                 name = f"research-qa-{category}"
@@ -2588,7 +2643,10 @@ class SliceRegistry(unittest.TestCase):
                 self.assertFalse(spec.accepts_assessments)
                 self.assertFalse(spec.accepts_ranked)
                 self.assertTrue(spec.accepts_selection)
-                for field in ("engine_calls", "turn_calls", "ceiling_cases", "decision"):
+                self.assertIs(spec.decision, metric)
+                self.assertEqual(metric.name, metric_name)
+                self.assertTrue(metric.higher_is_better)
+                for field in ("engine_calls", "turn_calls", "ceiling_cases"):
                     with self.subTest(field=field):
                         self.assertIsNone(getattr(spec, field))
                 self.assertNotIn(name, SMOKE_PARTS)

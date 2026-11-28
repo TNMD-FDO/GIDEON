@@ -931,11 +931,16 @@ class WorkerFetch(unittest.TestCase):
 
         root_logger = logging.getLogger()
         handlers, level = root_logger.handlers[:], root_logger.level
+        # The worker's process filters no transport logger, while gideon-api's frontend
+        # client filters httpx process-wide and an earlier test in this worker may have built it.
+        httpx_logger = logging.getLogger("httpx")
+        httpx_filters = httpx_logger.filters[:]
         bare_output = io.StringIO()
         bare_handler = logging.StreamHandler(bare_output)
         try:
             root_logger.handlers[:] = [bare_handler]
             root_logger.setLevel(logging.INFO)
+            httpx_logger.filters[:] = []
             with (
                 self.client(StreamingMockTransport(respond)) as client,
                 client.stream("GET", url) as response,
@@ -976,6 +981,7 @@ class WorkerFetch(unittest.TestCase):
         finally:
             root_logger.handlers[:] = handlers
             root_logger.setLevel(level)
+            httpx_logger.filters[:] = httpx_filters
 
     def test_transfer_logs_resume_and_progress_at_most_once_per_minute(self) -> None:
         body = b"fictitious specimen!"

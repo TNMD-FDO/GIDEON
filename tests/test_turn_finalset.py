@@ -41,7 +41,11 @@ class FinalSet(unittest.TestCase):
     def test_picks_the_highest_raw_scores_of_the_read_candidates(self) -> None:
         config = config_for(stage_scored=True)
         limit = config["final_k"]
-        entries = [entry(f"fixture-chunk-{rank}", rank, rank / (limit + 3)) for rank in range(1, limit + 3)]
+        floor = config["abstention.floor"]
+        entries = [
+            entry(f"fixture-chunk-{rank}", rank, floor + (1 - floor) * rank / (limit + 3))
+            for rank in range(1, limit + 3)
+        ]
         unread = entry("fixture-unread", len(entries) + 1, 1.0)
         passages = documents(entries)
 
@@ -54,7 +58,55 @@ class FinalSet(unittest.TestCase):
             "tokens": sum(passages[item.chunk_id].token_count for item in expected),
             "controlling_seated": 0, "document_capped": 0, "exempt_documents": 0,
             "budget_dropped": 0, "objects_unseated": [],
+            "floor": floor, "floor_dropped": 0, "best_under_floor": None,
         })
+
+    def test_floor_leaves_only_survivors_for_the_pick_seats_cap_and_budget(self) -> None:
+        config = config_for({"final_k": 2, "final_reserved_controlling": 1, "per_document_cap": 1}, stage_scored=True)
+        floor = config["abstention.floor"]
+        step = (1 - floor) / 4
+        best = entry("fixture-best", 1, floor + 2 * step)
+        duplicate = entry("fixture-duplicate", 2, floor + step)
+        boundary = entry("fixture-boundary", 3, floor)
+        home = entry("fixture-z-home", 4, floor / 2, tier="state_home")
+        tied = entry("fixture-a-tied", 5, floor / 2)
+        weakest = entry("fixture-weakest", 6, floor / 4)
+        entries = [best, duplicate, boundary, home, tied, weakest]
+        passages = documents(entries, dict.fromkeys((best.chunk_id, duplicate.chunk_id, home.chunk_id), "fixture-shared"))
+        config["context_budget_tokens"] = passages[best.chunk_id].token_count + passages[boundary.chunk_id].token_count
+
+        # The discarded held hit cannot exempt the shared opinion from the cap.
+        result = choose(entries, passages, config, {0: {home.chunk_id}}, stage_scored=True)
+
+        self.assertEqual([(hit.chunk_id, hit.seat) for hit in result.hits], [
+            (best.chunk_id, "score"), (boundary.chunk_id, "score"),
+        ])
+        self.assertEqual(result.floor_dropped, (tied.chunk_id, home.chunk_id, weakest.chunk_id))
+        self.assertEqual(result.counts, {
+            "candidates": len(entries), "size": 2, "pinned": 0, "controlling_seated": 0, "by_tier": {"persuasive": 2},
+            "tokens": config["context_budget_tokens"], "document_capped": 1, "exempt_documents": 0,
+            "budget_dropped": 0, "objects_unseated": [],
+            "floor": floor, "floor_dropped": 3, "best_under_floor": tied.stage2_score,
+        })
+
+    def test_support_counts_pins_against_the_default_and_overridden_threshold(self) -> None:
+        config = config_for({"abstention.floor": 1}, stage_scored=True)
+        overridden: RetrievalConfig = {**config, "abstention.thin_below": 1}
+        threshold = config["abstention.thin_below"]
+        pins = [entry(f"fixture-pin-{i}", i, 0.0, pinned=True) for i in range(1, threshold + 1)]
+        unpinned = entry("fixture-unpinned", threshold + 1, 0.0)
+        passages = documents([*pins, unpinned])
+        for count, level in ((0, "none"), (1, "thin"), (threshold - 1, "thin"), (threshold, "ok")):
+            with self.subTest(count=count):
+                entries = [*pins[:count], unpinned]
+                result = choose(entries, passages, config, {}, stage_scored=True)
+                self.assertEqual([hit.chunk_id for hit in result.hits], [pin.chunk_id for pin in pins[:count]])
+                self.assertEqual(result.floor_dropped, (unpinned.chunk_id,))
+                self.assertEqual(result.support_level, level)
+                self.assertEqual(
+                    choose(entries, passages, overridden, {}, stage_scored=True).support_level,
+                    "ok" if count else "none",
+                )
 
     def test_every_pin_sits_beside_final_k_in_score_order(self) -> None:
         low_pin = entry("fixture-low-pin", 1, 0.1, pinned=True)
@@ -81,12 +133,13 @@ class FinalSet(unittest.TestCase):
         self.assertEqual(result.counts["pinned"], 2)
 
     def test_equal_scores_break_by_pool_rank_then_chunk_id(self) -> None:
-        first = entry("fixture-z", 1, 0.5)
-        second = entry("fixture-a", 2, 0.5)
-        third = entry("fixture-b", 2, 0.5)
+        config = config_for({"final_k": 2, "final_reserved_controlling": 0}, stage_scored=True)
+        floor = config["abstention.floor"]
+        first = entry("fixture-z", 1, floor)
+        second = entry("fixture-a", 2, floor)
+        third = entry("fixture-b", 2, floor)
         entries = [third, second, first]
 
-        config = config_for({"final_k": 2, "final_reserved_controlling": 0}, stage_scored=True)
         result = choose(entries, documents(entries), config, {}, stage_scored=True)
 
         self.assertEqual([hit.chunk_id for hit in result.hits], [first.chunk_id, second.chunk_id])
@@ -102,10 +155,14 @@ class FinalSet(unittest.TestCase):
         result = choose([last, unread, pin, first], passages, config, {}, stage_scored=False)
 
         self.assertEqual([(hit.chunk_id, hit.stage2_score) for hit in result.hits], [(first.chunk_id, None), (pin.chunk_id, None)])
+        self.assertEqual(result.floor_dropped, ())
+        self.assertEqual(result.counts["floor"], config["abstention.floor"])
+        self.assertEqual(result.counts["floor_dropped"], 0)
+        self.assertIsNone(result.counts["best_under_floor"])
 
     def test_document_cap_passes_over_a_chunk_and_does_not_count_pins(self) -> None:
         cap = config_for(stage_scored=True)["per_document_cap"]
-        config = config_for({"final_k": cap + 1, "final_reserved_controlling": 0}, stage_scored=True)
+        config = config_for({"final_k": cap + 1, "final_reserved_controlling": 0, "abstention.floor": 0}, stage_scored=True)
         pin = entry("fixture-pin", 1, 1.0, pinned=True)
         repeated = [entry(f"fixture-repeated-{rank}", rank, 1 / rank) for rank in range(2, cap + 3)]
         next_opinion = entry("fixture-next-opinion", cap + 3, 0.0)
@@ -123,7 +180,7 @@ class FinalSet(unittest.TestCase):
                 self.assertEqual(result.counts["document_capped"], capped)
 
     def test_reporter_exempts_the_document_with_more_held_hits_or_the_best_pool_rank(self) -> None:
-        config = config_for(stage_scored=True)
+        config = config_for({"abstention.floor": 0}, stage_scored=True)
         cap = config["per_document_cap"]
         early = [entry(f"fixture-early-{rank}", rank, 0.4) for rank in range(1, cap + 2)]
         later = [entry(f"fixture-later-{rank}", rank, 0.8) for rank in range(cap + 2, 2 * cap + 3)]
@@ -155,7 +212,7 @@ class FinalSet(unittest.TestCase):
         state = entry("fixture-state", 7, 0.4, tier="state_home")
         circuit = entry("fixture-circuit", 8, 0.3, tier="circuit_published")
         entries = [pin, best, matter, low, other_matter, other_persuasive, state, circuit]
-        config = config_for({"final_k": 3, "final_reserved_controlling": 3}, stage_scored=True)
+        config = config_for({"final_k": 3, "final_reserved_controlling": 3, "abstention.floor": 0}, stage_scored=True)
 
         result = choose(entries, documents(entries), config, {}, stage_scored=True)
 
@@ -176,7 +233,9 @@ class FinalSet(unittest.TestCase):
             best.chunk_id: "fixture-full", blocked.chunk_id: "fixture-full",
             lowest.chunk_id: "fixture-vacated", from_same_doc.chunk_id: "fixture-vacated",
         })
-        config = config_for({"final_k": 3, "final_reserved_controlling": 2, "per_document_cap": 1}, stage_scored=True)
+        config = config_for({
+            "final_k": 3, "final_reserved_controlling": 2, "per_document_cap": 1, "abstention.floor": 0,
+        }, stage_scored=True)
 
         result = choose(entries, passages, config, {}, stage_scored=True)
 
@@ -231,7 +290,7 @@ class FinalSet(unittest.TestCase):
             ("off", [persuasive, matter, best_circuit, circuit, scotus, district, state]),
         ):
             with self.subTest(mode=mode):
-                config = config_for({"hierarchy.mode": mode}, stage_scored=True)
+                config = config_for({"hierarchy.mode": mode, "abstention.floor": 0}, stage_scored=True)
                 result = choose(entries, passages, config, {}, stage_scored=True)
                 self.assertEqual([(hit.number, hit.chunk_id) for hit in result.hits], [
                     (number, item.chunk_id) for number, item in enumerate(expected, start=1)
@@ -244,7 +303,7 @@ class FinalSet(unittest.TestCase):
         entries = [second, zero, first]
         config = config_for(stage_scored=True)
         weights = {**config["hierarchy.weights"], "scotus": 1.0, "circuit_published": 0.5, "persuasive": 0.0}
-        config = config_for({"hierarchy.weights": weights}, stage_scored=True)
+        config = config_for({"hierarchy.weights": weights, "abstention.floor": 0}, stage_scored=True)
 
         result = choose(entries, documents(entries), config, {}, stage_scored=True)
 
@@ -259,7 +318,7 @@ class FinalSet(unittest.TestCase):
         release = config_for(stage_scored=True)
         weights = {**release["hierarchy.weights"], "persuasive": 0.0}
         budget = passages[stronger.chunk_id].token_count
-        config = config_for({"hierarchy.weights": weights, "context_budget_tokens": budget}, stage_scored=True)
+        config = config_for({"hierarchy.weights": weights, "context_budget_tokens": budget, "abstention.floor": 0}, stage_scored=True)
 
         result = choose(entries, passages, config, {}, stage_scored=True)
 
@@ -270,7 +329,9 @@ class FinalSet(unittest.TestCase):
         best = entry("fixture-best", 1, 0.9)
         home = entry("fixture-home", 2, 0.1, tier="state_home")
         entries = [best, home]
-        config = config_for({"final_k": 1, "final_reserved_controlling": 1, "hierarchy.mode": "off"}, stage_scored=True)
+        config = config_for({
+            "final_k": 1, "final_reserved_controlling": 1, "hierarchy.mode": "off", "abstention.floor": 0,
+        }, stage_scored=True)
 
         result = choose(entries, documents(entries), config, {}, stage_scored=True)
 
@@ -309,9 +370,13 @@ class FinalSet(unittest.TestCase):
         passages = documents(entries)
         selected = (first, second, state)
         total = sum(passages[item.chunk_id].token_count for item in selected)
-        config = config_for({"final_k": len(selected), "final_reserved_controlling": 1}, stage_scored=True)
+        config = config_for({
+            "final_k": len(selected), "final_reserved_controlling": 1, "abstention.floor": 0,
+        }, stage_scored=True)
 
-        for budget, expected, dropped, seats in ((total, selected, 0, 1), (total - 1, selected[:-1], 1, 0)):
+        for budget, expected, dropped, seats, level in (
+            (total, selected, 0, 1, "ok"), (total - 1, selected[:-1], 1, 0, "thin"),
+        ):
             with self.subTest(budget=budget):
                 result = choose(entries, passages, {**config, "context_budget_tokens": budget}, {}, stage_scored=True)
                 self.assertEqual([(hit.number, hit.chunk_id, hit.tokens) for hit in result.hits], [
@@ -324,7 +389,9 @@ class FinalSet(unittest.TestCase):
                                 for tier in {item.authority_tier for item in expected}},
                     "tokens": sum(passages[item.chunk_id].token_count for item in expected),
                     "document_capped": 0, "exempt_documents": 0, "budget_dropped": dropped, "objects_unseated": [],
+                    "floor": config["abstention.floor"], "floor_dropped": 0, "best_under_floor": None,
                 })
+                self.assertEqual(result.support_level, level)
                 self.assertEqual(json.loads(json.dumps(result.counts)), result.counts)
 
     def test_budget_passes_over_a_protected_pin_and_drops_a_lower_pin_before_a_stronger_score_hit(self) -> None:
@@ -403,3 +470,4 @@ class FinalSet(unittest.TestCase):
                 self.assertEqual(result.counts["pinned"], len(expected))
                 self.assertEqual(result.counts["tokens"], len(expected) * tokens)
                 self.assertEqual(result.counts["budget_dropped"], len(unseated))
+                self.assertEqual(result.support_level, "thin" if expected else "none")

@@ -172,7 +172,7 @@ class TurnRerank(TurnEndpointFixture):
         self.assertEqual(json.loads(self.requests[self.mget_path].content), read)
         (generation_request,) = [request for request in self.engine_requests if request.url.path == COMPLETIONS_ROUTE]
         self.assertEqual(json.loads(generation_request.content)["messages"], messages(
-            message, [("", texts[chunk_id]) for chunk_id in ordered_ids],
+            message, [("", texts[chunk_id]) for chunk_id in ordered_ids], support_level="ok",
         ))
         self.assertEqual(json.loads(self.turn_row()["evidence"]), body["final_set"])
 

@@ -12,8 +12,8 @@ from typing import Final
 from gideon.host.report import Problem
 from gideon.turn.config import OverrideRefusal, config_hash, effective_config
 
-BASELINES: Final = MappingProxyType({"off": MappingProxyType({
-    "query_plan": "off", "rerank.stage1": "off", "rerank.stage2": "off",
+BASELINES: Final[Mapping[str, Mapping[str, str | int]]] = MappingProxyType({"off": MappingProxyType({
+    "query_plan": "off", "rerank.stage1": "off", "rerank.stage2": "off", "abstention.floor": 0,
 })})
 
 

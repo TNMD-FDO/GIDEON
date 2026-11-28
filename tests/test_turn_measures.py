@@ -104,7 +104,8 @@ class TurnMeasuresTests(unittest.TestCase):
 
     def test_every_outcome_with_and_without_each_figure(self) -> None:
         source = writer.EVAL_SOURCE
-        terminal_outcomes = get_args(events.EndWord)
+        # An abstention sends the notice without a generated answer, so M5 leaves it out.
+        terminal_outcomes = tuple(word for word in get_args(events.EndWord) if word != "abstained")
         for outcome, present in product(get_args(turnlog.Outcome), product((False, True), repeat=4)):
             with self.subTest(outcome=outcome, figures_present=present):
                 retrieval, rerank, first_text, total = present

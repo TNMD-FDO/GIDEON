@@ -9,6 +9,7 @@ from gideon.host import (
     announcesync,
     apply,
     archive,
+    auditquery,
     backup,
     drill,
     engine,
@@ -84,6 +85,10 @@ def run_users_reconcile(args: argparse.Namespace) -> int:
 
 def run_retention_sweep(args: argparse.Namespace) -> int:
     return _guarded("retention sweep", retention.run_retention_sweep, args)
+
+
+def run_audit_query(args: argparse.Namespace) -> int:
+    return _guarded("audit query", auditquery.run_audit_query, args)
 
 
 def run_window_set(args: argparse.Namespace) -> int:

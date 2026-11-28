@@ -266,7 +266,7 @@ class TurnAnswer(unittest.TestCase):
     def test_stream_context_uses_the_question_alone(self) -> None:
         question = "Did the fictitious harbor reopen on May 4, 2034?"
         passage = "The fictitious harbor closed on April 7, 2034."
-        user_message = messages(question, (("", passage),))[-1]["content"]
+        user_message = messages(question, (("", passage),), support_level="ok")[-1]["content"]
         state = stream_state(question, guardrail.EVAL_SOURCE, "fixture-chat")
         self.assertEqual((state.branch, state.source, state.chat_id), (LEGAL_BRANCH, guardrail.EVAL_SOURCE, "fixture-chat"))
         supplied = state.supplied[guardrail.DEADLINE_FAMILY.name]
@@ -406,7 +406,7 @@ class TurnAnswer(unittest.TestCase):
         question = "When is the fictional filing due?"
         passage = "The deadline is April 7, 2034."
         self.assertFalse(guardrail.normalized_dates(question))
-        self.assertTrue(guardrail.normalized_dates(messages(question, (("", passage),))[-1]["content"]))
+        self.assertTrue(guardrail.normalized_dates(messages(question, (("", passage),), support_level="ok")[-1]["content"]))
         state = stream_state(question, guardrail.EVAL_SOURCE)
         mechanics = AnswerMechanics(state)
         step = mechanics.process(payload({"content": passage}, finish_reason="stop"))

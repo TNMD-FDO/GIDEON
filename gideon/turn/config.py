@@ -30,6 +30,8 @@ RetrievalConfig = TypedDict(
         "per_document_cap": int,
         "per_hit_chunks": int,
         "context_budget_tokens": int,
+        "abstention.floor": float,
+        "abstention.thin_below": int,
     },
 )
 
@@ -66,8 +68,10 @@ RETRIEVAL_CONFIG: Final[Mapping[str, object]] = MappingProxyType({
     "per_document_cap": 3,  # E24 corrects the cap.
     "per_hit_chunks": 3,  # E12 governs when neighbour expansion is enabled.
     "context_budget_tokens": 40_000,  # E25 corrects the retrieved-token budget.
+    "abstention.floor": 0.5,  # E26 tunes this placeholder; 0 is the off state.
+    "abstention.thin_below": 3,  # exempt: thin support is one or two hits.
 })
-# The largest depth an override may ask of a leg, the pool, stage 2, or the final set.
+# The largest retrieval depth or hit threshold an override may ask for.
 _HARD_CAP: Final = 500
 # The widest budget an override may ask: E25's widest arm.
 _BUDGET_CEILING: Final = 80_000
@@ -84,7 +88,8 @@ class OverrideRefusal:
 def _valid_override(key: str, value: object, *, reranker: bool) -> bool:
     match key:
         case (
-            "leg_limit" | "pool_cap" | "reservations.exact_object" | "reservations.controlling" | "stage2_depth" | "final_k"
+            "leg_limit" | "pool_cap" | "reservations.exact_object" | "reservations.controlling"
+            | "stage2_depth" | "final_k" | "abstention.thin_below"
         ):
             return type(value) is int and 0 < value <= _HARD_CAP
         case "rrf.k":
@@ -93,7 +98,7 @@ def _valid_override(key: str, value: object, *, reranker: bool) -> bool:
             return isinstance(value, str) and value in ("on", "off")
         case "rerank.stage2":
             return isinstance(value, str) and (value == "off" or (reranker and value == "on"))
-        case "boilerplate_weight":
+        case "boilerplate_weight" | "abstention.floor":
             return (type(value) is int or type(value) is float) and 0 <= value <= 1
         case "query_plan" | "rerank.stage1":
             return isinstance(value, str) and value == "off"
@@ -130,11 +135,15 @@ def effective_config(
             return OverrideRefusal(key, "override_not_allowed")
         if not _valid_override(key, value, reranker=reranker):
             return OverrideRefusal(key, "override_invalid")
-        # One spelling per weight, so 1 and 1.0, or 0 and -0.0, hash alike.
-        config[key] = float(cast(float, value)) + 0.0 if key == "boilerplate_weight" else value
+        # One float spelling, so 1 and 1.0, or 0 and -0.0, hash alike.
+        config[key] = float(cast(float, value)) + 0.0 if key in ("boilerplate_weight", "abstention.floor") else value
     effective = cast(RetrievalConfig, config)
     if effective["final_reserved_controlling"] > effective["final_k"]:
         return OverrideRefusal("final_reserved_controlling", "override_invalid")
+    if effective["rerank.stage2"] == "off":
+        if overrides is not None and "abstention.floor" in overrides and effective["abstention.floor"] != 0.0:
+            return OverrideRefusal("abstention.floor", "override_invalid")
+        effective["abstention.floor"] = 0.0
     weights = effective["hierarchy.weights"]
     release_weights = cast(Mapping[str, float], RETRIEVAL_CONFIG["hierarchy.weights"])
     effective["hierarchy.weights"] = MappingProxyType({tier: float(weights[tier]) + 0.0 for tier in release_weights})

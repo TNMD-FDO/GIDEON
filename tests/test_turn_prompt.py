@@ -200,8 +200,14 @@ class LegalPrompt(unittest.TestCase):
         ):
             self.user_content(self.hits, self.provenance)
 
-    def test_tracer_keeps_its_system_instruction(self) -> None:
-        self.assertEqual(
-            messages(self.question, ())[0],
-            {"role": "system", "content": TRACER_SYSTEM},
-        )
+    def test_tracer_appends_the_thin_instruction_after_its_system_text(self) -> None:
+        for level, content in (("ok", TRACER_SYSTEM), ("thin", f"{TRACER_SYSTEM}\n\n{THIN_SUPPORT}")):
+            with self.subTest(level=level):
+                self.assertEqual(messages(self.question, (), support_level=level)[0], {
+                    "role": "system", "content": content,
+                })
+
+    def test_tracer_requires_usable_support(self) -> None:
+        for level in ("none", "fictitious support"):
+            with self.subTest(level=level), self.assertRaisesRegex(ValueError, "support level"):
+                messages(self.question, (), support_level=level)

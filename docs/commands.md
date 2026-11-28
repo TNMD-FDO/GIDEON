@@ -134,6 +134,13 @@ Retention sweep deletes chats idle past `retention.chats`, their named uploads, 
 **Command.** `gideon retention sweep`.\
 **Steps.** None in a runbook; the command prints its rows and each refusal's fix.
 
+### gideon audit query
+
+Audit query answers whether GIDEON touched a matter, a person, or a chat. It prints the audit log's rows for a knowledge base, a user, or a chat by id, each Research turn with who asked, the passages it returned, and how it ended, and never any text. A CSA runs it as root when an office asks; several selectors must all match, and `--since` and `--until` bound the window in office time.
+
+**Command.** `gideon audit query --kb <id> | --user <id> | --chat <id> [--since <time>] [--until <time>] [--json]`.\
+**Steps.** [docs/runbooks/observability.md §6](runbooks/observability.md).
+
 ### gideon registry mirror
 
 Registry mirror pulls the release's images into the build box's loopback registry. The maintaining office's CSA runs it during installation or before building an image; it needs Docker access.
@@ -262,7 +269,7 @@ Eval run scores an evaluation set, compares per-case verdicts with the committed
 
 The quiet window covers weeknights 19:00 to 06:00 and Friday 19:00 to Monday 06:00 in the site's timezone. The account used for evaluation turns through the frontend is called the eval identity.
 
-`extraction` scores the set's labelled exact objects. `judgments` sends each query to the Research service's `/turn` endpoint and scores the retrieved passages against attorneys' grades. Research uses the selected stack's live index generation, so a name supplied with `--generation <name>` must match it. Use `--baseline off` to score the same queries with each model-driven stage in its off setting. To score a saved ranked list, supply `--ranked <file>` and use `--generation <name>` to select the generation it came from. Without a name, a file run selects the same generation as `gold-drop` below.
+`extraction` scores the set's labelled exact objects. `judgments` sends each query to the Research service's `/turn` endpoint and scores the retrieved passages against attorneys' grades. Research uses the selected stack's live index generation, unless `--generation <name>` names a built or live one, which is sent to the Research service by name. Use `--baseline off` to score the same queries with each model-driven stage in its off setting. To score a saved ranked list, supply `--ranked <file>` and use `--generation <name>` to select the generation it came from. Without a name, a file run selects the same generation as `gold-drop` below.
 
 The report gives nDCG@10, recall@50, and Hole@10. Coverage and input validity decide whether the run passes. The report lists graded passages the generation lacks under their graded text by query ID and excludes them from the figures. A failed Research request, an unresolved retrieved passage, or a ranked entry the generation does not hold fails the affected query and the run. The run records the generation and its corpus lockfile. With `--assessed <file>`, the report also shows the passages in each top ten that no attorney graded, the model's grade counts for them, and the model's disagreement with the attorneys' grades as a rate and Cohen's κ. The run records the assessment file's SHA-256, prompt, and model alongside the measures computed from the attorneys' grades.
 
@@ -282,7 +289,7 @@ The report gives nDCG@10, recall@50, and Hole@10. Coverage and input validity de
 
 `--challenger --stack ci` runs the experiment in `config/challenger.yaml` beside the release configuration on the build box and records paired runs, or prints `skipped` when no challenger is set.
 
-`--decision --against <run-id>` runs guardrails five times in the weekend window, pairing each control's false refusal with the named run's to record the mean difference, its 95% interval, and a verdict of wins, loses, or undecided. Too few paired clusters causes a refusal without an interval.
+`--decision --against <run-id>` runs guardrails five times in the weekend window, pairing each control's false refusal with the named run's to record the mean difference, its 95% interval, and a verdict of wins, loses, or undecided. Too few paired clusters causes a refusal without an interval. `research-qa-retrieval` and `research-qa-synthesis` also admit it from one run, pairing each case's share of held gold passages in the evidence, scored 0 for a synthesis answer that does not end complete, and compare no reference.
 
 `--force` starts a run outside its window and notes it on the run's record; engine-reaching runs still take the engine lock, so a held lock ordinarily refuses another. At the window's end, an engine-reaching run aborts, keeping completed repeats and recording a partial run.
 
@@ -311,7 +318,7 @@ Proposals reads waiting proposals, trigger measurements, feedback counts, guardr
 **Command.** `gideon proposals [--record]`.\
 **Steps.** [docs/runbooks/release-files.md §7](runbooks/release-files.md); for testing the tally, [docs/runbooks/observability.md §7](runbooks/observability.md).
 
-The unimplemented commands `gideon host gpu`, `gideon registry gc`, and `gideon audit query` each print "not implemented" and exit 1.
+The unimplemented commands `gideon host gpu` and `gideon registry gc` each print "not implemented" and exit 1.
 
 ## 2. The build-box tools
 

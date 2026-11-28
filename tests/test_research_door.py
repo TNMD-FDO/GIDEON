@@ -6,6 +6,7 @@ import subprocess
 import unittest
 from collections.abc import Mapping, Sequence
 from http import HTTPStatus
+from itertools import product
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -26,6 +27,7 @@ from gideon.host.render.api import (
 from gideon.host.render.owui import EVAL_IDENTITY
 from gideon.turn import events
 from gideon.turn.config import RETRIEVAL_CONFIG
+from gideon.turn.finalset import SUPPORT_LEVELS
 from gideon.turn.states import State, TurnFailure
 
 FIXTURES = Path(__file__).with_name("fixtures") / "eval" / "turn-pool"
@@ -46,6 +48,7 @@ def turn_pool_reply(overrides: Mapping[str, object] | None = None, *, reranker: 
     return {
         **recorded,
         "retrieval_config_hash": digest,
+        "support_level": "ok",
         "pool": [
             {**entry, "rank": entry["pool_rank"], "stage2_score": None, "pinned": False, "object": None}
             for entry in recorded["pool"]
@@ -72,12 +75,16 @@ class ResearchDoor(unittest.TestCase):
         run.assert_called_once()
         return result
 
-    def test_send_uses_the_eval_identity_and_includes_only_supplied_overrides(self) -> None:
+    def test_send_uses_the_eval_identity_and_includes_only_supplied_options(self) -> None:
         options: tuple[Mapping[str, object] | None, ...] = (None, {}, baselines.BASELINES["off"])
-        for overrides in options:
+        name = turn_pool_fixture("reply.json")["generation"]["gen_id"]
+        for overrides, generation in product(options, (None, name)):
             fixture = turn_pool_reply(overrides)
-            with self.subTest(overrides=overrides), patch.object(self.host, "run", return_value=envelope(fixture, HTTPStatus.OK)) as run:
-                result = research_door.send(self.host, RENDERED, MESSAGE, overrides)
+            with (
+                self.subTest(overrides=overrides, generation=generation),
+                patch.object(self.host, "run", return_value=envelope(fixture, HTTPStatus.OK)) as run,
+            ):
+                result = research_door.send(self.host, RENDERED, MESSAGE, overrides, generation=generation)
                 run.assert_called_once()
                 argv = run.call_args.args[0]
                 target = urlsplit(argv[-2])
@@ -92,6 +99,8 @@ class ResearchDoor(unittest.TestCase):
                 expected: dict[str, object] = {"message": MESSAGE, "stop_after": fixture["stage"]}
                 if overrides:
                     expected["overrides"] = dict(overrides)
+                if generation is not None:
+                    expected["generation"] = generation
                 self.assertEqual(request["body"], expected)
                 self.assertNotIn(MESSAGE, repr(argv))
                 self.assertNotIn(MESSAGE, repr(result))
@@ -106,12 +115,28 @@ class ResearchDoor(unittest.TestCase):
         expected = research_door.Reply(
             fixture["generation"]["gen_id"], tuple(fixture["generation"]["lockfiles"]),
             fixture["retrieval_config_hash"], tuple(entry["chunk_id"] for entry in ranked),
-            fixture["timings_ms"]["total"],
+            fixture["timings_ms"]["total"], fixture["support_level"],
         )
         self.assertEqual(self.send({**fixture, "pool": ranked[1:] + ranked[:1]}), expected)
         reply = self.send({**fixture, "pool": []})
         assert isinstance(reply, research_door.Reply)
         self.assertEqual(reply.chunk_ids, ())
+
+    def test_retrieval_reply_requires_a_support_level_from_the_shared_vocabulary(self) -> None:
+        fixture = turn_pool_reply()
+        for level in SUPPORT_LEVELS:
+            with self.subTest(level=level):
+                reply = self.send({**fixture, "support_level": level})
+                assert isinstance(reply, research_door.Reply)
+                self.assertEqual(reply.support_level, level)
+
+        fixture.pop("support_level")
+        expected = research_door.Failure("turn-reply-invalid")
+        self.assertEqual(self.send(fixture), expected)
+        invalid_levels: tuple[object, ...] = (None, False, 3, [], {}, MESSAGE, "THIN")
+        for invalid in invalid_levels:
+            with self.subTest(level=invalid):
+                self.assertEqual(self.send({**fixture, "support_level": invalid}), expected)
 
     def test_success_rejects_invalid_stage_generation_hash_pool_and_latency(self) -> None:
         fixture = turn_pool_reply()
@@ -227,12 +252,12 @@ class ResearchDoor(unittest.TestCase):
         self.assertEqual(research_door.TURN_PATH, ast.literal_eval(value))
         self.assertIn("POST", ast.literal_eval(next(keyword.value for keyword in route.keywords if keyword.arg == "methods")))
 
-    def test_imports_stay_within_the_door_turn_events_states_and_host_seams(self) -> None:
+    def test_imports_stay_within_the_door_shared_turn_modules_and_host_seams(self) -> None:
         assert_import_boundary(self, research_door, {
             "gideon.evaluation.turns", "gideon.evaluation.turns.door", "gideon.host",
             "gideon.host.render.api", "gideon.host.render.engine", "gideon.host.render.worker",
             "gideon.host.report", "gideon.host.stack", "gideon.host.staging", "gideon.host.sysio",
-            "gideon.turn", "gideon.turn.events", "gideon.turn.states",
+            "gideon.turn", "gideon.turn.events", "gideon.turn.finalset", "gideon.turn.states",
         })
 
 
@@ -288,19 +313,20 @@ class FullResearchTurn(unittest.TestCase):
         for sentinel in (MESSAGE, self.answer, self.delta):
             self.assertNotIn(sentinel, repr(result))
 
-    def test_full_send_includes_only_supplied_message_id_and_overrides(self) -> None:
+    def test_full_send_includes_only_supplied_options(self) -> None:
         response = stream_envelope(
             (*self.prefix, events.answer(self.answer, "complete", self.timings)), self.elapsed,
         )
         options: tuple[Mapping[str, object] | None, ...] = (None, {}, baselines.BASELINES["off"])
+        name = self.retrieval["generation"]["gen_id"]
         for message_id in (None, "fictitious-message-123"):
-            for overrides in options:
+            for overrides, generation in product(options, (None, name)):
                 with (
-                    self.subTest(message_id=message_id, overrides=overrides),
+                    self.subTest(message_id=message_id, overrides=overrides, generation=generation),
                     patch.object(self.host, "run", return_value=response) as run,
                 ):
                     result = research_door.send_full(
-                        self.host, RENDERED, MESSAGE, overrides, message_id=message_id,
+                        self.host, RENDERED, MESSAGE, overrides, message_id=message_id, generation=generation,
                     )
                     self.assertIsInstance(result, research_door.FullReply)
                     run.assert_called_once()
@@ -317,6 +343,8 @@ class FullResearchTurn(unittest.TestCase):
                         expected["message_id"] = message_id
                     if overrides:
                         expected["overrides"] = dict(overrides)
+                    if generation is not None:
+                        expected["generation"] = generation
                     self.assertEqual(request["body"], expected)
                     self.assertNotIn(MESSAGE, repr(argv))
 
@@ -339,6 +367,7 @@ class FullResearchTurn(unittest.TestCase):
                         self.retrieval["retrieval_config_hash"],
                         tuple(entry["chunk_id"] for entry in self.ranked_pool),
                         self.retrieval["timings_ms"]["total"],
+                        self.retrieval["support_level"],
                     ))
                     self.assertEqual(reply.evidence, tuple(entry["chunk_id"] for entry in self.selected))
                     self.assertEqual(reply.answer, self.answer)
@@ -351,6 +380,41 @@ class FullResearchTurn(unittest.TestCase):
                     self.assertEqual(reply.elapsed, self.elapsed)
                     for sentinel in (MESSAGE, self.answer, self.delta):
                         self.assertNotIn(sentinel, repr(reply))
+
+    def test_abstained_stream_returns_the_notice_with_zero_evidence_and_attempts(self) -> None:
+        retrieve = events.phase("retrieve", {**self.retrieval, "support_level": "none"})
+        timings = {"total": self.timings["total"]}
+        answer = events.answer(self.answer, "abstained", timings)
+
+        reply = self.send(stream_envelope((retrieve, answer), self.elapsed))
+
+        assert isinstance(reply, research_door.FullReply)
+        self.assertEqual(reply.retrieval.support_level, "none")
+        # The ranked pool is kept for recall; no passage reached the turn's evidence.
+        self.assertEqual(reply.retrieval.chunk_ids, tuple(entry["chunk_id"] for entry in self.ranked_pool))
+        self.assertEqual(reply.evidence, ())
+        self.assertEqual((reply.attempts, reply.text_events), (0, 0))
+        self.assertEqual((reply.end, reply.answer, reply.family), ("abstained", self.answer, None))
+        self.assertEqual((reply.timings_ms, reply.latency_ms, reply.elapsed), (timings, timings["total"], self.elapsed))
+        self.assertNotIn(self.answer, repr(reply))
+
+    def test_malformed_abstention_streams_return_the_invalid_reply_code(self) -> None:
+        unsupported = {**self.retrieval, "support_level": "none"}
+        retrieve = events.phase("retrieve", unsupported)
+        abstained = events.answer(self.answer, "abstained", {"total": self.timings["total"]})
+        complete = events.answer(self.answer, "complete", self.timings)
+        frames = {
+            "passage before retrieve": (self.passages[0], retrieve, abstained),
+            "generate phase": (retrieve, self.generate, abstained),
+            "text event": (retrieve, events.text(self.delta), abstained),
+            "complete at none": (retrieve, self.generate, complete),
+            "complete with no attempt": (self.retrieve, complete),
+            "abstained at ok": (events.phase("retrieve", {**unsupported, "support_level": "ok"}), abstained),
+            "abstained at thin": (events.phase("retrieve", {**unsupported, "support_level": "thin"}), abstained),
+        }
+        for label, stream in frames.items():
+            with self.subTest(label=label):
+                self.assert_failure(self.send(stream_envelope(stream, self.elapsed)), research_door.Failure("turn-reply-invalid"))
 
     def test_malformed_streams_return_only_the_invalid_reply_code(self) -> None:
         terminal = events.answer(self.answer, "complete", self.timings)
